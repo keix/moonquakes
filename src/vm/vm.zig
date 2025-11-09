@@ -79,6 +79,34 @@ pub const VM = struct {
         return @mod(a, b);
     }
 
+    // compareOp removed - EQ/LT/LE no longer write booleans to registers
+
+    fn eqOp(a: TValue, b: TValue) bool {
+        return a.eql(b);
+    }
+
+    fn ltOp(a: TValue, b: TValue) !bool {
+        const na = a.toNumber();
+        const nb = b.toNumber();
+        if (na != null and nb != null) {
+            return na.? < nb.?;
+        }
+        // TODO: string comparison will be added when string type is implemented
+        // Non-numeric types cannot be ordered
+        return error.OrderComparisonError;
+    }
+
+    fn leOp(a: TValue, b: TValue) !bool {
+        const na = a.toNumber();
+        const nb = b.toNumber();
+        if (na != null and nb != null) {
+            return na.? <= nb.?;
+        }
+        // TODO: string comparison will be added when string type is implemented
+        // Non-numeric types cannot be ordered
+        return error.OrderComparisonError;
+    }
+
     pub const ReturnValue = union(enum) {
         none,
         single: TValue,
@@ -145,6 +173,117 @@ pub const VM = struct {
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
                     self.stack[self.base + a] = .{ .boolean = !vb.toBoolean() };
+                },
+                .EQ => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
+                    const is_true = eqOp(self.stack[self.base + b], self.stack[self.base + c]);
+                    // if (is_true != (negate != 0)) then skip next instruction
+                    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+                        ci.pc += 1;
+                    }
+                },
+                .LT => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const negate = inst.getA();
+                    const is_true = ltOp(self.stack[self.base + b], self.stack[self.base + c]) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+                        ci.pc += 1;
+                    }
+                },
+                .LE => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const negate = inst.getA();
+                    const is_true = leOp(self.stack[self.base + b], self.stack[self.base + c]) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+                        ci.pc += 1;
+                    }
+                },
+                .JMP => {
+                    const sj = inst.getsJ();
+                    // pc is already pointing to next instruction, just add signed offset
+                    if (sj >= 0) {
+                        ci.pc += @as(usize, @intCast(sj));
+                    } else {
+                        ci.pc -= @as(usize, @intCast(-sj));
+                    }
+                },
+                .TEST => {
+                    const k = inst.getk();
+                    const va = &self.stack[self.base + a];
+                    // if not (truth(va) == k) then skip
+                    if (va.toBoolean() != k) {
+                        ci.pc += 1;
+                    }
+                },
+                .TESTSET => {
+                    const b = inst.getB();
+                    const k = inst.getk();
+                    const vb = &self.stack[self.base + b];
+                    if (vb.toBoolean() == k) {
+                        // True: copy value and continue execution (no skip)
+                        self.stack[self.base + a] = vb.*;
+                    } else {
+                        // False: skip next instruction
+                        ci.pc += 1;
+                    }
+                },
+                .FORPREP => {
+                    const sbx = inst.getSBx();
+                    const v_init = self.stack[self.base + a];
+                    const v_limit = self.stack[self.base + a + 1];
+                    const v_step = self.stack[self.base + a + 2];
+
+                    if (v_init.isInteger() and v_limit.isInteger() and v_step.isInteger()) {
+                        const ii = v_init.integer;
+                        const is = v_step.integer;
+                        self.stack[self.base + a] = .{ .integer = ii - is }; // integer path
+                    } else {
+                        const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
+                        const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
+                        self.stack[self.base + a] = .{ .number = i - s }; // float path
+                    }
+
+                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                },
+                .FORLOOP => {
+                    const sbx = inst.getSBx();
+                    const idx = &self.stack[self.base + a];
+                    const limit = &self.stack[self.base + a + 1];
+                    const step = &self.stack[self.base + a + 2];
+
+                    if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
+                        // integer path
+                        const new_i = idx.integer + step.integer;
+                        const cont = if (step.integer > 0) (new_i <= limit.integer) else (new_i >= limit.integer);
+                        if (cont) {
+                            idx.* = .{ .integer = new_i };
+                            self.stack[self.base + a + 3] = .{ .integer = new_i };
+                            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                        }
+                    } else {
+                        // float path
+                        const i = idx.toNumber() orelse return error.InvalidForLoopInit;
+                        const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
+                        const s = step.toNumber() orelse return error.InvalidForLoopStep;
+
+                        const new_i = i + s;
+                        const cont = if (s > 0) (new_i <= l) else (new_i >= l);
+                        if (cont) {
+                            idx.* = .{ .number = new_i };
+                            self.stack[self.base + a + 3] = .{ .number = new_i };
+                            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                        }
+                    }
                 },
                 .RETURN => {
                     const b = inst.getB();

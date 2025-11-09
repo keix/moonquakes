@@ -116,6 +116,7 @@ pub const InstructionFormat = struct {
     pub const MAXARG_Ax = (1 << SIZE_Ax) - 1;
     pub const MAXARG_sJ = (1 << SIZE_sJ) - 1;
     pub const OFFSET_sJ = MAXARG_sJ >> 1;
+    pub const OFFSET_sBx = MAXARG_Bx >> 1;
 };
 
 pub const Instruction = packed struct(u32) {
@@ -153,7 +154,8 @@ pub const Instruction = packed struct(u32) {
     }
 
     pub fn initAsBx(opcode: OpCode, a: u8, sbx: i17) Instruction {
-        const bx = @as(u17, @bitCast(@as(u17, @intCast(sbx + InstructionFormat.OFFSET_sJ))));
+        const offset_val = @as(i32, sbx) + @as(i32, InstructionFormat.OFFSET_sBx);
+        const bx = @as(u17, @intCast(offset_val));
         return initABx(opcode, a, bx);
     }
 
@@ -164,7 +166,8 @@ pub const Instruction = packed struct(u32) {
     }
 
     pub fn initsJ(opcode: OpCode, sj: i25) Instruction {
-        const j = @as(u25, @intCast(sj + InstructionFormat.OFFSET_sJ));
+        const offset_val = @as(i26, sj) + @as(i26, InstructionFormat.OFFSET_sJ);
+        const j = @as(u25, @intCast(offset_val));
         const inst_value = @as(u32, @intFromEnum(opcode)) |
             (@as(u32, j) << InstructionFormat.POS_sJ);
         return @bitCast(inst_value);
@@ -195,8 +198,9 @@ pub const Instruction = packed struct(u32) {
         return @intCast((raw >> InstructionFormat.POS_Bx) & InstructionFormat.MAXARG_Bx);
     }
 
-    pub fn getsBx(self: Instruction) i17 {
-        return @as(i17, @bitCast(self.getBx())) - InstructionFormat.OFFSET_sJ;
+    pub fn getSBx(self: Instruction) i17 {
+        const bx_val = @as(i32, self.getBx());
+        return @as(i17, @intCast(bx_val - @as(i32, InstructionFormat.OFFSET_sBx)));
     }
 
     pub fn getAx(self: Instruction) u25 {
@@ -207,7 +211,7 @@ pub const Instruction = packed struct(u32) {
     pub fn getsJ(self: Instruction) i25 {
         const raw: u32 = @bitCast(self);
         const j = (raw >> InstructionFormat.POS_sJ) & InstructionFormat.MAXARG_sJ;
-        return @as(i25, @intCast(j)) - InstructionFormat.OFFSET_sJ;
+        return @as(i25, @intCast(@as(i26, @intCast(j)) - @as(i26, InstructionFormat.OFFSET_sJ)));
     }
 };
 
