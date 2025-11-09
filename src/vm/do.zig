@@ -5,7 +5,7 @@ const Instruction = @import("../compiler/opcodes.zig").Instruction;
 
 pub const CallFrame = struct {
     func: *const Proto,
-    pc: [*]const u32,
+    pc: [*]const Instruction,
     base: u32,
     top: u32,
 };

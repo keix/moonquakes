@@ -39,10 +39,9 @@ pub const VM = struct {
 
         while (true) {
             var ci = &self.ci.?;
-            const inst_raw = ci.pc[0];
+            const inst = ci.pc[0];
             ci.pc += 1;
 
-            const inst: Instruction = @bitCast(inst_raw);
             const op = inst.getOpCode();
             const a = inst.getA();
 
