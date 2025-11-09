@@ -123,6 +123,22 @@ pub const VM = struct {
                 .MOD => {
                     try self.arithBinary(inst, a, modOp);
                 },
+                .UNM => {
+                    const b = inst.getB();
+                    const vb = &self.stack[self.base + b];
+                    if (vb.isInteger()) {
+                        self.stack[self.base + a] = .{ .integer = -vb.integer };
+                    } else if (vb.toNumber()) |n| {
+                        self.stack[self.base + a] = .{ .number = -n };
+                    } else {
+                        return error.ArithmeticError;
+                    }
+                },
+                .NOT => {
+                    const b = inst.getB();
+                    const vb = &self.stack[self.base + b];
+                    self.stack[self.base + a] = .{ .boolean = !vb.toBoolean() };
+                },
                 .RETURN => {
                     const b = inst.getB();
                     if (b == 0) {
