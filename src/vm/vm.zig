@@ -60,7 +60,7 @@ pub const VM = struct {
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
                     const vc = &self.stack[self.base + c];
-                    
+
                     const nb = vb.toNumber();
                     const nc = vc.toNumber();
                     if (nb != null and nc != null) {
