@@ -24,12 +24,39 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const test_step = b.step("test", "Run unit tests");
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
+
+    // Unit tests for moonquakes
+    const moonquakes_tests = b.addTest(.{
+        .root_source_file = b.path("src/test.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-    test_step.dependOn(&run_exe_unit_tests.step);
+    const run_moonquakes_tests = b.addRunArtifact(moonquakes_tests);
+    test_step.dependOn(&run_moonquakes_tests.step);
+
+    // Integration test executables
+    const integration_step = b.step("integration", "Run integration tests");
+    const test_names = [_][]const u8{
+        "basic",
+        "arithmetic",
+    };
+
+    for (test_names) |test_name| {
+        const test_exe = b.addExecutable(.{
+            .name = test_name,
+            .root_source_file = b.path(b.fmt("tests/{s}.zig", .{test_name})),
+            .target = target,
+            .optimize = optimize,
+        });
+
+        const run_test = b.addRunArtifact(test_exe);
+
+        // Individual test steps
+        const individual_test_step = b.step(b.fmt("test-{s}", .{test_name}), b.fmt("Run {s} tests", .{test_name}));
+        individual_test_step.dependOn(&run_test.step);
+
+        // Add to integration step
+        integration_step.dependOn(&run_test.step);
+    }
 }

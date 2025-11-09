@@ -27,6 +27,57 @@ pub const VM = struct {
         return vm;
     }
 
+    fn arithBinary(self: *VM, inst: Instruction, a: u8, comptime op: fn (f64, f64) f64) !void {
+        const b = inst.getB();
+        const c = inst.getC();
+        const vb = &self.stack[self.base + b];
+        const vc = &self.stack[self.base + c];
+
+        // Try integer arithmetic first for add, sub, mul
+        if (op == addOp or op == subOp or op == mulOp) {
+            if (vb.isInteger() and vc.isInteger()) {
+                const ib = vb.integer;
+                const ic = vc.integer;
+                if (op == addOp) {
+                    self.stack[self.base + a] = .{ .integer = ib + ic };
+                } else if (op == subOp) {
+                    self.stack[self.base + a] = .{ .integer = ib - ic };
+                } else if (op == mulOp) {
+                    self.stack[self.base + a] = .{ .integer = ib * ic };
+                }
+                return;
+            }
+        }
+
+        // Fall back to floating point
+        const nb = vb.toNumber();
+        const nc = vc.toNumber();
+        if (nb != null and nc != null) {
+            self.stack[self.base + a] = .{ .number = op(nb.?, nc.?) };
+        } else {
+            return error.ArithmeticError;
+        }
+    }
+
+    fn addOp(a: f64, b: f64) f64 {
+        return a + b;
+    }
+    fn subOp(a: f64, b: f64) f64 {
+        return a - b;
+    }
+    fn mulOp(a: f64, b: f64) f64 {
+        return a * b;
+    }
+    fn divOp(a: f64, b: f64) f64 {
+        return a / b;
+    }
+    fn idivOp(a: f64, b: f64) f64 {
+        return @floor(a / b);
+    }
+    fn modOp(a: f64, b: f64) f64 {
+        return @mod(a, b);
+    }
+
     pub fn execute(self: *VM, proto: *const Proto) !?TValue {
         self.ci = CallFrame{
             .func = proto,
@@ -55,24 +106,22 @@ pub const VM = struct {
                     self.stack[self.base + a] = proto.k[bx];
                 },
                 .ADD => {
-                    const b = inst.getB();
-                    const c = inst.getC();
-                    const vb = &self.stack[self.base + b];
-                    const vc = &self.stack[self.base + c];
-
-                    const nb = vb.toNumber();
-                    const nc = vc.toNumber();
-                    if (nb != null and nc != null) {
-                        self.stack[self.base + a] = .{ .number = nb.? + nc.? };
-                    } else {
-                        const ib = vb.toInteger();
-                        const ic = vc.toInteger();
-                        if (ib != null and ic != null) {
-                            self.stack[self.base + a] = .{ .integer = ib.? + ic.? };
-                        } else {
-                            return error.ArithmeticError;
-                        }
-                    }
+                    try self.arithBinary(inst, a, addOp);
+                },
+                .SUB => {
+                    try self.arithBinary(inst, a, subOp);
+                },
+                .MUL => {
+                    try self.arithBinary(inst, a, mulOp);
+                },
+                .DIV => {
+                    try self.arithBinary(inst, a, divOp);
+                },
+                .IDIV => {
+                    try self.arithBinary(inst, a, idivOp);
+                },
+                .MOD => {
+                    try self.arithBinary(inst, a, modOp);
                 },
                 .RETURN => {
                     const b = inst.getB();
