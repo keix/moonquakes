@@ -7,6 +7,17 @@ const VM = @import("../vm/vm.zig").VM;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
+    try testing.expect(result == .single);
+    try testing.expect(result.single.eql(expected));
+}
+
+fn expectApproxResult(result: VM.ReturnValue, expected_value: f64, tolerance: f64) !void {
+    try testing.expect(result == .single);
+    try testing.expect(result.single.isNumber());
+    try testing.expectApproxEqAbs(result.single.number, expected_value, tolerance);
+}
+
 test "arithmetic: 10 - 3 * 2 = 4" {
     const constants = [_]TValue{
         .{ .integer = 10 },
@@ -34,8 +45,7 @@ test "arithmetic: 10 - 3 * 2 = 4" {
     var vm = VM.init();
     const result = try vm.execute(&proto);
 
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .integer = 4 }));
+    try expectSingleResult(result, TValue{ .integer = 4 });
 }
 
 test "arithmetic: 10 / 3" {
@@ -62,9 +72,7 @@ test "arithmetic: 10 / 3" {
     var vm = VM.init();
     const result = try vm.execute(&proto);
 
-    try testing.expect(result != null);
-    try testing.expect(result.?.isNumber());
-    try testing.expectApproxEqAbs(result.?.number, 3.333333, 0.00001);
+    try expectApproxResult(result, 3.333333, 0.00001);
 }
 
 test "arithmetic: 10 // 3 = 3" {
@@ -91,8 +99,7 @@ test "arithmetic: 10 // 3 = 3" {
     var vm = VM.init();
     const result = try vm.execute(&proto);
 
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .number = 3 }));
+    try expectSingleResult(result, TValue{ .number = 3 });
 }
 
 test "arithmetic: 10 % 3 = 1" {
@@ -119,6 +126,5 @@ test "arithmetic: 10 % 3 = 1" {
     var vm = VM.init();
     const result = try vm.execute(&proto);
 
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .number = 1 }));
+    try expectSingleResult(result, TValue{ .number = 1 });
 }

@@ -32,9 +32,16 @@ pub fn main() !void {
     const result = try vm.execute(&proto);
 
     try stdout.print("Moonquakes speaks for the first time!\n", .{});
-    if (result) |val| {
-        try stdout.print("Result: {}\n", .{val});
-    } else {
-        try stdout.print("Result: nil\n", .{});
+    switch (result) {
+        .none => try stdout.print("Result: nil\n", .{}),
+        .single => |val| try stdout.print("Result: {}\n", .{val}),
+        .multiple => |vals| {
+            try stdout.print("Results: ", .{});
+            for (vals, 0..) |val, i| {
+                if (i > 0) try stdout.print(", ", .{});
+                try stdout.print("{}", .{val});
+            }
+            try stdout.print("\n", .{});
+        },
     }
 }

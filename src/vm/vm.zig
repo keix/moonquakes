@@ -27,7 +27,8 @@ pub const VM = struct {
         return vm;
     }
 
-    fn arithBinary(self: *VM, inst: Instruction, a: u8, comptime op: fn (f64, f64) f64) !void {
+    fn arithBinary(self: *VM, inst: Instruction, comptime op: fn (f64, f64) f64) !void {
+        const a = inst.getA();
         const b = inst.getB();
         const c = inst.getC();
         const vb = &self.stack[self.base + b];
@@ -78,7 +79,13 @@ pub const VM = struct {
         return @mod(a, b);
     }
 
-    pub fn execute(self: *VM, proto: *const Proto) !?TValue {
+    pub const ReturnValue = union(enum) {
+        none,
+        single: TValue,
+        multiple: []TValue,
+    };
+
+    pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
         self.ci = CallFrame{
             .func = proto,
             .pc = proto.code.ptr,
@@ -106,22 +113,22 @@ pub const VM = struct {
                     self.stack[self.base + a] = proto.k[bx];
                 },
                 .ADD => {
-                    try self.arithBinary(inst, a, addOp);
+                    try self.arithBinary(inst, addOp);
                 },
                 .SUB => {
-                    try self.arithBinary(inst, a, subOp);
+                    try self.arithBinary(inst, subOp);
                 },
                 .MUL => {
-                    try self.arithBinary(inst, a, mulOp);
+                    try self.arithBinary(inst, mulOp);
                 },
                 .DIV => {
-                    try self.arithBinary(inst, a, divOp);
+                    try self.arithBinary(inst, divOp);
                 },
                 .IDIV => {
-                    try self.arithBinary(inst, a, idivOp);
+                    try self.arithBinary(inst, idivOp);
                 },
                 .MOD => {
-                    try self.arithBinary(inst, a, modOp);
+                    try self.arithBinary(inst, modOp);
                 },
                 .UNM => {
                     const b = inst.getB();
@@ -142,11 +149,19 @@ pub const VM = struct {
                 .RETURN => {
                     const b = inst.getB();
                     if (b == 0) {
-                        return null;
+                        // return no values (used internally for tailcall)
+                        return .none;
                     } else if (b == 1) {
-                        return null;
+                        // return nothing (return)
+                        return .none;
+                    } else if (b == 2) {
+                        // return 1 value from R[A]
+                        return .{ .single = self.stack[self.base + a] };
                     } else {
-                        return self.stack[self.base + a];
+                        // return n-1 values from R[A]..R[A+n-2]
+                        const count = b - 1;
+                        const values = self.stack[self.base + a .. self.base + a + count];
+                        return .{ .multiple = values };
                     }
                 },
                 else => return error.UnknownOpcode,

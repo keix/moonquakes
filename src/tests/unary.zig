@@ -7,6 +7,11 @@ const VM = @import("../vm/vm.zig").VM;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
+    try testing.expect(result == .single);
+    try testing.expect(result.single.eql(expected));
+}
+
 test "unary: -5 = -5" {
     const constants = [_]TValue{
         .{ .integer = 5 },
@@ -28,9 +33,8 @@ test "unary: -5 = -5" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .integer = -5 }));
+
+    try expectSingleResult(result, TValue{ .integer = -5 });
 }
 
 test "unary: -3.5 = -3.5" {
@@ -54,9 +58,8 @@ test "unary: -3.5 = -3.5" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .number = -3.5 }));
+
+    try expectSingleResult(result, TValue{ .number = -3.5 });
 }
 
 test "unary: not true = false" {
@@ -80,9 +83,8 @@ test "unary: not true = false" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .boolean = false }));
+
+    try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "unary: not nil = true" {
@@ -106,9 +108,8 @@ test "unary: not nil = true" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .boolean = true }));
+
+    try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "unary: not 0 = false" {
@@ -132,9 +133,8 @@ test "unary: not 0 = false" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .boolean = false }));
+
+    try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "unary: -5 + 3 = -2" {
@@ -161,7 +161,6 @@ test "unary: -5 + 3 = -2" {
 
     var vm = VM.init();
     const result = try vm.execute(&proto);
-    
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .integer = -2 }));
+
+    try expectSingleResult(result, TValue{ .integer = -2 });
 }

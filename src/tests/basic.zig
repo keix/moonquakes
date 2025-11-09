@@ -7,6 +7,15 @@ const VM = @import("../vm/vm.zig").VM;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
+    try testing.expect(result == .single);
+    try testing.expect(result.single.eql(expected));
+}
+
+fn expectNoResult(result: VM.ReturnValue) !void {
+    try testing.expect(result == .none);
+}
+
 test "basic: 1 + 2 = 3" {
     const constants = [_]TValue{
         .{ .integer = 1 },
@@ -31,8 +40,7 @@ test "basic: 1 + 2 = 3" {
     var vm = VM.init();
     const result = try vm.execute(&proto);
 
-    try testing.expect(result != null);
-    try testing.expect(result.?.eql(TValue{ .integer = 3 }));
+    try expectSingleResult(result, TValue{ .integer = 3 });
 
     // Optional: print success for debugging
     // std.debug.print("✓ basic: 1 + 2 = 3\n", .{});
