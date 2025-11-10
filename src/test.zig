@@ -9,6 +9,9 @@ pub const returns_tests = @import("tests/returns.zig");
 pub const comparison_tests = @import("tests/comparison.zig");
 pub const control_flow_tests = @import("tests/control_flow.zig");
 pub const for_loop_tests = @import("tests/for_loops.zig");
+pub const load_instructions_tests = @import("tests/load_instructions.zig");
+pub const immediate_arithmetic_tests = @import("tests/immediate_arithmetic.zig");
+pub const constant_arithmetic_tests = @import("tests/constant_arithmetic.zig");
 
 test {
     // This will include all tests from imported modules
