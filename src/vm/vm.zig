@@ -140,6 +140,109 @@ pub const VM = struct {
                     const bx = inst.getBx();
                     self.stack[self.base + a] = proto.k[bx];
                 },
+                .LOADBOOL => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    self.stack[self.base + a] = .{ .boolean = (b != 0) };
+                    if (c != 0) {
+                        ci.pc += 1; // skip next instruction
+                    }
+                },
+                .LOADNIL => {
+                    const b = inst.getB();
+                    var i: u8 = 0;
+                    while (i <= b) : (i += 1) {
+                        self.stack[self.base + a + i] = .nil;
+                    }
+                },
+                .ADDI => {
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const vb = &self.stack[self.base + b];
+
+                    // ADDI uses C as a signed byte (-128 to 127)
+                    const imm = @as(i8, @bitCast(@as(u8, sc)));
+
+                    if (vb.isInteger()) {
+                        self.stack[self.base + a] = .{ .integer = vb.integer + imm };
+                    } else if (vb.toNumber()) |n| {
+                        self.stack[self.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
+                    } else {
+                        return error.ArithmeticError;
+                    }
+                },
+                .ADDK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c]; // C is always a constant index for ADDK
+
+                    if (vb.isInteger() and vc.isInteger()) {
+                        self.stack[self.base + a] = .{ .integer = vb.integer + vc.integer };
+                    } else {
+                        const nb = vb.toNumber() orelse return error.ArithmeticError;
+                        const nc = vc.toNumber() orelse return error.ArithmeticError;
+                        self.stack[self.base + a] = .{ .number = nb + nc };
+                    }
+                },
+                .SUBK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    if (vb.isInteger() and vc.isInteger()) {
+                        self.stack[self.base + a] = .{ .integer = vb.integer - vc.integer };
+                    } else {
+                        const nb = vb.toNumber() orelse return error.ArithmeticError;
+                        const nc = vc.toNumber() orelse return error.ArithmeticError;
+                        self.stack[self.base + a] = .{ .number = nb - nc };
+                    }
+                },
+                .MULK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    if (vb.isInteger() and vc.isInteger()) {
+                        self.stack[self.base + a] = .{ .integer = vb.integer * vc.integer };
+                    } else {
+                        const nb = vb.toNumber() orelse return error.ArithmeticError;
+                        const nc = vc.toNumber() orelse return error.ArithmeticError;
+                        self.stack[self.base + a] = .{ .number = nb * nc };
+                    }
+                },
+                .DIVK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const nb = vb.toNumber() orelse return error.ArithmeticError;
+                    const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    self.stack[self.base + a] = .{ .number = nb / nc };
+                },
+                .IDIVK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const nb = vb.toNumber() orelse return error.ArithmeticError;
+                    const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    self.stack[self.base + a] = .{ .number = @floor(nb / nc) };
+                },
+                .MODK => {
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const nb = vb.toNumber() orelse return error.ArithmeticError;
+                    const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    self.stack[self.base + a] = .{ .number = @mod(nb, nc) };
+                },
                 .ADD => {
                     try self.arithBinary(inst, addOp);
                 },
