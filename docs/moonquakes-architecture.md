@@ -76,4 +76,126 @@ ADD R1 R2 R3 ; R1 = R2 + R3
 ADDK R1 R2 K5 ; R1 = R2 + K[5]
 ```
 
-Next, we will describe how instructions are executed inside the VM loop, how registers map to stack slots, and how a Proto (function prototype) stores bytecode and constants.
+## 2. Call Frames and Execution Context
+Each active function call in Moonquakes is represented by a CallFrame.
+A CallFrame stores all the state necessary to resume a function — including the current program counter (pc), the base index of its stack segment, and its associated function prototype (Proto).
+
+Conceptually, a CallFrame is similar to a lightweight stack frame in a CPU, but designed for a register-based virtual machine.
+
+### 2.1 Structure
+```
+pub const CallFrame = struct {
+    func: *const Proto, // the function prototype being executed
+    pc: [*]const u32,   // pointer to current instruction
+    base: u32,          // base register index in VM stack
+    top: u32,           // top of the function's register window
+};
+```
+
+Each frame defines a register window — a contiguous region of the global VM stack used by that function. Registers R[base] through R[top-1] belong exclusively to that function, isolating it from others.
+
+### 2.2 Relation to the VM
+When a function is called, the VM:
+
+- Pushes a new frame (CallFrame) onto its internal call stack.
+- Sets the frame’s base to the current stack top.
+- Executes instructions in the function’s bytecode (Proto.code).
+- When a RETURN opcode is reached, the frame is popped, and control returns to the caller.
+
+In Moonquakes, for simplicity, only one active frame exists for now (no nested calls yet). Future phases will expand this with a proper call stack and tail-call optimization.
+
+### 2.3 Stack and Register Mapping
+The global VM stack holds all registers for all active frames:
+
+```
++---------------------------------+  
+|  R0  |  R1  |  R2  |  R3  | ... |  
++---------------------------------+  
+^base                             ^top
+```
+
+Each instruction refers to registers using relative indices from the frame base:
+
+```
+R[A] = stack[frame.base + A]
+```
+
+This design mirrors Lua’s register-based model — efficient, predictable, and well-suited for JIT or ahead-of-time compilation.
+
+## 3. Function Prototype (Proto)
+In Moonquakes, every function — whether it’s a Lua script or a nested function — is represented by a Proto structure.
+
+A Proto encapsulates the immutable components of a compiled Lua function: its constants, bytecode, local variable count, and stack size requirements.
+
+Unlike a CallFrame, which is runtime state, a Proto is compile-time data that can be shared and executed multiple times.
+
+### 3.1 Structure
+```
+pub const Proto = struct {
+    k: []const TValue,      // constant table (literals, numbers, strings)
+    code: []const u32,      // array of 32-bit encoded instructions
+    numparams: u8,          // number of formal parameters
+    is_vararg: bool,        // whether function accepts variable arguments
+    maxstacksize: u8,       // required register count
+};
+```
+
+Each Proto defines the static blueprint for execution:
+
+- k holds constants referenced by opcodes that use the k flag.
+- code contains the VM bytecode sequence, each entry a 32-bit instruction.
+- numparams and is_vararg define the function signature.
+- maxstacksize declares how many registers (stack slots) must be reserved.
+
+The VM does not allocate dynamically per instruction — it reserves the entire maxstacksize at frame setup. This design ensures predictable stack access and constant-time register lookups.
+
+### 3.2 Relationship Between Proto and CallFrame
+
+When executing, the VM binds a Proto to a CallFrame:
+
+```
+CallFrame {
+    func = &Proto
+    base = stack_base
+    top  = stack_base + Proto.maxstacksize
+}
+```
+
+Conceptually:
+
+```
+Proto (definition) → CallFrame (activation) → VM (execution)
+```
+
+- The Proto is static — it never changes.
+- The CallFrame is dynamic — it represents one active invocation of that Proto.
+- The VM manages both — loading constants, fetching instructions, updating registers.
+
+## 4. Execution Loop (Fetch–Decode–Execute)
+
+At the heart of Moonquakes lies a classic fetch–decode–execute cycle —
+a simple loop that continuously fetches the next instruction, decodes it, and executes it against the active stack frame.
+
+Pseudocode overview:
+
+```
+while true:
+    inst = frame.pc[0]
+    frame.pc += 1
+    decode op, A, B, C from inst
+
+    switch op:
+        case MOVE:
+            R[A] = R[B]
+        case LOADK:
+            R[A] = K[Bx]
+        case ADD:
+            R[A] = R[B] + R[C]
+        ...
+        case RETURN:
+            return result
+```
+
+This design remains faithful to Lua’s philosophy — a register-based virtual machine that trades off bytecode compactness for execution speed and simplicity.
+
+Every instruction executes in constant time, without additional heap allocations or indirection.
