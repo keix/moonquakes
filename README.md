@@ -22,7 +22,13 @@ Lua 5.4 Reference Manual
 
 Moonquakes is developed with the long-term goal of fully implementing the Lua 5.4 specification. Not all features are complete yet, but every part is designed to stay faithful to the official spec.
 
+## Acknowledgments
+Moonquakes is inspired by the elegance of the original Lua authors:  
+Roberto Ierusalimschy, Luiz Henrique de Figueiredo, and Waldemar Celes.
+
+Their work defined not only a language, but a philosophy of simplicity that still resonates today.
+
 ## License
 Copyright KEI SAWAMURA 2025.  
-Moonquakes is licensed under the MIT License. Copying, sharing, and modifying is encouraged and appreciated.
+Moonquakes is licensed under the MIT License. Copying and modifying is encouraged and appreciated.
 
