@@ -31,7 +31,7 @@ test "Instruction AsBx format" {
     try testing.expectEqual(OpCode.FORPREP, inst1.getOpCode());
     try testing.expectEqual(@as(u8, 3), inst1.getA());
     try testing.expectEqual(@as(i17, 100), inst1.getSBx());
-    
+
     // Test negative signed value
     const inst2 = Instruction.initAsBx(.FORLOOP, 4, -50);
     try testing.expectEqual(OpCode.FORLOOP, inst2.getOpCode());
@@ -44,7 +44,7 @@ test "Instruction sJ format" {
     const inst1 = Instruction.initsJ(.JMP, 1000);
     try testing.expectEqual(OpCode.JMP, inst1.getOpCode());
     try testing.expectEqual(@as(i25, 1000), inst1.getsJ());
-    
+
     // Test negative jump
     const inst2 = Instruction.initsJ(.JMP, -500);
     try testing.expectEqual(OpCode.JMP, inst2.getOpCode());
