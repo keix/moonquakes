@@ -73,10 +73,18 @@ pub const VM = struct {
         return a / b;
     }
     fn idivOp(a: f64, b: f64) f64 {
-        return @floor(a / b);
+        return luaFloorDiv(a, b);
     }
     fn modOp(a: f64, b: f64) f64 {
-        return @mod(a, b);
+        return luaMod(a, b);
+    }
+
+    fn luaFloorDiv(a: f64, b: f64) f64 {
+        return @floor(a / b);
+    }
+
+    fn luaMod(a: f64, b: f64) f64 {
+        return a - luaFloorDiv(a, b) * b;
     }
 
     // compareOp removed - EQ/LT/LE no longer write booleans to registers
@@ -231,7 +239,7 @@ pub const VM = struct {
 
                     const nb = vb.toNumber() orelse return error.ArithmeticError;
                     const nc = vc.toNumber() orelse return error.ArithmeticError;
-                    self.stack[self.base + a] = .{ .number = @floor(nb / nc) };
+                    self.stack[self.base + a] = .{ .number = luaFloorDiv(nb, nc) };
                 },
                 .MODK => {
                     const b = inst.getB();
@@ -241,7 +249,7 @@ pub const VM = struct {
 
                     const nb = vb.toNumber() orelse return error.ArithmeticError;
                     const nc = vc.toNumber() orelse return error.ArithmeticError;
-                    self.stack[self.base + a] = .{ .number = @mod(nb, nc) };
+                    self.stack[self.base + a] = .{ .number = luaMod(nb, nc) };
                 },
                 .ADD => {
                     try self.arithBinary(inst, addOp);
