@@ -13,6 +13,9 @@ pub const load_instructions_tests = @import("tests/load_instructions.zig");
 pub const immediate_arithmetic_tests = @import("tests/immediate_arithmetic.zig");
 pub const constant_arithmetic_tests = @import("tests/constant_arithmetic.zig");
 pub const opcodes_tests = @import("tests/opcodes.zig");
+pub const value_equality_tests = @import("tests/value_equality.zig");
+pub const nan_comparisons_tests = @import("tests/nan_comparisons.zig");
+pub const division_by_zero_tests = @import("tests/division_by_zero.zig");
 
 test {
     // This will include all tests from imported modules
