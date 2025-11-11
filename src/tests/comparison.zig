@@ -270,3 +270,102 @@ test "comparison: different types nil == false = false" {
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
+
+test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
+    const constants = [_]TValue{
+        .{ .integer = 1 },
+        .{ .number = 1.0 },
+        .{ .boolean = true }, // result for true case
+        .{ .boolean = false }, // result for false case
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 1 (integer)
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 1.0 (float)
+        Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) != 1 then skip next (if NOT equal then skip)
+        Instruction.initABx(.LOADK, 2, 2), // R2 = true (executed if equal)
+        Instruction.initsJ(.JMP, 1), // Jump to return
+        Instruction.initABx(.LOADK, 2, 3), // R2 = false (executed if not equal)
+        Instruction.initABC(.RETURN, 2, 2, 0), // return R2
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    // In Lua 5.3+, 1 == 1.0 is true
+    try expectSingleResult(result, TValue{ .boolean = true });
+}
+
+test "EQ instruction: integer != non-integer float (42 != 42.5)" {
+    const constants = [_]TValue{
+        .{ .integer = 42 },
+        .{ .number = 42.5 },
+        .{ .boolean = true }, // result for true case
+        .{ .boolean = false }, // result for false case
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 42 (integer)
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 42.5 (float)
+        Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) != 0 then skip next (if equal then skip)
+        Instruction.initABx(.LOADK, 2, 3), // R2 = false (executed if not equal)
+        Instruction.initsJ(.JMP, 1), // Jump to return
+        Instruction.initABx(.LOADK, 2, 2), // R2 = true (executed if equal)
+        Instruction.initABC(.RETURN, 2, 2, 0), // return R2
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    // 42 != 42.5, so should return false
+    try expectSingleResult(result, TValue{ .boolean = false });
+}
+
+test "EQ instruction: negative integer == float (-100 == -100.0)" {
+    const constants = [_]TValue{
+        .{ .integer = -100 },
+        .{ .number = -100.0 },
+        .{ .boolean = true }, // result for true case
+        .{ .boolean = false }, // result for false case
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = -100 (integer)
+        Instruction.initABx(.LOADK, 1, 1), // R1 = -100.0 (float)
+        Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) != 1 then skip next (if NOT equal then skip)
+        Instruction.initABx(.LOADK, 2, 2), // R2 = true (executed if equal)
+        Instruction.initsJ(.JMP, 1), // Jump to return
+        Instruction.initABx(.LOADK, 2, 3), // R2 = false (executed if not equal)
+        Instruction.initABC(.RETURN, 2, 2, 0), // return R2
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    // -100 == -100.0 should be true in Lua 5.3+
+    try expectSingleResult(result, TValue{ .boolean = true });
+}

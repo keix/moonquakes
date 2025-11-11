@@ -73,12 +73,19 @@ pub const TValue = union(ValueType) {
     }
 
     pub fn eql(a: TValue, b: TValue) bool {
-        if (@as(ValueType, a) != @as(ValueType, b)) return false;
         return switch (a) {
-            .nil => true,
-            .boolean => |ab| ab == b.boolean,
-            .integer => |ai| ai == b.integer,
-            .number => |an| an == b.number,
+            .nil => b == .nil,
+            .boolean => |ab| b == .boolean and ab == b.boolean,
+            .integer => |ai| switch (b) {
+                .integer => |bi| ai == bi,
+                .number => |bn| @as(f64, @floatFromInt(ai)) == bn,
+                else => false,
+            },
+            .number => |an| switch (b) {
+                .integer => |bi| an == @as(f64, @floatFromInt(bi)),
+                .number => |bn| an == bn,
+                else => false,
+            },
         };
     }
 };

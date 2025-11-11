@@ -27,7 +27,9 @@ pub const VM = struct {
         return vm;
     }
 
-    fn arithBinary(self: *VM, inst: Instruction, comptime op: fn (f64, f64) f64) !void {
+    const ArithOp = enum { add, sub, mul, div, idiv, mod };
+
+    fn arithBinary(self: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         const a = inst.getA();
         const b = inst.getB();
         const c = inst.getC();
@@ -35,48 +37,40 @@ pub const VM = struct {
         const vc = &self.stack[self.base + c];
 
         // Try integer arithmetic first for add, sub, mul
-        if (op == addOp or op == subOp or op == mulOp) {
+        if (tag == .add or tag == .sub or tag == .mul) {
             if (vb.isInteger() and vc.isInteger()) {
                 const ib = vb.integer;
                 const ic = vc.integer;
-                if (op == addOp) {
-                    self.stack[self.base + a] = .{ .integer = ib + ic };
-                } else if (op == subOp) {
-                    self.stack[self.base + a] = .{ .integer = ib - ic };
-                } else if (op == mulOp) {
-                    self.stack[self.base + a] = .{ .integer = ib * ic };
-                }
+                const res = switch (tag) {
+                    .add => ib + ic,
+                    .sub => ib - ic,
+                    .mul => ib * ic,
+                    else => unreachable,
+                };
+                self.stack[self.base + a] = .{ .integer = res };
                 return;
             }
         }
 
         // Fall back to floating point
-        const nb = vb.toNumber();
-        const nc = vc.toNumber();
-        if (nb != null and nc != null) {
-            self.stack[self.base + a] = .{ .number = op(nb.?, nc.?) };
-        } else {
+        const nb = vb.toNumber() orelse return error.ArithmeticError;
+        const nc = vc.toNumber() orelse return error.ArithmeticError;
+
+        // Check for division by zero
+        if ((tag == .div or tag == .idiv or tag == .mod) and nc == 0) {
             return error.ArithmeticError;
         }
-    }
 
-    fn addOp(a: f64, b: f64) f64 {
-        return a + b;
-    }
-    fn subOp(a: f64, b: f64) f64 {
-        return a - b;
-    }
-    fn mulOp(a: f64, b: f64) f64 {
-        return a * b;
-    }
-    fn divOp(a: f64, b: f64) f64 {
-        return a / b;
-    }
-    fn idivOp(a: f64, b: f64) f64 {
-        return luaFloorDiv(a, b);
-    }
-    fn modOp(a: f64, b: f64) f64 {
-        return luaMod(a, b);
+        const res = switch (tag) {
+            .add => nb + nc,
+            .sub => nb - nc,
+            .mul => nb * nc,
+            .div => nb / nc,
+            .idiv => luaFloorDiv(nb, nc),
+            .mod => luaMod(nb, nc),
+        };
+
+        self.stack[self.base + a] = .{ .number = res };
     }
 
     fn luaFloorDiv(a: f64, b: f64) f64 {
@@ -97,6 +91,10 @@ pub const VM = struct {
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {
+            // In Lua, any comparison with NaN returns false
+            if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
+                return false;
+            }
             return na.? < nb.?;
         }
         // TODO: string comparison will be added when string type is implemented
@@ -108,6 +106,10 @@ pub const VM = struct {
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {
+            // In Lua, any comparison with NaN returns false
+            if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
+                return false;
+            }
             return na.? <= nb.?;
         }
         // TODO: string comparison will be added when string type is implemented
@@ -229,6 +231,7 @@ pub const VM = struct {
 
                     const nb = vb.toNumber() orelse return error.ArithmeticError;
                     const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    if (nc == 0) return error.ArithmeticError;
                     self.stack[self.base + a] = .{ .number = nb / nc };
                 },
                 .IDIVK => {
@@ -239,6 +242,7 @@ pub const VM = struct {
 
                     const nb = vb.toNumber() orelse return error.ArithmeticError;
                     const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    if (nc == 0) return error.ArithmeticError;
                     self.stack[self.base + a] = .{ .number = luaFloorDiv(nb, nc) };
                 },
                 .MODK => {
@@ -249,25 +253,26 @@ pub const VM = struct {
 
                     const nb = vb.toNumber() orelse return error.ArithmeticError;
                     const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    if (nc == 0) return error.ArithmeticError;
                     self.stack[self.base + a] = .{ .number = luaMod(nb, nc) };
                 },
                 .ADD => {
-                    try self.arithBinary(inst, addOp);
+                    try self.arithBinary(inst, .add);
                 },
                 .SUB => {
-                    try self.arithBinary(inst, subOp);
+                    try self.arithBinary(inst, .sub);
                 },
                 .MUL => {
-                    try self.arithBinary(inst, mulOp);
+                    try self.arithBinary(inst, .mul);
                 },
                 .DIV => {
-                    try self.arithBinary(inst, divOp);
+                    try self.arithBinary(inst, .div);
                 },
                 .IDIV => {
-                    try self.arithBinary(inst, idivOp);
+                    try self.arithBinary(inst, .idiv);
                 },
                 .MOD => {
-                    try self.arithBinary(inst, modOp);
+                    try self.arithBinary(inst, .mod);
                 },
                 .UNM => {
                     const b = inst.getB();
