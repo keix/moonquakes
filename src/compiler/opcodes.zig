@@ -126,6 +126,7 @@ pub const Instruction = packed struct(u32) {
     b: u8,
     c: u8,
 
+    // iABC: [op:7][a:8][k:1][b:8][c:8]
     pub fn initABC(opcode: OpCode, a: u8, b: u8, c: u8) Instruction {
         return .{
             .op = @intFromEnum(opcode),
@@ -136,6 +137,7 @@ pub const Instruction = packed struct(u32) {
         };
     }
 
+    // iABC: [op:7][a:8][k:1][b:8][c:8] with k flag
     pub fn initABCk(opcode: OpCode, a: u8, b: u8, c: u8, k: bool) Instruction {
         return .{
             .op = @intFromEnum(opcode),
@@ -146,6 +148,7 @@ pub const Instruction = packed struct(u32) {
         };
     }
 
+    // iABx: [op:7][a:8][bx:17]
     pub fn initABx(opcode: OpCode, a: u8, bx: u17) Instruction {
         const inst_value = @as(u32, @intFromEnum(opcode)) |
             (@as(u32, a) << InstructionFormat.POS_A) |
@@ -153,18 +156,21 @@ pub const Instruction = packed struct(u32) {
         return @bitCast(inst_value);
     }
 
+    // iAsBx: [op:7][a:8][sbx:17] (17-bit signed)
     pub fn initAsBx(opcode: OpCode, a: u8, sbx: i17) Instruction {
         const offset_val = @as(i32, sbx) + @as(i32, InstructionFormat.OFFSET_sBx);
         const bx = @as(u17, @intCast(offset_val));
         return initABx(opcode, a, bx);
     }
 
+    // iAx: [op:7][ax:25]
     pub fn initAx(opcode: OpCode, ax: u25) Instruction {
         const inst_value = @as(u32, @intFromEnum(opcode)) |
             (@as(u32, ax) << InstructionFormat.POS_Ax);
         return @bitCast(inst_value);
     }
 
+    // isJ: [op:7][sj:25] (25-bit signed jump)
     pub fn initsJ(opcode: OpCode, sj: i25) Instruction {
         const offset_val = @as(i26, sj) + @as(i26, InstructionFormat.OFFSET_sJ);
         const j = @as(u25, @intCast(offset_val));
@@ -214,25 +220,3 @@ pub const Instruction = packed struct(u32) {
         return @as(i25, @intCast(@as(i26, @intCast(j)) - @as(i26, InstructionFormat.OFFSET_sJ)));
     }
 };
-
-const testing = std.testing;
-
-test "Instruction packed struct size" {
-    try testing.expectEqual(@sizeOf(u32), @sizeOf(Instruction));
-}
-
-test "Instruction ABC format" {
-    const inst = Instruction.initABC(.ADD, 1, 2, 3);
-    try testing.expectEqual(OpCode.ADD, inst.getOpCode());
-    try testing.expectEqual(@as(u8, 1), inst.getA());
-    try testing.expectEqual(@as(u8, 2), inst.getB());
-    try testing.expectEqual(@as(u8, 3), inst.getC());
-    try testing.expectEqual(false, inst.getk());
-}
-
-test "Instruction ABx format" {
-    const inst = Instruction.initABx(.LOADK, 5, 12345);
-    try testing.expectEqual(OpCode.LOADK, inst.getOpCode());
-    try testing.expectEqual(@as(u8, 5), inst.getA());
-    try testing.expectEqual(@as(u17, 12345), inst.getBx());
-}

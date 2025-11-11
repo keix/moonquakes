@@ -248,3 +248,55 @@ test "Constant arithmetic: chain operations" {
 
     try expectSingleResult(result, TValue{ .number = 30.0 });
 }
+
+test "MODK: Lua-style negative modulo" {
+    const constants = [_]TValue{
+        .{ .number = -7.0 },
+        .{ .number = 5.0 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = -7.0
+        Instruction.initABC(.MODK, 1, 0, 1), // R1 = R0 % K[1] (-7 % 5 = 3 in Lua)
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = 3.0 });
+}
+
+test "IDIVK: Lua-style floor division with negative" {
+    const constants = [_]TValue{
+        .{ .number = -7.0 },
+        .{ .number = 5.0 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = -7.0
+        Instruction.initABC(.IDIVK, 1, 0, 1), // R1 = R0 // K[1] (-7 // 5 = -2 in Lua)
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = -2.0 });
+}
