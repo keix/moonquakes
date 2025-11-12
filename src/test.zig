@@ -16,6 +16,7 @@ pub const opcodes_tests = @import("tests/opcodes.zig");
 pub const value_equality_tests = @import("tests/value_equality.zig");
 pub const nan_comparisons_tests = @import("tests/nan_comparisons.zig");
 pub const division_by_zero_tests = @import("tests/division_by_zero.zig");
+pub const basic_with_utils_tests = @import("tests/basic_with_utils.zig");
 
 test {
     // This will include all tests from imported modules
