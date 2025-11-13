@@ -7,6 +7,8 @@ const VM = @import("../vm/vm.zig").VM;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+const utils = @import("test_utils.zig");
+
 fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));
@@ -40,9 +42,25 @@ test "comparison: 5 == 5 = true" {
     };
 
     var vm = VM.init();
+
+    // Added: ComparisonTest helper could be used for simpler verification
+    // However, this test is complex so we verify manually
+    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
+
     const result = try vm.execute(&proto);
 
+    trace.updateFinal(&vm, 3);
+
+    // Existing verification
     try expectSingleResult(result, TValue{ .boolean = true });
+
+    // Added: Register and PC behavior verification
+    try trace.expectRegisterChanged(0, TValue{ .integer = 5 });
+    try trace.expectRegisterChanged(1, TValue{ .integer = 5 });
+    try trace.expectRegisterChanged(2, TValue{ .boolean = true }); // EQ didn't skip, so true was set
+
+    // VM final state
+    try utils.expectVMState(&vm, 0, 3);
 }
 
 test "comparison: 5 == 3 = false" {
@@ -368,4 +386,64 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
 
     // -100 == -100.0 should be true in Lua 5.3+
     try expectSingleResult(result, TValue{ .boolean = true });
+}
+
+// Added: Concise test using ComparisonTest helper
+test "comparison: EQ with skip behavior verification" {
+    var vm = VM.init();
+
+    // Test 1: Equal values with A=0 (should skip)
+    try utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
+        TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
+
+    // Test 2: Different values with A=0 (should not skip)
+    vm = VM.init();
+    try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
+}
+
+test "comparison: LT with side effect verification" {
+    // Verify that comparison instruction itself doesn't modify values
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 10
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 20
+        Instruction.initABC(.LT, 0, 0, 1), // if (R0 < R1) == 0 then skip (true, so skip)
+        Instruction.initABx(.LOADK, 2, 2), // R2 = 100 (skipped)
+        Instruction.initABx(.LOADK, 3, 3), // R3 = 200 (executed)
+        Instruction.initABC(.RETURN, 0, 5, 0), // return R0..R3
+    };
+
+    const constants = [_]TValue{
+        .{ .integer = 10 },
+        .{ .integer = 20 },
+        .{ .integer = 100 },
+        .{ .integer = 200 },
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 4,
+    };
+
+    var vm = VM.init();
+
+    // Initialize R2, R3 to track changes
+    vm.stack[2] = .nil;
+    vm.stack[3] = .nil;
+
+    var trace = utils.ExecutionTrace.captureInitial(&vm, 4);
+    const result = try vm.execute(&proto);
+    trace.updateFinal(&vm, 4);
+
+    // Verify registers
+    try trace.expectRegisterChanged(0, TValue{ .integer = 10 });
+    try trace.expectRegisterChanged(1, TValue{ .integer = 20 });
+    try trace.expectRegisterUnchanged(2); // R2 was skipped so remains nil
+    try trace.expectRegisterChanged(3, TValue{ .integer = 200 }); // R3 was executed
+
+    // Verify result
+    try testing.expect(result == .multiple);
+    try testing.expectEqual(@as(usize, 4), result.multiple.len);
 }
