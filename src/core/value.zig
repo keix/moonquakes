@@ -1,13 +1,15 @@
 const std = @import("std");
+const Closure = @import("closure.zig").Closure;
 
 /// Note:
-/// Current TValue includes only primitive types (nil/boolean/integer/number).
-/// Later this union will be extended with pointer types (string, table, function, GCObject*).
+/// Current TValue includes primitive types and closure.
+/// Later this union will be extended with more pointer types (string, table, GCObject*).
 pub const ValueType = enum(u8) {
     nil,
     boolean,
     integer,
     number,
+    closure,
 };
 
 pub const TValue = union(ValueType) {
@@ -15,6 +17,7 @@ pub const TValue = union(ValueType) {
     boolean: bool,
     integer: i64,
     number: f64,
+    closure: *const Closure,
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -30,6 +33,10 @@ pub const TValue = union(ValueType) {
 
     pub fn isNumber(self: TValue) bool {
         return self == .number;
+    }
+
+    pub fn isClosure(self: TValue) bool {
+        return self == .closure;
     }
 
     pub fn toInteger(self: TValue) ?i64 {
@@ -56,6 +63,13 @@ pub const TValue = union(ValueType) {
         };
     }
 
+    pub fn toClosure(self: TValue) ?*const Closure {
+        return switch (self) {
+            .closure => |c| c,
+            else => null,
+        };
+    }
+
     pub fn format(
         self: TValue,
         comptime fmt: []const u8,
@@ -69,6 +83,7 @@ pub const TValue = union(ValueType) {
             .boolean => |b| try writer.print("{}", .{b}),
             .integer => |i| try writer.print("{}", .{i}),
             .number => |n| try writer.print("{d}", .{n}),
+            .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
         }
     }
 
@@ -86,6 +101,7 @@ pub const TValue = union(ValueType) {
                 .number => |bn| an == bn,
                 else => false,
             },
+            .closure => |ac| b == .closure and ac == b.closure,
         };
     }
 };
