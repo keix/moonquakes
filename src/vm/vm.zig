@@ -28,6 +28,7 @@ pub const VM = struct {
     }
 
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
+    const BitwiseOp = enum { band, bor, bxor };
 
     fn arithBinary(self: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         const a = inst.getA();
@@ -79,6 +80,42 @@ pub const VM = struct {
 
     fn luaMod(a: f64, b: f64) f64 {
         return a - luaFloorDiv(a, b) * b;
+    }
+
+    fn bitwiseBinary(self: *VM, inst: Instruction, comptime tag: BitwiseOp) !void {
+        // Bitwise operations in Lua 5.3+ work only on integers
+        // Floats with no fractional part can be converted to integers
+        const a = inst.getA();
+        const b = inst.getB();
+        const c = inst.getC();
+        const vb = &self.stack[self.base + b];
+        const vc = &self.stack[self.base + c];
+
+        // Helper to convert value to integer for bitwise ops
+        const toInt = struct {
+            fn convert(v: *const TValue) !i64 {
+                if (v.isInteger()) {
+                    return v.integer;
+                } else if (v.toNumber()) |n| {
+                    // Check if it's a whole number
+                    if (@floor(n) == n) {
+                        return @as(i64, @intFromFloat(n));
+                    }
+                }
+                return error.ArithmeticError;
+            }
+        }.convert;
+
+        const ib = try toInt(vb);
+        const ic = try toInt(vc);
+
+        const res = switch (tag) {
+            .band => ib & ic,
+            .bor => ib | ic,
+            .bxor => ib ^ ic,
+        };
+
+        self.stack[self.base + a] = .{ .integer = res };
     }
 
     // compareOp removed - EQ/LT/LE no longer write booleans to registers
@@ -181,6 +218,52 @@ pub const VM = struct {
                         return error.ArithmeticError;
                     }
                 },
+                .SHLI => {
+                    // Shift left immediate
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const vb = &self.stack[self.base + b];
+
+                    // Convert value to integer
+                    const value = if (vb.isInteger())
+                        vb.integer
+                    else if (vb.toNumber()) |n| blk: {
+                        if (@floor(n) == n) {
+                            break :blk @as(i64, @intFromFloat(n));
+                        } else {
+                            return error.ArithmeticError;
+                        }
+                    } else {
+                        return error.ArithmeticError;
+                    };
+
+                    // C is unsigned immediate shift amount
+                    const shift = @as(u8, sc);
+                    self.stack[self.base + a] = .{ .integer = std.math.shl(i64, value, @as(u6, @intCast(shift))) };
+                },
+                .SHRI => {
+                    // Shift right immediate (arithmetic)
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const vb = &self.stack[self.base + b];
+
+                    // Convert value to integer
+                    const value = if (vb.isInteger())
+                        vb.integer
+                    else if (vb.toNumber()) |n| blk: {
+                        if (@floor(n) == n) {
+                            break :blk @as(i64, @intFromFloat(n));
+                        } else {
+                            return error.ArithmeticError;
+                        }
+                    } else {
+                        return error.ArithmeticError;
+                    };
+
+                    // C is unsigned immediate shift amount
+                    const shift = @as(u8, sc);
+                    self.stack[self.base + a] = .{ .integer = std.math.shr(i64, value, @as(u6, @intCast(shift))) };
+                },
                 .ADDK => {
                     const b = inst.getB();
                     const c = inst.getC();
@@ -256,6 +339,79 @@ pub const VM = struct {
                     if (nc == 0) return error.ArithmeticError;
                     self.stack[self.base + a] = .{ .number = luaMod(nb, nc) };
                 },
+                .BANDK => {
+                    // Bitwise AND with constant
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    // Helper to convert value to integer
+                    const toInt = struct {
+                        fn convert(v: *const TValue) !i64 {
+                            if (v.isInteger()) {
+                                return v.integer;
+                            } else if (v.toNumber()) |n| {
+                                if (@floor(n) == n) {
+                                    return @as(i64, @intFromFloat(n));
+                                }
+                            }
+                            return error.ArithmeticError;
+                        }
+                    }.convert;
+
+                    const ib = try toInt(vb);
+                    const ic = try toInt(vc);
+                    self.stack[self.base + a] = .{ .integer = ib & ic };
+                },
+                .BORK => {
+                    // Bitwise OR with constant
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const toInt = struct {
+                        fn convert(v: *const TValue) !i64 {
+                            if (v.isInteger()) {
+                                return v.integer;
+                            } else if (v.toNumber()) |n| {
+                                if (@floor(n) == n) {
+                                    return @as(i64, @intFromFloat(n));
+                                }
+                            }
+                            return error.ArithmeticError;
+                        }
+                    }.convert;
+
+                    const ib = try toInt(vb);
+                    const ic = try toInt(vc);
+                    self.stack[self.base + a] = .{ .integer = ib | ic };
+                },
+                .BXORK => {
+                    // Bitwise XOR with constant
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const toInt = struct {
+                        fn convert(v: *const TValue) !i64 {
+                            if (v.isInteger()) {
+                                return v.integer;
+                            } else if (v.toNumber()) |n| {
+                                if (@floor(n) == n) {
+                                    return @as(i64, @intFromFloat(n));
+                                }
+                            }
+                            return error.ArithmeticError;
+                        }
+                    }.convert;
+
+                    const ib = try toInt(vb);
+                    const ic = try toInt(vc);
+                    self.stack[self.base + a] = .{ .integer = ib ^ ic };
+                },
                 .ADD => {
                     try self.arithBinary(inst, .add);
                 },
@@ -274,6 +430,89 @@ pub const VM = struct {
                 .MOD => {
                     try self.arithBinary(inst, .mod);
                 },
+                .BAND => {
+                    // Bitwise AND (&)
+                    try self.bitwiseBinary(inst, .band);
+                },
+                .BOR => {
+                    // Bitwise OR (|)
+                    try self.bitwiseBinary(inst, .bor);
+                },
+                .BXOR => {
+                    // Bitwise XOR (~)
+                    // Note: In Lua, ~ is XOR for binary ops, NOT for unary
+                    try self.bitwiseBinary(inst, .bxor);
+                },
+                .SHL => {
+                    // Shift left (<<)
+                    // In Lua, negative shifts shift in opposite direction
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &self.stack[self.base + c];
+
+                    const toInt = struct {
+                        fn convert(v: *const TValue) !i64 {
+                            if (v.isInteger()) {
+                                return v.integer;
+                            } else if (v.toNumber()) |n| {
+                                if (@floor(n) == n) {
+                                    return @as(i64, @intFromFloat(n));
+                                }
+                            }
+                            return error.ArithmeticError;
+                        }
+                    }.convert;
+
+                    const value = try toInt(vb);
+                    const shift = try toInt(vc);
+
+                    // Lua behavior: negative shift does right shift
+                    const result = if (shift >= 0) blk: {
+                        const s = std.math.cast(u6, shift) orelse 63;
+                        break :blk std.math.shl(i64, value, s);
+                    } else blk: {
+                        const s = std.math.cast(u6, -shift) orelse 63;
+                        break :blk std.math.shr(i64, value, s);
+                    };
+
+                    self.stack[self.base + a] = .{ .integer = result };
+                },
+                .SHR => {
+                    // Shift right (>>)
+                    // In Lua, this is arithmetic (sign-extending) shift
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &self.stack[self.base + c];
+
+                    const toInt = struct {
+                        fn convert(v: *const TValue) !i64 {
+                            if (v.isInteger()) {
+                                return v.integer;
+                            } else if (v.toNumber()) |n| {
+                                if (@floor(n) == n) {
+                                    return @as(i64, @intFromFloat(n));
+                                }
+                            }
+                            return error.ArithmeticError;
+                        }
+                    }.convert;
+
+                    const value = try toInt(vb);
+                    const shift = try toInt(vc);
+
+                    // Lua behavior: negative shift does left shift
+                    const result = if (shift >= 0) blk: {
+                        const s = std.math.cast(u6, shift) orelse 63;
+                        break :blk std.math.shr(i64, value, s);
+                    } else blk: {
+                        const s = std.math.cast(u6, -shift) orelse 63;
+                        break :blk std.math.shl(i64, value, s);
+                    };
+
+                    self.stack[self.base + a] = .{ .integer = result };
+                },
                 .UNM => {
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
@@ -289,6 +528,31 @@ pub const VM = struct {
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
                     self.stack[self.base + a] = .{ .boolean = !vb.toBoolean() };
+                },
+                .BNOT => {
+                    // Bitwise NOT (~)
+                    // Lua 5.3+ requires integer operand
+                    const b = inst.getB();
+                    const vb = &self.stack[self.base + b];
+
+                    if (vb.isInteger()) {
+                        // Direct integer path
+                        self.stack[self.base + a] = .{ .integer = ~vb.integer };
+                    } else {
+                        // Try to convert to integer
+                        // In Lua, floats with no fractional part can be converted
+                        if (vb.toNumber()) |n| {
+                            // Check if it's a whole number
+                            if (@floor(n) == n) {
+                                const i = @as(i64, @intFromFloat(n));
+                                self.stack[self.base + a] = .{ .integer = ~i };
+                            } else {
+                                return error.ArithmeticError;
+                            }
+                        } else {
+                            return error.ArithmeticError;
+                        }
+                    }
                 },
                 .EQ => {
                     const b = inst.getB();
