@@ -211,7 +211,14 @@ pub const VM = struct {
                     const imm = @as(i8, @bitCast(@as(u8, sc)));
 
                     if (vb.isInteger()) {
-                        self.stack[self.base + a] = .{ .integer = vb.integer + imm };
+                        const add_result = @addWithOverflow(vb.integer, @as(i64, imm));
+                        if (add_result[1] == 0) {
+                            self.stack[self.base + a] = .{ .integer = add_result[0] };
+                        } else {
+                            // Overflow occurred, fallback to float
+                            const n = @as(f64, @floatFromInt(vb.integer)) + @as(f64, @floatFromInt(imm));
+                            self.stack[self.base + a] = .{ .number = n };
+                        }
                     } else if (vb.toNumber()) |n| {
                         self.stack[self.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
                     } else {
@@ -626,10 +633,23 @@ pub const VM = struct {
                     if (v_init.isInteger() and v_limit.isInteger() and v_step.isInteger()) {
                         const ii = v_init.integer;
                         const is = v_step.integer;
-                        self.stack[self.base + a] = .{ .integer = ii - is }; // integer path
+                        // Check for zero step
+                        if (is == 0) return error.InvalidForLoopStep;
+
+                        const sub_result = @subWithOverflow(ii, is);
+                        if (sub_result[1] == 0) {
+                            self.stack[self.base + a] = .{ .integer = sub_result[0] };
+                        } else {
+                            // Overflow occurred, fallback to float path
+                            const i = @as(f64, @floatFromInt(ii));
+                            const s = @as(f64, @floatFromInt(is));
+                            self.stack[self.base + a] = .{ .number = i - s };
+                        }
                     } else {
                         const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
                         const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
+                        // Check for zero step
+                        if (s == 0) return error.InvalidForLoopStep;
                         self.stack[self.base + a] = .{ .number = i - s }; // float path
                     }
 
@@ -643,13 +663,33 @@ pub const VM = struct {
 
                     if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
                         // integer path
-                        const new_i = idx.integer + step.integer;
-                        const cont = if (step.integer > 0) (new_i <= limit.integer) else (new_i >= limit.integer);
-                        if (cont) {
-                            idx.* = .{ .integer = new_i };
-                            self.stack[self.base + a + 3] = .{ .integer = new_i };
-                            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                        const i = idx.integer;
+                        const l = limit.integer;
+                        const s = step.integer;
+
+                        // Compare first, then add (safer order)
+                        if (s > 0) {
+                            if (i < l) {
+                                const add_result = @addWithOverflow(i, s);
+                                if (add_result[1] == 0 and add_result[0] <= l) {
+                                    const new_i = add_result[0];
+                                    idx.* = .{ .integer = new_i };
+                                    self.stack[self.base + a + 3] = .{ .integer = new_i };
+                                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                                }
+                            }
+                        } else if (s < 0) {
+                            if (i > l) {
+                                const add_result = @addWithOverflow(i, s);
+                                if (add_result[1] == 0 and add_result[0] >= l) {
+                                    const new_i = add_result[0];
+                                    idx.* = .{ .integer = new_i };
+                                    self.stack[self.base + a + 3] = .{ .integer = new_i };
+                                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                                }
+                            }
                         }
+                        // s == 0 should not happen (caught in FORPREP)
                     } else {
                         // float path
                         const i = idx.toNumber() orelse return error.InvalidForLoopInit;
