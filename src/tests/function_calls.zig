@@ -155,8 +155,8 @@ pub const VMExt = struct {
                         }
                     }
 
-                    // Push new call frame
-                    _ = try self.base_vm.pushCallFrame(func, new_base, nresults);
+                    // Push new call info
+                    _ = try self.base_vm.pushCallInfo(func, new_base, new_base, nresults);
                 },
                 .RETURN => {
                     const b = inst.getB();
@@ -168,8 +168,8 @@ pub const VMExt = struct {
                         const nresults = returning_ci.nresults;
                         const calling_base = returning_ci.base;
 
-                        // Pop the call frame
-                        self.base_vm.popCallFrame();
+                        // Pop the call info
+                        self.base_vm.popCallInfo();
 
                         // Now handle copying results back
                         if (b == 1) {

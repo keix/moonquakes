@@ -77,18 +77,21 @@ ADDK R1 R2 K5 ; R1 = R2 + K[5]
 ```
 
 ## 2. Call Frames and Execution Context
-Each active function call in Moonquakes is represented by a CallFrame.
-A CallFrame stores all the state necessary to resume a function — including the current program counter (pc), the base index of its stack segment, and its associated function prototype (Proto).
+Each active function call in Moonquakes is represented by a CallInfo.
+A CallInfo stores all the state necessary to resume a function — including the current program counter (pc), the base index of its stack segment, the return base for results, and its associated function prototype (Proto).
 
-Conceptually, a CallFrame is similar to a lightweight stack frame in a CPU, but designed for a register-based virtual machine.
+Conceptually, a CallInfo is similar to a lightweight stack frame in a CPU, but designed for a register-based virtual machine.
 
 ### 2.1 Structure
 ```
-pub const CallFrame = struct {
-    func: *const Proto, // the function prototype being executed
-    pc: [*]const u32,   // pointer to current instruction
-    base: u32,          // base register index in VM stack
-    top: u32,           // top of the function's register window
+pub const CallInfo = struct {
+    func: *const Proto,              // the function prototype being executed
+    pc: [*]const Instruction,        // pointer to current instruction
+    base: u32,                       // base register index in VM stack
+    ret_base: u32,                   // where to place return values in caller's frame
+    savedpc: ?[*]const Instruction,  // saved pc for yielding
+    nresults: i16,                   // expected number of results (-1 = multiple)
+    previous: ?*CallInfo,            // previous frame in the call stack
 };
 ```
 
@@ -97,12 +100,12 @@ Each frame defines a register window — a contiguous region of the global VM st
 ### 2.2 Relation to the VM
 When a function is called, the VM:
 
-- Pushes a new frame (CallFrame) onto its internal call stack.
+- Pushes a new frame (CallInfo) onto its internal call stack.
 - Sets the frame’s base to the current stack top.
 - Executes instructions in the function’s bytecode (Proto.code).
 - When a RETURN opcode is reached, the frame is popped, and control returns to the caller.
 
-In Moonquakes, for simplicity, only one active frame exists for now (no nested calls yet). Future phases will expand this with a proper call stack and tail-call optimization.
+In Moonquakes, the VM now supports multiple active frames with a proper call stack, allowing nested function calls up to 20 levels deep.
 
 ### 2.3 Stack and Register Mapping
 The global VM stack holds all registers for all active frames:
@@ -127,7 +130,7 @@ In Moonquakes, every function — whether it’s a Lua script or a nested functi
 
 A Proto encapsulates the immutable components of a compiled Lua function: its constants, bytecode, local variable count, and stack size requirements.
 
-Unlike a CallFrame, which is runtime state, a Proto is compile-time data that can be shared and executed multiple times.
+Unlike a CallInfo, which is runtime state, a Proto is compile-time data that can be shared and executed multiple times.
 
 ### 3.1 Structure
 ```
@@ -149,26 +152,28 @@ Each Proto defines the static blueprint for execution:
 
 The VM does not allocate dynamically per instruction — it reserves the entire maxstacksize at frame setup. This design ensures predictable stack access and constant-time register lookups.
 
-### 3.2 Relationship Between Proto and CallFrame
+### 3.2 Relationship Between Proto and CallInfo
 
-When executing, the VM binds a Proto to a CallFrame:
+When executing, the VM binds a Proto to a CallInfo:
 
 ```
-CallFrame {
+CallInfo {
     func = &Proto
     base = stack_base
-    top  = stack_base + Proto.maxstacksize
+    ret_base = caller_result_base
+    nresults = expected_results
+    previous = &caller_CallInfo
 }
 ```
 
 Conceptually:
 
 ```
-Proto (definition) → CallFrame (activation) → VM (execution)
+Proto (definition) → CallInfo (activation) → VM (execution)
 ```
 
 - The Proto is static — it never changes.
-- The CallFrame is dynamic — it represents one active invocation of that Proto.
+- The CallInfo is dynamic — it represents one active invocation of that Proto.
 - The VM manages both — loading constants, fetching instructions, updating registers.
 
 ## 4. Execution Loop (Fetch–Decode–Execute)

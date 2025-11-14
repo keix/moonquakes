@@ -47,8 +47,8 @@ pub const VM = struct {
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
     const BitwiseOp = enum { band, bor, bxor };
 
-    // Push a new call frame onto the call stack
-    pub fn pushCallFrame(self: *VM, func: *const Proto, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+    // Push a new call info onto the call stack
+    pub fn pushCallInfo(self: *VM, func: *const Proto, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
         if (self.callstack_size >= self.callstack.len) {
             return error.CallStackOverflow;
         }
@@ -71,8 +71,8 @@ pub const VM = struct {
         return new_ci;
     }
 
-    // Pop a call frame from the call stack
-    pub fn popCallFrame(self: *VM) void {
+    // Pop a call info from the call stack
+    pub fn popCallInfo(self: *VM) void {
         if (self.ci) |ci| {
             if (ci.previous) |prev| {
                 self.ci = prev;
@@ -807,8 +807,8 @@ pub const VM = struct {
                         self.stack[new_base + i] = .nil;
                     }
 
-                    // Push new call frame
-                    _ = try self.pushCallFrame(func_proto, new_base, ret_base, nresults);
+                    // Push new call info
+                    _ = try self.pushCallInfo(func_proto, new_base, ret_base, nresults);
 
                     // Update top for the new function
                     self.top = new_base + func_proto.maxstacksize;
@@ -823,8 +823,8 @@ pub const VM = struct {
                         const nresults = returning_ci.nresults;
                         const dst_base = returning_ci.ret_base; // Where to place results in caller's frame
 
-                        // Pop the call frame
-                        self.popCallFrame();
+                        // Pop the call info
+                        self.popCallInfo();
 
                         // Now handle copying results back
                         if (b == 0) {

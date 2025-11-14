@@ -119,8 +119,8 @@ test "VM call stack push and pop" {
     vm.ci = &vm.base_ci;
     vm.base = 0;
 
-    // Test pushing a new call frame
-    const new_ci = try vm.pushCallFrame(&proto2, 4, 4, 1);
+    // Test pushing a new call info
+    const new_ci = try vm.pushCallInfo(&proto2, 4, 4, 1);
     try std.testing.expect(vm.ci == new_ci);
     try std.testing.expect(vm.base == 4);
     try std.testing.expect(vm.callstack_size == 1);
@@ -133,10 +133,10 @@ test "VM call stack push and pop" {
     try std.testing.expect(new_ci.base == 4);
     try std.testing.expect(new_ci.pc == proto2.code.ptr);
 
-    // Test popping call frame
+    // Test popping call info
     const old_base = vm.base;
     const old_ci = vm.ci;
-    vm.popCallFrame();
+    vm.popCallInfo();
 
     // Verify state after pop
     try std.testing.expect(vm.ci == &vm.base_ci);
@@ -177,11 +177,11 @@ test "VM call stack overflow" {
     // Push frames until we hit the limit
     var i: usize = 0;
     while (i < vm.callstack.len) : (i += 1) {
-        _ = try vm.pushCallFrame(&dummy_proto, @intCast(i * 4), @intCast(i * 4), 1);
+        _ = try vm.pushCallInfo(&dummy_proto, @intCast(i * 4), @intCast(i * 4), 1);
     }
 
     // Next push should fail
-    try std.testing.expectError(error.CallStackOverflow, vm.pushCallFrame(&dummy_proto, 100, 100, 1));
+    try std.testing.expectError(error.CallStackOverflow, vm.pushCallInfo(&dummy_proto, 100, 100, 1));
 }
 
 test "nested function call with register tracking" {
