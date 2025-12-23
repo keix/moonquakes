@@ -1,31 +1,32 @@
 # Moonquakes Lexical and Syntactic Analysis
 
-Moonquakes includes a self-contained front-end — a lexer and parser — responsible for transforming raw Lua source code into executable bytecode (Proto).
+Moonquakes implements a single-pass compiler that transforms raw Lua source code directly into executable bytecode (Proto).
 
-While the virtual machine executes bytecode, the lexer and parser define what that bytecode means. They together form the compiler front-end, mirroring Lua’s clean, single-pass design.
+The design follows Lua's original architecture: lexical analysis separates tokens from source text, while parsing and bytecode emission occur simultaneously in a single pass.
 
 ## 1. Overview
-The front-end of Moonquakes performs three main stages:
+
+Moonquakes compiler performs a two-stage pipeline:
 
 ```
-Lua Source → Tokens → Abstract Syntax Tree → Proto (Bytecode)
+Lua Source → Tokens → Proto (Bytecode)
 ```
 
 | Stage                | Component     | Description                                                                            |
 | -------------------- | ------------- | -------------------------------------------------------------------------------------- |
-| **Lexical Analysis** | `lexer.zig`   | Converts raw Lua source into a stream of tokens                                        |
-| **Parsing**          | `parser.zig`  | Consumes tokens and builds an abstract syntax tree (AST)                               |
-| **Code Generation**  | `codegen.zig` | Traverses the AST and emits Lua bytecode instructions (`Instruction`) within a `Proto` |
+| **Lexical Analysis** | `lexer.zig`   | Converts raw Lua source into a stream of tokens (classification only)                |
+| **Parsing & Emission**| `parser.zig`  | Consumes tokens and directly emits bytecode instructions into a `Proto`              |
 
-
-Each phase is designed to be independent and composable, so the VM and compiler remain decoupled — the compiler only needs to produce Proto structures compatible with the VM execution model.
+Moonquakes does not build an intermediate AST. Instead, parsing and bytecode emission are performed in a single pass. This approach reduces memory usage and complexity while maintaining compatibility with Lua's execution model.
 
 ## 2. Lexical Analysis (Lexer)
 
 The lexer converts raw Lua source text into a stream of tokens — atomic units like identifiers, keywords, literals, and punctuation.
 
+**Lexer responsibility: Classification only. No semantic meaning.**
+
 ### 2.1 Token Structure
-```
+```zig
 pub const Token = struct {
     kind: TokenKind,
     lexeme: []const u8,
@@ -34,7 +35,7 @@ pub const Token = struct {
 ```
 
 ### 2.2 Token Kinds
-```
+```zig
 pub const TokenKind = enum {
     Identifier,
     Number,
@@ -44,8 +45,9 @@ pub const TokenKind = enum {
     Eof,
 };
 ```
+In practice, TokenKind will be refined to distinguish individual keywords and symbols to simplify parsing logic.
 
-Internally, the lexer scans the input buffer character by character, classifying sequences:
+The lexer scans input character by character, classifying sequences:
 
 | Example   | Token Kind | Lexeme    |
 | --------- | ---------- | --------- |
@@ -60,91 +62,146 @@ Internally, the lexer scans the input buffer character by character, classifying
 - Track line numbers for error reporting
 - Support Lua 5.4 literal forms (including hexadecimal and exponential notation)
 - Return Eof token at the end of input
+- **No allocation** — all lexemes are slices over the original source buffer
 
-The lexer does not allocate dynamic memory — all lexemes are slices over the original source buffer.
+## 3. Parsing and Code Emission (Single Pass)
 
-## 3. Syntax Analysis (Parser)
+The parser consumes tokens and **immediately emits bytecode**. Each grammar rule produces bytecode instructions directly into a Proto structure.
 
-The parser converts the token stream into an Abstract Syntax Tree (AST) that represents the grammatical structure of the program.
+> **Parsing is code generation.**
 
 ### 3.1 Parsing Strategy
 
-Moonquakes adopts a recursive descent parser, similar to the original Lua implementation. It’s small, explicit, and easy to follow — no parser generators are used.
+Recursive descent parser with immediate bytecode emission:
 
-Example grammar excerpt (simplified):
+```text
+parseExp()  → emits expression bytecode
+parseStat() → emits statement bytecode
+parseChunk() → emits chunk bytecode
+```
 
+Example grammar (simplified):
 ```
 chunk     ::= { stat [';'] } [ laststat [';'] ]
 stat      ::= varlist '=' explist | functioncall | do block end | while exp do block end
-exp       ::= nil | false | true | Number | String | function | prefixexp | tableconstructor | exp binop exp | unop exp
+exp       ::= nil | false | true | Number | String | function | prefixexp | exp binop exp | unop exp
 ```
 
-Each grammar rule corresponds to a Zig function:
+Each grammar rule corresponds to a Zig function that emits bytecode:
+```zig
+fn parseExp(self: *Parser) !void {
+    // Parse expression and emit bytecode immediately
+    self.emit(OP_LOADK, reg, const_idx);
+}
 
-```
-fn parseExp(self: *Parser) !*AstNode { ... }
-fn parseStat(self: *Parser) !*AstNode { ... }
-fn parseChunk(self: *Parser) !*AstNode { ... }
+fn parseStat(self: *Parser) !void {
+    // Parse statement and emit bytecode immediately
+    self.emit(OP_SETGLOBAL, reg, name_idx);
+}
 ```
 
-### 3.2 AST Structure
-```
-pub const AstNode = struct {
-    kind: AstKind,
-    left: ?*AstNode,
-    right: ?*AstNode,
-    value: ?TValue,
+### 3.2 ProtoBuilder State
+
+Parser maintains bytecode generation state:
+
+```zig
+pub const ProtoBuilder = struct {
+    code: std.ArrayList(Instruction),      // Bytecode instructions
+    constants: std.ArrayList(TValue),      // Constant pool
+    maxstacksize: u8,                     // Register allocation
+    patch_list: std.ArrayList(JumpPatch), // Forward jumps
+    
+    pub fn emit(self: *Self, op: OpCode, a: u8, b: u8, c: u8) void
+    pub fn emitJump(self: *Self) u32
+    pub fn patchJump(self: *Self, addr: u32)
 };
 ```
 
+### 3.3 Control Flow Implementation
 
-Each node corresponds to a Lua construct:
+Forward-jump patching handles control structures:
 
-- Binary expressions (ADD, SUB, etc.)
-- Unary expressions (NOT, UNM)
-- Control flow (IF, WHILE, FOR)
-- Function definitions and calls
+```zig
+// Example: while condition do body end
+const jump_start = self.emitJump();     // Jump to condition
+const body_start = self.code.items.len;
+try self.parseBlock();                  // Emit body bytecode
+try self.parseExp();                    // Emit condition bytecode
+self.emitJumpIf(body_start);           // Jump back to body if true
+self.patchJump(jump_start);            // Patch initial jump
+```
 
-## 4. Code Generation
+## 4. Bytecode Output
 
-After parsing, the AST is traversed to emit bytecode.
-Each node maps directly to one or more VM instructions (Instruction), forming a Proto.
+Parser produces a complete Proto structure:
 
-Example:
+```zig
+pub const Proto = struct {
+    code: []Instruction,        // Array of 32-bit instructions
+    k: []TValue,               // Constant table
+    maxstacksize: u8,          // Number of registers needed
+    numparams: u8,             // Function parameters
+    is_vararg: bool,           // Vararg function
+};
+```
+
+Example transformation:
 
 | Lua Source  | Generated Bytecode                                          |
 | ----------- | ----------------------------------------------------------- |
-| `x = 1 + 2` | `LOADK R0 K1`, `LOADK R1 K2`, `ADD R2 R0 R1`, `SETVAR R2 x` |
+| `x = 1 + 2` | `LOADK R0 K0`, `LOADK R1 K1`, `ADD R2 R0 R1`, `SETGLOBAL R2 K2` |
 
+The resulting Proto can be directly passed to the VM's `execute()` function.
 
-This step constructs:
+## 5. Bytecode Dump (Debug)
 
-- Proto.code → array of encoded instructions
-- Proto.k → constant table for literals
-- Proto.maxstacksize → number of registers needed
+Moonquakes includes a bytecode disassembler for debugging and validation:
 
-The resulting Proto can be directly passed to the VM’s execute() function.
+```
+LOADK    R0  K0    ; 1
+LOADK    R1  K1    ; 2  
+ADD      R2  R0 R1
+SETGLOBAL R2  K2   ; x
+```
 
-## 5. Design Philosophy
-Lua’s original compiler front-end is famously simple yet expressive. Moonquakes aims to preserve this quality, with a few guiding principles:
+- **Dump is a debugging tool** but bytecode format is first-class
+- **VM consumes the same bytes** that dump displays
+- Human-readable mnemonics map directly to raw 32-bit instructions
 
-- Transparency: all syntax rules and code emission are explicit in Zig
-- Zero Allocation: wherever possible, parse without heap allocation
-- Single Pass: lexical and syntactic analysis proceed in a predictable flow
-- Compatibility: follows Lua 5.4 grammar closely to ensure identical behavior
+## 6. Design Rationale
 
-## 6. Future Work
-Feature	Status	Notes
+**No AST**
+- Reduces memory allocation
+- Simplifies compiler pipeline  
+- Matches Lua's original design
 
-| Feature                              |  Notes                                       |
-| ------------------------------------ |  ------------------------------------------- |
-| Full expression grammar              |  partial arithmetic ops implemented          |
-| Function definitions                 |  prototype emission planned                  |
-| Local/global scope resolution        |  identifier tables in progress               |
-| String interpolation / long brackets |  handled by lexer                            |
-| Error recovery                       |  planned: panic-free parser with diagnostics |
+**Fixed-width instructions**
+- Predictable encoding/decoding
+- Efficient VM dispatch
+- Simple instruction format
 
-## 7. Example Flow
+**Parser-driven register allocation**
+- Registers allocated during parsing
+- No separate allocation pass needed
+- Minimal register usage
+
+**VM/compiler decoupling via Proto**
+- Compiler outputs standardized Proto format
+- VM only depends on Proto structure
+- Clean separation of concerns
+
+## 7. Future Work
+
+| Feature                              | Notes                                       |
+| ------------------------------------ | ------------------------------------------- |
+| Full expression grammar              | Partial arithmetic ops implemented          |
+| Function definitions                 | Proto emission for nested functions        |
+| Local/global scope resolution        | Symbol tables during parsing               |
+| Error recovery                       | Panic-free parser with diagnostics         |
+
+## 8. Example Flow
+Conceptual example
+
 ```
 Source:
     for i = 1, 3 do
@@ -153,7 +210,8 @@ Source:
 
 Pipeline:
     [Lexer] → FOR, Identifier(i), '=', Number(1), ',', Number(3), DO, ...
-    [Parser] → Ast.For( init=1, limit=3, body=Call("print", i) )
-    [Codegen] → Proto with FORPREP, FORLOOP, CALL, RETURN
-    [VM] → executes Proto until RETURN
+    [Parser] → Directly emits: FORPREP, CALL, FORLOOP instructions
+    [VM] → Executes Proto until RETURN
 ```
+
+**No AST is constructed.** The parser reads tokens and immediately produces executable bytecode.
