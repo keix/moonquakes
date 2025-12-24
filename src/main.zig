@@ -4,10 +4,20 @@ const Proto = @import("vm/func.zig").Proto;
 const VM = @import("vm/vm.zig").VM;
 const opcodes = @import("compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+const lexer = @import("compiler/lexer.zig");
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
 
+    // Test lexer with simple Lua code
+    const test_source = "local x = 42\nreturn x + 1";
+
+    try stdout.print("Testing lexer with: {s}\n", .{test_source});
+    try stdout.print("Tokens:\n", .{});
+    lexer.dumpAllTokens(test_source);
+    try stdout.print("\n", .{});
+
+    // Original VM test
     const constants = [_]TValue{
         .{ .integer = 1 },
         .{ .integer = 2 },
