@@ -19,6 +19,9 @@ pub const division_by_zero_tests = @import("tests/division_by_zero.zig");
 pub const basic_with_utils_tests = @import("tests/basic_with_utils.zig");
 pub const bitwise_tests = @import("tests/bitwise.zig");
 pub const parser_tests = @import("tests/parser.zig");
+pub const multi_proto_tests = @import("tests/multi_proto.zig");
+pub const simple_call_tests = @import("tests/simple_call.zig");
+// pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {
     // This will include all tests from imported modules

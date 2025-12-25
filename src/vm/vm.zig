@@ -1,17 +1,31 @@
 const std = @import("std");
 const TValue = @import("../core/value.zig").TValue;
+const Closure = @import("../core/closure.zig").Closure;
 const Proto = @import("func.zig").Proto;
-const CallFrame = @import("do.zig").CallFrame;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
+
+// CallInfo represents a function call in the call stack
+pub const CallInfo = struct {
+    func: *const Proto,
+    pc: [*]const Instruction,
+    base: u32,
+    ret_base: u32, // Where to place return values in caller's frame
+    savedpc: ?[*]const Instruction, // saved pc for yielding
+    nresults: i16, // expected number of results (-1 = multiple)
+    previous: ?*CallInfo, // previous frame in the call stack
+};
 
 pub const VM = struct {
     stack: [256]TValue,
     stack_last: u32,
     top: u32,
     base: u32,
-    ci: ?CallFrame,
+    ci: ?*CallInfo,
+    base_ci: CallInfo,
+    callstack: [20]CallInfo, // Support up to 20 nested calls
+    callstack_size: u8,
 
     pub fn init() VM {
         var vm = VM{
@@ -20,6 +34,9 @@ pub const VM = struct {
             .top = 0,
             .base = 0,
             .ci = null,
+            .base_ci = undefined,
+            .callstack = undefined,
+            .callstack_size = 0,
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
@@ -29,6 +46,43 @@ pub const VM = struct {
 
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
     const BitwiseOp = enum { band, bor, bxor };
+
+    // Push a new call info onto the call stack
+    pub fn pushCallInfo(self: *VM, func: *const Proto, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+        if (self.callstack_size >= self.callstack.len) {
+            return error.CallStackOverflow;
+        }
+
+        const new_ci = &self.callstack[self.callstack_size];
+        new_ci.* = CallInfo{
+            .func = func,
+            .pc = func.code.ptr,
+            .base = base,
+            .ret_base = ret_base,
+            .savedpc = null,
+            .nresults = nresults,
+            .previous = self.ci,
+        };
+
+        self.callstack_size += 1;
+        self.ci = new_ci;
+        self.base = base;
+
+        return new_ci;
+    }
+
+    // Pop a call info from the call stack
+    pub fn popCallInfo(self: *VM) void {
+        if (self.ci) |ci| {
+            if (ci.previous) |prev| {
+                self.ci = prev;
+                self.base = prev.base;
+                if (self.callstack_size > 0) {
+                    self.callstack_size -= 1;
+                }
+            }
+        }
+    }
 
     fn arithBinary(self: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         const a = inst.getA();
@@ -161,17 +215,22 @@ pub const VM = struct {
     };
 
     pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
-        self.ci = CallFrame{
+        // Set up initial call frame
+        self.base_ci = CallInfo{
             .func = proto,
             .pc = proto.code.ptr,
             .base = 0,
-            .top = proto.maxstacksize,
+            .ret_base = 0, // Main function doesn't have a caller
+            .savedpc = null,
+            .nresults = -1, // multiple results expected
+            .previous = null,
         };
+        self.ci = &self.base_ci;
         self.base = 0;
         self.top = proto.maxstacksize;
 
         while (true) {
-            var ci = &self.ci.?;
+            var ci = self.ci.?;
             const inst = ci.pc[0];
             ci.pc += 1;
 
@@ -185,7 +244,7 @@ pub const VM = struct {
                 },
                 .LOADK => {
                     const bx = inst.getBx();
-                    self.stack[self.base + a] = proto.k[bx];
+                    self.stack[self.base + a] = ci.func.k[bx];
                 },
                 .LOADBOOL => {
                     const b = inst.getB();
@@ -275,7 +334,7 @@ pub const VM = struct {
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
-                    const vc = &proto.k[c]; // C is always a constant index for ADDK
+                    const vc = &ci.func.k[c]; // C is always a constant index for ADDK
 
                     if (vb.isInteger() and vc.isInteger()) {
                         self.stack[self.base + a] = .{ .integer = vb.integer + vc.integer };
@@ -289,7 +348,7 @@ pub const VM = struct {
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
-                    const vc = &proto.k[c];
+                    const vc = &ci.func.k[c];
 
                     if (vb.isInteger() and vc.isInteger()) {
                         self.stack[self.base + a] = .{ .integer = vb.integer - vc.integer };
@@ -705,8 +764,112 @@ pub const VM = struct {
                         }
                     }
                 },
+                .CALL => {
+                    // CALL A B C: R(A),...,R(A+C-2) := R(A)(R(A+1),...,R(A+B-1))
+                    const b = inst.getB();
+                    const c = inst.getC();
+
+                    // Get the function value
+                    const func_val = &self.stack[self.base + a];
+                    if (!func_val.isClosure()) {
+                        return error.NotAFunction;
+                    }
+                    const closure = func_val.closure;
+                    const func_proto = closure.proto;
+
+                    // Calculate number of arguments
+                    const nargs: u32 = if (b > 0) b - 1 else blk: {
+                        // B == 0 means use all values from R(A+1) to top
+                        const arg_start = self.base + a + 1;
+                        break :blk self.top - arg_start;
+                    };
+
+                    // Calculate expected results
+                    const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
+
+                    // New base for called function (Lua convention: callee starts at R(A))
+                    const new_base = self.base + a;
+                    const ret_base = self.base + a; // Results go back to R(A)
+
+                    // Move arguments to correct positions if needed
+                    // Arguments are already at R(A+1)..R(A+nargs), but callee expects them at R(0)..R(nargs-1)
+                    // Since callee base = R(A), we need to shift arguments down by 1
+                    if (nargs > 0) {
+                        var i: u32 = 0;
+                        while (i < nargs) : (i += 1) {
+                            self.stack[new_base + i] = self.stack[new_base + 1 + i];
+                        }
+                    }
+
+                    // Initialize remaining parameters to nil
+                    var i: u32 = nargs;
+                    while (i < func_proto.numparams) : (i += 1) {
+                        self.stack[new_base + i] = .nil;
+                    }
+
+                    // Push new call info
+                    _ = try self.pushCallInfo(func_proto, new_base, ret_base, nresults);
+
+                    // Update top for the new function
+                    self.top = new_base + func_proto.maxstacksize;
+                },
                 .RETURN => {
                     const b = inst.getB();
+
+                    // Handle returns from nested calls
+                    if (self.ci.?.previous != null) {
+                        // We're returning from a nested call
+                        const returning_ci = self.ci.?;
+                        const nresults = returning_ci.nresults;
+                        const dst_base = returning_ci.ret_base; // Where to place results in caller's frame
+
+                        // Pop the call info
+                        self.popCallInfo();
+
+                        // Now handle copying results back
+                        if (b == 0) {
+                            // Return all values from R[A] to top
+                            // TODO: implement variable return
+                            return error.VariableReturnNotImplemented;
+                        } else if (b == 1) {
+                            // No return values
+                            // Set expected number of results to nil
+                            if (nresults > 0) {
+                                var i: u16 = 0;
+                                while (i < nresults) : (i += 1) {
+                                    self.stack[dst_base + i] = .nil;
+                                }
+                            }
+                        } else {
+                            // Return b-1 values starting from R[A]
+                            const ret_count = b - 1;
+
+                            // Copy return values from callee's R[A+i] to caller's dst_base+i
+                            if (nresults < 0) {
+                                // Multiple results expected
+                                var i: u16 = 0;
+                                while (i < ret_count) : (i += 1) {
+                                    self.stack[dst_base + i] = self.stack[returning_ci.base + a + i];
+                                }
+                                self.top = dst_base + ret_count;
+                            } else {
+                                // Fixed number of results
+                                var i: u16 = 0;
+                                while (i < nresults) : (i += 1) {
+                                    if (i < ret_count) {
+                                        self.stack[dst_base + i] = self.stack[returning_ci.base + a + i];
+                                    } else {
+                                        self.stack[dst_base + i] = .nil;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Continue execution in the calling function
+                        continue;
+                    }
+
+                    // This is a return from the main function
                     if (b == 0) {
                         // return no values (used internally for tailcall)
                         return .none;

@@ -23,7 +23,7 @@ from zero to the moment the VM executes its first instruction and returns a valu
 What is included:
 - A minimal Lua 5.4 VM implemented in Zig
 - TValue (nil, boolean, integer, number only)
-- Stack and CallFrame
+- Stack and CallInfo
 - Prototype (Proto) structure with constants and bytecode
 - Hand-written bytecode execution (no parser/lexer yet)
 
@@ -39,7 +39,7 @@ What is explicitly out of scope (for now):
 
 Planned components:
 - **TValue** — tagged union for fundamental types
-- **CallFrame & Stack** — register-based VM model
+- **CallInfo & Stack** — register-based VM model
 - **Proto** — function prototype with constants + instructions
 - **Instruction format (iABC)** — 32-bit packed opcodes
 - **VM Loop** — fetch → decode → execute
@@ -76,7 +76,7 @@ Only these four are required for the VM to "speak" for the first time.
 - Define TValue (core/value.zig)
 - Define opcode enums and instruction format (compiler/opcodes.zig)
 - Implement VM struct and main dispatch loop (vm/vm.zig)
-- Implement CallFrame and stack handling (vm/do.zig)
+- Implement CallInfo and stack handling
 - Hardcode a minimal Proto with bytecode for return 1 + 2
 - Execute through repl.zig and print the result
 
