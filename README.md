@@ -15,6 +15,10 @@ The internal structure of Moonquakes — including the VM design, instruction fo
 
 [Moonquakes Architecture](docs/moonquakes-architecture.md)
 
+Moonquakes intentionally avoids intermediate representations where they are not essential.  Parsing and bytecode emission occur in a single pass, mirroring the original Lua compiler design.
+
+The resulting bytecode serves as both the execution format and the primary debugging surface, making the system easy to inspect, reason about, and extend.
+
 ## Lua Specification 
 Lua 5.4 Reference Manual
 
