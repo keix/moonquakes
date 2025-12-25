@@ -53,6 +53,11 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.MUL, dst, left, right);
+        try self.code.append(instr);
+    }
+
     pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
         const instr = Instruction.initABC(.RETURN, reg, 2, 0);
         try self.code.append(instr);
@@ -138,17 +143,48 @@ pub const Parser = struct {
         return error.ExpectedExpression;
     }
 
-    fn parseAdd(self: *Parser) !u8 {
+    fn parseMul(self: *Parser) !u8 {
         var left = try self.parsePrimary();
 
         while (self.current.kind == .Symbol and
-            std.mem.eql(u8, self.current.lexeme, "+"))
+            (std.mem.eql(u8, self.current.lexeme, "*") or
+                std.mem.eql(u8, self.current.lexeme, "/")))
         {
-            self.advance(); // consume '+'
+            const op = self.current.lexeme;
+            self.advance(); // consume operator
             const right = try self.parsePrimary();
 
             const dst = self.proto.allocReg();
-            try self.proto.emitAdd(dst, left, right);
+            if (std.mem.eql(u8, op, "*")) {
+                try self.proto.emitMul(dst, left, right);
+            } else {
+                // TODO: implement division
+                return error.UnsupportedOperator;
+            }
+            left = dst;
+        }
+
+        return left;
+    }
+
+    fn parseAdd(self: *Parser) !u8 {
+        var left = try self.parseMul();
+
+        while (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, "+") or
+                std.mem.eql(u8, self.current.lexeme, "-")))
+        {
+            const op = self.current.lexeme;
+            self.advance(); // consume operator
+            const right = try self.parseMul();
+
+            const dst = self.proto.allocReg();
+            if (std.mem.eql(u8, op, "+")) {
+                try self.proto.emitAdd(dst, left, right);
+            } else {
+                // TODO: implement subtraction
+                return error.UnsupportedOperator;
+            }
             left = dst;
         }
 
