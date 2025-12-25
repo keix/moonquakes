@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Test parser with simple Lua code
-    const test_source = "return 1 + 2";
+    const test_source = "return 1 + 2 + 3 * 4";
 
     try stdout.print("Testing parser with: {s}\n", .{test_source});
     try stdout.print("Tokens:\n", .{});
