@@ -10,6 +10,7 @@ pub const ValueType = enum(u8) {
     integer,
     number,
     closure,
+    native_func,
 };
 
 pub const TValue = union(ValueType) {
@@ -18,6 +19,7 @@ pub const TValue = union(ValueType) {
     integer: i64,
     number: f64,
     closure: *const Closure,
+    native_func: u8,
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -37,6 +39,10 @@ pub const TValue = union(ValueType) {
 
     pub fn isClosure(self: TValue) bool {
         return self == .closure;
+    }
+
+    pub fn isNativeFunc(self: TValue) bool {
+        return self == .native_func;
     }
 
     pub fn toInteger(self: TValue) ?i64 {
@@ -84,6 +90,7 @@ pub const TValue = union(ValueType) {
             .integer => |i| try writer.print("{}", .{i}),
             .number => |n| try writer.print("{d}", .{n}),
             .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
+            .native_func => |id| try writer.print("native_function_{}", .{id}),
         }
     }
 
@@ -102,6 +109,7 @@ pub const TValue = union(ValueType) {
                 else => false,
             },
             .closure => |ac| b == .closure and ac == b.closure,
+            .native_func => |af| b == .native_func and af == b.native_func,
         };
     }
 };

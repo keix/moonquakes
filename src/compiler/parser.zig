@@ -58,6 +58,21 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitSub(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.SUB, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.DIV, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitMod(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.MOD, dst, left, right);
+        try self.code.append(instr);
+    }
+
     pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
         const instr = Instruction.initABC(.RETURN, reg, 2, 0);
         try self.code.append(instr);
@@ -148,7 +163,8 @@ pub const Parser = struct {
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "*") or
-                std.mem.eql(u8, self.current.lexeme, "/")))
+                std.mem.eql(u8, self.current.lexeme, "/") or
+                std.mem.eql(u8, self.current.lexeme, "%")))
         {
             const op = self.current.lexeme;
             self.advance(); // consume operator
@@ -157,8 +173,11 @@ pub const Parser = struct {
             const dst = self.proto.allocReg();
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
+            } else if (std.mem.eql(u8, op, "/")) {
+                try self.proto.emitDiv(dst, left, right);
+            } else if (std.mem.eql(u8, op, "%")) {
+                try self.proto.emitMod(dst, left, right);
             } else {
-                // TODO: implement division
                 return error.UnsupportedOperator;
             }
             left = dst;
@@ -181,8 +200,9 @@ pub const Parser = struct {
             const dst = self.proto.allocReg();
             if (std.mem.eql(u8, op, "+")) {
                 try self.proto.emitAdd(dst, left, right);
+            } else if (std.mem.eql(u8, op, "-")) {
+                try self.proto.emitSub(dst, left, right);
             } else {
-                // TODO: implement subtraction
                 return error.UnsupportedOperator;
             }
             left = dst;

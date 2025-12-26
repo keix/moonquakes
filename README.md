@@ -1,6 +1,9 @@
 # Moonquakes
 An interpretation of Lua
 
+## Why Moonquakes?
+Moonquakes imagines Lua as moonlight at night — still on the surface, quietly trembling beneath as time moves on.
+
 ## Overview
 Moonquakes is a clean-room implementation of the **Lua 5.4** virtual machine and runtime.
 
