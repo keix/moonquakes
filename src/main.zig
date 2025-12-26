@@ -13,16 +13,45 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Test parser with simple Lua code
-    const test_source = "return 1 + 2 + 3 * 4";
+    // Get command line arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    try stdout.print("Testing parser with: {s}\n", .{test_source});
+    var source: []const u8 = undefined;
+    var should_free_source = false;
+
+    if (args.len > 1) {
+        // Read from file
+        const file_path = args[1];
+        try stdout.print("Reading from file: {s}\n", .{file_path});
+
+        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try stdout.print("Error: File '{s}' not found\n", .{file_path});
+                return;
+            },
+            else => return err,
+        };
+        defer file.close();
+
+        const file_size = try file.getEndPos();
+        const file_contents = try allocator.alloc(u8, file_size);
+        _ = try file.readAll(file_contents);
+        source = file_contents;
+        should_free_source = true;
+    } else {
+        try stdout.print("Usage: moonquakes <lua_file>\n", .{});
+        return;
+    }
+    defer if (should_free_source) allocator.free(source);
+
+    try stdout.print("Testing parser with: {s}\n", .{source});
     try stdout.print("Tokens:\n", .{});
-    lexer.dumpAllTokens(test_source);
+    lexer.dumpAllTokens(source);
     try stdout.print("\n", .{});
 
     // Test parser
-    var lx = lexer.Lexer.init(test_source);
+    var lx = lexer.Lexer.init(source);
     var proto_builder = parser.ProtoBuilder.init(allocator);
     defer proto_builder.deinit();
 
@@ -49,7 +78,7 @@ pub fn main() !void {
     const result = try vm.execute(&proto);
 
     try stdout.print("Moonquakes speaks for the first time!\n", .{});
-    try stdout.print("Compiling and executing Lua code: {s}\n", .{test_source});
+    try stdout.print("Compiling and executing Lua code: {s}\n", .{source});
     switch (result) {
         .none => try stdout.print("Result: nil\n", .{}),
         .single => |val| try stdout.print("Result: {}\n", .{val}),
