@@ -146,7 +146,45 @@ pub const Lexer = struct {
         const start = self.pos;
         const start_line = self.line;
 
-        _ = self.advance();
+        const first_char = self.advance();
+
+        // Check for two-character operators
+        if (self.pos < self.src.len) {
+            const second_char = self.peek();
+            switch (first_char) {
+                '=' => {
+                    if (second_char == '=') {
+                        _ = self.advance();
+                    }
+                },
+                '!' => {
+                    if (second_char == '=') {
+                        _ = self.advance();
+                    }
+                },
+                '<' => {
+                    if (second_char == '=') {
+                        _ = self.advance();
+                    }
+                },
+                '>' => {
+                    if (second_char == '=') {
+                        _ = self.advance();
+                    }
+                },
+                '~' => {
+                    if (second_char == '=') {
+                        _ = self.advance();
+                    }
+                },
+                '.' => {
+                    if (second_char == '.') {
+                        _ = self.advance();
+                    }
+                },
+                else => {},
+            }
+        }
 
         return .{
             .kind = .Symbol,
