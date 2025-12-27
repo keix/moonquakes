@@ -39,20 +39,20 @@ test "control flow: JMP forward" {
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
 
-test "control flow: JMP backward (simple loop)" {
+test "control flow: JMP 0 goes to next instruction" {
     const constants = [_]TValue{
         .{ .integer = 0 },
         .{ .integer = 1 },
         .{ .integer = 2 },
     };
 
-    // Simple: just test JMP backward
+    // Test JMP relative offset: sJ=0 should go to next instruction
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 0 (counter)
         Instruction.initABx(.LOADK, 1, 1), // R1 = 1 (increment)
         // Loop start (index 2)
         Instruction.initABC(.ADD, 0, 0, 1), // R0 = R0 + R1
-        Instruction.initsJ(.JMP, 1), // Jump forward to RETURN (exit loop)
+        Instruction.initsJ(.JMP, 0), // Jump to next instruction (RETURN)
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
@@ -68,6 +68,66 @@ test "control flow: JMP backward (simple loop)" {
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
+}
+
+test "control flow: JMP out of bounds should error" {
+    const constants = [_]TValue{
+        .{ .integer = 0 },
+    };
+
+    // Test JMP that goes out of bounds
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 0
+        Instruction.initsJ(.JMP, 2), // Jump 2 instructions forward (out of bounds)
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (never reached)
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = VM.init();
+    const result = vm.execute(&proto);
+
+    try testing.expectError(error.PcOutOfRange, result);
+}
+
+test "control flow: JMP backward (real loop)" {
+    const constants = [_]TValue{
+        .{ .integer = 0 }, // counter
+        .{ .integer = 1 }, // increment
+        .{ .integer = 3 }, // limit
+    };
+
+    // Real backward loop with condition
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // 0: R0 = 0 (counter)
+        Instruction.initABx(.LOADK, 1, 1), // 1: R1 = 1 (increment)
+        Instruction.initABx(.LOADK, 2, 2), // 2: R2 = 3 (limit)
+        // Loop start (index 3)
+        Instruction.initABC(.ADD, 0, 0, 1), // 3: R0 += R1
+        Instruction.initABC(.LT, 0, 0, 2), // 4: if R0 < R2 then skip next
+        Instruction.initsJ(.JMP, 1), // 5: jump to return (exit loop)
+        Instruction.initsJ(.JMP, -4), // 6: jump back to ADD (continue loop)
+        Instruction.initABC(.RETURN, 0, 2, 0), // 7: return R0
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = VM.init();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .integer = 3 });
 }
 
 test "control flow: TEST with true value" {

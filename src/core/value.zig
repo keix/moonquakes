@@ -11,6 +11,7 @@ pub const ValueType = enum(u8) {
     number,
     closure,
     native_func,
+    string, // Add at the end to preserve existing enum values
 };
 
 pub const TValue = union(ValueType) {
@@ -20,6 +21,7 @@ pub const TValue = union(ValueType) {
     number: f64,
     closure: *const Closure,
     native_func: u8,
+    string: []const u8,
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -39,6 +41,10 @@ pub const TValue = union(ValueType) {
 
     pub fn isClosure(self: TValue) bool {
         return self == .closure;
+    }
+
+    pub fn isString(self: TValue) bool {
+        return self == .string;
     }
 
     pub fn isNativeFunc(self: TValue) bool {
@@ -91,6 +97,7 @@ pub const TValue = union(ValueType) {
             .number => |n| try writer.print("{d}", .{n}),
             .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
             .native_func => |id| try writer.print("native_function_{}", .{id}),
+            .string => |s| try writer.print("{s}", .{s}),
         }
     }
 
@@ -110,6 +117,7 @@ pub const TValue = union(ValueType) {
             },
             .closure => |ac| b == .closure and ac == b.closure,
             .native_func => |af| b == .native_func and af == b.native_func,
+            .string => |as| b == .string and std.mem.eql(u8, as, b.string),
         };
     }
 };
