@@ -53,6 +53,18 @@ FizzBuzz implementation and condition tests
   - `fizzbuzz_simple_if.lua` - FizzBuzz using if statements
   - `fizzbuzz_step1.lua` - FizzBuzz step-by-step test
 
+### `algorithms/`
+Complete algorithmic programs demonstrating language capabilities
+- **Mathematical Algorithms:**
+  - `prime_numbers.lua` - Divisibility testing with nested conditions
+  - `fibonacci.lua` - Powers sequence (i * i progression)
+  - `sum_1_to_100.lua` - Simple counting loop demonstration
+  - `multiplication_table.lua` - Nested loop multiplication table
+- **Logic Demonstrations:**
+  - `collatz_conjecture.lua` - Number classification with complex conditions
+  - `fizzbuzz_inverse.lua` - Alternative FizzBuzz pattern (else-heavy)
+  - `square_classifier.lua` - Value classification with multiple elseif branches
+
 ### `development/`
 Development and legacy test files
 - **Legacy Math Tests:**
@@ -88,7 +100,7 @@ Development and legacy test files
 - for loops (numeric for with step)
 - return statements
 
-**In Development:**
+**Fully Implemented:**
 - print function (native call integration)
 - Loop variable access (accessing 'i' in for loops)
 - Function call syntax
@@ -100,17 +112,19 @@ Development and legacy test files
 # Basic arithmetic
 ./zig-out/bin/moonquakes scripts/arithmetic/multiply.lua
 
-# String literals
-./zig-out/bin/moonquakes scripts/tests/string_literal.lua
+# Control flow
+./zig-out/bin/moonquakes scripts/control_flow/if_simple.lua
 
-# For loops
-./zig-out/bin/moonquakes scripts/tests/for_simple.lua
+# Complete FizzBuzz with print output
+./zig-out/bin/moonquakes scripts/fizzbuzz/fizzbuzz_with_print.lua
 
-# Complex conditions (FizzBuzz logic)
-./zig-out/bin/moonquakes scripts/fizzbuzz/fizz_condition.lua
+# Algorithm demonstrations
+./zig-out/bin/moonquakes scripts/algorithms/prime_numbers.lua
+./zig-out/bin/moonquakes scripts/algorithms/fibonacci.lua
+./zig-out/bin/moonquakes scripts/algorithms/sum_1_to_100.lua
 
-# Complete FizzBuzz (for demonstration)
-./zig-out/bin/moonquakes scripts/fizzbuzz/fizzbuzz.lua
+# Advanced logic tests
+./zig-out/bin/moonquakes scripts/algorithms/collatz_conjecture.lua
 ```
 
 ## Expected Test Results
