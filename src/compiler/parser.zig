@@ -375,16 +375,50 @@ pub const Parser = struct {
         // Parse then branch
         try self.parseStatements();
 
-        // Check for else
+        // Handle elseif/else
         var else_jmp: ?u32 = null;
+        var current_false_jmp = false_jmp;
+
+        // Handle elseif chains
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "elseif")) {
+            self.advance(); // consume 'elseif'
+
+            // Jump over this elseif when previous condition was true
+            else_jmp = try self.proto.emitPatchableJMP();
+
+            // Patch previous false jump to here (start of elseif)
+            const elseif_start = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(current_false_jmp, elseif_start);
+
+            // Parse elseif condition
+            const elseif_condition_reg = try self.parseExpr();
+
+            // Expect 'then'
+            if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "then"))) {
+                return error.ExpectedThen;
+            }
+            self.advance(); // consume 'then'
+
+            // TEST elseif condition, skip if false
+            try self.proto.emitTEST(elseif_condition_reg, false);
+            current_false_jmp = try self.proto.emitPatchableJMP();
+
+            // Parse elseif body
+            try self.parseStatements();
+        }
+
+        // Handle final else if present
         if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "else")) {
             self.advance(); // consume 'else'
-            // Jump over else branch when then branch executes
-            else_jmp = try self.proto.emitPatchableJMP();
+
+            // Jump over else branch when previous condition was true
+            if (else_jmp == null) {
+                else_jmp = try self.proto.emitPatchableJMP();
+            }
 
             // Patch false jump to here (start of else branch)
             const else_start = @as(u32, @intCast(self.proto.code.items.len));
-            self.proto.patchJMP(false_jmp, else_start);
+            self.proto.patchJMP(current_false_jmp, else_start);
 
             // Parse else branch
             try self.parseStatements();
@@ -398,11 +432,14 @@ pub const Parser = struct {
 
         // Patch jumps
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Patch the final jump-to-end from successful branches
         if (else_jmp) |jmp| {
             self.proto.patchJMP(jmp, end_addr);
-        } else {
-            self.proto.patchJMP(false_jmp, end_addr);
         }
+
+        // Patch the final false jump (from last condition) to end
+        self.proto.patchJMP(current_false_jmp, end_addr);
     }
 
     fn parseFor(self: *Parser) !void {
@@ -488,6 +525,7 @@ pub const Parser = struct {
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
                 (std.mem.eql(u8, self.current.lexeme, "else") or
+                    std.mem.eql(u8, self.current.lexeme, "elseif") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
             if (self.current.kind == .Keyword) {

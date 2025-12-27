@@ -22,33 +22,46 @@ Comparison operators
 - `true_1_1.lua` - 1 == 1 (true)
 - `false_1_2.lua` - 1 == 2 (false)
 
-### `fizzbuzz/`
-FizzBuzz implementation and condition tests
-- `fizz_condition.lua` - Fizz condition (3 % 3 == 0)
-- `buzz_condition.lua` - Buzz condition (5 % 5 == 0)
-- `fizzbuzz_condition.lua` - FizzBuzz condition (15 % 15 == 0)
-- `normal_number.lua` - Normal number (7 % 3 == 1)
-- `complex_condition.lua` - Complex condition (15 % 3 == 0)
-- `division_equals.lua` - Division equality test (15 / 3 == 5)
-- `fizzbuzz.lua` - Complete FizzBuzz program
-
-### `tests/`
-Development tests including control flow and advanced features
-- **Control Flow:**
+### `control_flow/`
+Control flow statements and loops
+- **If Statements:**
   - `if_simple.lua` - Basic if-then-else with boolean literals
   - `if_condition.lua` - If statement with comparison (5 == 5)
   - `if_fizz.lua` - FizzBuzz condition test (15 % 3 == 0)
-  - `fizzbuzz_simple_if.lua` - FizzBuzz using if statements
+  - `elseif_test.lua` - Complex elseif chains
 - **For Loops:**
   - `for_simple.lua` - Basic for loop (1 to 3)
+  - `simple_for.lua` - Simple for loop test
   - `for_fixed.lua` - For loop with fixed return value
+  - `for_values.lua` - For loop value iteration test
   - `for_with_if.lua` - For loop combined with if statements
-- **String Literals:**
-  - `string_literal.lua` - String literal test
-- **Legacy:**
+  - `for_with_elseif.lua` - For loop with elseif (working FizzBuzz pattern)
+  - `for_if_simple.lua` - Simple for+if combination
+  - `for_debug.lua` - For loop debugging test
+
+### `fizzbuzz/`
+FizzBuzz implementation and condition tests
+- **Conditions:**
+  - `fizz_condition.lua` - Fizz condition (3 % 3 == 0)
+  - `buzz_condition.lua` - Buzz condition (5 % 5 == 0)
+  - `fizzbuzz_condition.lua` - FizzBuzz condition (15 % 15 == 0)
+  - `normal_number.lua` - Normal number (7 % 3 == 1)
+  - `complex_condition.lua` - Complex condition (15 % 3 == 0)
+  - `division_equals.lua` - Division equality test (15 / 3 == 5)
+- **Complete Programs:**
+  - `fizzbuzz.lua` - Complete FizzBuzz program
+  - `fizzbuzz_simple_if.lua` - FizzBuzz using if statements
+  - `fizzbuzz_step1.lua` - FizzBuzz step-by-step test
+
+### `development/`
+Development and legacy test files
+- **Legacy Math Tests:**
   - `legacy_math1.lua` - Old math test (3 + 4)
   - `legacy_math2.lua` - Old math test (10 - 3)
   - `legacy_math3.lua` - Old math test (3 * 5)
+- **Feature Development:**
+  - `print_test.lua` - Print function testing
+  - `string_literal.lua` - String literal test
 
 ## Usage
 
