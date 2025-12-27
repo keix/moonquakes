@@ -105,7 +105,16 @@ pub const ProtoBuilder = struct {
 
     pub fn patchJMP(self: *ProtoBuilder, addr: u32, target: u32) void {
         const offset_i32 = @as(i32, @intCast(target)) - @as(i32, @intCast(addr)) - 1;
-        const offset: i25 = @intCast(offset_i32); // truncate to i25
+
+        // Check if offset fits in i25 range (-16,777,216 to 16,777,215)
+        const max_i25 = (1 << 24) - 1;
+        const min_i25 = -(1 << 24);
+
+        if (offset_i32 < min_i25 or offset_i32 > max_i25) {
+            std.debug.panic("Jump offset out of range: {} (from {} to {})\n", .{ offset_i32, addr, target });
+        }
+
+        const offset: i25 = @intCast(offset_i32);
         self.code.items[addr] = Instruction.initsJ(.JMP, offset);
     }
 
@@ -167,6 +176,17 @@ pub const ProtoBuilder = struct {
         return @intCast(self.constants.items.len - 1);
     }
 
+    pub fn addNativeFunc(self: *ProtoBuilder, func_id: u8) !u32 {
+        const const_value = TValue{ .native_func = func_id };
+        try self.constants.append(const_value);
+        return @intCast(self.constants.items.len - 1);
+    }
+
+    pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
+        const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
+        try self.code.append(instr);
+    }
+
     fn updateMaxStack(self: *ProtoBuilder, stack_size: u8) void {
         if (stack_size > self.maxstacksize) {
             self.maxstacksize = stack_size;
@@ -216,6 +236,13 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else {
+                    return error.UnsupportedStatement;
+                }
+            } else if (self.current.kind == .Identifier) {
+                // Handle function calls like print(...)
+                if (std.mem.eql(u8, self.current.lexeme, "print")) {
+                    try self.parseFunctionCall();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -375,16 +402,52 @@ pub const Parser = struct {
         // Parse then branch
         try self.parseStatements();
 
-        // Check for else
-        var else_jmp: ?u32 = null;
+        // Always emit jump to skip else branch after then branch
+        const else_jmp = try self.proto.emitPatchableJMP();
+
+        // Handle elseif/else
+        var current_false_jmp = false_jmp;
+        var else_jumps = std.ArrayList(u32).init(self.proto.allocator);
+        defer else_jumps.deinit();
+
+        // Handle elseif chains
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "elseif")) {
+            self.advance(); // consume 'elseif'
+
+            // Patch previous false jump to here (start of elseif)
+            const elseif_start = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(current_false_jmp, elseif_start);
+
+            // Parse elseif condition
+            const elseif_condition_reg = try self.parseExpr();
+
+            // Expect 'then'
+            if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "then"))) {
+                return error.ExpectedThen;
+            }
+            self.advance(); // consume 'then'
+
+            // TEST elseif condition, skip if false
+            try self.proto.emitTEST(elseif_condition_reg, false);
+            current_false_jmp = try self.proto.emitPatchableJMP();
+
+            // Parse elseif body
+            try self.parseStatements();
+
+            // Jump over remaining elseif/else when this condition was true
+            const jump_to_end = try self.proto.emitPatchableJMP();
+            try else_jumps.append(jump_to_end);
+        }
+
+        // Handle final else if present
+        var has_else = false;
         if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "else")) {
             self.advance(); // consume 'else'
-            // Jump over else branch when then branch executes
-            else_jmp = try self.proto.emitPatchableJMP();
+            has_else = true;
 
             // Patch false jump to here (start of else branch)
             const else_start = @as(u32, @intCast(self.proto.code.items.len));
-            self.proto.patchJMP(false_jmp, else_start);
+            self.proto.patchJMP(current_false_jmp, else_start);
 
             // Parse else branch
             try self.parseStatements();
@@ -398,10 +461,18 @@ pub const Parser = struct {
 
         // Patch jumps
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
-        if (else_jmp) |jmp| {
-            self.proto.patchJMP(jmp, end_addr);
-        } else {
-            self.proto.patchJMP(false_jmp, end_addr);
+
+        // Patch the jump-to-end from then branch
+        self.proto.patchJMP(else_jmp, end_addr);
+
+        // Patch all elseif jumps to end
+        for (else_jumps.items) |jump| {
+            self.proto.patchJMP(jump, end_addr);
+        }
+
+        // If no else branch, patch the false jump to end
+        if (!has_else) {
+            self.proto.patchJMP(current_false_jmp, end_addr);
         }
     }
 
@@ -483,11 +554,12 @@ pub const Parser = struct {
         self.proto.patchFORInstr(forloop_addr, loop_start);
     }
 
-    fn parseStatements(self: *Parser) (std.mem.Allocator.Error || error{ ExpectedThen, ExpectedEnd, ExpectedIdentifier, ExpectedEquals, ExpectedComma, ExpectedDo, UnsupportedStatement, ExpectedExpression, UnsupportedOperator, InvalidNumber, UnsupportedIdentifier })!void {
+    fn parseStatements(self: *Parser) (std.mem.Allocator.Error || error{ ExpectedThen, ExpectedEnd, ExpectedIdentifier, ExpectedEquals, ExpectedComma, ExpectedDo, UnsupportedStatement, ExpectedExpression, UnsupportedOperator, InvalidNumber, UnsupportedIdentifier, ExpectedLeftParen, ExpectedRightParen, UnsupportedFunction })!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
                 (std.mem.eql(u8, self.current.lexeme, "else") or
+                    std.mem.eql(u8, self.current.lexeme, "elseif") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
             if (self.current.kind == .Keyword) {
@@ -501,10 +573,73 @@ pub const Parser = struct {
                 } else {
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Identifier) {
+                // Handle function calls like print(...)
+                if (std.mem.eql(u8, self.current.lexeme, "print")) {
+                    try self.parseFunctionCall();
+                } else {
+                    return error.UnsupportedStatement;
+                }
             } else {
                 return error.UnsupportedStatement;
             }
         }
+    }
+
+    fn parseFunctionCall(self: *Parser) !void {
+        // Currently only support "print" function
+        if (!std.mem.eql(u8, self.current.lexeme, "print")) {
+            return error.UnsupportedFunction;
+        }
+
+        self.advance(); // consume function name
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Load print function constant
+        // Skip past potential for loop registers (0-3) to avoid conflicts
+        while (self.proto.next_reg <= 4) {
+            _ = self.proto.allocReg();
+        }
+        const func_reg = self.proto.allocReg();
+        const print_const_idx = try self.proto.addNativeFunc(0); // print is func_id 0
+        try self.proto.emitLoadK(func_reg, print_const_idx);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            // Move argument to correct position (func_reg + 1)
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+
+            // Parse additional arguments (if needed in future)
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                const next_arg = try self.parseExpr();
+                arg_count += 1;
+                // Move to correct position
+                if (next_arg != func_reg + arg_count) {
+                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                }
+            }
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (0 results for print)
+        try self.proto.emitCall(func_reg, arg_count, 0);
     }
 
     fn parseExpr(self: *Parser) !u8 {
