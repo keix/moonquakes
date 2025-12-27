@@ -153,29 +153,29 @@ test "parser: return (no expression)" {
     try testing.expectError(error.ExpectedExpression, result);
 }
 
-test "parser: return \"hello\" (unsupported)" {
+test "parser: return \"hello\" (string literal)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(allocator, "return \"hello\"");
-    try testing.expectError(error.ExpectedExpression, result);
+    const result = try parseAndExecute(allocator, "return \"hello\"");
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .string = "hello" });
 }
 
-test "parser: return 6 / 2 (unsupported division)" {
+test "parser: return 6 / 2 (division)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(allocator, "return 6 / 2");
-    try testing.expectError(error.UnsupportedOperator, result);
+    const result = try parseAndExecute(allocator, "return 6 / 2");
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .number = 3.0 });
 }
 
-test "parser: return 5 - 3 (unsupported subtraction)" {
+test "parser: return 5 - 3 (subtraction)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(allocator, "return 5 - 3");
-    try testing.expectError(error.UnsupportedOperator, result);
+    const result = try parseAndExecute(allocator, "return 5 - 3");
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 2 });
 }

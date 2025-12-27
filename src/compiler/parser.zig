@@ -109,6 +109,45 @@ pub const ProtoBuilder = struct {
         self.code.items[addr] = Instruction.initsJ(.JMP, offset);
     }
 
+    pub fn emitFORPREP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
+        const instr = Instruction.initAsBx(.FORPREP, base_reg, jump_target);
+        try self.code.append(instr);
+    }
+
+    pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
+        const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
+        try self.code.append(instr);
+    }
+
+    pub fn emitPatchableFORPREP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.FORPREP, base_reg, 0); // placeholder
+        try self.code.append(instr);
+        return @intCast(addr);
+    }
+
+    pub fn emitPatchableFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.FORLOOP, base_reg, 0); // placeholder
+        try self.code.append(instr);
+        return @intCast(addr);
+    }
+
+    pub fn patchFORInstr(self: *ProtoBuilder, addr: u32, target: u32) void {
+        const offset_i32 = @as(i32, @intCast(target)) - @as(i32, @intCast(addr)) - 1;
+        const offset: i17 = @intCast(offset_i32);
+
+        // Get the existing instruction to preserve opcode and A field
+        const existing = self.code.items[addr];
+        const new_instr = Instruction.initAsBx(existing.getOpCode(), existing.getA(), offset);
+        self.code.items[addr] = new_instr;
+    }
+
+    pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.MOVE, dst, src, 0);
+        try self.code.append(instr);
+    }
+
     pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
         const instr = Instruction.initABC(.RETURN, reg, 2, 0);
         try self.code.append(instr);
@@ -117,6 +156,13 @@ pub const ProtoBuilder = struct {
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         const value = std.fmt.parseInt(i64, lexeme, 10) catch return error.InvalidNumber;
         const const_value = TValue{ .integer = value };
+        try self.constants.append(const_value);
+        return @intCast(self.constants.items.len - 1);
+    }
+
+    pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
+        // Store the actual string value
+        const const_value = TValue{ .string = lexeme };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }
@@ -168,6 +214,8 @@ pub const Parser = struct {
                     return; // return ends the chunk
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
                     try self.parseIf();
+                } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
+                    try self.parseFor();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -190,6 +238,14 @@ pub const Parser = struct {
             try self.proto.emitLoadK(reg, k);
             self.advance();
             return reg;
+        } else if (self.current.kind == .String) {
+            const reg = self.proto.allocReg();
+            // Remove quotes from string literal
+            const str_content = self.current.lexeme[1 .. self.current.lexeme.len - 1];
+            const k = try self.proto.addConstString(str_content);
+            try self.proto.emitLoadK(reg, k);
+            self.advance();
+            return reg;
         } else if (self.current.kind == .Keyword) {
             if (std.mem.eql(u8, self.current.lexeme, "true") or
                 std.mem.eql(u8, self.current.lexeme, "false"))
@@ -199,6 +255,17 @@ pub const Parser = struct {
                 try self.proto.emitLOADBOOL(reg, is_true, false);
                 self.advance();
                 return reg;
+            }
+        } else if (self.current.kind == .Identifier) {
+            // For now, only support loop variable 'i' which is at base+3
+            if (std.mem.eql(u8, self.current.lexeme, "i")) {
+                const reg = self.proto.allocReg();
+                // Loop variable is stored at base+3, copy to new register
+                try self.proto.emitMOVE(reg, 3); // base+3 = loop variable
+                self.advance();
+                return reg;
+            } else {
+                return error.UnsupportedIdentifier;
             }
         }
 
@@ -338,16 +405,102 @@ pub const Parser = struct {
         }
     }
 
-    fn parseStatements(self: *Parser) !void {
-        // For now, only support return statements inside if
+    fn parseFor(self: *Parser) !void {
+        self.advance(); // consume 'for'
+
+        // Expect variable name (for now, we'll ignore it and use a fixed register)
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        self.advance(); // consume identifier
+
+        // Expect '='
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+            return error.ExpectedEquals;
+        }
+        self.advance(); // consume '='
+
+        // Parse initial value
+        const init_reg = try self.parseExpr();
+
+        // Expect ','
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) {
+            return error.ExpectedComma;
+        }
+        self.advance(); // consume ','
+
+        // Parse limit value
+        const limit_reg = try self.parseExpr();
+
+        // Check for optional step (for now, default to 1)
+        var step_reg: u8 = 0;
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            step_reg = try self.parseExpr();
+        } else {
+            // Default step = 1
+            step_reg = self.proto.allocReg();
+            const const_idx = try self.proto.addConstNumber("1");
+            try self.proto.emitLoadK(step_reg, const_idx);
+        }
+
+        // Expect 'do'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
+            return error.ExpectedDo;
+        }
+        self.advance(); // consume 'do'
+
+        // Set up for loop registers: base, base+1=limit, base+2=step
+        const base_reg = init_reg;
+        // Move limit and step to correct positions if needed
+        if (limit_reg != base_reg + 1) {
+            try self.proto.emitMOVE(base_reg + 1, limit_reg);
+        }
+        if (step_reg != base_reg + 2) {
+            try self.proto.emitMOVE(base_reg + 2, step_reg);
+        }
+
+        // FORPREP: decrement counter by step, then jump to FORLOOP
+        const forprep_addr = try self.proto.emitPatchableFORPREP(base_reg);
+        const loop_start = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Parse loop body
+        try self.parseStatements();
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // FORLOOP: increment and check, jump back if continuing
+        const forloop_addr = try self.proto.emitPatchableFORLOOP(base_reg);
+
+        // Patch FORPREP to jump to FORLOOP if initial condition fails
+        self.proto.patchFORInstr(forprep_addr, forloop_addr);
+
+        // Patch FORLOOP to jump back to loop start
+        self.proto.patchFORInstr(forloop_addr, loop_start);
+    }
+
+    fn parseStatements(self: *Parser) (std.mem.Allocator.Error || error{ ExpectedThen, ExpectedEnd, ExpectedIdentifier, ExpectedEquals, ExpectedComma, ExpectedDo, UnsupportedStatement, ExpectedExpression, UnsupportedOperator, InvalidNumber, UnsupportedIdentifier })!void {
+        // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
                 (std.mem.eql(u8, self.current.lexeme, "else") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
-            if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "return")) {
-                try self.parseReturn();
-                return; // return ends the statement block
+            if (self.current.kind == .Keyword) {
+                if (std.mem.eql(u8, self.current.lexeme, "return")) {
+                    try self.parseReturn();
+                    return; // return ends the statement block
+                } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
+                    try self.parseIf();
+                } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
+                    try self.parseFor();
+                } else {
+                    return error.UnsupportedStatement;
+                }
             } else {
                 return error.UnsupportedStatement;
             }

@@ -231,6 +231,14 @@ pub const VM = struct {
 
         while (true) {
             var ci = self.ci.?;
+
+            // Check PC is within bounds before instruction fetch
+            const pc_offset = @intFromPtr(ci.pc) - @intFromPtr(ci.func.code.ptr);
+            const pc_index = pc_offset / @sizeOf(Instruction);
+            if (pc_index >= ci.func.code.len) {
+                return error.PcOutOfRange;
+            }
+
             const inst = ci.pc[0];
             ci.pc += 1;
 
@@ -656,11 +664,19 @@ pub const VM = struct {
                 },
                 .JMP => {
                     const sj = inst.getsJ();
-                    // pc is already pointing to next instruction, just add signed offset
+                    // PC is already pointing to next instruction after this JMP
+                    // sJ is relative to the instruction AFTER the JMP
                     if (sj >= 0) {
                         ci.pc += @as(usize, @intCast(sj));
                     } else {
                         ci.pc -= @as(usize, @intCast(-sj));
+                    }
+
+                    // Validate PC after jump
+                    const new_pc_offset = @intFromPtr(ci.pc) - @intFromPtr(ci.func.code.ptr);
+                    const new_pc_index = new_pc_offset / @sizeOf(Instruction);
+                    if (new_pc_index >= ci.func.code.len) {
+                        return error.PcOutOfRange;
                     }
                 },
                 .TEST => {
@@ -927,6 +943,11 @@ pub const VM = struct {
                     // Another hack for built-in function calls
                     const b = inst.getB();
                     self.stack[self.base + a] = .{ .native_func = @as(u8, b) };
+                },
+                .NEWTABLE => {
+                    // Basic table creation (not fully implemented)
+                    // For now, just set to nil
+                    self.stack[self.base + a] = .nil;
                 },
                 else => return error.UnknownOpcode,
             }
