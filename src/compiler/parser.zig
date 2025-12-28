@@ -5,6 +5,9 @@ const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
 const TValue = @import("../core/value.zig").TValue;
 const Proto = @import("../core/proto.zig").Proto;
+const Function = @import("../core/function.zig").Function;
+const NativeFn = @import("../core/native.zig").NativeFn;
+const NativeFnId = @import("../core/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
 
@@ -176,8 +179,9 @@ pub const ProtoBuilder = struct {
         return @intCast(self.constants.items.len - 1);
     }
 
-    pub fn addNativeFunc(self: *ProtoBuilder, func_id: u8) !u32 {
-        const const_value = TValue{ .native_func = func_id };
+    pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
+        const native_fn = NativeFn.init(native_id);
+        const const_value = TValue{ .function = Function{ .native = native_fn } };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }
@@ -191,6 +195,16 @@ pub const ProtoBuilder = struct {
         if (stack_size > self.maxstacksize) {
             self.maxstacksize = stack_size;
         }
+    }
+
+    pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
+        const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
+        try self.code.append(instr);
+    }
+
+    pub fn emitGETTABLE(self: *ProtoBuilder, dst: u8, table: u8, key: u8) !void {
+        const instr = Instruction.initABC(.GETTABLE, dst, table, key);
+        try self.code.append(instr);
     }
 
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
@@ -243,6 +257,8 @@ pub const Parser = struct {
                 // Handle function calls like print(...)
                 if (std.mem.eql(u8, self.current.lexeme, "print")) {
                     try self.parseFunctionCall();
+                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
+                    try self.parseIoCall();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -577,6 +593,8 @@ pub const Parser = struct {
                 // Handle function calls like print(...)
                 if (std.mem.eql(u8, self.current.lexeme, "print")) {
                     try self.parseFunctionCall();
+                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
+                    try self.parseIoCall();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -606,7 +624,7 @@ pub const Parser = struct {
             _ = self.proto.allocReg();
         }
         const func_reg = self.proto.allocReg();
-        const print_const_idx = try self.proto.addNativeFunc(0); // print is func_id 0
+        const print_const_idx = try self.proto.addNativeFunc(NativeFnId.print); // print as native function
         try self.proto.emitLoadK(func_reg, print_const_idx);
 
         // Parse arguments
@@ -644,5 +662,73 @@ pub const Parser = struct {
 
     fn parseExpr(self: *Parser) !u8 {
         return self.parseCompare();
+    }
+
+    fn parseIoCall(self: *Parser) !void {
+        // Parse "io.write(...)" calls
+        // Current token should be "io"
+        if (!std.mem.eql(u8, self.current.lexeme, "io")) {
+            return error.UnsupportedStatement;
+        }
+        self.advance(); // consume "io"
+
+        // Expect '.'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "."))) {
+            return error.UnsupportedStatement;
+        }
+        self.advance(); // consume '.'
+
+        // Expect method name (currently only support "write")
+        if (!(self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "write"))) {
+            return error.UnsupportedStatement;
+        }
+        self.advance(); // consume "write"
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Generate bytecode for io.write call
+        // Skip past potential for loop registers (0-3) to avoid conflicts
+        while (self.proto.next_reg <= 4) {
+            _ = self.proto.allocReg();
+        }
+
+        // Get io table from global
+        const io_reg = self.proto.allocReg();
+        const io_key_const = try self.proto.addConstString("io");
+        try self.proto.emitGETTABUP(io_reg, 0, io_key_const);
+
+        // Get write method from io table
+        const write_reg = self.proto.allocReg();
+        const write_key_const = try self.proto.addConstString("write");
+        try self.proto.emitLoadK(write_reg, write_key_const);
+
+        // Get io.write function
+        const func_reg = self.proto.allocReg();
+        try self.proto.emitGETTABLE(func_reg, io_reg, write_reg);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            // Move argument to correct position (func_reg + 1)
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (0 results for io.write)
+        try self.proto.emitCall(func_reg, arg_count, 0);
     }
 };
