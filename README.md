@@ -14,14 +14,9 @@ Even decades after its creation, Lua's architecture remains one of the most eleg
 Moonquakes carries that elegance forward — rewritten in Zig.
 
 ## Architecture
-The internal structure of Moonquakes — including the VM design, instruction formats, call frames, and execution flow — is documented here:
+Moonquakes follows a clean, modular design inspired by the original Lua architecture, prioritizing clarity, minimalism, and structural integrity.
 
-[Moonquakes Architecture](docs/moonquakes-architecture.md)
-
-Moonquakes intentionally avoids intermediate representations where they are not essential.  Parsing and bytecode emission occur in a single pass, mirroring the original Lua compiler design.
-
-The resulting bytecode serves as both the execution format and the primary debugging surface, making the system easy to inspect, reason about, and extend.
-
+For detailed design and implementation notes, see the documentation in [docs/](docs/).
 ## Lua Specification 
 Lua 5.4 Reference Manual
 
