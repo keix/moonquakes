@@ -4,7 +4,7 @@ const Lexer = lexer.Lexer;
 const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
 const TValue = @import("../core/value.zig").TValue;
-const Proto = @import("../vm/func.zig").Proto;
+const Proto = @import("../core/proto.zig").Proto;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
 

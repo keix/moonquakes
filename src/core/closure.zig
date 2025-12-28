@@ -1,5 +1,5 @@
 const std = @import("std");
-const Proto = @import("../vm/func.zig").Proto;
+const Proto = @import("proto.zig").Proto;
 
 /// Closure represents a function instance.
 /// For now, it only contains a Proto reference (no upvalues support yet).
