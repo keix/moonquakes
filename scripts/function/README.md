@@ -4,7 +4,7 @@ Tests for the new Function architecture implementing proper separation of concer
 
 ## Structure
 
-- `global/` - Global functions (print)
+- `global/` - Global functions (`_G` namespace)
 - `io/` - I/O library functions (io.write)
 
 ## Key Features Tested
@@ -54,8 +54,6 @@ D
 
 ### global/
 - `print.lua` - Basic print functionality
-- `print_with_return.lua` - Multiple print calls
-- `mixed_output.lua` - print + io.write combination
 
 ### io/
 - `write.lua` - Basic io.write functionality

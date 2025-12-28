@@ -12,4 +12,3 @@ for i = 1, 15 do
     end
 end
 
-return "Alternative FizzBuzz complete"

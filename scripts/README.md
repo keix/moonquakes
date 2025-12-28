@@ -45,21 +45,17 @@ FizzBuzz implementation and condition tests
   - `fizz_condition.lua` - Fizz condition (3 % 3 == 0)
   - `buzz_condition.lua` - Buzz condition (5 % 5 == 0)
   - `fizzbuzz_condition.lua` - FizzBuzz condition (15 % 15 == 0)
-  - `normal_number.lua` - Normal number (7 % 3 == 1)
   - `complex_condition.lua` - Complex condition (15 % 3 == 0)
   - `division_equals.lua` - Division equality test (15 / 3 == 5)
 - **Complete Programs:**
   - `fizzbuzz.lua` - Complete FizzBuzz program
   - `fizzbuzz_simple_if.lua` - FizzBuzz using if statements
-  - `fizzbuzz_step1.lua` - FizzBuzz step-by-step test
 
 ### `algorithms/`
 Complete algorithmic programs demonstrating language capabilities
 - **Mathematical Algorithms:**
   - `prime_numbers.lua` - Divisibility testing with nested conditions
-  - `fibonacci.lua` - Powers sequence (i * i progression)
-  - `sum_1_to_100.lua` - Simple counting loop demonstration
-  - `multiplication_table.lua` - Nested loop multiplication table
+  - `multiplication_table.lua` - Simple arithmetic progression (i * 2)
 - **Logic Demonstrations:**
   - `collatz_conjecture.lua` - Number classification with complex conditions
   - `fizzbuzz_inverse.lua` - Alternative FizzBuzz pattern (else-heavy)
@@ -74,6 +70,13 @@ Development and legacy test files
 - **Feature Development:**
   - `print_test.lua` - Print function testing
   - `string_literal.lua` - String literal test
+
+### `function/`
+Function system tests for the new Function architecture
+- **Global Functions (`_G`):**
+  - `global/print.lua` - Basic print functionality
+- **I/O Library Functions:**
+  - `io/write.lua` - Basic io.write functionality (no newline)
 
 ## Usage
 
@@ -90,21 +93,21 @@ Development and legacy test files
 
 ## Currently Supported Features
 
-**Fully Implemented:**
+**Core Language Features:**
 - Number literals (integers and floats)
 - Boolean literals (true, false)
 - String literals ("hello", "Fizz", "Buzz")
 - Arithmetic operations (+, -, *, /, %)
 - Comparison operators (==, !=)
-- if-then-else statements
+- if-then-else statements with elseif clauses
 - for loops (numeric for with step)
-- return statements
+- Automatic return nil (no explicit return needed)
 
-**Fully Implemented:**
-- print function (native call integration)
-- Loop variable access (accessing 'i' in for loops)
-- Function call syntax
-- elseif statements
+**Function System:**
+- Global functions (print)
+- Table-based namespaces (io.write)
+- Native function dispatch with proper separation of concerns
+- VM as simple dispatcher bridge
 
 ## Usage Examples
 
@@ -115,13 +118,16 @@ Development and legacy test files
 # Control flow
 ./zig-out/bin/moonquakes scripts/control_flow/if_simple.lua
 
-# Complete FizzBuzz with print output
-./zig-out/bin/moonquakes scripts/fizzbuzz/fizzbuzz_with_print.lua
+# Complete FizzBuzz program
+./zig-out/bin/moonquakes scripts/fizzbuzz/fizzbuzz.lua
+
+# Function system tests
+./zig-out/bin/moonquakes scripts/function/global/print.lua
+./zig-out/bin/moonquakes scripts/function/io/write.lua
 
 # Algorithm demonstrations
 ./zig-out/bin/moonquakes scripts/algorithms/prime_numbers.lua
-./zig-out/bin/moonquakes scripts/algorithms/fibonacci.lua
-./zig-out/bin/moonquakes scripts/algorithms/sum_1_to_100.lua
+./zig-out/bin/moonquakes scripts/algorithms/multiplication_table.lua
 
 # Advanced logic tests
 ./zig-out/bin/moonquakes scripts/algorithms/collatz_conjecture.lua
@@ -155,16 +161,19 @@ Development and legacy test files
 
 ## Implementation Status
 
-Moonquakes now supports most core Lua features needed for basic programming:
+Moonquakes now supports comprehensive Lua core features:
 
 - **Lexical Analysis** - Complete tokenizer for Lua syntax
-- **Arithmetic** - All basic math operations with proper precedence
-- **Control Flow** - if/then/else statements with boolean logic
-- **Loops** - for loops with FORPREP/FORLOOP bytecode
+- **Arithmetic** - All basic math operations with proper precedence  
+- **Control Flow** - if/then/else/elseif statements with boolean logic
+- **Loops** - for loops with FORPREP/FORLOOP bytecode and variable access
 - **Data Types** - integers, floats, booleans, strings
+- **Function System** - Native function dispatch with proper architecture
 - **VM Safety** - PC range checking and robust error handling
+- **Auto Return** - Automatic `return nil` insertion for clean code
 
-**Next Major Milestones:**
+**Major Features Completed:**
 1. Loop variable access (referencing `i` in for loops)
-2. Function call syntax integration
+2. Function call syntax integration (print, io.write)
 3. Complete FizzBuzz program execution
+4. Proper Function architecture with separation of concerns
