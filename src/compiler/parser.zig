@@ -164,6 +164,12 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(.RETURN, reg, 2, 0);
         try self.code.append(instr);
     }
+    
+    pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
+        const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
+        try self.code.append(instr);
+        self.updateMaxStack(dst + count);
+    }
 
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         const value = std.fmt.parseInt(i64, lexeme, 10) catch return error.InvalidNumber;
@@ -266,11 +272,21 @@ pub const Parser = struct {
                 return error.UnsupportedStatement;
             }
         }
+        
+        // Auto-append return nil if no explicit return was encountered
+        try self.autoReturnNil();
     }
 
     fn parseReturn(self: *Parser) !void {
         self.advance(); // consume 'return'
         const reg = try self.parseExpr();
+        try self.proto.emitReturn(reg);
+    }
+    
+    fn autoReturnNil(self: *Parser) !void {
+        // Add nil constant and emit return nil
+        const reg = self.proto.allocReg();
+        try self.proto.emitLOADNIL(reg, 1);
         try self.proto.emitReturn(reg);
     }
 

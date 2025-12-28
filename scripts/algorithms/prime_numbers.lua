@@ -16,4 +16,3 @@ for i = 2, 20 do
     end
 end
 
-return "Divisibility test complete"
