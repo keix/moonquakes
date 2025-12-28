@@ -1,7 +1,7 @@
 const std = @import("std");
 const TValue = @import("../core/value.zig").TValue;
 
-fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
+pub fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
     // Handle integers that fit in i64 range and have no fractional part
     if (n == @floor(n) and n >= std.math.minInt(i64) and n <= std.math.maxInt(i64)) {
         const int_val: i64 = @intFromFloat(n);
@@ -11,7 +11,7 @@ fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{}", .{n});
 }
 
-fn formatInteger(allocator: std.mem.Allocator, i: i64) ![]const u8 {
+pub fn formatInteger(allocator: std.mem.Allocator, i: i64) ![]const u8 {
     return try std.fmt.allocPrint(allocator, "{d}", .{i});
 }
 
