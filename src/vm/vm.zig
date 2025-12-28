@@ -74,33 +74,7 @@ pub const VM = struct {
 
     /// VM is just a bridge - dispatches to appropriate native function
     fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
-        // Try builtin invoke first
-        if (builtin.invoke(id, self, func_reg, nargs, nresults)) {
-            // Builtin handled it
-            return;
-        } else |err| switch (err) {
-            error.PrintNotImplementedInBuiltin => {
-                // Handle print locally for now
-                try self.nativePrint(func_reg, nargs, nresults);
-            },
-            else => return err,
-        }
-    }
-
-    /// Native function implementations
-    fn nativePrint(self: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-        const stdout = std.io.getStdOut().writer();
-        if (nargs > 0) {
-            const arg = &self.stack[self.base + func_reg + 1];
-            try stdout.print("{}\n", .{arg.*});
-        } else {
-            try stdout.print("\n", .{});
-        }
-
-        // Set result (print returns nil)
-        if (nresults > 0) {
-            self.stack[self.base + func_reg] = .nil;
-        }
+        try builtin.invoke(id, self, func_reg, nargs, nresults);
     }
 
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
