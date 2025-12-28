@@ -2,6 +2,9 @@ const std = @import("std");
 const TValue = @import("../core/value.zig").TValue;
 const Closure = @import("../core/closure.zig").Closure;
 const Proto = @import("../core/proto.zig").Proto;
+const Table = @import("../core/table.zig").Table;
+const Function = @import("../core/function.zig").Function;
+const NativeFnId = @import("../core/native.zig").NativeFnId;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -26,8 +29,23 @@ pub const VM = struct {
     base_ci: CallInfo,
     callstack: [20]CallInfo, // Support up to 20 nested calls
     callstack_size: u8,
+    globals: *Table,
+    allocator: std.mem.Allocator,
 
-    pub fn init() VM {
+    pub fn init(allocator: std.mem.Allocator) !VM {
+        var globals = try allocator.create(Table);
+        globals.* = Table.init(allocator);
+
+        // Create io table
+        var io_table = try allocator.create(Table);
+        io_table.* = Table.init(allocator);
+
+        // Add io.write as native function
+        const io_write_fn = Function{ .native = .{ .id = NativeFnId.io_write } };
+        try io_table.set("write", .{ .function = io_write_fn });
+
+        try globals.set("io", .{ .table = io_table });
+
         var vm = VM{
             .stack = undefined,
             .stack_last = 256 - 1,
@@ -37,11 +55,64 @@ pub const VM = struct {
             .base_ci = undefined,
             .callstack = undefined,
             .callstack_size = 0,
+            .globals = globals,
+            .allocator = allocator,
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
         }
         return vm;
+    }
+
+    pub fn deinit(self: *VM) void {
+        // Clean up io table
+        if (self.globals.get("io")) |io_val| {
+            if (io_val == .table) {
+                io_val.table.deinit();
+                self.allocator.destroy(io_val.table);
+            }
+        }
+
+        // Clean up globals table
+        self.globals.deinit();
+        self.allocator.destroy(self.globals);
+    }
+
+    /// VM is just a bridge - dispatches to appropriate native function
+    fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+        switch (id) {
+            .print => try self.nativePrint(func_reg, nargs, nresults),
+            .io_write => try self.nativeIoWrite(func_reg, nargs, nresults),
+        }
+    }
+
+    /// Native function implementations
+    fn nativePrint(self: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+        const stdout = std.io.getStdOut().writer();
+        if (nargs > 0) {
+            const arg = &self.stack[self.base + func_reg + 1];
+            try stdout.print("{}\n", .{arg.*});
+        } else {
+            try stdout.print("\n", .{});
+        }
+
+        // Set result (print returns nil)
+        if (nresults > 0) {
+            self.stack[self.base + func_reg] = .nil;
+        }
+    }
+
+    fn nativeIoWrite(self: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+        const stdout = std.io.getStdOut().writer();
+        if (nargs > 0) {
+            const arg = &self.stack[self.base + func_reg + 1];
+            try stdout.print("{}", .{arg.*}); // No newline for io.write
+        }
+
+        // Set result (io.write returns file object, but we return nil for simplicity)
+        if (nresults > 0) {
+            self.stack[self.base + func_reg] = .nil;
+        }
     }
 
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
@@ -788,28 +859,21 @@ pub const VM = struct {
                     // Get the function value
                     const func_val = &self.stack[self.base + a];
 
-                    // Handle native functions
-                    if (func_val.isNativeFunc()) {
-                        const func_id = func_val.native_func;
+                    // Handle function calls
+                    if (func_val.isFunction()) {
+                        const function = func_val.function;
                         const nargs: u32 = if (b > 0) b - 1 else 0;
+                        const nresults: u32 = if (c > 0) c - 1 else 0;
 
-                        switch (func_id) {
-                            0 => { // print function
-                                const stdout = std.io.getStdOut().writer();
-                                if (nargs > 0) {
-                                    const arg = &self.stack[self.base + a + 1];
-                                    try stdout.print("{}\n", .{arg.*});
-                                } else {
-                                    try stdout.print("\n", .{});
-                                }
-
-                                // Set result (print returns nil)
-                                const nresults: u32 = if (c > 0) c - 1 else 0;
-                                if (nresults > 0) {
-                                    self.stack[self.base + a] = .nil;
-                                }
+                        switch (function) {
+                            .native => |native_fn| {
+                                // VM just dispatches to native function
+                                try self.callNative(native_fn.id, a, nargs, nresults);
                             },
-                            else => return error.UnknownNativeFunction,
+                            .bytecode => |func_proto| {
+                                // Handle bytecode function calls
+                                _ = try self.pushCallInfo(func_proto, self.base + a, self.base + a, @intCast(nresults));
+                            },
                         }
                         continue;
                     }
@@ -930,19 +994,43 @@ pub const VM = struct {
                     }
                 },
                 .GETTABUP => {
-                    // Basic print function implementation
-                    // This is a hack - normally GETTABUP gets a global, but we'll use it for print
-                    _ = inst.getB();
-                    _ = inst.getC();
+                    // GETTABUP A B C: R[A] := UpValue[B][K[C]]
+                    // For globals: R[A] := _ENV[K[C]]
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    _ = b; // Assume B=0 for _ENV (global environment)
 
-                    // If this is accessing a "print" global (we'll check for constant index)
-                    // For simplicity, we'll assume this is a print call setup
-                    self.stack[self.base + a] = .{ .native_func = 0 }; // 0 = print function
+                    const key_val = ci.func.k[c];
+                    if (key_val.isString()) {
+                        const key = key_val.string;
+                        const value = self.globals.get(key) orelse .nil;
+                        self.stack[self.base + a] = value;
+                    } else {
+                        return error.InvalidTableKey;
+                    }
                 },
                 .GETUPVAL => {
-                    // Another hack for built-in function calls
+                    // Legacy opcode - might need proper implementation later
+                    // For now, set to nil
                     const b = inst.getB();
-                    self.stack[self.base + a] = .{ .native_func = @as(u8, b) };
+                    _ = b; // Suppress unused warning
+                    self.stack[self.base + a] = .nil;
+                },
+                .GETTABLE => {
+                    // GETTABLE A B C: R[A] := R[B][R[C]]
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + b];
+                    const key_val = self.stack[self.base + c];
+
+                    if (table_val.isTable() and key_val.isString()) {
+                        const table = table_val.table;
+                        const key = key_val.string;
+                        const value = table.get(key) orelse .nil;
+                        self.stack[self.base + a] = value;
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
                 },
                 .NEWTABLE => {
                     // Basic table creation (not fully implemented)

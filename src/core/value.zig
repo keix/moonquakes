@@ -1,5 +1,7 @@
 const std = @import("std");
 const Closure = @import("closure.zig").Closure;
+const Table = @import("table.zig").Table;
+const Function = @import("function.zig").Function;
 
 /// Note:
 /// Current TValue includes primitive types and closure.
@@ -10,8 +12,9 @@ pub const ValueType = enum(u8) {
     integer,
     number,
     closure,
-    native_func,
-    string, // Add at the end to preserve existing enum values
+    function,
+    string,
+    table,
 };
 
 pub const TValue = union(ValueType) {
@@ -20,8 +23,9 @@ pub const TValue = union(ValueType) {
     integer: i64,
     number: f64,
     closure: *const Closure,
-    native_func: u8,
+    function: Function,
     string: []const u8,
+    table: *Table,
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -47,8 +51,12 @@ pub const TValue = union(ValueType) {
         return self == .string;
     }
 
-    pub fn isNativeFunc(self: TValue) bool {
-        return self == .native_func;
+    pub fn isFunction(self: TValue) bool {
+        return self == .function;
+    }
+
+    pub fn isTable(self: TValue) bool {
+        return self == .table;
     }
 
     pub fn toInteger(self: TValue) ?i64 {
@@ -96,8 +104,12 @@ pub const TValue = union(ValueType) {
             .integer => |i| try writer.print("{}", .{i}),
             .number => |n| try writer.print("{d}", .{n}),
             .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
-            .native_func => |id| try writer.print("native_function_{}", .{id}),
+            .function => |f| switch (f) {
+                .bytecode => |p| try writer.print("function: 0x{x}", .{@intFromPtr(p)}),
+                .native => |nf| try writer.print("native_function_{}", .{@intFromEnum(nf.id)}),
+            },
             .string => |s| try writer.print("{s}", .{s}),
+            .table => |t| try writer.print("table: 0x{x}", .{@intFromPtr(t)}),
         }
     }
 
@@ -116,8 +128,12 @@ pub const TValue = union(ValueType) {
                 else => false,
             },
             .closure => |ac| b == .closure and ac == b.closure,
-            .native_func => |af| b == .native_func and af == b.native_func,
+            .function => |af| switch (af) {
+                .bytecode => |ap| b == .function and b.function == .bytecode and ap == b.function.bytecode,
+                .native => |anf| b == .function and b.function == .native and std.mem.eql(u8, @tagName(anf.id), @tagName(b.function.native.id)),
+            },
             .string => |as| b == .string and std.mem.eql(u8, as, b.string),
+            .table => |at| b == .table and at == b.table,
         };
     }
 };
