@@ -1,6 +1,6 @@
 const std = @import("std");
 const VM = @import("../vm/vm.zig").VM;
-const Proto = @import("../vm/func.zig").Proto;
+const Proto = @import("../core/proto.zig").Proto;
 const TValue = @import("../core/value.zig").TValue;
 const Closure = @import("../core/closure.zig").Closure;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
