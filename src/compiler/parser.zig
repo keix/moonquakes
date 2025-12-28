@@ -11,6 +11,24 @@ const NativeFnId = @import("../core/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+const ParseError = error{
+    OutOfMemory,
+    InvalidNumber,
+    UnsupportedIdentifier,
+    ExpectedExpression,
+    UnsupportedOperator,
+    ExpectedThen,
+    ExpectedEnd,
+    ExpectedIdentifier,
+    ExpectedEquals,
+    ExpectedComma,
+    ExpectedDo,
+    UnsupportedStatement,
+    ExpectedLeftParen,
+    ExpectedRightParen,
+    UnsupportedFunction,
+};
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
@@ -164,7 +182,7 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(.RETURN, reg, 2, 0);
         try self.code.append(instr);
     }
-    
+
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
         const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
         try self.code.append(instr);
@@ -246,7 +264,22 @@ pub const Parser = struct {
         self.current = self.lexer.nextToken();
     }
 
-    pub fn parseChunk(self: *Parser) !void {
+    fn peek(self: *Parser) Token {
+        // Save current state
+        const saved_pos = self.lexer.pos;
+        const saved_line = self.lexer.line;
+
+        // Get next token
+        const next_token = self.lexer.nextToken();
+
+        // Restore state
+        self.lexer.pos = saved_pos;
+        self.lexer.line = saved_line;
+
+        return next_token;
+    }
+
+    pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
@@ -260,9 +293,9 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Handle function calls like print(...)
-                if (std.mem.eql(u8, self.current.lexeme, "print")) {
-                    try self.parseFunctionCall();
+                // Look ahead to see if it's a function call
+                if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+                    try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
                 } else {
@@ -272,25 +305,25 @@ pub const Parser = struct {
                 return error.UnsupportedStatement;
             }
         }
-        
+
         // Auto-append return nil if no explicit return was encountered
         try self.autoReturnNil();
     }
 
-    fn parseReturn(self: *Parser) !void {
+    fn parseReturn(self: *Parser) ParseError!void {
         self.advance(); // consume 'return'
         const reg = try self.parseExpr();
         try self.proto.emitReturn(reg);
     }
-    
-    fn autoReturnNil(self: *Parser) !void {
+
+    fn autoReturnNil(self: *Parser) ParseError!void {
         // Add nil constant and emit return nil
         const reg = self.proto.allocReg();
         try self.proto.emitLOADNIL(reg, 1);
         try self.proto.emitReturn(reg);
     }
 
-    fn parsePrimary(self: *Parser) !u8 {
+    fn parsePrimary(self: *Parser) ParseError!u8 {
         if (self.current.kind == .Number) {
             const reg = self.proto.allocReg();
             const k = try self.proto.addConstNumber(self.current.lexeme);
@@ -306,7 +339,12 @@ pub const Parser = struct {
             self.advance();
             return reg;
         } else if (self.current.kind == .Keyword) {
-            if (std.mem.eql(u8, self.current.lexeme, "true") or
+            if (std.mem.eql(u8, self.current.lexeme, "nil")) {
+                const reg = self.proto.allocReg();
+                try self.proto.emitLOADNIL(reg, 1);
+                self.advance();
+                return reg;
+            } else if (std.mem.eql(u8, self.current.lexeme, "true") or
                 std.mem.eql(u8, self.current.lexeme, "false"))
             {
                 const is_true = std.mem.eql(u8, self.current.lexeme, "true");
@@ -316,6 +354,10 @@ pub const Parser = struct {
                 return reg;
             }
         } else if (self.current.kind == .Identifier) {
+            // Check for function calls that return values
+            if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+                return try self.parseFunctionCallExpr();
+            }
             // For now, only support loop variable 'i' which is at base+3
             if (std.mem.eql(u8, self.current.lexeme, "i")) {
                 const reg = self.proto.allocReg();
@@ -331,7 +373,7 @@ pub const Parser = struct {
         return error.ExpectedExpression;
     }
 
-    fn parseMul(self: *Parser) !u8 {
+    fn parseMul(self: *Parser) ParseError!u8 {
         var left = try self.parsePrimary();
 
         while (self.current.kind == .Symbol and
@@ -359,7 +401,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseAdd(self: *Parser) !u8 {
+    fn parseAdd(self: *Parser) ParseError!u8 {
         var left = try self.parseMul();
 
         while (self.current.kind == .Symbol and
@@ -384,7 +426,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseCompare(self: *Parser) !u8 {
+    fn parseCompare(self: *Parser) ParseError!u8 {
         var left = try self.parseAdd();
 
         while (self.current.kind == .Symbol and
@@ -415,7 +457,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseIf(self: *Parser) !void {
+    fn parseIf(self: *Parser) ParseError!void {
         self.advance(); // consume 'if'
 
         // Parse condition
@@ -508,7 +550,7 @@ pub const Parser = struct {
         }
     }
 
-    fn parseFor(self: *Parser) !void {
+    fn parseFor(self: *Parser) ParseError!void {
         self.advance(); // consume 'for'
 
         // Expect variable name (for now, we'll ignore it and use a fixed register)
@@ -606,8 +648,10 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Handle function calls like print(...)
-                if (std.mem.eql(u8, self.current.lexeme, "print")) {
+                // Handle function calls like print(...) or tostring(...)
+                if (std.mem.eql(u8, self.current.lexeme, "print") or
+                    std.mem.eql(u8, self.current.lexeme, "tostring"))
+                {
                     try self.parseFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
@@ -620,9 +664,12 @@ pub const Parser = struct {
         }
     }
 
-    fn parseFunctionCall(self: *Parser) !void {
-        // Currently only support "print" function
-        if (!std.mem.eql(u8, self.current.lexeme, "print")) {
+    fn parseFunctionCall(self: *Parser) ParseError!void {
+        // Support "print" and "tostring" functions
+        const func_name = self.current.lexeme;
+        if (!std.mem.eql(u8, func_name, "print") and
+            !std.mem.eql(u8, func_name, "tostring"))
+        {
             return error.UnsupportedFunction;
         }
 
@@ -634,14 +681,18 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Load print function constant
+        // Load function constant
         // Skip past potential for loop registers (0-3) to avoid conflicts
         while (self.proto.next_reg <= 4) {
             _ = self.proto.allocReg();
         }
         const func_reg = self.proto.allocReg();
-        const print_const_idx = try self.proto.addNativeFunc(NativeFnId.print); // print as native function
-        try self.proto.emitLoadK(func_reg, print_const_idx);
+        const func_id = if (std.mem.eql(u8, func_name, "print"))
+            NativeFnId.print
+        else
+            NativeFnId.tostring;
+        const func_const_idx = try self.proto.addNativeFunc(func_id);
+        try self.proto.emitLoadK(func_reg, func_const_idx);
 
         // Parse arguments
         var arg_count: u8 = 0;
@@ -672,15 +723,112 @@ pub const Parser = struct {
         }
         self.advance(); // consume ')'
 
-        // Emit CALL instruction (0 results for print)
+        // Emit CALL instruction
+        const nresults = if (std.mem.eql(u8, func_name, "print")) @as(u8, 0) else @as(u8, 1);
+        try self.proto.emitCall(func_reg, arg_count, nresults);
+    }
+
+    fn parseGenericFunctionCall(self: *Parser) ParseError!void {
+        // Parse function call - for now support known functions
+        const func_name = self.current.lexeme;
+
+        // Map function name to native function ID
+        const func_id = if (std.mem.eql(u8, func_name, "print"))
+            NativeFnId.print
+        else if (std.mem.eql(u8, func_name, "tostring"))
+            NativeFnId.tostring
+        else
+            return error.UnsupportedFunction;
+
+        self.advance(); // consume function name
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Load function constant
+        const func_reg = self.proto.allocReg();
+        const func_const_idx = try self.proto.addNativeFunc(func_id);
+        try self.proto.emitLoadK(func_reg, func_const_idx);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (0 results for statements)
         try self.proto.emitCall(func_reg, arg_count, 0);
     }
 
-    fn parseExpr(self: *Parser) !u8 {
+    fn parseFunctionCallExpr(self: *Parser) ParseError!u8 {
+        // Parse function call that returns a value
+        const func_name = self.current.lexeme;
+
+        // Map function name to native function ID
+        const func_id = if (std.mem.eql(u8, func_name, "tostring"))
+            NativeFnId.tostring
+        else if (std.mem.eql(u8, func_name, "print"))
+            NativeFnId.print
+        else
+            return error.UnsupportedFunction;
+
+        self.advance(); // consume function name
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Load function constant
+        const func_reg = self.proto.allocReg();
+        const func_const_idx = try self.proto.addNativeFunc(func_id);
+        try self.proto.emitLoadK(func_reg, func_const_idx);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            // Move argument to correct position (func_reg + 1)
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (1 result)
+        try self.proto.emitCall(func_reg, arg_count, 1);
+
+        // Return the register where the result is stored
+        return func_reg;
+    }
+
+    fn parseExpr(self: *Parser) ParseError!u8 {
         return self.parseCompare();
     }
 
-    fn parseIoCall(self: *Parser) !void {
+    fn parseIoCall(self: *Parser) ParseError!void {
         // Parse "io.write(...)" calls
         // Current token should be "io"
         if (!std.mem.eql(u8, self.current.lexeme, "io")) {

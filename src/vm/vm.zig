@@ -8,6 +8,9 @@ const NativeFnId = @import("../core/native.zig").NativeFnId;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
+const builtin_init = @import("../builtin/init.zig");
+const builtin_string = @import("../builtin/string.zig");
+const builtin_io = @import("../builtin/io.zig");
 
 // CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
@@ -33,18 +36,11 @@ pub const VM = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !VM {
-        var globals = try allocator.create(Table);
+        const globals = try allocator.create(Table);
         globals.* = Table.init(allocator);
 
-        // Create io table
-        var io_table = try allocator.create(Table);
-        io_table.* = Table.init(allocator);
-
-        // Add io.write as native function
-        const io_write_fn = Function{ .native = .{ .id = NativeFnId.io_write } };
-        try io_table.set("write", .{ .function = io_write_fn });
-
-        try globals.set("io", .{ .table = io_table });
+        // Initialize global environment
+        try builtin_init.initGlobalEnvironment(globals, allocator);
 
         var vm = VM{
             .stack = undefined,
@@ -82,7 +78,8 @@ pub const VM = struct {
     fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
         switch (id) {
             .print => try self.nativePrint(func_reg, nargs, nresults),
-            .io_write => try self.nativeIoWrite(func_reg, nargs, nresults),
+            .io_write => try builtin_io.nativeIoWrite(self, func_reg, nargs, nresults),
+            .tostring => try builtin_string.nativeToString(self, func_reg, nargs, nresults),
         }
     }
 
@@ -97,19 +94,6 @@ pub const VM = struct {
         }
 
         // Set result (print returns nil)
-        if (nresults > 0) {
-            self.stack[self.base + func_reg] = .nil;
-        }
-    }
-
-    fn nativeIoWrite(self: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-        const stdout = std.io.getStdOut().writer();
-        if (nargs > 0) {
-            const arg = &self.stack[self.base + func_reg + 1];
-            try stdout.print("{}", .{arg.*}); // No newline for io.write
-        }
-
-        // Set result (io.write returns file object, but we return nil for simplicity)
         if (nresults > 0) {
             self.stack[self.base + func_reg] = .nil;
         }
