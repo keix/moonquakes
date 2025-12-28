@@ -8,9 +8,7 @@ const NativeFnId = @import("../core/native.zig").NativeFnId;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
-const builtin_init = @import("../builtin/init.zig");
-const builtin_string = @import("../builtin/string.zig");
-const builtin_io = @import("../builtin/io.zig");
+const builtin = @import("../builtin/dispatch.zig");
 
 // CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
@@ -40,7 +38,7 @@ pub const VM = struct {
         globals.* = Table.init(allocator);
 
         // Initialize global environment
-        try builtin_init.initGlobalEnvironment(globals, allocator);
+        try builtin.initGlobalEnvironment(globals, allocator);
 
         var vm = VM{
             .stack = undefined,
@@ -76,10 +74,16 @@ pub const VM = struct {
 
     /// VM is just a bridge - dispatches to appropriate native function
     fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
-        switch (id) {
-            .print => try self.nativePrint(func_reg, nargs, nresults),
-            .io_write => try builtin_io.nativeIoWrite(self, func_reg, nargs, nresults),
-            .tostring => try builtin_string.nativeToString(self, func_reg, nargs, nresults),
+        // Try builtin invoke first
+        if (builtin.invoke(id, self, func_reg, nargs, nresults)) {
+            // Builtin handled it
+            return;
+        } else |err| switch (err) {
+            error.PrintNotImplementedInBuiltin => {
+                // Handle print locally for now
+                try self.nativePrint(func_reg, nargs, nresults);
+            },
+            else => return err,
         }
     }
 

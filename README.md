@@ -13,6 +13,14 @@ Even decades after its creation, Lua's architecture remains one of the most eleg
 
 Moonquakes carries that elegance forward — rewritten in Zig.
 
+
+## Build
+Moonquakes is built with Zig.
+
+```sh
+zig build
+```
+
 ## Architecture
 Moonquakes follows a clean, modular design inspired by the original Lua architecture, prioritizing clarity, minimalism, and structural integrity.
 
