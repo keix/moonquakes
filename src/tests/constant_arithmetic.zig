@@ -1,8 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 
-const TValue = @import("../core/value.zig").TValue;
-const Proto = @import("../core/proto.zig").Proto;
+const TValue = @import("../runtime/value.zig").TValue;
+const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;

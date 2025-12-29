@@ -3,11 +3,11 @@ const lexer = @import("lexer.zig");
 const Lexer = lexer.Lexer;
 const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
-const TValue = @import("../core/value.zig").TValue;
-const Proto = @import("../core/proto.zig").Proto;
-const Function = @import("../core/function.zig").Function;
-const NativeFn = @import("../core/native.zig").NativeFn;
-const NativeFnId = @import("../core/native.zig").NativeFnId;
+const TValue = @import("../runtime/value.zig").TValue;
+const Proto = @import("proto.zig").Proto;
+const Function = @import("../runtime/function.zig").Function;
+const NativeFn = @import("../runtime/native.zig").NativeFn;
+const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
 

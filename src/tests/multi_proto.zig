@@ -1,8 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
-const Proto = @import("../core/proto.zig").Proto;
-const TValue = @import("../core/value.zig").TValue;
+const Proto = @import("../compiler/proto.zig").Proto;
+const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const OpCode = @import("../compiler/opcodes.zig").OpCode;
 const test_utils = @import("test_utils.zig");
@@ -20,7 +20,7 @@ test "manual multi-proto execution - simple call and return" {
     //     return z
     // end
 
-    const Closure = @import("../core/closure.zig").Closure;
+    const Closure = @import("../runtime/closure.zig").Closure;
 
     // Proto for add function
     const add_code = [_]Instruction{
@@ -190,7 +190,7 @@ test "VM call stack overflow" {
 
 test "nested function call with register tracking" {
     // Test a deeper call: main -> add -> multiply
-    const Closure = @import("../core/closure.zig").Closure;
+    const Closure = @import("../runtime/closure.zig").Closure;
 
     // multiply(a, b) returns a * b
     const mul_code = [_]Instruction{

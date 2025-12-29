@@ -1,5 +1,5 @@
 const std = @import("std");
-const TValue = @import("../core/value.zig").TValue;
+const TValue = @import("../runtime/value.zig").TValue;
 const string = @import("string.zig");
 
 pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {

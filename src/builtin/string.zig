@@ -1,5 +1,5 @@
 const std = @import("std");
-const TValue = @import("../core/value.zig").TValue;
+const TValue = @import("../runtime/value.zig").TValue;
 
 fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
     // Handle integers that fit in i64 range and have no fractional part

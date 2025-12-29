@@ -1,7 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const TValue = @import("../core/value.zig").TValue;
+const TValue = @import("../runtime/value.zig").TValue;
 
 test "TValue.eql: basic equality" {
     // nil == nil

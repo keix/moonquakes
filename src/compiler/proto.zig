@@ -1,6 +1,6 @@
 const std = @import("std");
-const TValue = @import("../core/value.zig").TValue;
-const Instruction = @import("../compiler/opcodes.zig").Instruction;
+const TValue = @import("../runtime/value.zig").TValue;
+const Instruction = @import("opcodes.zig").Instruction;
 
 pub const Proto = struct {
     k: []const TValue,
