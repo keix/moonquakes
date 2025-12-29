@@ -32,6 +32,7 @@ pub const VM = struct {
     callstack_size: u8,
     globals: *Table,
     allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator, // TODO: Replace with GC when implemented
 
     pub fn init(allocator: std.mem.Allocator) !VM {
         const globals = try allocator.create(Table);
@@ -51,6 +52,7 @@ pub const VM = struct {
             .callstack_size = 0,
             .globals = globals,
             .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator), // TODO: Replace with GC.init()
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
@@ -59,6 +61,10 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        // Clean up arena allocator
+        // TODO: Replace with GC.deinit() when implemented
+        self.arena.deinit();
+
         // Clean up io table
         if (self.globals.get("io")) |io_val| {
             if (io_val == .table) {
