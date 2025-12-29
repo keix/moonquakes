@@ -51,8 +51,61 @@ pub const ProtoBuilder = struct {
         self.constants.deinit();
     }
 
+    pub fn allocReg(self: *ProtoBuilder) u8 {
+        const reg = self.next_reg;
+        self.next_reg += 1;
+        self.updateMaxStack(self.next_reg);
+        return reg;
+    }
+
+    // emit functions grouped together
     pub fn emit(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8) !void {
         const instr = Instruction.initABC(op, a, b, c);
+        try self.code.append(instr);
+    }
+
+    pub fn emitAdd(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.ADD, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
+        const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
+        try self.code.append(instr);
+    }
+
+    pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.DIV, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
+        const instr = Instruction.initABC(.EQ, negate, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
+        const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
+        try self.code.append(instr);
+    }
+
+    pub fn emitFORPREP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
+        const instr = Instruction.initAsBx(.FORPREP, base_reg, jump_target);
+        try self.code.append(instr);
+    }
+
+    pub fn emitGETTABLE(self: *ProtoBuilder, dst: u8, table: u8, key: u8) !void {
+        const instr = Instruction.initABC(.GETTABLE, dst, table, key);
+        try self.code.append(instr);
+    }
+
+    pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
+        const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
+        try self.code.append(instr);
+    }
+
+    pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
+        const instr = Instruction.initsJ(.JMP, offset);
         try self.code.append(instr);
     }
 
@@ -62,15 +115,26 @@ pub const ProtoBuilder = struct {
         self.updateMaxStack(reg + 1);
     }
 
-    pub fn allocReg(self: *ProtoBuilder) u8 {
-        const reg = self.next_reg;
-        self.next_reg += 1;
-        self.updateMaxStack(self.next_reg);
-        return reg;
+    pub fn emitLOADBOOL(self: *ProtoBuilder, dst: u8, value: bool, skip: bool) !void {
+        const b: u8 = if (value) 1 else 0;
+        const c: u8 = if (skip) 1 else 0;
+        const instr = Instruction.initABC(.LOADBOOL, dst, b, c);
+        try self.code.append(instr);
     }
 
-    pub fn emitAdd(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
-        const instr = Instruction.initABC(.ADD, dst, left, right);
+    pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
+        const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
+        try self.code.append(instr);
+        self.updateMaxStack(dst + count);
+    }
+
+    pub fn emitMod(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.MOD, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(instr);
     }
 
@@ -79,30 +143,34 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitPatchableFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.FORLOOP, base_reg, 0); // placeholder
+        try self.code.append(instr);
+        return @intCast(addr);
+    }
+
+    pub fn emitPatchableFORPREP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.FORPREP, base_reg, 0); // placeholder
+        try self.code.append(instr);
+        return @intCast(addr);
+    }
+
+    pub fn emitPatchableJMP(self: *ProtoBuilder) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initsJ(.JMP, 0); // placeholder
+        try self.code.append(instr);
+        return @intCast(addr);
+    }
+
+    pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
+        const instr = Instruction.initABC(.RETURN, reg, 2, 0);
+        try self.code.append(instr);
+    }
+
     pub fn emitSub(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SUB, dst, left, right);
-        try self.code.append(instr);
-    }
-
-    pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
-        const instr = Instruction.initABC(.DIV, dst, left, right);
-        try self.code.append(instr);
-    }
-
-    pub fn emitMod(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
-        const instr = Instruction.initABC(.MOD, dst, left, right);
-        try self.code.append(instr);
-    }
-
-    pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
-        const instr = Instruction.initABC(.EQ, negate, left, right);
-        try self.code.append(instr);
-    }
-
-    pub fn emitLOADBOOL(self: *ProtoBuilder, dst: u8, value: bool, skip: bool) !void {
-        const b: u8 = if (value) 1 else 0;
-        const c: u8 = if (skip) 1 else 0;
-        const instr = Instruction.initABC(.LOADBOOL, dst, b, c);
         try self.code.append(instr);
     }
 
@@ -112,16 +180,14 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
-    pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
-        const instr = Instruction.initsJ(.JMP, offset);
-        try self.code.append(instr);
-    }
+    pub fn patchFORInstr(self: *ProtoBuilder, addr: u32, target: u32) void {
+        const offset_i32 = @as(i32, @intCast(target)) - @as(i32, @intCast(addr)) - 1;
+        const offset: i17 = @intCast(offset_i32);
 
-    pub fn emitPatchableJMP(self: *ProtoBuilder) !u32 {
-        const addr = self.code.items.len;
-        const instr = Instruction.initsJ(.JMP, 0); // placeholder
-        try self.code.append(instr);
-        return @intCast(addr);
+        // Get the existing instruction to preserve opcode and A field
+        const existing = self.code.items[addr];
+        const new_instr = Instruction.initAsBx(existing.getOpCode(), existing.getA(), offset);
+        self.code.items[addr] = new_instr;
     }
 
     pub fn patchJMP(self: *ProtoBuilder, addr: u32, target: u32) void {
@@ -139,56 +205,7 @@ pub const ProtoBuilder = struct {
         self.code.items[addr] = Instruction.initsJ(.JMP, offset);
     }
 
-    pub fn emitFORPREP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
-        const instr = Instruction.initAsBx(.FORPREP, base_reg, jump_target);
-        try self.code.append(instr);
-    }
-
-    pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
-        const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
-        try self.code.append(instr);
-    }
-
-    pub fn emitPatchableFORPREP(self: *ProtoBuilder, base_reg: u8) !u32 {
-        const addr = self.code.items.len;
-        const instr = Instruction.initAsBx(.FORPREP, base_reg, 0); // placeholder
-        try self.code.append(instr);
-        return @intCast(addr);
-    }
-
-    pub fn emitPatchableFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
-        const addr = self.code.items.len;
-        const instr = Instruction.initAsBx(.FORLOOP, base_reg, 0); // placeholder
-        try self.code.append(instr);
-        return @intCast(addr);
-    }
-
-    pub fn patchFORInstr(self: *ProtoBuilder, addr: u32, target: u32) void {
-        const offset_i32 = @as(i32, @intCast(target)) - @as(i32, @intCast(addr)) - 1;
-        const offset: i17 = @intCast(offset_i32);
-
-        // Get the existing instruction to preserve opcode and A field
-        const existing = self.code.items[addr];
-        const new_instr = Instruction.initAsBx(existing.getOpCode(), existing.getA(), offset);
-        self.code.items[addr] = new_instr;
-    }
-
-    pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
-        const instr = Instruction.initABC(.MOVE, dst, src, 0);
-        try self.code.append(instr);
-    }
-
-    pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
-        const instr = Instruction.initABC(.RETURN, reg, 2, 0);
-        try self.code.append(instr);
-    }
-
-    pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
-        const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
-        try self.code.append(instr);
-        self.updateMaxStack(dst + count);
-    }
-
+    // add functions grouped together
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         const value = std.fmt.parseInt(i64, lexeme, 10) catch return error.InvalidNumber;
         const const_value = TValue{ .integer = value };
@@ -210,25 +227,10 @@ pub const ProtoBuilder = struct {
         return @intCast(self.constants.items.len - 1);
     }
 
-    pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
-        const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
-        try self.code.append(instr);
-    }
-
     fn updateMaxStack(self: *ProtoBuilder, stack_size: u8) void {
         if (stack_size > self.maxstacksize) {
             self.maxstacksize = stack_size;
         }
-    }
-
-    pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
-        const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
-        try self.code.append(instr);
-    }
-
-    pub fn emitGETTABLE(self: *ProtoBuilder, dst: u8, table: u8, key: u8) !void {
-        const instr = Instruction.initABC(.GETTABLE, dst, table, key);
-        try self.code.append(instr);
     }
 
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
@@ -279,6 +281,14 @@ pub const Parser = struct {
         return next_token;
     }
 
+    fn autoReturnNil(self: *Parser) ParseError!void {
+        // Add nil constant and emit return nil
+        const reg = self.proto.allocReg();
+        try self.proto.emitLOADNIL(reg, 1);
+        try self.proto.emitReturn(reg);
+    }
+
+    // Parse functions grouped together
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
             if (self.current.kind == .Keyword) {
@@ -310,19 +320,14 @@ pub const Parser = struct {
         try self.autoReturnNil();
     }
 
+    // Statement parsing
     fn parseReturn(self: *Parser) ParseError!void {
         self.advance(); // consume 'return'
         const reg = try self.parseExpr();
         try self.proto.emitReturn(reg);
     }
 
-    fn autoReturnNil(self: *Parser) ParseError!void {
-        // Add nil constant and emit return nil
-        const reg = self.proto.allocReg();
-        try self.proto.emitLOADNIL(reg, 1);
-        try self.proto.emitReturn(reg);
-    }
-
+    // Expression parsing (precedence order: Primary -> Mul -> Add -> Compare)
     fn parsePrimary(self: *Parser) ParseError!u8 {
         if (self.current.kind == .Number) {
             const reg = self.proto.allocReg();
@@ -457,6 +462,7 @@ pub const Parser = struct {
         return left;
     }
 
+    // Control flow parsing
     fn parseIf(self: *Parser) ParseError!void {
         self.advance(); // consume 'if'
 
@@ -664,6 +670,7 @@ pub const Parser = struct {
         }
     }
 
+    // Function call parsing
     fn parseFunctionCall(self: *Parser) ParseError!void {
         // Support "print" and "tostring" functions
         const func_name = self.current.lexeme;
@@ -828,6 +835,7 @@ pub const Parser = struct {
         return self.parseCompare();
     }
 
+    // Special parsing functions
     fn parseIoCall(self: *Parser) ParseError!void {
         // Parse "io.write(...)" calls
         // Current token should be "io"

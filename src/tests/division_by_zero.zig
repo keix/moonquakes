@@ -36,7 +36,8 @@ test "DIV: division by zero (integer)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -63,7 +64,8 @@ test "DIV: division by zero (float)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -90,7 +92,8 @@ test "IDIV: integer division by zero" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -117,7 +120,8 @@ test "MOD: modulo by zero" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -143,7 +147,8 @@ test "DIVK: division by zero constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -169,7 +174,8 @@ test "IDIVK: integer division by zero constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -195,7 +201,8 @@ test "MODK: modulo by zero constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try expectError(result, error.ArithmeticError);
@@ -224,7 +231,8 @@ test "Division operations with non-zero divisors should succeed" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try testing.expect(result == .multiple);

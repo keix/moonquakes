@@ -49,7 +49,7 @@ pub const VMExt = struct {
 
     pub fn init() VMExt {
         var vm_ext = VMExt{
-            .base_vm = VM.init(),
+            .base_vm = VM.init(std.testing.allocator) catch unreachable,
             .ext_stack = undefined,
         };
         for (&vm_ext.ext_stack) |*v| {

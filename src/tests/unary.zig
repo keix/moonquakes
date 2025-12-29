@@ -31,7 +31,8 @@ test "unary: -5 = -5" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = -5 });
@@ -56,7 +57,8 @@ test "unary: -3.5 = -3.5" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = -3.5 });
@@ -81,7 +83,8 @@ test "unary: not true = false" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -106,7 +109,8 @@ test "unary: not nil = true" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -131,7 +135,8 @@ test "unary: not 0 = false" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -159,7 +164,8 @@ test "unary: -5 + 3 = -2" {
         .maxstacksize = 4,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = -2 });

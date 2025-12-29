@@ -39,7 +39,8 @@ test "LT with NaN: NaN < 5.0 = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // NaN < 5.0 should be false in Lua
@@ -73,7 +74,8 @@ test "LT with NaN: 5.0 < NaN = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // 5.0 < NaN should be false in Lua
@@ -107,7 +109,8 @@ test "LE with NaN: NaN <= 5.0 = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // NaN <= 5.0 should be false in Lua
@@ -141,7 +144,8 @@ test "LE with NaN: NaN <= NaN = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // NaN <= NaN should be false in Lua
@@ -175,7 +179,8 @@ test "EQ with NaN: NaN == NaN = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // NaN == NaN should be false
@@ -204,7 +209,8 @@ test "Arithmetic with NaN propagation" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // NaN + 5.0 should propagate NaN

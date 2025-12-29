@@ -32,7 +32,8 @@ test "ADDI: positive immediate with integer" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 15 });
@@ -60,7 +61,8 @@ test "ADDI: negative immediate with integer" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 7 });
@@ -85,7 +87,8 @@ test "ADDI: with float number" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 13.5 });
@@ -110,7 +113,8 @@ test "ADDI: maximum positive immediate" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 227 });
@@ -138,7 +142,8 @@ test "ADDI: maximum negative immediate" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = -28 });
@@ -165,7 +170,8 @@ test "ADDI: loop counter optimization" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });

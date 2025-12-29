@@ -18,7 +18,8 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !VM.ReturnV
     defer allocator.free(proto.code);
     defer allocator.free(proto.k);
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     return vm.execute(&proto);
 }
 

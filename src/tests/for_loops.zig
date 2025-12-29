@@ -36,7 +36,8 @@ test "FORPREP minimal test" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 4.0 }); // init - step = 5 - 1 = 4
@@ -74,7 +75,8 @@ test "for loop: simple integer loop 1 to 3" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Added: Comprehensive state tracking
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
@@ -124,7 +126,8 @@ test "for loop: negative step (countdown)" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
     const result = try vm.execute(&proto);
     trace.updateFinal(&vm, 5);
@@ -164,7 +167,8 @@ test "for loop: zero iterations (start > limit with positive step)" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Set up R3 to verify it never gets set
     vm.stack[3] = .nil;
@@ -211,7 +215,8 @@ test "for loop: float loop variables with integer path detection" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const loop_trace = utils.ForLoopTrace.capture(&vm, 0);
     _ = loop_trace; // Will use after execution
 
@@ -260,7 +265,8 @@ test "for loop: step of zero should error" {
         .maxstacksize = 4,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     // Step of zero should cause an error
@@ -296,7 +302,8 @@ test "for loop: overflow behavior" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // Should execute 3 times: max-2, max-1, max
@@ -330,7 +337,8 @@ test "for loop: side effects on unused registers" {
         .maxstacksize = 11,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Initialize extra registers with specific values
     vm.stack[5] = TValue{ .integer = 555 };

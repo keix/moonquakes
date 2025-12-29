@@ -33,7 +33,8 @@ test "ADDK: integer + integer constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 35 });
@@ -59,7 +60,8 @@ test "ADDK: number + number constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 12.75 });
@@ -85,7 +87,8 @@ test "SUBK: integer - integer constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 35 });
@@ -111,7 +114,8 @@ test "MULK: integer * integer constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
@@ -137,7 +141,8 @@ test "DIVK: number / number constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
@@ -163,7 +168,8 @@ test "IDIVK: integer // constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 3.0 });
@@ -189,7 +195,8 @@ test "MODK: integer % constant" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 2.0 });
@@ -215,7 +222,8 @@ test "Constant arithmetic: mixed types" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
@@ -243,7 +251,8 @@ test "Constant arithmetic: chain operations" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 30.0 });
@@ -269,7 +278,8 @@ test "MODK: Lua-style negative modulo" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = 3.0 });
@@ -295,7 +305,8 @@ test "IDIVK: Lua-style floor division with negative" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .number = -2.0 });

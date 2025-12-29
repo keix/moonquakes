@@ -33,7 +33,8 @@ test "control flow: JMP forward" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
@@ -64,7 +65,8 @@ test "control flow: JMP 0 goes to next instruction" {
         .maxstacksize = 4,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
@@ -90,7 +92,8 @@ test "control flow: JMP out of bounds should error" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = vm.execute(&proto);
 
     try testing.expectError(error.PcOutOfRange, result);
@@ -124,7 +127,8 @@ test "control flow: JMP backward (real loop)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
@@ -153,7 +157,8 @@ test "control flow: TEST with true value" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
@@ -182,7 +187,8 @@ test "control flow: TEST with false value" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
@@ -211,7 +217,8 @@ test "control flow: TEST with k=true (inverted)" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
@@ -239,7 +246,8 @@ test "control flow: TESTSET with true value" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // TESTSET should not have copied, R1 is replaced with 99 again
@@ -279,7 +287,8 @@ test "control flow: if-then-else simulation" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 100 });
