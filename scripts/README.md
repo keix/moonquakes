@@ -14,6 +14,7 @@ This directory contains Lua scripts for testing Moonquakes functionality.
 - `basics/` - Basic language features
   - `number.lua` - Number literals
   - `print_42.lua` - Simple output test
+  - `string.lua` - String literal testing
 
 ### Comparisons
 - `comparisons/` - Comparison operators
@@ -23,25 +24,9 @@ This directory contains Lua scripts for testing Moonquakes functionality.
 
 ### Control Flow
 - `control_flow/` - Control structures
-  - `elseif_test.lua` - Complex elseif chains
-  - `for_debug.lua` - For loop debugging
-  - `for_fixed.lua` - For loop with fixed values
-  - `for_if_simple.lua` - For loop with if statements
-  - `for_simple.lua` - Basic for loops
-  - `for_values.lua` - For loop value iteration
-  - `for_with_elseif.lua` - For loops with elseif
-  - `for_with_if.lua` - For loops with if statements
-  - `if_condition.lua` - Conditional statements
-  - `if_fizz.lua` - FizzBuzz conditions
-  - `if_simple.lua` - Basic if statements
-
-### Development
-- `development/` - Development and legacy tests
-  - `legacy_math1.lua` - Legacy math operations
-  - `legacy_math2.lua` - Legacy math operations
-  - `legacy_math3.lua` - Legacy math operations
-  - `print_test.lua` - Print function testing
-  - `string_literal.lua` - String literal testing
+  - `if.lua` - Basic if/else statements
+  - `elseif.lua` - Complex elseif chains
+  - `for.lua` - Basic for loops
 
 ### FizzBuzz
 - `fizzbuzz/` - FizzBuzz implementations and variations
