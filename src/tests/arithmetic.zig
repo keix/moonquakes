@@ -44,7 +44,8 @@ test "arithmetic: 10 - 3 * 2 = 4" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Capture initial state
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
@@ -89,7 +90,8 @@ test "arithmetic: 10 / 3 with side effect verification" {
         .maxstacksize = 6, // Extra space to test side effects
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Set up registers beyond what we need to verify no side effects
     vm.stack[3] = TValue{ .integer = 999 };
@@ -141,7 +143,8 @@ test "arithmetic: 10 // 3 = 3" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Added: Stack and register verification
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
@@ -183,7 +186,8 @@ test "arithmetic: 10 % 3 = 1" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Added: ExecutionTrace for state tracking
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);

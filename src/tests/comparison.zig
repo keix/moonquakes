@@ -41,7 +41,8 @@ test "comparison: 5 == 5 = true" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Added: ComparisonTest helper could be used for simpler verification
     // However, this test is complex so we verify manually
@@ -90,7 +91,8 @@ test "comparison: 5 == 3 = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -123,7 +125,8 @@ test "comparison: 3 < 5 = true" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -155,7 +158,8 @@ test "comparison: 5 < 3 = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -187,7 +191,8 @@ test "comparison: 3 <= 5 = true" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -219,7 +224,8 @@ test "comparison: 5 <= 5 = true" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -251,7 +257,8 @@ test "comparison: mixed types 3 < 3.5 = true" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -283,7 +290,8 @@ test "comparison: different types nil == false = false" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -315,7 +323,8 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // In Lua 5.3+, 1 == 1.0 is true
@@ -348,7 +357,8 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // 42 != 42.5, so should return false
@@ -381,7 +391,8 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     // -100 == -100.0 should be true in Lua 5.3+
@@ -390,14 +401,16 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
 
 // Added: Concise test using ComparisonTest helper
 test "comparison: EQ with skip behavior verification" {
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Test 1: Equal values with A=0 (should skip)
     try utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 
     // Test 2: Different values with A=0 (should not skip)
-    vm = VM.init();
+    vm.deinit();
+    vm = try VM.init(testing.allocator);
     try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
 }
 
@@ -427,7 +440,8 @@ test "comparison: LT with side effect verification" {
         .maxstacksize = 4,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Initialize R2, R3 to track changes
     vm.stack[2] = .nil;

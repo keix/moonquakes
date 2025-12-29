@@ -37,7 +37,8 @@ test "return: no values (RETURN with B=1)" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectNoResult(result);
@@ -61,7 +62,8 @@ test "return: single value (RETURN with B=2)" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
@@ -89,7 +91,8 @@ test "return: multiple values (RETURN with B=4)" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     const expected = [_]TValue{

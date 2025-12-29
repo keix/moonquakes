@@ -35,7 +35,8 @@ test "LOADBOOL: load true" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -55,7 +56,8 @@ test "LOADBOOL: load false" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -76,7 +78,8 @@ test "LOADBOOL: with skip" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -101,7 +104,8 @@ test "LOADNIL: single register" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue.nil);
@@ -130,7 +134,8 @@ test "LOADNIL: multiple registers" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     const expected = [_]TValue{ .nil, .nil, .nil };
@@ -158,7 +163,8 @@ test "LOADNIL: range in middle of stack" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     const expected = [_]TValue{

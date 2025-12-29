@@ -28,7 +28,8 @@ test "MOVE with stack verification" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Capture initial state
     const trace = utils.ExecutionTrace.captureInitial(&vm, 2);
@@ -73,7 +74,8 @@ test "LOADK with comprehensive state tracking" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Verify initial state - all registers should be nil
     try utils.expectNilRange(&vm, 0, 3);
@@ -114,34 +116,39 @@ test "ADD instruction with side effect verification" {
 }
 
 test "Arithmetic operation helper usage" {
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Test integer addition
     try utils.testArithmeticOp(&vm, Instruction.initABC(.ADD, 2, 0, 1), TValue{ .integer = 10 }, TValue{ .integer = 20 }, TValue{ .integer = 30 }, &[_]TValue{});
 
     // Reset VM
-    vm = VM.init();
+    vm.deinit();
+    vm = try VM.init(testing.allocator);
 
     // Test float multiplication
     try utils.testArithmeticOp(&vm, Instruction.initABC(.MUL, 2, 0, 1), TValue{ .number = 2.5 }, TValue{ .number = 4.0 }, TValue{ .number = 10.0 }, &[_]TValue{});
 }
 
 test "EQ comparison with skip verification" {
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Test equal values with A=0 (skip if equal)
     try utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 
     // Reset VM
-    vm = VM.init();
+    vm.deinit();
+    vm = try VM.init(testing.allocator);
 
     // Test unequal values with A=0 (don't skip if unequal)
     try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
         TValue{ .integer = 42 }, TValue{ .integer = 43 }, &[_]TValue{});
 
     // Reset VM
-    vm = VM.init();
+    vm.deinit();
+    vm = try VM.init(testing.allocator);
 
     // Test equal values with A=1 (don't skip if equal, because A=1 negates)
     try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) == (A==0) then skip
@@ -176,7 +183,8 @@ test "FORPREP/FORLOOP with state tracking" {
         .maxstacksize = 5,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Capture loop state before execution
     const initial_loop = utils.ForLoopTrace.capture(&vm, 0);

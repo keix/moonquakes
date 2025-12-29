@@ -7,6 +7,11 @@ const Proto = @import("../core/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+/// Helper function to create a VM with proper cleanup
+pub fn createTestVM() !VM {
+    return VM.init(testing.allocator);
+}
+
 /// Verify register state at specific position
 pub fn expectRegister(vm: *const VM, reg: u8, expected: TValue) !void {
     const actual = vm.stack[vm.base + reg];
@@ -212,7 +217,8 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
         .maxstacksize = @as(u8, @intCast(initial_regs.len)),
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Set initial registers
     for (initial_regs, 0..) |val, i| {

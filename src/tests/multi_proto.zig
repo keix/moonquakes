@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
 const Proto = @import("../core/proto.zig").Proto;
 const TValue = @import("../core/value.zig").TValue;
@@ -62,7 +63,8 @@ test "manual multi-proto execution - simple call and return" {
     };
 
     // Test execution with real function call
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Capture initial state
     var trace = test_utils.ExecutionTrace.captureInitial(&vm, 4);
@@ -81,7 +83,8 @@ test "manual multi-proto execution - simple call and return" {
 }
 
 test "VM call stack push and pop" {
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Create test protos
     const proto1_code = [_]Instruction{
@@ -149,7 +152,8 @@ test "VM call stack push and pop" {
 }
 
 test "VM call stack overflow" {
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     const dummy_code = [_]Instruction{
         Instruction.initABC(.RETURN, 0, 1, 0),
@@ -247,7 +251,8 @@ test "nested function call with register tracking" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
     // Track call stack depth
     try std.testing.expect(vm.callstack_size == 0);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
 const Proto = @import("../core/proto.zig").Proto;
 const TValue = @import("../core/value.zig").TValue;
@@ -33,7 +34,8 @@ test "closure constant loading" {
         .maxstacksize = 1,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .closure = &func_closure });
@@ -79,7 +81,8 @@ test "simple function call without arguments" {
         .maxstacksize = 2,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
@@ -123,7 +126,8 @@ test "function call with arguments" {
         .maxstacksize = 3,
     };
 
-    var vm = VM.init();
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
