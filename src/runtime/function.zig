@@ -1,5 +1,5 @@
 const std = @import("std");
-const Proto = @import("proto.zig").Proto;
+const Proto = @import("../compiler/proto.zig").Proto;
 const NativeFn = @import("native.zig").NativeFn;
 
 pub const Function = union(enum) {

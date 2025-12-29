@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
-const TValue = @import("../core/value.zig").TValue;
+const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const test_utils = @import("test_utils.zig");
 
