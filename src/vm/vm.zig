@@ -19,6 +19,21 @@ pub const CallInfo = struct {
     savedpc: ?[*]const Instruction, // saved pc for yielding
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
+
+    /// Fetch next instruction and advance PC
+    /// Encapsulates PC bounds checking as an invariant
+    pub inline fn fetch(self: *CallInfo) !Instruction {
+        const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
+        const pc_index = pc_offset / @sizeOf(Instruction);
+
+        if (pc_index >= self.func.code.len) {
+            return error.PcOutOfRange;
+        }
+
+        const inst = self.pc[0];
+        self.pc += 1;
+        return inst;
+    }
 };
 
 pub const VM = struct {
@@ -271,16 +286,7 @@ pub const VM = struct {
         while (true) {
             var ci = self.ci.?;
 
-            // Check PC is within bounds before instruction fetch
-            const pc_offset = @intFromPtr(ci.pc) - @intFromPtr(ci.func.code.ptr);
-            const pc_index = pc_offset / @sizeOf(Instruction);
-            if (pc_index >= ci.func.code.len) {
-                return error.PcOutOfRange;
-            }
-
-            const inst = ci.pc[0];
-            ci.pc += 1;
-
+            const inst = try ci.fetch();
             const op = inst.getOpCode();
             const a = inst.getA();
 
