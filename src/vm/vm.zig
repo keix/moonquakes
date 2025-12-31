@@ -81,8 +81,23 @@ pub const VM = struct {
         // TODO: Replace with GC.deinit() when implemented
         self.arena.deinit();
 
-        // Clean up library tables (io, math, table, utf8)
-        const library_names = [_][]const u8{ "io", "math", "table", "utf8" };
+        // Clean up package table's nested tables first
+        if (self.globals.get("package")) |package_val| {
+            if (package_val == .table) {
+                const package_subtables = [_][]const u8{ "loaded", "preload", "searchers" };
+                for (package_subtables) |subtable_name| {
+                    if (package_val.table.get(subtable_name)) |subtable_val| {
+                        if (subtable_val == .table) {
+                            subtable_val.table.deinit();
+                            self.allocator.destroy(subtable_val.table);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up library tables (string, io, math, table, os, debug, utf8, coroutine, package)
+        const library_names = [_][]const u8{ "string", "io", "math", "table", "os", "debug", "utf8", "coroutine", "package" };
         for (library_names) |lib_name| {
             if (self.globals.get(lib_name)) |lib_val| {
                 if (lib_val == .table) {
