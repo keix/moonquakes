@@ -9,6 +9,7 @@ const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
+const ErrorHandler = @import("error.zig");
 
 // CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
@@ -80,11 +81,14 @@ pub const VM = struct {
         // TODO: Replace with GC.deinit() when implemented
         self.arena.deinit();
 
-        // Clean up io table
-        if (self.globals.get("io")) |io_val| {
-            if (io_val == .table) {
-                io_val.table.deinit();
-                self.allocator.destroy(io_val.table);
+        // Clean up library tables (io, math, table, utf8)
+        const library_names = [_][]const u8{ "io", "math", "table", "utf8" };
+        for (library_names) |lib_name| {
+            if (self.globals.get(lib_name)) |lib_val| {
+                if (lib_val == .table) {
+                    lib_val.table.deinit();
+                    self.allocator.destroy(lib_val.table);
+                }
             }
         }
 
@@ -96,6 +100,41 @@ pub const VM = struct {
     /// VM is just a bridge - dispatches to appropriate native function
     fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
         try builtin.invoke(id, self, func_reg, nargs, nresults);
+    }
+
+    /// Sugar Layer: Handle VM error with user-friendly reporting
+    /// Translates internal VM errors to Lua error messages
+    fn handleVMError(self: *VM, vm_error: anyerror) !void {
+        // Check if this is a VM internal error that should be translated
+        const vm_error_typed = switch (vm_error) {
+            error.PcOutOfRange => ErrorHandler.VMError.PcOutOfRange,
+            error.CallStackOverflow => ErrorHandler.VMError.CallStackOverflow,
+            error.ArithmeticError => ErrorHandler.VMError.ArithmeticError,
+            error.OrderComparisonError => ErrorHandler.VMError.OrderComparisonError,
+            error.InvalidForLoopInit => ErrorHandler.VMError.InvalidForLoopInit,
+            error.InvalidForLoopStep => ErrorHandler.VMError.InvalidForLoopStep,
+            error.InvalidForLoopLimit => ErrorHandler.VMError.InvalidForLoopLimit,
+            error.NotAFunction => ErrorHandler.VMError.NotAFunction,
+            error.InvalidTableKey => ErrorHandler.VMError.InvalidTableKey,
+            error.InvalidTableOperation => ErrorHandler.VMError.InvalidTableOperation,
+            error.UnknownOpcode => ErrorHandler.VMError.UnknownOpcode,
+            error.VariableReturnNotImplemented => ErrorHandler.VMError.VariableReturnNotImplemented,
+            else => return vm_error, // Pass through non-VM errors
+        };
+
+        // Use Sugar Layer to translate and report the error
+        const error_message = ErrorHandler.reportError(vm_error_typed, self.allocator, null) catch |err| switch (err) {
+            error.OutOfMemory => "out of memory during error reporting",
+            else => "unknown error occurred",
+        };
+        defer if (error_message.len > 0) self.allocator.free(error_message);
+
+        // Print the user-friendly error message
+        const stderr = std.io.getStdErr().writer();
+        stderr.print("{s}\n", .{error_message}) catch {};
+
+        // Propagate the original error for proper control flow
+        return vm_error;
     }
 
     const ArithOp = enum { add, sub, mul, div, idiv, mod };
