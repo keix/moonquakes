@@ -285,21 +285,21 @@ pub const VM = struct {
 
         while (true) {
             var ci = self.ci.?;
-
             const inst = try ci.fetch();
-            const op = inst.getOpCode();
-            const a = inst.getA();
 
-            switch (op) {
+            switch (inst.getOpCode()) {
                 .MOVE => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     self.stack[self.base + a] = self.stack[self.base + b];
                 },
                 .LOADK => {
+                    const a = inst.getA();
                     const bx = inst.getBx();
                     self.stack[self.base + a] = ci.func.k[bx];
                 },
                 .LOADBOOL => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     self.stack[self.base + a] = .{ .boolean = (b != 0) };
@@ -308,6 +308,7 @@ pub const VM = struct {
                     }
                 },
                 .LOADNIL => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     var i: u8 = 0;
                     while (i <= b) : (i += 1) {
@@ -315,6 +316,7 @@ pub const VM = struct {
                     }
                 },
                 .ADDI => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const sc = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -339,6 +341,7 @@ pub const VM = struct {
                 },
                 .SHLI => {
                     // Shift left immediate
+                    const a = inst.getA();
                     const b = inst.getB();
                     const sc = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -362,6 +365,7 @@ pub const VM = struct {
                 },
                 .SHRI => {
                     // Shift right immediate (arithmetic)
+                    const a = inst.getA();
                     const b = inst.getB();
                     const sc = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -384,6 +388,7 @@ pub const VM = struct {
                     self.stack[self.base + a] = .{ .integer = std.math.shr(i64, value, @as(u6, @intCast(shift))) };
                 },
                 .ADDK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -398,6 +403,7 @@ pub const VM = struct {
                     }
                 },
                 .SUBK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -412,6 +418,7 @@ pub const VM = struct {
                     }
                 },
                 .MULK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -426,6 +433,7 @@ pub const VM = struct {
                     }
                 },
                 .DIVK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -437,6 +445,7 @@ pub const VM = struct {
                     self.stack[self.base + a] = .{ .number = nb / nc };
                 },
                 .IDIVK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -448,6 +457,7 @@ pub const VM = struct {
                     self.stack[self.base + a] = .{ .number = luaFloorDiv(nb, nc) };
                 },
                 .MODK => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -460,6 +470,7 @@ pub const VM = struct {
                 },
                 .BANDK => {
                     // Bitwise AND with constant
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -485,6 +496,7 @@ pub const VM = struct {
                 },
                 .BORK => {
                     // Bitwise OR with constant
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -509,6 +521,7 @@ pub const VM = struct {
                 },
                 .BXORK => {
                     // Bitwise XOR with constant
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -565,6 +578,7 @@ pub const VM = struct {
                 .SHL => {
                     // Shift left (<<)
                     // In Lua, negative shifts shift in opposite direction
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -600,6 +614,7 @@ pub const VM = struct {
                 .SHR => {
                     // Shift right (>>)
                     // In Lua, this is arithmetic (sign-extending) shift
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const vb = &self.stack[self.base + b];
@@ -633,6 +648,7 @@ pub const VM = struct {
                     self.stack[self.base + a] = .{ .integer = result };
                 },
                 .UNM => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
                     if (vb.isInteger()) {
@@ -644,6 +660,7 @@ pub const VM = struct {
                     }
                 },
                 .NOT => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
                     self.stack[self.base + a] = .{ .boolean = !vb.toBoolean() };
@@ -651,6 +668,7 @@ pub const VM = struct {
                 .BNOT => {
                     // Bitwise NOT (~)
                     // Lua 5.3+ requires integer operand
+                    const a = inst.getA();
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
 
@@ -674,9 +692,9 @@ pub const VM = struct {
                     }
                 },
                 .EQ => {
+                    const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
                     const b = inst.getB();
                     const c = inst.getC();
-                    const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
                     const is_true = eqOp(self.stack[self.base + b], self.stack[self.base + c]);
                     // if (is_true != (negate != 0)) then skip next instruction
                     if ((is_true and negate == 0) or (!is_true and negate != 0)) {
@@ -684,9 +702,9 @@ pub const VM = struct {
                     }
                 },
                 .LT => {
+                    const negate = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
-                    const negate = inst.getA();
                     const is_true = ltOp(self.stack[self.base + b], self.stack[self.base + c]) catch |err| switch (err) {
                         error.OrderComparisonError => return error.ArithmeticError,
                         else => return err,
@@ -696,9 +714,9 @@ pub const VM = struct {
                     }
                 },
                 .LE => {
+                    const negate = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
-                    const negate = inst.getA();
                     const is_true = leOp(self.stack[self.base + b], self.stack[self.base + c]) catch |err| switch (err) {
                         error.OrderComparisonError => return error.ArithmeticError,
                         else => return err,
@@ -725,6 +743,7 @@ pub const VM = struct {
                     }
                 },
                 .TEST => {
+                    const a = inst.getA();
                     const k = inst.getk();
                     const va = &self.stack[self.base + a];
                     // if not (truth(va) == k) then skip
@@ -733,6 +752,7 @@ pub const VM = struct {
                     }
                 },
                 .TESTSET => {
+                    const a = inst.getA();
                     const b = inst.getB();
                     const k = inst.getk();
                     const vb = &self.stack[self.base + b];
@@ -745,6 +765,7 @@ pub const VM = struct {
                     }
                 },
                 .FORPREP => {
+                    const a = inst.getA();
                     const sbx = inst.getSBx();
                     const v_init = self.stack[self.base + a];
                     const v_limit = self.stack[self.base + a + 1];
@@ -776,6 +797,7 @@ pub const VM = struct {
                     if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
                 },
                 .FORLOOP => {
+                    const a = inst.getA();
                     const sbx = inst.getSBx();
                     const idx = &self.stack[self.base + a];
                     const limit = &self.stack[self.base + a + 1];
@@ -827,6 +849,7 @@ pub const VM = struct {
                 },
                 .CALL => {
                     // CALL A B C: R(A),...,R(A+C-2) := R(A)(R(A+1),...,R(A+B-1))
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
 
@@ -895,6 +918,7 @@ pub const VM = struct {
                     self.top = new_base + func_proto.maxstacksize;
                 },
                 .RETURN => {
+                    const a = inst.getA();
                     const b = inst.getB();
 
                     // Handle returns from nested calls
@@ -970,6 +994,7 @@ pub const VM = struct {
                 .GETTABUP => {
                     // GETTABUP A B C: R[A] := UpValue[B][K[C]]
                     // For globals: R[A] := _ENV[K[C]]
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     _ = b; // Assume B=0 for _ENV (global environment)
@@ -986,12 +1011,14 @@ pub const VM = struct {
                 .GETUPVAL => {
                     // Legacy opcode - might need proper implementation later
                     // For now, set to nil
+                    const a = inst.getA();
                     const b = inst.getB();
                     _ = b; // Suppress unused warning
                     self.stack[self.base + a] = .nil;
                 },
                 .GETTABLE => {
                     // GETTABLE A B C: R[A] := R[B][R[C]]
+                    const a = inst.getA();
                     const b = inst.getB();
                     const c = inst.getC();
                     const table_val = self.stack[self.base + b];
@@ -1009,6 +1036,7 @@ pub const VM = struct {
                 .NEWTABLE => {
                     // Basic table creation (not fully implemented)
                     // For now, just set to nil
+                    const a = inst.getA();
                     self.stack[self.base + a] = .nil;
                 },
                 else => return error.UnknownOpcode,
