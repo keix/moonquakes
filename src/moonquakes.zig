@@ -4,6 +4,7 @@ const Proto = @import("compiler/proto.zig").Proto;
 const VM = @import("vm/vm.zig").VM;
 const lexer = @import("compiler/lexer.zig");
 const parser = @import("compiler/parser.zig");
+const ErrorHandler = @import("vm/error.zig");
 
 /// This project is a clean-room implementation inspired by
 /// the Lua 5.4 language specification.
@@ -40,7 +41,22 @@ pub const Moonquakes = struct {
     pub fn run(self: *Moonquakes, proto: *const Proto) !VM.ReturnValue {
         var vm = try VM.init(self.allocator);
         defer vm.deinit();
-        return try vm.execute(proto);
+
+        // Execute with Sugar Layer error translation
+        return vm.execute(proto) catch |err| {
+            // Translate VM errors to user-friendly messages using Sugar Layer
+            const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
+                error.OutOfMemory => "out of memory during error translation",
+            };
+            defer if (translated_error.len > 0) self.allocator.free(translated_error);
+
+            // Print the user-friendly error message
+            const stderr = std.io.getStdErr().writer();
+            stderr.print("{s}\n", .{translated_error}) catch {};
+
+            // Propagate the original error for proper control flow
+            return err;
+        };
     }
 
     /// Compile and execute Lua source in one step
@@ -116,5 +132,31 @@ pub const Moonquakes = struct {
                 try stdout.print("\n", .{});
             },
         }
+    }
+
+    /// Sugar Layer: Translate VM errors to user-friendly messages
+    fn translateVMError(self: *Moonquakes, vm_error: anyerror) ![]const u8 {
+        // Check if this is a VM internal error that should be translated
+        const vm_error_typed = switch (vm_error) {
+            error.PcOutOfRange => ErrorHandler.VMError.PcOutOfRange,
+            error.CallStackOverflow => ErrorHandler.VMError.CallStackOverflow,
+            error.ArithmeticError => ErrorHandler.VMError.ArithmeticError,
+            error.OrderComparisonError => ErrorHandler.VMError.OrderComparisonError,
+            error.InvalidForLoopInit => ErrorHandler.VMError.InvalidForLoopInit,
+            error.InvalidForLoopStep => ErrorHandler.VMError.InvalidForLoopStep,
+            error.InvalidForLoopLimit => ErrorHandler.VMError.InvalidForLoopLimit,
+            error.NotAFunction => ErrorHandler.VMError.NotAFunction,
+            error.InvalidTableKey => ErrorHandler.VMError.InvalidTableKey,
+            error.InvalidTableOperation => ErrorHandler.VMError.InvalidTableOperation,
+            error.UnknownOpcode => ErrorHandler.VMError.UnknownOpcode,
+            error.VariableReturnNotImplemented => ErrorHandler.VMError.VariableReturnNotImplemented,
+            else => {
+                // For non-VM errors, return a generic message
+                return try self.allocator.dupe(u8, "runtime error occurred");
+            },
+        };
+
+        // Use Sugar Layer to translate the error
+        return ErrorHandler.reportError(vm_error_typed, self.allocator, null);
     }
 };
