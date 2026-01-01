@@ -24,16 +24,38 @@ pub const CallInfo = struct {
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
+        try self.validatePC();
+        const inst = self.pc[0];
+        self.skip();
+
+        return inst;
+    }
+
+    /// Skip next instruction (increment PC by 1)
+    pub inline fn skip(self: *CallInfo) void {
+        self.pc += 1;
+    }
+
+    /// Jump relatively from current PC position
+    /// Handles both forward and backward jumps
+    pub inline fn jumpRel(self: *CallInfo, offset: i32) !void {
+        if (offset >= 0) {
+            self.pc += @as(usize, @intCast(offset));
+        } else {
+            self.pc -= @as(usize, @intCast(-offset));
+        }
+
+        // Validate PC bounds
+        try self.validatePC();
+    }
+
+    /// Validate PC is within function bounds
+    inline fn validatePC(self: *CallInfo) !void {
         const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
         const pc_index = pc_offset / @sizeOf(Instruction);
-
         if (pc_index >= self.func.code.len) {
             return error.PcOutOfRange;
         }
-
-        const inst = self.pc[0];
-        self.pc += 1;
-        return inst;
     }
 };
 
@@ -358,7 +380,7 @@ pub const VM = struct {
                     const c = inst.getC();
                     self.stack[self.base + a] = .{ .boolean = (b != 0) };
                     if (c != 0) {
-                        ci.pc += 1; // skip next instruction
+                        ci.skip();
                     }
                 },
                 .LOADNIL => {
@@ -401,9 +423,7 @@ pub const VM = struct {
                     const vb = &self.stack[self.base + b];
 
                     // Convert value to integer
-                    const value = if (vb.isInteger())
-                        vb.integer
-                    else if (vb.toNumber()) |n| blk: {
+                    const value = if (vb.isInteger()) vb.integer else if (vb.toNumber()) |n| blk: {
                         if (@floor(n) == n) {
                             break :blk @as(i64, @intFromFloat(n));
                         } else {
@@ -425,9 +445,7 @@ pub const VM = struct {
                     const vb = &self.stack[self.base + b];
 
                     // Convert value to integer
-                    const value = if (vb.isInteger())
-                        vb.integer
-                    else if (vb.toNumber()) |n| blk: {
+                    const value = if (vb.isInteger()) vb.integer else if (vb.toNumber()) |n| blk: {
                         if (@floor(n) == n) {
                             break :blk @as(i64, @intFromFloat(n));
                         } else {
@@ -752,7 +770,7 @@ pub const VM = struct {
                     const is_true = eqOp(self.stack[self.base + b], self.stack[self.base + c]);
                     // if (is_true != (negate != 0)) then skip next instruction
                     if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                        ci.pc += 1;
+                        ci.skip();
                     }
                 },
                 .LT => {
@@ -764,7 +782,7 @@ pub const VM = struct {
                         else => return err,
                     };
                     if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                        ci.pc += 1;
+                        ci.skip();
                     }
                 },
                 .LE => {
@@ -776,25 +794,14 @@ pub const VM = struct {
                         else => return err,
                     };
                     if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                        ci.pc += 1;
+                        ci.skip();
                     }
                 },
                 .JMP => {
                     const sj = inst.getsJ();
                     // PC is already pointing to next instruction after this JMP
                     // sJ is relative to the instruction AFTER the JMP
-                    if (sj >= 0) {
-                        ci.pc += @as(usize, @intCast(sj));
-                    } else {
-                        ci.pc -= @as(usize, @intCast(-sj));
-                    }
-
-                    // Validate PC after jump
-                    const new_pc_offset = @intFromPtr(ci.pc) - @intFromPtr(ci.func.code.ptr);
-                    const new_pc_index = new_pc_offset / @sizeOf(Instruction);
-                    if (new_pc_index >= ci.func.code.len) {
-                        return error.PcOutOfRange;
-                    }
+                    try ci.jumpRel(sj);
                 },
                 .TEST => {
                     const a = inst.getA();
@@ -802,7 +809,7 @@ pub const VM = struct {
                     const va = &self.stack[self.base + a];
                     // if not (truth(va) == k) then skip
                     if (va.toBoolean() != k) {
-                        ci.pc += 1;
+                        ci.skip();
                     }
                 },
                 .TESTSET => {
@@ -815,7 +822,7 @@ pub const VM = struct {
                         self.stack[self.base + a] = vb.*;
                     } else {
                         // False: skip next instruction
-                        ci.pc += 1;
+                        ci.skip();
                     }
                 },
                 .FORPREP => {
@@ -848,7 +855,7 @@ pub const VM = struct {
                         self.stack[self.base + a] = .{ .number = i - s }; // float path
                     }
 
-                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                    try ci.jumpRel(sbx);
                 },
                 .FORLOOP => {
                     const a = inst.getA();
