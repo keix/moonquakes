@@ -49,6 +49,16 @@ pub const CallInfo = struct {
         try self.validatePC();
     }
 
+    /// Fetch next instruction expecting it to be EXTRAARG
+    /// Used by instructions like LOADKX that consume 2-word opcodes
+    pub inline fn fetchExtraArg(self: *CallInfo) !Instruction {
+        const inst = try self.fetch();
+        if (inst.getOpCode() != .EXTRAARG) {
+            return error.UnknownOpcode;
+        }
+        return inst;
+    }
+
     /// Validate PC is within function bounds
     inline fn validatePC(self: *CallInfo) !void {
         const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
@@ -373,6 +383,15 @@ pub const VM = struct {
                     const a = inst.getA();
                     const bx = inst.getBx();
                     self.stack[self.base + a] = ci.func.k[bx];
+                },
+                .LOADKX => {
+                    // LOADKX A: R[A] := K[EXTRAARG]
+                    // Extended constant loading - constant index comes from next EXTRAARG instruction
+                    const a = inst.getA();
+                    // Fetch the EXTRAARG instruction (2-word opcode)
+                    const extraarg_inst = try ci.fetchExtraArg();
+                    const ax = extraarg_inst.getAx();
+                    self.stack[self.base + a] = ci.func.k[ax];
                 },
                 .LOADBOOL => {
                     const a = inst.getA();
@@ -1094,11 +1113,54 @@ pub const VM = struct {
                         return error.InvalidTableOperation;
                     }
                 },
+                .GETI => {
+                    // GETI A B C: R[A] := R[B][C] (C is integer immediate)
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + b];
+
+                    if (table_val.isTable()) {
+                        const table = table_val.table;
+                        // Convert integer index to string key (Lua tables use string keys internally)
+                        var key_buffer: [32]u8 = undefined;
+                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
+                            return error.InvalidTableKey;
+                        };
+                        const value = table.get(key) orelse .nil;
+                        self.stack[self.base + a] = value;
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
+                },
+                .GETFIELD => {
+                    // GETFIELD A B C: R[A] := R[B][K[C]] (C is constant string index)
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + b];
+                    const key_val = ci.func.k[c];
+
+                    if (table_val.isTable() and key_val.isString()) {
+                        const table = table_val.table;
+                        const key = key_val.string;
+                        const value = table.get(key) orelse .nil;
+                        self.stack[self.base + a] = value;
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
+                },
                 .NEWTABLE => {
                     // Basic table creation (not fully implemented)
                     // For now, just set to nil
                     const a = inst.getA();
                     self.stack[self.base + a] = .nil;
+                },
+                .EXTRAARG => {
+                    // EXTRAARG Ax: Extra argument for preceding instruction
+                    // This instruction provides additional argument data for the previous instruction
+                    // It should not be executed independently - handled by instructions like LOADKX
+                    return error.UnknownOpcode; // Should not be executed directly
                 },
                 else => return error.UnknownOpcode,
             }

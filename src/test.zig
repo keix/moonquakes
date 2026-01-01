@@ -21,6 +21,7 @@ pub const bitwise_tests = @import("tests/bitwise.zig");
 pub const parser_tests = @import("tests/parser.zig");
 pub const multi_proto_tests = @import("tests/multi_proto.zig");
 pub const simple_call_tests = @import("tests/simple_call.zig");
+pub const extended_load_tests = @import("tests/extended_load.zig");
 // pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {

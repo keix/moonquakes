@@ -1,0 +1,146 @@
+const std = @import("std");
+const testing = std.testing;
+const test_utils = @import("test_utils.zig");
+const TValue = @import("../runtime/value.zig").TValue;
+const Proto = @import("../compiler/proto.zig").Proto;
+const opcodes = @import("../compiler/opcodes.zig");
+const OpCode = opcodes.OpCode;
+const Instruction = opcodes.Instruction;
+
+test "LOADKX with EXTRAARG loads large constant index" {
+    var vm = try test_utils.createTestVM();
+    defer vm.deinit();
+
+    // Create constants array with value at large index
+    const constants = [_]TValue{
+        .nil, .nil, .nil, .nil, .nil, // Padding to create large index
+        .{ .integer = 42 }, // Index 5
+    };
+
+    // LOADKX R[0] := K[EXTRAARG], EXTRAARG ax=5, RETURN
+    const instructions = [_]Instruction{
+        Instruction.initABC(.LOADKX, 0, 0, 0),
+        Instruction.initAx(.EXTRAARG, 5), // Large constant index
+        Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
+    };
+
+    var proto = Proto{
+        .code = &instructions,
+        .k = &constants,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 10,
+    };
+
+    _ = try vm.execute(&proto);
+
+    // Verify R[0] contains the constant value from index 5
+    try test_utils.expectRegister(&vm, 0, .{ .integer = 42 });
+
+    // Verify other registers remain uninitialized
+    try test_utils.expectNilRange(&vm, 1, 5);
+}
+
+test "GETI with nil table returns error" {
+    var vm = try test_utils.createTestVM();
+    defer vm.deinit();
+
+    const constants = [_]TValue{.nil};
+
+    // GETI R[0] := R[0][1] (R[0] is nil, not a table)
+    const instructions = [_]Instruction{
+        Instruction.initABC(.GETI, 0, 0, 1),
+        Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
+    };
+
+    var proto = Proto{
+        .code = &instructions,
+        .k = &constants,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 10,
+    };
+
+    // Should return InvalidTableOperation since R[0] is nil
+    const result = vm.execute(&proto);
+    try testing.expect(std.meta.isError(result));
+    // Note: We can't test specific error type without proper error handling
+}
+
+test "GETFIELD with nil table returns error" {
+    var vm = try test_utils.createTestVM();
+    defer vm.deinit();
+
+    // Constants array with string key
+    const constants = [_]TValue{
+        .{ .string = "name" }, // Index 0 - field name
+    };
+
+    // GETFIELD R[1] := R[0][K[0]] where K[0] = "name", R[0] is nil
+    const instructions = [_]Instruction{
+        Instruction.initABC(.GETFIELD, 1, 0, 0),
+        Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
+    };
+
+    var proto = Proto{
+        .code = &instructions,
+        .k = &constants,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 10,
+    };
+
+    // Should return InvalidTableOperation since R[0] is nil
+    const result = vm.execute(&proto);
+    try testing.expect(std.meta.isError(result));
+}
+
+test "Multiple LOADKX operations" {
+    var vm = try test_utils.createTestVM();
+    defer vm.deinit();
+
+    // Create constants with multiple values
+    const constants = [_]TValue{
+        .{ .string = "hello" }, // Index 0
+        .{ .number = 3.14 }, // Index 1
+        .nil, .nil, .nil, // Padding
+        .{ .integer = 100 }, // Index 5
+        .{ .boolean = true }, // Index 6
+    };
+
+    // Load multiple constants using LOADKX
+    const instructions = [_]Instruction{
+        // R[0] := K[5] (integer 100)
+        Instruction.initABC(.LOADKX, 0, 0, 0),
+        Instruction.initAx(.EXTRAARG, 5),
+
+        // R[1] := K[6] (boolean true)
+        Instruction.initABC(.LOADKX, 1, 0, 0),
+        Instruction.initAx(.EXTRAARG, 6),
+
+        // R[2] := K[0] (string "hello")
+        Instruction.initABC(.LOADKX, 2, 0, 0),
+        Instruction.initAx(.EXTRAARG, 0),
+        Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
+    };
+
+    var proto = Proto{
+        .code = &instructions,
+        .k = &constants,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 10,
+    };
+
+    _ = try vm.execute(&proto);
+
+    // Verify all loaded values
+    try test_utils.expectRegisters(&vm, 0, &[_]TValue{
+        .{ .integer = 100 }, // R[0]
+        .{ .boolean = true }, // R[1]
+        .{ .string = "hello" }, // R[2]
+    });
+
+    // Verify remaining registers are nil
+    try test_utils.expectNilRange(&vm, 3, 5);
+}
