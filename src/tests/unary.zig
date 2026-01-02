@@ -170,3 +170,55 @@ test "unary: -5 + 3 = -2" {
 
     try expectSingleResult(result, TValue{ .integer = -2 });
 }
+
+test "unary: #\"hello\" = 5 (string length)" {
+    const constants = [_]TValue{
+        .{ .string = "hello" },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = "hello"
+        Instruction.initABC(.LEN, 1, 0, 0), // R1 = #R0
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .integer = 5 });
+}
+
+test "unary: #\"\" = 0 (empty string length)" {
+    const constants = [_]TValue{
+        .{ .string = "" },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = ""
+        Instruction.initABC(.LEN, 1, 0, 0), // R1 = #R0
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .integer = 0 });
+}

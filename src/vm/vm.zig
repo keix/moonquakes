@@ -816,6 +816,75 @@ pub const VM = struct {
                         }
                     }
                 },
+                .LEN => {
+                    // Length operator (#)
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const vb = &self.stack[self.base + b];
+
+                    if (vb.isString()) {
+                        self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(vb.string.len)) };
+                    } else {
+                        // TODO: table length support when tables are implemented
+                        return error.LengthError;
+                    }
+                },
+                .CONCAT => {
+                    // String concatenation: R[A] := R[B] .. R[B+1] .. ... .. R[C]
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+
+                    // Calculate total length needed
+                    var total_len: usize = 0;
+                    for (b..c + 1) |i| {
+                        const val = &self.stack[self.base + i];
+                        if (val.isString()) {
+                            total_len += val.string.len;
+                        } else if (val.isInteger()) {
+                            // Convert integer to string to get length
+                            var buf: [32]u8 = undefined;
+                            const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch {
+                                return error.ArithmeticError;
+                            };
+                            total_len += str.len;
+                        } else if (val.isNumber()) {
+                            // Convert number to string to get length
+                            var buf: [32]u8 = undefined;
+                            const str = std.fmt.bufPrint(&buf, "{d}", .{val.number}) catch {
+                                return error.ArithmeticError;
+                            };
+                            total_len += str.len;
+                        } else {
+                            return error.ArithmeticError; // Cannot concatenate non-string/number values
+                        }
+                    }
+
+                    // Allocate result string
+                    const result = try self.allocator.alloc(u8, total_len);
+                    var offset: usize = 0;
+
+                    // Concatenate all values
+                    for (b..c + 1) |i| {
+                        const val = &self.stack[self.base + i];
+                        if (val.isString()) {
+                            @memcpy(result[offset .. offset + val.string.len], val.string);
+                            offset += val.string.len;
+                        } else if (val.isInteger()) {
+                            const str = std.fmt.bufPrint(result[offset..], "{d}", .{val.integer}) catch {
+                                return error.ArithmeticError;
+                            };
+                            offset += str.len;
+                        } else if (val.isNumber()) {
+                            const str = std.fmt.bufPrint(result[offset..], "{d}", .{val.number}) catch {
+                                return error.ArithmeticError;
+                            };
+                            offset += str.len;
+                        }
+                    }
+
+                    self.stack[self.base + a] = .{ .string = result };
+                },
                 .EQ => {
                     const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
                     const b = inst.getB();
@@ -1105,6 +1174,71 @@ pub const VM = struct {
                         return .{ .multiple = values };
                     }
                 },
+                .RETURN0 => {
+                    // Return 0 values (specialized RETURN with B=1)
+                    // Handle returns from nested calls
+                    if (self.ci.?.previous != null) {
+                        // We're returning from a nested call
+                        const returning_ci = self.ci.?;
+                        const nresults = returning_ci.nresults;
+                        const dst_base = returning_ci.ret_base;
+
+                        // Pop the call info
+                        self.popCallInfo();
+
+                        // Set expected number of results to nil
+                        if (nresults > 0) {
+                            var i: u16 = 0;
+                            while (i < nresults) : (i += 1) {
+                                self.stack[dst_base + i] = .nil;
+                            }
+                        }
+
+                        // Continue execution in the calling function
+                        continue;
+                    }
+
+                    // This is a return from the main function
+                    return .none;
+                },
+                .RETURN1 => {
+                    // Return 1 value from R[A] (specialized RETURN with B=2)
+                    const a = inst.getA();
+
+                    // Handle returns from nested calls
+                    if (self.ci.?.previous != null) {
+                        // We're returning from a nested call
+                        const returning_ci = self.ci.?;
+                        const nresults = returning_ci.nresults;
+                        const dst_base = returning_ci.ret_base;
+
+                        // Pop the call info
+                        self.popCallInfo();
+
+                        // Copy the single return value
+                        if (nresults < 0) {
+                            // Multiple results expected - return 1 value
+                            self.stack[dst_base] = self.stack[returning_ci.base + a];
+                            self.top = dst_base + 1;
+                        } else {
+                            // Fixed number of results
+                            if (nresults > 0) {
+                                self.stack[dst_base] = self.stack[returning_ci.base + a];
+                                // Fill remaining with nil
+                                var i: u16 = 1;
+                                while (i < nresults) : (i += 1) {
+                                    self.stack[dst_base + i] = .nil;
+                                }
+                            }
+                        }
+
+                        // Continue execution in the calling function
+                        continue;
+                    }
+
+                    // This is a return from the main function
+                    return .{ .single = self.stack[self.base + a] };
+                },
                 .GETTABUP => {
                     // GETTABUP A B C: R[A] := UpValue[B][K[C]]
                     // For globals: R[A] := _ENV[K[C]]
@@ -1147,6 +1281,23 @@ pub const VM = struct {
                         return error.InvalidTableOperation;
                     }
                 },
+                .SETTABLE => {
+                    // SETTABLE A B C: R[A][R[B]] := R[C]
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + a];
+                    const key_val = self.stack[self.base + b];
+                    const value = self.stack[self.base + c];
+
+                    if (table_val.isTable() and key_val.isString()) {
+                        const table = table_val.table;
+                        const key = key_val.string;
+                        try table.set(key, value);
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
+                },
                 .GETI => {
                     // GETI A B C: R[A] := R[B][C] (C is integer immediate)
                     const a = inst.getA();
@@ -1167,6 +1318,26 @@ pub const VM = struct {
                         return error.InvalidTableOperation;
                     }
                 },
+                .SETI => {
+                    // SETI A B C: R[A][B] := R[C] (B is integer immediate)
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + a];
+                    const value = self.stack[self.base + c];
+
+                    if (table_val.isTable()) {
+                        const table = table_val.table;
+                        // Convert integer index to string key
+                        var key_buffer: [32]u8 = undefined;
+                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
+                            return error.InvalidTableKey;
+                        };
+                        try table.set(key, value);
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
+                },
                 .GETFIELD => {
                     // GETFIELD A B C: R[A] := R[B][K[C]] (C is constant string index)
                     const a = inst.getA();
@@ -1180,6 +1351,23 @@ pub const VM = struct {
                         const key = key_val.string;
                         const value = table.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
+                    } else {
+                        return error.InvalidTableOperation;
+                    }
+                },
+                .SETFIELD => {
+                    // SETFIELD A B C: R[A][K[B]] := R[C] (B is constant string index)
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const table_val = self.stack[self.base + a];
+                    const key_val = ci.func.k[b];
+                    const value = self.stack[self.base + c];
+
+                    if (table_val.isTable() and key_val.isString()) {
+                        const table = table_val.table;
+                        const key = key_val.string;
+                        try table.set(key, value);
                     } else {
                         return error.InvalidTableOperation;
                     }
