@@ -102,3 +102,48 @@ test "return: multiple values (RETURN with B=4)" {
     };
     try expectMultipleResults(result, &expected);
 }
+
+test "return: RETURN0 - no values" {
+    const code = [_]Instruction{
+        Instruction.initABC(.RETURN0, 0, 0, 0), // return nothing
+    };
+
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try testing.expect(result == .none);
+}
+
+test "return: RETURN1 - single value" {
+    const constants = [_]TValue{
+        .{ .integer = 42 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 42
+        Instruction.initABC(.RETURN1, 0, 0, 0), // return R0
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .integer = 42 });
+}

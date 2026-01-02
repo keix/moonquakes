@@ -45,7 +45,7 @@ Converts any Lua value to its string representation.
 
 **Examples:**
 ```lua
-tostring(42)     -- "42" 
+tostring(42)      -- "42" 
 tostring("hello") -- "hello"
 tostring(nil)     -- "nil"
 tostring(true)    -- "true" 

@@ -17,6 +17,7 @@ pub const VMError = error{
     // Type & Arithmetic Errors
     ArithmeticError,
     OrderComparisonError,
+    LengthError,
 
     // For Loop Parameter Errors
     InvalidForLoopInit,
@@ -85,6 +86,10 @@ pub fn translateVMError(vm_error: VMError, allocator: std.mem.Allocator) !LuaErr
         error.OrderComparisonError => LuaError{
             .kind = .type_error,
             .message = try allocator.dupe(u8, "attempt to compare non-comparable values"),
+        },
+        error.LengthError => LuaError{
+            .kind = .type_error,
+            .message = try allocator.dupe(u8, "attempt to get length of non-string value"),
         },
         error.InvalidForLoopInit, error.InvalidForLoopStep, error.InvalidForLoopLimit => LuaError{
             .kind = .loop_error,
