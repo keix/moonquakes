@@ -22,6 +22,8 @@ pub const parser_tests = @import("tests/parser.zig");
 pub const multi_proto_tests = @import("tests/multi_proto.zig");
 pub const simple_call_tests = @import("tests/simple_call.zig");
 pub const extended_load_tests = @import("tests/extended_load.zig");
+pub const comparison_extensions_tests = @import("tests/comparison_extensions.zig");
+pub const parser_comparison_tests = @import("tests/parser_comparison.zig");
 // pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {

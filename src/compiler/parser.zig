@@ -116,10 +116,23 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn emitLOADBOOL(self: *ProtoBuilder, dst: u8, value: bool, skip: bool) !void {
-        const b: u8 = if (value) 1 else 0;
-        const c: u8 = if (skip) 1 else 0;
-        const instr = Instruction.initABC(.LOADBOOL, dst, b, c);
-        try self.code.append(instr);
+        // Use Lua 5.4 standard opcodes instead of LOADBOOL
+        if (value and !skip) {
+            const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
+            try self.code.append(instr);
+        } else if (!value and !skip) {
+            const instr = Instruction.initABC(.LOADFALSE, dst, 0, 0);
+            try self.code.append(instr);
+        } else if (!value and skip) {
+            const instr = Instruction.initABC(.LFALSESKIP, dst, 0, 0);
+            try self.code.append(instr);
+        } else {
+            // value=true, skip=true: Load true and skip next instruction
+            const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
+            try self.code.append(instr);
+            const skip_instr = Instruction.initsJ(.JMP, 1); // Skip exactly 1 instruction
+            try self.code.append(skip_instr);
+        }
     }
 
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
@@ -445,14 +458,14 @@ pub const Parser = struct {
             const dst = self.proto.allocReg();
             if (std.mem.eql(u8, op, "==")) {
                 // For ==: if equal then set true, else set false
-                try self.proto.emitEQ(left, right, 1); // skip if NOT equal (negate=1)
-                try self.proto.emitLOADBOOL(dst, true, true); // equal: true, skip next
-                try self.proto.emitLOADBOOL(dst, false, false); // not equal: false
+                try self.proto.emitEQ(left, right, 0); // skip if equal (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // equal: true
             } else if (std.mem.eql(u8, op, "!=")) {
                 // For !=: if not equal then set true, else set false
-                try self.proto.emitEQ(left, right, 0); // skip if equal (negate=0)
-                try self.proto.emitLOADBOOL(dst, true, true); // not equal: true, skip next
-                try self.proto.emitLOADBOOL(dst, false, false); // equal: false
+                try self.proto.emitEQ(left, right, 1); // skip if NOT equal (negate=1)
+                try self.proto.emitLOADBOOL(dst, false, true); // equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // not equal: true
             } else {
                 return error.UnsupportedOperator;
             }

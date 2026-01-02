@@ -393,14 +393,33 @@ pub const VM = struct {
                     const ax = extraarg_inst.getAx();
                     self.stack[self.base + a] = ci.func.k[ax];
                 },
-                .LOADBOOL => {
+                .LOADI => {
+                    // LOADI A sBx: R[A] := sBx (signed immediate integer)
                     const a = inst.getA();
-                    const b = inst.getB();
-                    const c = inst.getC();
-                    self.stack[self.base + a] = .{ .boolean = (b != 0) };
-                    if (c != 0) {
-                        ci.skip();
-                    }
+                    const sbx = inst.getSBx();
+                    self.stack[self.base + a] = .{ .integer = @as(i64, sbx) };
+                },
+                .LOADF => {
+                    // LOADF A sBx: R[A] := (lua_Number)sBx (signed immediate float)
+                    const a = inst.getA();
+                    const sbx = inst.getSBx();
+                    self.stack[self.base + a] = .{ .number = @as(f64, @floatFromInt(sbx)) };
+                },
+                .LOADFALSE => {
+                    // LOADFALSE A: R[A] := false
+                    const a = inst.getA();
+                    self.stack[self.base + a] = .{ .boolean = false };
+                },
+                .LFALSESKIP => {
+                    // LFALSESKIP A: R[A] := false; pc++
+                    const a = inst.getA();
+                    self.stack[self.base + a] = .{ .boolean = false };
+                    ci.skip();
+                },
+                .LOADTRUE => {
+                    // LOADTRUE A: R[A] := true
+                    const a = inst.getA();
+                    self.stack[self.base + a] = .{ .boolean = true };
                 },
                 .LOADNIL => {
                     const a = inst.getA();
@@ -1155,6 +1174,90 @@ pub const VM = struct {
                     // For now, just set to nil
                     const a = inst.getA();
                     self.stack[self.base + a] = .nil;
+                },
+                .EQK => {
+                    // EQK A B C: if not (R[B] == K[C]) then pc++
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const is_true = eqOp(self.stack[self.base + b], ci.func.k[c]);
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
+                },
+                .EQI => {
+                    // EQI A B C: if not (R[B] == C) then pc++ (C is signed immediate)
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const imm = @as(i8, @bitCast(@as(u8, sc))); // signed byte
+                    const imm_val = TValue{ .integer = @as(i64, imm) };
+                    const is_true = eqOp(self.stack[self.base + b], imm_val);
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
+                },
+                .LTI => {
+                    // LTI A B C: if not (R[B] < C) then pc++ (C is signed immediate)
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const imm = @as(i8, @bitCast(@as(u8, sc))); // signed byte
+                    const imm_val = TValue{ .integer = @as(i64, imm) };
+                    const is_true = ltOp(self.stack[self.base + b], imm_val) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
+                },
+                .LEI => {
+                    // LEI A B C: if not (R[B] <= C) then pc++ (C is signed immediate)
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const imm = @as(i8, @bitCast(@as(u8, sc))); // signed byte
+                    const imm_val = TValue{ .integer = @as(i64, imm) };
+                    const is_true = leOp(self.stack[self.base + b], imm_val) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
+                },
+                .GTI => {
+                    // GTI A B C: if not (R[B] > C) then pc++ (C is signed immediate)
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const imm = @as(i8, @bitCast(@as(u8, sc))); // signed byte
+                    const imm_val = TValue{ .integer = @as(i64, imm) };
+                    // R[B] > C is equivalent to C < R[B]
+                    const is_true = ltOp(imm_val, self.stack[self.base + b]) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
+                },
+                .GEI => {
+                    // GEI A B C: if not (R[B] >= C) then pc++ (C is signed immediate)
+                    const a = inst.getA(); // negate flag
+                    const b = inst.getB();
+                    const sc = inst.getC();
+                    const imm = @as(i8, @bitCast(@as(u8, sc))); // signed byte
+                    const imm_val = TValue{ .integer = @as(i64, imm) };
+                    // R[B] >= C is equivalent to C <= R[B]
+                    const is_true = leOp(imm_val, self.stack[self.base + b]) catch |err| switch (err) {
+                        error.OrderComparisonError => return error.ArithmeticError,
+                        else => return err,
+                    };
+                    if ((is_true and a == 0) or (!is_true and a != 0)) {
+                        ci.skip();
+                    }
                 },
                 .EXTRAARG => {
                     // EXTRAARG Ax: Extra argument for preceding instruction

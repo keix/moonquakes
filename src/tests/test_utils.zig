@@ -274,8 +274,8 @@ pub const ComparisonTest = struct {
     pub fn expectSkip(vm: *VM, inst: Instruction, reg_a_val: TValue, reg_b_val: TValue, constants: []const TValue) !void {
         const code = [_]Instruction{
             inst, // comparison instruction
-            Instruction.initABC(.LOADBOOL, 0, 1, 1), // should be skipped (C=1 to skip next)
-            Instruction.initABC(.LOADBOOL, 0, 0, 0), // should execute
+            Instruction.initABC(.LFALSESKIP, 0, 0, 0), // load true and skip next
+            Instruction.initABC(.LOADFALSE, 0, 0, 0), // should execute
             Instruction.initABC(.RETURN, 0, 2, 0), // return R0
         };
 
@@ -295,7 +295,7 @@ pub const ComparisonTest = struct {
 
         const result = try vm.execute(&proto);
 
-        // If comparison skips, LOADBOOL R0 1 1 is skipped, LOADBOOL R0 0 0 executes
+        // If comparison skips, LFALSESKIP is skipped, LOADFALSE executes
         // R0 should be false
         try testing.expect(result == .single);
         try testing.expect(result.single.eql(TValue{ .boolean = false }));
@@ -304,8 +304,8 @@ pub const ComparisonTest = struct {
     pub fn expectNoSkip(vm: *VM, inst: Instruction, reg_a_val: TValue, reg_b_val: TValue, constants: []const TValue) !void {
         const code = [_]Instruction{
             inst, // comparison instruction
-            Instruction.initABC(.LOADBOOL, 0, 1, 1), // should execute (C=1 to skip next)
-            Instruction.initABC(.LOADBOOL, 0, 0, 0), // should be skipped
+            Instruction.initABC(.LFALSESKIP, 0, 0, 0), // should execute (load false and skip next)
+            Instruction.initABC(.LOADTRUE, 0, 0, 0), // should be skipped
             Instruction.initABC(.RETURN, 0, 2, 0), // return R0
         };
 
@@ -325,10 +325,10 @@ pub const ComparisonTest = struct {
 
         const result = try vm.execute(&proto);
 
-        // If comparison doesn't skip, LOADBOOL R0 1 1 executes (sets R0=true and skips next)
-        // R0 should be true
+        // If comparison doesn't skip, LFALSESKIP executes (sets R0=false and skips LOADTRUE)
+        // R0 should be false
         try testing.expect(result == .single);
-        try testing.expect(result.single.eql(TValue{ .boolean = true }));
+        try testing.expect(result.single.eql(TValue{ .boolean = false }));
     }
 };
 
