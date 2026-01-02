@@ -21,9 +21,9 @@ fn expectMultipleResults(result: VM.ReturnValue, expected: []const TValue) !void
     }
 }
 
-test "LOADBOOL: load true" {
+test "LOADI: load signed immediate integer" {
     const code = [_]Instruction{
-        Instruction.initABC(.LOADBOOL, 0, 1, 0), // R0 = true, no skip
+        Instruction.initAsBx(.LOADI, 0, 42), // R0 = 42
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
@@ -39,12 +39,54 @@ test "LOADBOOL: load true" {
     defer vm.deinit();
     const result = try vm.execute(&proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue{ .integer = 42 });
 }
 
-test "LOADBOOL: load false" {
+test "LOADI: load negative signed immediate" {
     const code = [_]Instruction{
-        Instruction.initABC(.LOADBOOL, 0, 0, 0), // R0 = false, no skip
+        Instruction.initAsBx(.LOADI, 0, -100), // R0 = -100
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0
+    };
+
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .integer = -100 });
+}
+
+test "LOADF: load signed immediate as float" {
+    const code = [_]Instruction{
+        Instruction.initAsBx(.LOADF, 0, 42), // R0 = 42.0
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0
+    };
+
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = 42.0 });
+}
+
+test "LOADFALSE: load false" {
+    const code = [_]Instruction{
+        Instruction.initABC(.LOADFALSE, 0, 0, 0), // R0 = false
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
@@ -63,11 +105,10 @@ test "LOADBOOL: load false" {
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
-test "LOADBOOL: with skip" {
+test "LOADTRUE: load true" {
     const code = [_]Instruction{
-        Instruction.initABC(.LOADBOOL, 0, 1, 1), // R0 = true, skip next
-        Instruction.initABC(.LOADBOOL, 0, 0, 0), // This should be skipped
-        Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be true)
+        Instruction.initABC(.LOADTRUE, 0, 0, 0), // R0 = true
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
     const proto = Proto{
@@ -83,6 +124,28 @@ test "LOADBOOL: with skip" {
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
+}
+
+test "LFALSESKIP: load false and skip" {
+    const code = [_]Instruction{
+        Instruction.initABC(.LFALSESKIP, 0, 0, 0), // R0 = false, skip next
+        Instruction.initABC(.LOADTRUE, 0, 0, 0), // This should be skipped
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be false)
+    };
+
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "LOADNIL: single register" {

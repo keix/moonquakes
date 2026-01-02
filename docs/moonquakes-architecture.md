@@ -13,14 +13,18 @@ Moonquakes follows the same 32-bit instruction format used by the official Lua 5
 Every instruction is exactly one 32-bit word and is divided into several fields: **OpCode**, **A**, **k**, **B**, and **C**, or into larger composite fields depending on instruction mode.
 
 ### 1.1 Bit Layout (iABC format)
-The most common instruction layout is iABC:
+The most common instruction encoding used by Lua 5.4 is the **iABC** format.
+
+Each instruction is a 32-bit unsigned integer. Bit positions are described
+using little-endian bit numbering, where bit 0 is the least significant bit.
 
 ```
-+--------+--------+--------+--------+--------+  
-| Op     | A      | k      | B      | C      |  
-+--------+--------+--------+--------+--------+
-7 bits   8 bits   1 bit    8 bits   8 bits
+| 31 ... 24 | 23 ... 16 | 15 | 14 ... 7 | 6 ... 0 |
+|-----------|-----------|----|----------|---------|
+|     C     |     B     | k  |     A    |   OP    |
 ```
+
+OP is a 7-bit opcode stored in the least significant bits.
 
 | Field | Bits | Description |
 |-------|------|-------------|
@@ -29,6 +33,8 @@ The most common instruction layout is iABC:
 | **k**  | 1   | Constant flag: if `1`, operands B or C refer to constants (`K[]`) rather than registers (`R[]`) |
 | **B**  | 8   | Second operand: register index or constant index depending on `k` |
 | **C**  | 8   | Third operand: same as B (register or constant) |
+
+Note: The single `k` flag applies to both operands B and C in iABC-format instructions.
 
 ### 1.2 Instruction Modes
 Even though every instruction is exactly 32 bits wide, not every opcode needs three separate operands. Some instructions need two registers and a constant, some require a large constant index, and others require a signed jump offset.
@@ -153,7 +159,6 @@ Each Proto defines the static blueprint for execution:
 The VM does not allocate dynamically per instruction — it reserves the entire maxstacksize at frame setup. This design ensures predictable stack access and constant-time register lookups.
 
 ### 3.2 Relationship Between Proto and CallInfo
-
 When executing, the VM binds a Proto to a CallInfo:
 
 ```
