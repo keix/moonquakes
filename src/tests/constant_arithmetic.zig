@@ -311,3 +311,57 @@ test "IDIVK: Lua-style floor division with negative" {
 
     try expectSingleResult(result, TValue{ .number = -2.0 });
 }
+
+test "POWK: power with constant" {
+    const constants = [_]TValue{
+        .{ .number = 3.0 },
+        .{ .number = 4.0 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 3
+        Instruction.initABC(.POWK, 1, 0, 1), // R1 = R0 ^ K1 (3^4)
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = 81.0 });
+}
+
+test "POWK: integer base with constant exponent" {
+    const constants = [_]TValue{
+        .{ .integer = 2 },
+        .{ .integer = 5 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 2
+        Instruction.initABC(.POWK, 1, 0, 1), // R1 = R0 ^ K1 (2^5)
+        Instruction.initABC(.RETURN, 1, 2, 0), // return R1
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 2,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = 32.0 });
+}

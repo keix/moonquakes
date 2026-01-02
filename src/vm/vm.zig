@@ -45,7 +45,6 @@ pub const CallInfo = struct {
             self.pc -= @as(usize, @intCast(-offset));
         }
 
-        // Validate PC bounds
         try self.validatePC();
     }
 
@@ -184,7 +183,7 @@ pub const VM = struct {
         return vm_error;
     }
 
-    const ArithOp = enum { add, sub, mul, div, idiv, mod };
+    const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
     const BitwiseOp = enum { band, bor, bxor };
 
     // Push a new call info onto the call stack
@@ -263,6 +262,7 @@ pub const VM = struct {
             .div => nb / nc,
             .idiv => luaFloorDiv(nb, nc),
             .mod => luaMod(nb, nc),
+            .pow => std.math.pow(f64, nb, nc),
         };
 
         self.stack[self.base + a] = .{ .number = res };
@@ -312,8 +312,6 @@ pub const VM = struct {
         self.stack[self.base + a] = .{ .integer = res };
     }
 
-    // compareOp removed - EQ/LT/LE no longer write booleans to registers
-
     fn eqOp(a: TValue, b: TValue) bool {
         return a.eql(b);
     }
@@ -354,20 +352,23 @@ pub const VM = struct {
         multiple: []TValue,
     };
 
-    pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
-        // Set up initial call frame
+    fn setupMainFrame(self: *VM, proto: *const Proto) void {
         self.base_ci = CallInfo{
             .func = proto,
             .pc = proto.code.ptr,
             .base = 0,
-            .ret_base = 0, // Main function doesn't have a caller
+            .ret_base = 0,
             .savedpc = null,
-            .nresults = -1, // multiple results expected
+            .nresults = -1,
             .previous = null,
         };
         self.ci = &self.base_ci;
         self.base = 0;
         self.top = proto.maxstacksize;
+    }
+
+    pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
+        self.setupMainFrame(proto);
 
         while (true) {
             var ci = self.ci.?;
@@ -578,6 +579,17 @@ pub const VM = struct {
                     if (nc == 0) return error.ArithmeticError;
                     self.stack[self.base + a] = .{ .number = luaMod(nb, nc) };
                 },
+                .POWK => {
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    const vb = &self.stack[self.base + b];
+                    const vc = &proto.k[c];
+
+                    const nb = vb.toNumber() orelse return error.ArithmeticError;
+                    const nc = vc.toNumber() orelse return error.ArithmeticError;
+                    self.stack[self.base + a] = .{ .number = std.math.pow(f64, nb, nc) };
+                },
                 .BANDK => {
                     // Bitwise AND with constant
                     const a = inst.getA();
@@ -671,6 +683,9 @@ pub const VM = struct {
                 },
                 .MOD => {
                     try self.arithBinary(inst, .mod);
+                },
+                .POW => {
+                    try self.arithBinary(inst, .pow);
                 },
                 .BAND => {
                     // Bitwise AND (&)

@@ -207,3 +207,69 @@ test "arithmetic: 10 % 3 = 1" {
     // Verify all registers changed as expected
     try utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
 }
+
+test "arithmetic: 2 ^ 3 = 8 (power operation)" {
+    const constants = [_]TValue{
+        .{ .number = 2.0 },
+        .{ .number = 3.0 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 2
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 3
+        Instruction.initABC(.POW, 2, 0, 1), // R2 = R0 ^ R1
+        Instruction.initABC(.RETURN, 2, 2, 0), // return R2
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
+    const result = try vm.execute(&proto);
+    trace.updateFinal(&vm, 3);
+
+    try expectSingleResult(result, TValue{ .number = 8.0 });
+
+    // Verify register states
+    try utils.expectRegisters(&vm, 0, &[_]TValue{
+        .{ .number = 2.0 }, // R0
+        .{ .number = 3.0 }, // R1
+        .{ .number = 8.0 }, // R2
+    });
+}
+
+test "arithmetic: 5 ^ 2 with integer inputs" {
+    const constants = [_]TValue{
+        .{ .integer = 5 },
+        .{ .integer = 2 },
+    };
+
+    const code = [_]Instruction{
+        Instruction.initABx(.LOADK, 0, 0), // R0 = 5
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 2
+        Instruction.initABC(.POW, 2, 0, 1), // R2 = R0 ^ R1
+        Instruction.initABC(.RETURN, 2, 2, 0), // return R2
+    };
+
+    const proto = Proto{
+        .k = &constants,
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+    const result = try vm.execute(&proto);
+
+    try expectSingleResult(result, TValue{ .number = 25.0 });
+}

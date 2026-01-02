@@ -19,9 +19,11 @@ Each instruction is a 32-bit unsigned integer. Bit positions are described
 using little-endian bit numbering, where bit 0 is the least significant bit.
 
 ```
++-------------------------------------------------+
 | 31 ... 24 | 23 ... 16 | 15 | 14 ... 7 | 6 ... 0 |
 |-----------|-----------|----|----------|---------|
 |     C     |     B     | k  |     A    |   OP    |
++-------------------------------------------------+
 ```
 
 OP is a 7-bit opcode stored in the least significant bits.
