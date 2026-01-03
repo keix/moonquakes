@@ -35,6 +35,12 @@ const FunctionEntry = struct {
     proto: *Proto,
 };
 
+// Variable entry for scope management
+const VariableEntry = struct {
+    name: []const u8,
+    reg: u8,
+};
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
@@ -42,6 +48,7 @@ pub const ProtoBuilder = struct {
     next_reg: u8,
     allocator: std.mem.Allocator,
     functions: std.ArrayList(FunctionEntry),
+    variables: std.ArrayList(VariableEntry),
 
     pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
         return .{
@@ -51,6 +58,7 @@ pub const ProtoBuilder = struct {
             .next_reg = 0,
             .allocator = allocator,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
+            .variables = std.ArrayList(VariableEntry).init(allocator),
         };
     }
 
@@ -70,6 +78,7 @@ pub const ProtoBuilder = struct {
         self.code.deinit();
         self.constants.deinit();
         self.functions.deinit();
+        self.variables.deinit();
     }
 
     pub fn allocReg(self: *ProtoBuilder) u8 {
@@ -299,6 +308,20 @@ pub const ProtoBuilder = struct {
         return null;
     }
 
+    // Variable management methods
+    pub fn addVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
+        try self.variables.append(.{ .name = name, .reg = reg });
+    }
+
+    pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
+        for (self.variables.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.reg;
+            }
+        }
+        return null;
+    }
+
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
         const code_slice = try allocator.dupe(Instruction, self.code.items);
 
@@ -312,6 +335,24 @@ pub const ProtoBuilder = struct {
             .code = code_slice,
             .k = constants_slice,
             .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = self.maxstacksize,
+        };
+    }
+
+    pub fn toProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !Proto {
+        const code_slice = try allocator.dupe(Instruction, self.code.items);
+
+        // Handle empty constants case explicitly
+        const constants_slice = if (self.constants.items.len == 0)
+            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
+        else
+            try allocator.dupe(TValue, self.constants.items);
+
+        return Proto{
+            .code = code_slice,
+            .k = constants_slice,
+            .numparams = num_params,
             .is_vararg = false,
             .maxstacksize = self.maxstacksize,
         };
@@ -444,7 +485,16 @@ pub const Parser = struct {
                 self.advance();
                 return reg;
             } else {
-                return error.UnsupportedIdentifier;
+                // Check if it's a variable/parameter
+                const var_name = self.current.lexeme;
+                if (self.proto.findVariable(var_name)) |var_reg| {
+                    const reg = self.proto.allocReg();
+                    try self.proto.emitMOVE(reg, var_reg);
+                    self.advance();
+                    return reg;
+                } else {
+                    return error.UnsupportedIdentifier;
+                }
             }
         }
 
@@ -1068,20 +1118,26 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // For now, support single parameter
+        // Create a separate builder for function body first
+        var func_builder = ProtoBuilder.init(self.proto.allocator);
+        defer func_builder.deinit(); // Clean up at end of function
+
+        // Parse parameters and assign to registers
+        var param_count: u8 = 0;
         if (self.current.kind == .Identifier) {
-            // param_name = self.current.lexeme;
+            const param_name = self.current.lexeme;
             self.advance();
+
+            // Parameters start at register 0 in function scope
+            try func_builder.addVariable(param_name, param_count);
+            param_count += 1;
+            func_builder.next_reg = param_count; // Reserve register for parameter
         }
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
-
-        // Create a separate builder for function body
-        var func_builder = ProtoBuilder.init(self.proto.allocator);
-        defer func_builder.deinit(); // Clean up at end of function
 
         // Parse function body dynamically
         var old_proto = self.proto;
@@ -1104,7 +1160,7 @@ pub const Parser = struct {
         }
 
         // Convert function builder to Proto with dynamic allocation
-        const func_proto_data = try func_builder.toProto(self.proto.allocator);
+        const func_proto_data = try func_builder.toProtoWithParams(self.proto.allocator, param_count);
 
         // Create persistent Proto
         const proto_ptr = try self.proto.allocator.create(Proto);
