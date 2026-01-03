@@ -29,12 +29,27 @@ const ParseError = error{
     UnsupportedFunction,
 };
 
+// Simple function storage for minimal implementation
+const FunctionEntry = struct {
+    name: []const u8,
+    proto: *Proto,
+};
+
+// Variable entry for scope management
+const VariableEntry = struct {
+    name: []const u8,
+    reg: u8,
+};
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
     maxstacksize: u8,
     next_reg: u8,
     allocator: std.mem.Allocator,
+    functions: std.ArrayList(FunctionEntry),
+    variables: std.ArrayList(VariableEntry),
+    parent: ?*ProtoBuilder, // For function scope hierarchy
 
     pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
         return .{
@@ -43,12 +58,42 @@ pub const ProtoBuilder = struct {
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .functions = std.ArrayList(FunctionEntry).init(allocator),
+            .variables = std.ArrayList(VariableEntry).init(allocator),
+            .parent = null,
+        };
+    }
+
+    pub fn initWithParent(allocator: std.mem.Allocator, parent: *ProtoBuilder) ProtoBuilder {
+        return .{
+            .code = std.ArrayList(Instruction).init(allocator),
+            .constants = std.ArrayList(TValue).init(allocator),
+            .maxstacksize = 0,
+            .next_reg = 0,
+            .allocator = allocator,
+            .functions = std.ArrayList(FunctionEntry).init(allocator),
+            .variables = std.ArrayList(VariableEntry).init(allocator),
+            .parent = parent,
         };
     }
 
     pub fn deinit(self: *ProtoBuilder) void {
+        // Free function protos and their allocated arrays
+        for (self.functions.items) |entry| {
+            // Free the allocated arrays
+            if (entry.proto.code.len > 0) {
+                self.allocator.free(entry.proto.code);
+            }
+            if (entry.proto.k.len > 0) {
+                self.allocator.free(entry.proto.k);
+            }
+            self.allocator.destroy(entry.proto);
+        }
+
         self.code.deinit();
         self.constants.deinit();
+        self.functions.deinit();
+        self.variables.deinit();
     }
 
     pub fn allocReg(self: *ProtoBuilder) u8 {
@@ -81,6 +126,16 @@ pub const ProtoBuilder = struct {
 
     pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.EQ, negate, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitLT(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
+        const instr = Instruction.initABC(.LT, negate, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitLE(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
+        const instr = Instruction.initABC(.LE, negate, left, right);
         try self.code.append(instr);
     }
 
@@ -240,20 +295,83 @@ pub const ProtoBuilder = struct {
         return @intCast(self.constants.items.len - 1);
     }
 
+    pub fn addBytecodeFunc(self: *ProtoBuilder, proto: *const Proto) !u32 {
+        const const_value = TValue{ .function = Function{ .bytecode = proto } };
+        try self.constants.append(const_value);
+        return @intCast(self.constants.items.len - 1);
+    }
+
     fn updateMaxStack(self: *ProtoBuilder, stack_size: u8) void {
         if (stack_size > self.maxstacksize) {
             self.maxstacksize = stack_size;
         }
     }
 
+    pub fn addFunction(self: *ProtoBuilder, name: []const u8, proto: *Proto) !void {
+        try self.functions.append(FunctionEntry{
+            .name = name,
+            .proto = proto,
+        });
+    }
+
+    pub fn findFunction(self: *ProtoBuilder, name: []const u8) ?*Proto {
+        for (self.functions.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.proto;
+            }
+        }
+        // Search in parent scope if not found locally
+        if (self.parent) |parent| {
+            return parent.findFunction(name);
+        }
+        return null;
+    }
+
+    // Variable management methods
+    pub fn addVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
+        try self.variables.append(.{ .name = name, .reg = reg });
+    }
+
+    pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
+        for (self.variables.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.reg;
+            }
+        }
+        return null;
+    }
+
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
         const code_slice = try allocator.dupe(Instruction, self.code.items);
-        const constants_slice = try allocator.dupe(TValue, self.constants.items);
+
+        // Handle empty constants case explicitly
+        const constants_slice = if (self.constants.items.len == 0)
+            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
+        else
+            try allocator.dupe(TValue, self.constants.items);
 
         return Proto{
             .code = code_slice,
             .k = constants_slice,
             .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = self.maxstacksize,
+        };
+    }
+
+    pub fn toProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !Proto {
+        const code_slice = try allocator.dupe(Instruction, self.code.items);
+
+        // Handle empty constants case explicitly
+        const constants_slice = if (self.constants.items.len == 0)
+            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
+        else
+            try allocator.dupe(TValue, self.constants.items);
+
+        return Proto{
+            .code = code_slice,
+            .k = constants_slice,
+            .numparams = num_params,
             .is_vararg = false,
             .maxstacksize = self.maxstacksize,
         };
@@ -312,6 +430,8 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
+                    try self.parseFunctionDefinition();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -384,7 +504,16 @@ pub const Parser = struct {
                 self.advance();
                 return reg;
             } else {
-                return error.UnsupportedIdentifier;
+                // Check if it's a variable/parameter
+                const var_name = self.current.lexeme;
+                if (self.proto.findVariable(var_name)) |var_reg| {
+                    const reg = self.proto.allocReg();
+                    try self.proto.emitMOVE(reg, var_reg);
+                    self.advance();
+                    return reg;
+                } else {
+                    return error.UnsupportedIdentifier;
+                }
             }
         }
 
@@ -444,12 +573,25 @@ pub const Parser = struct {
         return left;
     }
 
+    // Comparison operators are lowered into conditional jumps + LOADBOOL.
+    // This mirrors Lua VM semantics:
+    //   - comparison emits a test instruction (EQ/LT/LE)
+    //   - followed by two LOADBOOL instructions to materialize a boolean value
+    //
+    // The exact opcode sequence is intentionally explicit here.
+    // Once CALL / RETURN and boolean handling are fully stabilized,
+    // this block may be refactored into a more compact form.
+
     fn parseCompare(self: *Parser) ParseError!u8 {
         var left = try self.parseAdd();
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "==") or
-                std.mem.eql(u8, self.current.lexeme, "!=")))
+                std.mem.eql(u8, self.current.lexeme, "!=") or
+                std.mem.eql(u8, self.current.lexeme, "<") or
+                std.mem.eql(u8, self.current.lexeme, "<=") or
+                std.mem.eql(u8, self.current.lexeme, ">") or
+                std.mem.eql(u8, self.current.lexeme, ">=")))
         {
             const op = self.current.lexeme;
             self.advance(); // consume operator
@@ -466,6 +608,28 @@ pub const Parser = struct {
                 try self.proto.emitEQ(left, right, 1); // skip if NOT equal (negate=1)
                 try self.proto.emitLOADBOOL(dst, false, true); // equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // not equal: true
+            } else if (std.mem.eql(u8, op, "<")) {
+                // For <: if left < right then set true, else set false
+                try self.proto.emitLT(left, right, 0); // skip if left < right (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not less than: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // less than: true
+            } else if (std.mem.eql(u8, op, "<=")) {
+                // For <=: if left <= right then set true, else set false
+                try self.proto.emitLE(left, right, 0); // skip if left <= right (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not less than or equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // less than or equal: true
+            } else if (std.mem.eql(u8, op, ">")) {
+                // For >: if left > right then set true, else set false
+                // Use LT with swapped operands: right < left
+                try self.proto.emitLT(right, left, 0); // skip if right < left (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not greater than: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // greater than: true
+            } else if (std.mem.eql(u8, op, ">=")) {
+                // For >=: if left >= right then set true, else set false
+                // Use LE with swapped operands: right <= left
+                try self.proto.emitLE(right, left, 0); // skip if right <= left (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not greater than or equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // greater than or equal: true
             } else {
                 return error.UnsupportedOperator;
             }
@@ -749,8 +913,58 @@ pub const Parser = struct {
     }
 
     fn parseGenericFunctionCall(self: *Parser) ParseError!void {
-        // Parse function call - for now support known functions
+        // Parse function call - support native and user-defined functions
         const func_name = self.current.lexeme;
+
+        // Check if it's a user-defined function first
+        if (self.proto.findFunction(func_name)) |user_func_proto| {
+            // Handle user-defined function call
+            self.advance(); // consume function name
+
+            // Expect '('
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+                return error.ExpectedLeftParen;
+            }
+            self.advance(); // consume '('
+
+            // Load function constant
+            const func_reg = self.proto.allocReg();
+            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
+            try self.proto.emitLoadK(func_reg, func_const_idx);
+
+            // Parse arguments with expression evaluation
+            var arg_count: u8 = 0;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                // Parse first argument
+                const arg_reg = try self.parseExpr();
+                // Move argument to correct position (func_reg + 1)
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+
+                // Parse additional arguments
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.advance(); // consume ','
+                    const next_arg = try self.parseExpr();
+                    arg_count += 1;
+                    // Move to correct position
+                    if (next_arg != func_reg + arg_count) {
+                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    }
+                }
+            }
+
+            // Expect ')'
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+
+            // Emit CALL instruction (0 results for statements)
+            try self.proto.emitCall(func_reg, arg_count, 0);
+            return;
+        }
 
         // Map function name to native function ID
         const func_id = if (std.mem.eql(u8, func_name, "print"))
@@ -797,6 +1011,58 @@ pub const Parser = struct {
     fn parseFunctionCallExpr(self: *Parser) ParseError!u8 {
         // Parse function call that returns a value
         const func_name = self.current.lexeme;
+
+        // Check if it's a user-defined function first
+        if (self.proto.findFunction(func_name)) |user_func_proto| {
+            // Handle user-defined function call with return value
+            self.advance(); // consume function name
+
+            // Expect '('
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+                return error.ExpectedLeftParen;
+            }
+            self.advance(); // consume '('
+
+            // Load function constant
+            const func_reg = self.proto.allocReg();
+            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
+            try self.proto.emitLoadK(func_reg, func_const_idx);
+
+            // Parse arguments with expression evaluation
+            var arg_count: u8 = 0;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                // Parse first argument
+                const arg_reg = try self.parseExpr();
+                // Move argument to correct position (func_reg + 1)
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+
+                // Parse additional arguments
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.advance(); // consume ','
+                    const next_arg = try self.parseExpr();
+                    arg_count += 1;
+                    // Move to correct position
+                    if (next_arg != func_reg + arg_count) {
+                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    }
+                }
+            }
+
+            // Expect ')'
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+
+            // Emit CALL instruction (1 result)
+            try self.proto.emitCall(func_reg, arg_count, 1);
+
+            // Return the register where the result is stored
+            return func_reg;
+        }
 
         // Map function name to native function ID
         const func_id = if (std.mem.eql(u8, func_name, "tostring"))
@@ -915,5 +1181,93 @@ pub const Parser = struct {
 
         // Emit CALL instruction (0 results for io.write)
         try self.proto.emitCall(func_reg, arg_count, 0);
+    }
+
+    fn parseFunctionDefinition(self: *Parser) ParseError!void {
+        // function name(param) return param end
+        self.advance(); // consume 'function'
+
+        // Parse function name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const func_name = self.current.lexeme;
+        self.advance(); // consume function name
+
+        // Parse parameters: (param)
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Create a separate builder for function body with parent reference
+        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        defer func_builder.deinit(); // Clean up at end of function
+
+        // Create Proto container early (address is fixed, content will be filled later)
+        const proto_ptr = try self.proto.allocator.create(Proto);
+
+        // Temporarily add function for recursive calls with unfilled Proto
+        try self.proto.addFunction(func_name, proto_ptr);
+
+        // Parse parameters and assign to registers
+        var param_count: u8 = 0;
+        if (self.current.kind == .Identifier) {
+            // Parse first parameter
+            const param_name = self.current.lexeme;
+            self.advance();
+
+            // Parameters start at register 0 in function scope
+            try func_builder.addVariable(param_name, param_count);
+            param_count += 1;
+
+            // Parse additional parameters
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const next_param = self.current.lexeme;
+                self.advance();
+
+                try func_builder.addVariable(next_param, param_count);
+                param_count += 1;
+            }
+
+            func_builder.next_reg = param_count; // Reserve registers for parameters
+        }
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Parse function body dynamically
+        const old_proto = self.proto;
+        self.proto = &func_builder; // Switch to function's ProtoBuilder
+        defer self.proto = old_proto; // Restore original ProtoBuilder
+
+        try self.parseStatements(); // Parse function body statements
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // Add implicit RETURN if no explicit return was added
+        if (func_builder.code.items.len == 0 or
+            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
+        {
+            try func_builder.emit(.RETURN, 0, 1, 0);
+        }
+
+        // Convert function builder to Proto with dynamic allocation
+        const func_proto_data = try func_builder.toProtoWithParams(self.proto.allocator, param_count);
+
+        // Fill the Proto container with actual content (late binding)
+        proto_ptr.* = func_proto_data;
+
+        // Proto is already registered in old_proto.functions, no need to replace
     }
 };
