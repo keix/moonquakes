@@ -29,12 +29,19 @@ const ParseError = error{
     UnsupportedFunction,
 };
 
+// Simple function storage for minimal implementation
+const FunctionEntry = struct {
+    name: []const u8,
+    proto: *Proto,
+};
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
     maxstacksize: u8,
     next_reg: u8,
     allocator: std.mem.Allocator,
+    functions: std.ArrayList(FunctionEntry),
 
     pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
         return .{
@@ -43,12 +50,26 @@ pub const ProtoBuilder = struct {
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .functions = std.ArrayList(FunctionEntry).init(allocator),
         };
     }
 
     pub fn deinit(self: *ProtoBuilder) void {
+        // Free function protos and their allocated arrays
+        for (self.functions.items) |entry| {
+            // Free the allocated arrays
+            if (entry.proto.code.len > 0) {
+                self.allocator.free(entry.proto.code);
+            }
+            if (entry.proto.k.len > 0) {
+                self.allocator.free(entry.proto.k);
+            }
+            self.allocator.destroy(entry.proto);
+        }
+
         self.code.deinit();
         self.constants.deinit();
+        self.functions.deinit();
     }
 
     pub fn allocReg(self: *ProtoBuilder) u8 {
@@ -250,15 +271,42 @@ pub const ProtoBuilder = struct {
         return @intCast(self.constants.items.len - 1);
     }
 
+    pub fn addBytecodeFunc(self: *ProtoBuilder, proto: *const Proto) !u32 {
+        const const_value = TValue{ .function = Function{ .bytecode = proto } };
+        try self.constants.append(const_value);
+        return @intCast(self.constants.items.len - 1);
+    }
+
     fn updateMaxStack(self: *ProtoBuilder, stack_size: u8) void {
         if (stack_size > self.maxstacksize) {
             self.maxstacksize = stack_size;
         }
     }
 
+    pub fn addFunction(self: *ProtoBuilder, name: []const u8, proto: *Proto) !void {
+        try self.functions.append(FunctionEntry{
+            .name = name,
+            .proto = proto,
+        });
+    }
+
+    pub fn findFunction(self: *ProtoBuilder, name: []const u8) ?*Proto {
+        for (self.functions.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.proto;
+            }
+        }
+        return null;
+    }
+
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
         const code_slice = try allocator.dupe(Instruction, self.code.items);
-        const constants_slice = try allocator.dupe(TValue, self.constants.items);
+
+        // Handle empty constants case explicitly
+        const constants_slice = if (self.constants.items.len == 0)
+            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
+        else
+            try allocator.dupe(TValue, self.constants.items);
 
         return Proto{
             .code = code_slice,
@@ -322,6 +370,8 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
+                    try self.parseFunctionDefinition();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -453,6 +503,15 @@ pub const Parser = struct {
 
         return left;
     }
+
+    // Comparison operators are lowered into conditional jumps + LOADBOOL.
+    // This mirrors Lua VM semantics:
+    //   - comparison emits a test instruction (EQ/LT/LE)
+    //   - followed by two LOADBOOL instructions to materialize a boolean value
+    //
+    // The exact opcode sequence is intentionally explicit here.
+    // Once CALL / RETURN and boolean handling are fully stabilized,
+    // this block may be refactored into a more compact form.
 
     fn parseCompare(self: *Parser) ParseError!u8 {
         var left = try self.parseAdd();
@@ -785,8 +844,47 @@ pub const Parser = struct {
     }
 
     fn parseGenericFunctionCall(self: *Parser) ParseError!void {
-        // Parse function call - for now support known functions
+        // Parse function call - support native and user-defined functions
         const func_name = self.current.lexeme;
+
+        // Check if it's a user-defined function first
+        if (self.proto.findFunction(func_name)) |user_func_proto| {
+            // Handle user-defined function call
+            self.advance(); // consume function name
+
+            // Expect '('
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+                return error.ExpectedLeftParen;
+            }
+            self.advance(); // consume '('
+
+            // Load function constant
+            const func_reg = self.proto.allocReg();
+            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
+            try self.proto.emitLoadK(func_reg, func_const_idx);
+
+            // Parse arguments (simplified: single argument for now)
+            var arg_count: u8 = 0;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                // Parse first argument
+                const arg_reg = try self.parseExpr();
+                // Move argument to correct position (func_reg + 1)
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+            }
+
+            // Expect ')'
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+
+            // Emit CALL instruction (0 results for statements)
+            try self.proto.emitCall(func_reg, arg_count, 0);
+            return;
+        }
 
         // Map function name to native function ID
         const func_id = if (std.mem.eql(u8, func_name, "print"))
@@ -951,5 +1049,77 @@ pub const Parser = struct {
 
         // Emit CALL instruction (0 results for io.write)
         try self.proto.emitCall(func_reg, arg_count, 0);
+    }
+
+    fn parseFunctionDefinition(self: *Parser) ParseError!void {
+        // function name(param) return param end
+        self.advance(); // consume 'function'
+
+        // Parse function name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const func_name = self.current.lexeme;
+        self.advance(); // consume function name
+
+        // Parse parameters: (param)
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // For now, support single parameter
+        if (self.current.kind == .Identifier) {
+            // param_name = self.current.lexeme;
+            self.advance();
+        }
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // For debugging: use the same allocator but don't use dupe for now
+        var func_builder = ProtoBuilder.init(self.proto.allocator);
+
+        // Parse function body - skip to 'end' for now
+        while (self.current.kind != .Eof) {
+            if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end")) {
+                break;
+            }
+            self.advance(); // skip for now
+        }
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // FIXED PROTO APPROACH: Allocate arrays properly
+        const return_instruction = Instruction.initABC(.RETURN, 0, 1, 0);
+
+        // Allocate arrays that will persist
+        const code_array = try self.proto.allocator.alloc(Instruction, 1);
+        code_array[0] = return_instruction;
+
+        const constants_array = try self.proto.allocator.alloc(TValue, 0); // empty
+
+        const func_proto = Proto{
+            .code = code_array,
+            .k = constants_array,
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 1, // Need at least 1 for return value
+        };
+
+        const proto_ptr = try self.proto.allocator.create(Proto);
+        proto_ptr.* = func_proto;
+
+        // Store function
+        try self.proto.addFunction(func_name, proto_ptr);
+
+        // Clean up builder since we're using static arrays now
+        func_builder.deinit();
     }
 };

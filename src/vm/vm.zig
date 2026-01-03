@@ -1052,7 +1052,28 @@ pub const VM = struct {
                             },
                             .bytecode => |func_proto| {
                                 // Handle bytecode function calls
-                                _ = try self.pushCallInfo(func_proto, self.base + a, self.base + a, @intCast(nresults));
+
+                                const new_base = self.base + a;
+                                const ret_base = self.base + a;
+
+                                // Move arguments to correct positions if needed
+                                // Arguments are already at R(A+1)..R(A+nargs), but callee expects them at R(0)..R(nargs-1)
+                                // Since callee base = R(A), we need to shift arguments down by 1
+                                if (nargs > 0) {
+                                    var i: u32 = 0;
+                                    while (i < nargs) : (i += 1) {
+                                        self.stack[new_base + i] = self.stack[new_base + 1 + i];
+                                    }
+                                }
+
+                                // Initialize remaining parameters to nil
+                                var i: u32 = nargs;
+                                while (i < func_proto.numparams) : (i += 1) {
+                                    self.stack[new_base + i] = .nil;
+                                }
+
+                                _ = try self.pushCallInfo(func_proto, new_base, ret_base, @intCast(nresults));
+                                self.top = new_base + func_proto.maxstacksize;
                             },
                         }
                         continue;
