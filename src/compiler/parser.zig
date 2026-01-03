@@ -49,6 +49,7 @@ pub const ProtoBuilder = struct {
     allocator: std.mem.Allocator,
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
+    parent: ?*ProtoBuilder, // For function scope hierarchy
 
     pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
         return .{
@@ -59,6 +60,20 @@ pub const ProtoBuilder = struct {
             .allocator = allocator,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
+            .parent = null,
+        };
+    }
+
+    pub fn initWithParent(allocator: std.mem.Allocator, parent: *ProtoBuilder) ProtoBuilder {
+        return .{
+            .code = std.ArrayList(Instruction).init(allocator),
+            .constants = std.ArrayList(TValue).init(allocator),
+            .maxstacksize = 0,
+            .next_reg = 0,
+            .allocator = allocator,
+            .functions = std.ArrayList(FunctionEntry).init(allocator),
+            .variables = std.ArrayList(VariableEntry).init(allocator),
+            .parent = parent,
         };
     }
 
@@ -304,6 +319,10 @@ pub const ProtoBuilder = struct {
             if (std.mem.eql(u8, entry.name, name)) {
                 return entry.proto;
             }
+        }
+        // Search in parent scope if not found locally
+        if (self.parent) |parent| {
+            return parent.findFunction(name);
         }
         return null;
     }
@@ -913,7 +932,7 @@ pub const Parser = struct {
             const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
             try self.proto.emitLoadK(func_reg, func_const_idx);
 
-            // Parse arguments (simplified: single argument for now)
+            // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
             if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
                 // Parse first argument
@@ -923,6 +942,17 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(func_reg + 1, arg_reg);
                 }
                 arg_count = 1;
+
+                // Parse additional arguments
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.advance(); // consume ','
+                    const next_arg = try self.parseExpr();
+                    arg_count += 1;
+                    // Move to correct position
+                    if (next_arg != func_reg + arg_count) {
+                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    }
+                }
             }
 
             // Expect ')'
@@ -981,6 +1011,58 @@ pub const Parser = struct {
     fn parseFunctionCallExpr(self: *Parser) ParseError!u8 {
         // Parse function call that returns a value
         const func_name = self.current.lexeme;
+
+        // Check if it's a user-defined function first
+        if (self.proto.findFunction(func_name)) |user_func_proto| {
+            // Handle user-defined function call with return value
+            self.advance(); // consume function name
+
+            // Expect '('
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+                return error.ExpectedLeftParen;
+            }
+            self.advance(); // consume '('
+
+            // Load function constant
+            const func_reg = self.proto.allocReg();
+            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
+            try self.proto.emitLoadK(func_reg, func_const_idx);
+
+            // Parse arguments with expression evaluation
+            var arg_count: u8 = 0;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                // Parse first argument
+                const arg_reg = try self.parseExpr();
+                // Move argument to correct position (func_reg + 1)
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+
+                // Parse additional arguments
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.advance(); // consume ','
+                    const next_arg = try self.parseExpr();
+                    arg_count += 1;
+                    // Move to correct position
+                    if (next_arg != func_reg + arg_count) {
+                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    }
+                }
+            }
+
+            // Expect ')'
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+
+            // Emit CALL instruction (1 result)
+            try self.proto.emitCall(func_reg, arg_count, 1);
+
+            // Return the register where the result is stored
+            return func_reg;
+        }
 
         // Map function name to native function ID
         const func_id = if (std.mem.eql(u8, func_name, "tostring"))
@@ -1118,20 +1200,41 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Create a separate builder for function body first
-        var func_builder = ProtoBuilder.init(self.proto.allocator);
+        // Create a separate builder for function body with parent reference
+        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
         defer func_builder.deinit(); // Clean up at end of function
+
+        // Create Proto container early (address is fixed, content will be filled later)
+        const proto_ptr = try self.proto.allocator.create(Proto);
+
+        // Temporarily add function for recursive calls with unfilled Proto
+        try self.proto.addFunction(func_name, proto_ptr);
 
         // Parse parameters and assign to registers
         var param_count: u8 = 0;
         if (self.current.kind == .Identifier) {
+            // Parse first parameter
             const param_name = self.current.lexeme;
             self.advance();
 
             // Parameters start at register 0 in function scope
             try func_builder.addVariable(param_name, param_count);
             param_count += 1;
-            func_builder.next_reg = param_count; // Reserve register for parameter
+
+            // Parse additional parameters
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const next_param = self.current.lexeme;
+                self.advance();
+
+                try func_builder.addVariable(next_param, param_count);
+                param_count += 1;
+            }
+
+            func_builder.next_reg = param_count; // Reserve registers for parameters
         }
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -1140,7 +1243,7 @@ pub const Parser = struct {
         self.advance(); // consume ')'
 
         // Parse function body dynamically
-        var old_proto = self.proto;
+        const old_proto = self.proto;
         self.proto = &func_builder; // Switch to function's ProtoBuilder
         defer self.proto = old_proto; // Restore original ProtoBuilder
 
@@ -1162,11 +1265,9 @@ pub const Parser = struct {
         // Convert function builder to Proto with dynamic allocation
         const func_proto_data = try func_builder.toProtoWithParams(self.proto.allocator, param_count);
 
-        // Create persistent Proto
-        const proto_ptr = try self.proto.allocator.create(Proto);
+        // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
 
-        // Store function in main ProtoBuilder
-        try old_proto.addFunction(func_name, proto_ptr);
+        // Proto is already registered in old_proto.functions, no need to replace
     }
 };
