@@ -26,6 +26,16 @@ pub const Moonquakes = struct {
     }
 
     /// Compile Lua source code into bytecode
+    ///
+    /// NOTE:
+    /// Proto returned here borrows memory from ProtoBuilder.
+    /// Lifetime is NOT independent. Do not use this API yet.
+    ///
+    /// Ownership model for Proto will be decided after:
+    /// - CALL / RETURN semantics are finalized
+    /// - closure and upvalue representation is defined
+    /// - GC root ownership is clarified
+    ///
     pub fn compile(self: *Moonquakes, source: []const u8) !Proto {
         var lx = lexer.Lexer.init(source);
         var builder = parser.ProtoBuilder.init(self.allocator);
@@ -61,7 +71,15 @@ pub const Moonquakes = struct {
 
     /// Compile and execute Lua source in one step
     pub fn runSource(self: *Moonquakes, source: []const u8) !VM.ReturnValue {
-        const proto = try self.compile(source);
+        // Don't use compile() which cleans up ProtoBuilder too early
+        var lx = lexer.Lexer.init(source);
+        var builder = parser.ProtoBuilder.init(self.allocator);
+        defer builder.deinit(); // Clean up after VM execution
+
+        var p = parser.Parser.init(&lx, &builder);
+        try p.parseChunk();
+
+        const proto = try builder.toProto(self.allocator);
         defer self.allocator.free(proto.code);
         defer self.allocator.free(proto.k);
 
