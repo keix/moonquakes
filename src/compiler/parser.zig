@@ -1079,16 +1079,16 @@ pub const Parser = struct {
         }
         self.advance(); // consume ')'
 
-        // For debugging: use the same allocator but don't use dupe for now
+        // Create a separate builder for function body
         var func_builder = ProtoBuilder.init(self.proto.allocator);
+        defer func_builder.deinit(); // Clean up at end of function
 
-        // Parse function body - skip to 'end' for now
-        while (self.current.kind != .Eof) {
-            if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end")) {
-                break;
-            }
-            self.advance(); // skip for now
-        }
+        // Parse function body dynamically
+        var old_proto = self.proto;
+        self.proto = &func_builder; // Switch to function's ProtoBuilder
+        defer self.proto = old_proto; // Restore original ProtoBuilder
+
+        try self.parseStatements(); // Parse function body statements
 
         // Expect 'end'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
@@ -1096,30 +1096,21 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // FIXED PROTO APPROACH: Allocate arrays properly
-        const return_instruction = Instruction.initABC(.RETURN, 0, 1, 0);
+        // Add implicit RETURN if no explicit return was added
+        if (func_builder.code.items.len == 0 or
+            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
+        {
+            try func_builder.emit(.RETURN, 0, 1, 0);
+        }
 
-        // Allocate arrays that will persist
-        const code_array = try self.proto.allocator.alloc(Instruction, 1);
-        code_array[0] = return_instruction;
+        // Convert function builder to Proto with dynamic allocation
+        const func_proto_data = try func_builder.toProto(self.proto.allocator);
 
-        const constants_array = try self.proto.allocator.alloc(TValue, 0); // empty
-
-        const func_proto = Proto{
-            .code = code_array,
-            .k = constants_array,
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 1, // Need at least 1 for return value
-        };
-
+        // Create persistent Proto
         const proto_ptr = try self.proto.allocator.create(Proto);
-        proto_ptr.* = func_proto;
+        proto_ptr.* = func_proto_data;
 
-        // Store function
-        try self.proto.addFunction(func_name, proto_ptr);
-
-        // Clean up builder since we're using static arrays now
-        func_builder.deinit();
+        // Store function in main ProtoBuilder
+        try old_proto.addFunction(func_name, proto_ptr);
     }
 };
