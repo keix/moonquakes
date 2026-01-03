@@ -117,3 +117,34 @@ test "parser comparison: negative numbers" {
     try testParserExpression("return 0 - 5 == 0 - 5", TValue{ .boolean = true });
     try testParserExpression("return 0 - 3 != 0 - 5", TValue{ .boolean = true });
 }
+
+test "parser comparison: < operator" {
+    try testParserExpression("return 5 < 10", TValue{ .boolean = true });
+    try testParserExpression("return 10 < 5", TValue{ .boolean = false });
+    try testParserExpression("return 5 < 5", TValue{ .boolean = false });
+}
+
+test "parser comparison: > operator" {
+    try testParserExpression("return 10 > 5", TValue{ .boolean = true });
+    try testParserExpression("return 5 > 10", TValue{ .boolean = false });
+    try testParserExpression("return 5 > 5", TValue{ .boolean = false });
+}
+
+test "parser comparison: <= operator" {
+    try testParserExpression("return 5 <= 10", TValue{ .boolean = true });
+    try testParserExpression("return 5 <= 5", TValue{ .boolean = true });
+    try testParserExpression("return 10 <= 5", TValue{ .boolean = false });
+}
+
+test "parser comparison: >= operator" {
+    try testParserExpression("return 10 >= 5", TValue{ .boolean = true });
+    try testParserExpression("return 5 >= 5", TValue{ .boolean = true });
+    try testParserExpression("return 5 >= 10", TValue{ .boolean = false });
+}
+
+test "parser comparison: order operators with arithmetic" {
+    try testParserExpression("return 3 + 2 < 10", TValue{ .boolean = true });
+    try testParserExpression("return 2 * 5 > 8", TValue{ .boolean = true });
+    try testParserExpression("return 15 / 3 <= 5", TValue{ .boolean = true });
+    try testParserExpression("return 7 % 3 >= 1", TValue{ .boolean = true });
+}

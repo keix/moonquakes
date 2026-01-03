@@ -84,6 +84,16 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitLT(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
+        const instr = Instruction.initABC(.LT, negate, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitLE(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
+        const instr = Instruction.initABC(.LE, negate, left, right);
+        try self.code.append(instr);
+    }
+
     pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
         try self.code.append(instr);
@@ -449,7 +459,11 @@ pub const Parser = struct {
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "==") or
-                std.mem.eql(u8, self.current.lexeme, "!=")))
+                std.mem.eql(u8, self.current.lexeme, "!=") or
+                std.mem.eql(u8, self.current.lexeme, "<") or
+                std.mem.eql(u8, self.current.lexeme, "<=") or
+                std.mem.eql(u8, self.current.lexeme, ">") or
+                std.mem.eql(u8, self.current.lexeme, ">=")))
         {
             const op = self.current.lexeme;
             self.advance(); // consume operator
@@ -466,6 +480,28 @@ pub const Parser = struct {
                 try self.proto.emitEQ(left, right, 1); // skip if NOT equal (negate=1)
                 try self.proto.emitLOADBOOL(dst, false, true); // equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // not equal: true
+            } else if (std.mem.eql(u8, op, "<")) {
+                // For <: if left < right then set true, else set false
+                try self.proto.emitLT(left, right, 0); // skip if left < right (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not less than: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // less than: true
+            } else if (std.mem.eql(u8, op, "<=")) {
+                // For <=: if left <= right then set true, else set false
+                try self.proto.emitLE(left, right, 0); // skip if left <= right (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not less than or equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // less than or equal: true
+            } else if (std.mem.eql(u8, op, ">")) {
+                // For >: if left > right then set true, else set false
+                // Use LT with swapped operands: right < left
+                try self.proto.emitLT(right, left, 0); // skip if right < left (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not greater than: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // greater than: true
+            } else if (std.mem.eql(u8, op, ">=")) {
+                // For >=: if left >= right then set true, else set false
+                // Use LE with swapped operands: right <= left
+                try self.proto.emitLE(right, left, 0); // skip if right <= left (negate=0)
+                try self.proto.emitLOADBOOL(dst, false, true); // not greater than or equal: false, skip next
+                try self.proto.emitLOADBOOL(dst, true, false); // greater than or equal: true
             } else {
                 return error.UnsupportedOperator;
             }
