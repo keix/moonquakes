@@ -192,6 +192,10 @@ pub const VM = struct {
             return error.CallStackOverflow;
         }
 
+        // TODO: Move CallInfo creation into CallInfo.initCall().
+        // Currently VM constructs call frames directly for clarity.
+        // Revisit after CALL / TAILCALL / RETURN semantics are fully stabilized.
+
         const new_ci = &self.callstack[self.callstack_size];
         new_ci.* = CallInfo{
             .func = func,
@@ -352,6 +356,9 @@ pub const VM = struct {
         multiple: []TValue,
     };
 
+    // TODO: Move CallInfo initialization to CallInfo.initMain().
+    // This frame is a VM bootstrap (root frame), not a normal call frame.
+    // Separate initialization when CallInfo responsibilities are clarified.
     fn setupMainFrame(self: *VM, proto: *const Proto) void {
         self.base_ci = CallInfo{
             .func = proto,
@@ -370,6 +377,12 @@ pub const VM = struct {
     pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
         self.setupMainFrame(proto);
 
+        // TODO (mnemonics.do): semantics frozen here.
+        // metamethod dispatch will be inserted at marked points.
+        // changing this requires revisiting standard library and C API.
+        //
+        // Keep: fetch/decode/dispatch.
+        // Move: stack/base/top mutations, CALL/RETURN frame transitions.
         while (true) {
             var ci = self.ci.?;
             const inst = try ci.fetch();
