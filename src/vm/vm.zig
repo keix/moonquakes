@@ -192,6 +192,10 @@ pub const VM = struct {
             return error.CallStackOverflow;
         }
 
+        // TODO: Move CallInfo creation into CallInfo.initCall().
+        // Currently VM constructs call frames directly for clarity.
+        // Revisit after CALL / TAILCALL / RETURN semantics are fully stabilized.
+
         const new_ci = &self.callstack[self.callstack_size];
         new_ci.* = CallInfo{
             .func = func,
@@ -352,6 +356,9 @@ pub const VM = struct {
         multiple: []TValue,
     };
 
+    // TODO: Move CallInfo initialization to CallInfo.initMain().
+    // This frame is a VM bootstrap (root frame), not a normal call frame.
+    // Separate initialization when CallInfo responsibilities are clarified.
     fn setupMainFrame(self: *VM, proto: *const Proto) void {
         self.base_ci = CallInfo{
             .func = proto,
@@ -370,6 +377,12 @@ pub const VM = struct {
     pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
         self.setupMainFrame(proto);
 
+        // TODO (mnemonics.do): semantics frozen here.
+        // metamethod dispatch will be inserted at marked points.
+        // changing this requires revisiting standard library and C API.
+        //
+        // Keep: fetch/decode/dispatch.
+        // Move: stack/base/top mutations, CALL/RETURN frame transitions.
         while (true) {
             var ci = self.ci.?;
             const inst = try ci.fetch();
@@ -1277,6 +1290,23 @@ pub const VM = struct {
                         return error.InvalidTableKey;
                     }
                 },
+                .SETTABUP => {
+                    // SETTABUP A B C: UpValue[A][K[B]] := R[C]
+                    // For globals: _ENV[K[B]] := R[C]
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    const c = inst.getC();
+                    _ = a; // Assume A=0 for _ENV (global environment)
+
+                    const key_val = ci.func.k[b];
+                    const value = self.stack[self.base + c];
+                    if (key_val.isString()) {
+                        const key = key_val.string;
+                        try self.globals.set(key, value);
+                    } else {
+                        return error.InvalidTableKey;
+                    }
+                },
                 .GETUPVAL => {
                     // Legacy opcode - might need proper implementation later
                     // For now, set to nil
@@ -1284,6 +1314,15 @@ pub const VM = struct {
                     const b = inst.getB();
                     _ = b; // Suppress unused warning
                     self.stack[self.base + a] = .nil;
+                },
+                .SETUPVAL => {
+                    // SETUPVAL A B: UpValue[B] := R[A]
+                    // For now, this is a no-op since we don't have proper upvalue implementation
+                    // TODO: Implement proper upvalue setting when upvalues are added
+                    const a = inst.getA();
+                    const b = inst.getB();
+                    _ = a; // Suppress unused warning
+                    _ = b; // Suppress unused warning
                 },
                 .GETTABLE => {
                     // GETTABLE A B C: R[A] := R[B][R[C]]
@@ -1482,6 +1521,20 @@ pub const VM = struct {
                     if ((is_true and a == 0) or (!is_true and a != 0)) {
                         ci.skip();
                     }
+                },
+                .CLOSE => {
+                    // CLOSE A: close upvalues from R[A] upward
+                    // For now, this is a no-op since we don't have proper upvalue implementation
+                    // TODO: Implement proper upvalue closing when upvalues are added
+                    const a = inst.getA();
+                    _ = a; // Suppress unused warning
+                },
+                .TBC => {
+                    // TBC A: mark R[A] as to-be-closed variable
+                    // For now, this is a no-op since we don't have proper to-be-closed implementation
+                    // TODO: Implement proper to-be-closed marking when resource management is added
+                    const a = inst.getA();
+                    _ = a; // Suppress unused warning
                 },
                 .EXTRAARG => {
                     // EXTRAARG Ax: Extra argument for preceding instruction

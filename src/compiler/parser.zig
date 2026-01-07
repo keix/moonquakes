@@ -11,6 +11,34 @@ const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
 
+/// parser.zig
+///
+/// This file implements the Lua 5.4 grammar and emits executable Proto objects.
+///
+/// Design notes:
+/// - This parser prioritizes semantic correctness and specification coverage
+///   over minimality or elegance.
+/// - Some parts may appear imperative or verbose; this is intentional.
+///   At this stage, clarity of semantics is more important than structure.
+///
+/// Important:
+/// - The parser is expected to evolve once the full instruction set (mnemonics)
+///   and runtime semantics are finalized.
+/// - Several dispatch patterns and hard-coded paths are temporary and will be
+///   refactored after the grammar is fully implemented and frozen.
+///
+/// Rationale:
+/// - The parser structure cannot be finalized before all statements and expressions
+///   are implemented.
+/// - Premature refactoring here would obscure semantics and increase churn.
+///
+/// Once all constructs are in place, this file will be revisited to:
+/// - reduce duplication
+/// - unify statement and expression dispatch
+/// - improve readability without changing semantics
+///
+/// Until then, correctness comes first.
+///
 const ParseError = error{
     OutOfMemory,
     InvalidNumber,
@@ -28,6 +56,8 @@ const ParseError = error{
     ExpectedRightParen,
     UnsupportedFunction,
 };
+
+const StatementError = std.mem.Allocator.Error || ParseError;
 
 // Simple function storage for minimal implementation
 const FunctionEntry = struct {
@@ -811,7 +841,7 @@ pub const Parser = struct {
         self.proto.patchFORInstr(forloop_addr, loop_start);
     }
 
-    fn parseStatements(self: *Parser) (std.mem.Allocator.Error || error{ ExpectedThen, ExpectedEnd, ExpectedIdentifier, ExpectedEquals, ExpectedComma, ExpectedDo, UnsupportedStatement, ExpectedExpression, UnsupportedOperator, InvalidNumber, UnsupportedIdentifier, ExpectedLeftParen, ExpectedRightParen, UnsupportedFunction })!void {
+    fn parseStatements(self: *Parser) StatementError!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
