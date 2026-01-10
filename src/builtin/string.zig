@@ -167,6 +167,17 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // Similar to sprintf with %d, %s, %f, etc.
 }
 
+/// string.dump(function [, strip]) - Returns binary representation of function
+pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement string.dump
+    // Returns binary chunk (bytecode) that can be loaded back with load()
+    // Requires access to bytecode generation/serialization
+}
+
 /// string.pack(fmt, v1, v2, ...) - Returns binary string containing values v1, v2, etc. packed according to format fmt
 pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = vm;
