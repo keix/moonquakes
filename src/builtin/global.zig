@@ -184,3 +184,78 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     // TODO: Implement tonumber
     // Converts string to number, optionally with specified base (2-36)
 }
+
+/// rawequal(v1, v2) - Checks whether v1 is equal to v2 without invoking metamethods
+pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement rawequal
+    // Returns true if v1 and v2 are primitively equal (without __eq metamethod)
+}
+
+/// load(chunk [, chunkname [, mode [, env]]]) - Loads a chunk
+pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement load
+    // Loads Lua chunk from string or reader function
+    // Requires integration with compiler/parser
+}
+
+/// loadfile([filename [, mode [, env]]]) - Loads a chunk from a file
+pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement loadfile
+    // Loads Lua chunk from file
+    // Requires integration with compiler/parser
+}
+
+/// dofile([filename]) - Executes a Lua file
+pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement dofile
+    // Equivalent to: assert(loadfile(filename))()
+    // Requires integration with compiler/parser
+}
+
+/// warn(msg1, ...) - Emits a warning with a message (Lua 5.4 feature)
+pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement warn
+    // Emits warning message (can be controlled with @on/@off)
+}
+
+/// _G - A global variable holding the global environment
+pub fn nativeG(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement _G
+    // Returns the global environment table
+    // Note: In Lua, _G is usually just a reference to the globals table
+}
+
+/// _VERSION - A global variable containing the running Lua version string
+pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = vm;
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    // TODO: Implement _VERSION
+    // Returns version string like "Lua 5.4" (or "Moonquakes 0.1")
+    // Note: This could be implemented as a constant rather than a function
+}

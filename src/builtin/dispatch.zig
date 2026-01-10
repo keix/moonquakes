@@ -103,11 +103,35 @@ fn initGlobalFunctions(globals: *Table) !void {
     const rawlen_fn = Function{ .native = .{ .id = NativeFnId.rawlen } };
     try globals.set("rawlen", .{ .function = rawlen_fn });
 
+    const rawequal_fn = Function{ .native = .{ .id = NativeFnId.rawequal } };
+    try globals.set("rawequal", .{ .function = rawequal_fn });
+
     const select_fn = Function{ .native = .{ .id = NativeFnId.select } };
     try globals.set("select", .{ .function = select_fn });
 
     const tonumber_fn = Function{ .native = .{ .id = NativeFnId.tonumber } };
     try globals.set("tonumber", .{ .function = tonumber_fn });
+
+    const load_fn = Function{ .native = .{ .id = NativeFnId.load } };
+    try globals.set("load", .{ .function = load_fn });
+
+    const loadfile_fn = Function{ .native = .{ .id = NativeFnId.loadfile } };
+    try globals.set("loadfile", .{ .function = loadfile_fn });
+
+    const dofile_fn = Function{ .native = .{ .id = NativeFnId.dofile } };
+    try globals.set("dofile", .{ .function = dofile_fn });
+
+    const warn_fn = Function{ .native = .{ .id = NativeFnId.warn } };
+    try globals.set("warn", .{ .function = warn_fn });
+
+    // Note: _G and _VERSION are typically set to globals itself and a version string
+    // They could be implemented as values rather than functions, but we keep them as
+    // functions for consistency with the enum system
+    const g_fn = Function{ .native = .{ .id = NativeFnId.lua_G } };
+    try globals.set("_G", .{ .function = g_fn });
+
+    const version_fn = Function{ .native = .{ .id = NativeFnId.lua_VERSION } };
+    try globals.set("_VERSION", .{ .function = version_fn });
 }
 
 /// String Library: string.len, string.sub, etc. (skeleton implementations)
@@ -153,6 +177,9 @@ fn initStringLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 
     const format_fn = Function{ .native = .{ .id = NativeFnId.string_format } };
     try string_table.set("format", .{ .function = format_fn });
+
+    const dump_fn = Function{ .native = .{ .id = NativeFnId.string_dump } };
+    try string_table.set("dump", .{ .function = dump_fn });
 
     const pack_fn = Function{ .native = .{ .id = NativeFnId.string_pack } };
     try string_table.set("pack", .{ .function = pack_fn });
@@ -536,8 +563,15 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .rawget => try global.nativeRawget(vm, func_reg, nargs, nresults),
         .rawset => try global.nativeRawset(vm, func_reg, nargs, nresults),
         .rawlen => try global.nativeRawlen(vm, func_reg, nargs, nresults),
+        .rawequal => try global.nativeRawequal(vm, func_reg, nargs, nresults),
         .select => try global.nativeSelect(vm, func_reg, nargs, nresults),
         .tonumber => try global.nativeTonumber(vm, func_reg, nargs, nresults),
+        .load => try global.nativeLoad(vm, func_reg, nargs, nresults),
+        .loadfile => try global.nativeLoadfile(vm, func_reg, nargs, nresults),
+        .dofile => try global.nativeDofile(vm, func_reg, nargs, nresults),
+        .warn => try global.nativeWarn(vm, func_reg, nargs, nresults),
+        .lua_G => try global.nativeG(vm, func_reg, nargs, nresults),
+        .lua_VERSION => try global.nativeVersion(vm, func_reg, nargs, nresults),
 
         // String Library (Skeleton implementations)
         .string_len => try string.nativeStringLen(vm, func_reg, nargs, nresults),
@@ -553,6 +587,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .string_gmatch => try string.nativeStringGmatch(vm, func_reg, nargs, nresults),
         .string_gsub => try string.nativeStringGsub(vm, func_reg, nargs, nresults),
         .string_format => try string.nativeStringFormat(vm, func_reg, nargs, nresults),
+        .string_dump => try string.nativeStringDump(vm, func_reg, nargs, nresults),
         .string_pack => try string.nativeStringPack(vm, func_reg, nargs, nresults),
         .string_unpack => try string.nativeStringUnpack(vm, func_reg, nargs, nresults),
         .string_packsize => try string.nativeStringPacksize(vm, func_reg, nargs, nresults),

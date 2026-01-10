@@ -20,8 +20,30 @@ pub const NativeFnId = enum(u8) {
     rawget,
     rawset,
     rawlen,
+    rawequal,
     select,
     tonumber,
+    load,
+    loadfile,
+    dofile,
+    warn,
+    lua_G, // '_G' starts with underscore, use lua_G
+    lua_VERSION, // '_VERSION' starts with underscore, use lua_VERSION
+
+    // Coroutine Library (builtin/coroutine.zig) - skeleton functions
+    coroutine_create,
+    coroutine_resume,
+    coroutine_running,
+    coroutine_status,
+    coroutine_wrap,
+    coroutine_yield,
+    coroutine_isyieldable,
+    coroutine_close,
+
+    // Module System (builtin/modules.zig) - skeleton functions
+    require,
+    package_loadlib,
+    package_searchpath,
 
     // String Library (builtin/string.zig) - skeleton functions
     string_len,
@@ -37,31 +59,26 @@ pub const NativeFnId = enum(u8) {
     string_gmatch,
     string_gsub,
     string_format,
+    string_dump,
     string_pack,
     string_unpack,
     string_packsize,
 
-    // IO Library (builtin/io.zig) - skeleton functions
-    io_write,
-    io_close,
-    io_flush,
-    io_input,
-    io_lines,
-    io_open,
-    io_output,
-    io_popen,
-    io_read,
-    io_tmpfile,
-    io_type,
+    // UTF8 Library (builtin/utf8.zig) - skeleton functions
+    utf8_char,
+    utf8_codes,
+    utf8_codepoint,
+    utf8_len,
+    utf8_offset,
 
-    // File handle methods (future userdata implementation)
-    file_close,
-    file_flush,
-    file_lines,
-    file_read,
-    file_seek,
-    file_setvbuf,
-    file_write,
+    // Table Library (builtin/table.zig) - skeleton functions
+    table_insert,
+    table_remove,
+    table_sort,
+    table_concat,
+    table_move,
+    table_pack,
+    table_unpack,
 
     // Math Library (builtin/math.zig) - skeleton functions
     math_abs,
@@ -88,14 +105,27 @@ pub const NativeFnId = enum(u8) {
     math_type,
     math_ult,
 
-    // Table Library (builtin/table.zig) - skeleton functions
-    table_insert,
-    table_remove,
-    table_sort,
-    table_concat,
-    table_move,
-    table_pack,
-    table_unpack,
+    // IO Library (builtin/io.zig) - skeleton functions
+    io_write,
+    io_close,
+    io_flush,
+    io_input,
+    io_lines,
+    io_open,
+    io_output,
+    io_popen,
+    io_read,
+    io_tmpfile,
+    io_type,
+
+    // File handle methods (future userdata implementation)
+    file_close,
+    file_flush,
+    file_lines,
+    file_read,
+    file_seek,
+    file_setvbuf,
+    file_write,
 
     // OS Library (builtin/os.zig) - skeleton functions
     os_clock,
@@ -127,28 +157,6 @@ pub const NativeFnId = enum(u8) {
     debug_traceback,
     debug_upvalueid,
     debug_upvaluejoin,
-
-    // UTF8 Library (builtin/utf8.zig) - skeleton functions
-    utf8_char,
-    utf8_codes,
-    utf8_codepoint,
-    utf8_len,
-    utf8_offset,
-
-    // Coroutine Library (builtin/coroutine.zig) - skeleton functions
-    coroutine_create,
-    coroutine_resume,
-    coroutine_running,
-    coroutine_status,
-    coroutine_wrap,
-    coroutine_yield,
-    coroutine_isyieldable,
-    coroutine_close,
-
-    // Module System (builtin/modules.zig) - skeleton functions
-    require,
-    package_loadlib,
-    package_searchpath,
 };
 
 pub const NativeFn = struct {

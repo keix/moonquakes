@@ -17,14 +17,30 @@ Moonquakes carries that elegance forward — rewritten in Zig.
 ## Build
 Moonquakes is built with Zig.
 
-```sh
+For development and debugging:
+```
 zig build
+```
+
+For normal use and evaluation, build with optimizations enabled:
+```sh
+zig build -Doptimize=ReleaseSafe
 ```
 
 ## Architecture
 Moonquakes follows a clean, modular design inspired by the original Lua architecture, prioritizing clarity, minimalism, and structural integrity.
 
 For detailed design and implementation notes, see the documentation in [docs/](docs/).
+
+## Project Notes
+Moonquakes is an active work in progress.
+Opcode coverage, implementation milestones, and design notes are tracked publicly to ensure transparency and long-term maintainability.
+
+For detailed progress tracking and internal design documentation, see:  
+Moonquakes Project Notes (Notion) https://lua-v5.notion.site/
+
+This page includes opcode checklists, architectural decisions, and future milestones, serving as a living companion to the source code.
+
 ## Lua Specification 
 Lua 5.4 Reference Manual
 
