@@ -36,9 +36,19 @@ pub const Moonquakes = struct {
     /// - closure and upvalue representation is defined
     /// - GC root ownership is clarified
     ///
+    /// DEPRECATED: Use compileWithGC instead for proper GC integration
     pub fn compile(self: *Moonquakes, source: []const u8) !Proto {
+        // Create a temporary VM just to get access to GC
+        var vm = try VM.init(self.allocator);
+        defer vm.deinit();
+
+        return try self.compileWithGC(source, &vm.gc);
+    }
+
+    /// Compile Lua source code with GC for string allocation
+    fn compileWithGC(self: *Moonquakes, source: []const u8, gc: *@import("runtime/gc/gc.zig").GC) !Proto {
         var lx = lexer.Lexer.init(source);
-        var builder = parser.ProtoBuilder.init(self.allocator);
+        var builder = parser.ProtoBuilder.init(self.allocator, gc);
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
@@ -71,10 +81,14 @@ pub const Moonquakes = struct {
 
     /// Compile and execute Lua source in one step
     pub fn runSource(self: *Moonquakes, source: []const u8) !VM.ReturnValue {
-        // Don't use compile() which cleans up ProtoBuilder too early
+        // Create VM first so GC is available for compilation
+        var vm = try VM.init(self.allocator);
+        defer vm.deinit();
+
+        // Compile with access to VM's GC
         var lx = lexer.Lexer.init(source);
-        var builder = parser.ProtoBuilder.init(self.allocator);
-        defer builder.deinit(); // Clean up after VM execution
+        var builder = parser.ProtoBuilder.init(self.allocator, &vm.gc);
+        defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
         try p.parseChunk();
@@ -83,7 +97,21 @@ pub const Moonquakes = struct {
         defer self.allocator.free(proto.code);
         defer self.allocator.free(proto.k);
 
-        return try self.run(&proto);
+        // Execute on the same VM
+        return vm.execute(&proto) catch |err| {
+            // Translate VM errors to user-friendly messages using Sugar Layer
+            const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
+                error.OutOfMemory => "out of memory during error translation",
+            };
+            defer if (translated_error.len > 0) self.allocator.free(translated_error);
+
+            // Print the user-friendly error message
+            const stderr = std.io.getStdErr().writer();
+            stderr.print("{s}\n", .{translated_error}) catch {};
+
+            // Propagate the original error for proper control flow
+            return err;
+        };
     }
 
     /// Load and execute Lua file

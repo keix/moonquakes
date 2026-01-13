@@ -10,6 +10,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
+const GC = @import("../runtime/gc/gc.zig").GC;
 
 /// parser.zig
 ///
@@ -77,17 +78,19 @@ pub const ProtoBuilder = struct {
     maxstacksize: u8,
     next_reg: u8,
     allocator: std.mem.Allocator,
+    gc: *GC, // For allocating GC-managed objects (strings, etc.)
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
-    pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
+    pub fn init(allocator: std.mem.Allocator, gc: *GC) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .constants = std.ArrayList(TValue).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .gc = gc,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .parent = null,
@@ -101,6 +104,7 @@ pub const ProtoBuilder = struct {
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .gc = parent.gc, // Inherit GC from parent
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .parent = parent,
@@ -312,8 +316,9 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
-        // Store the actual string value
-        const const_value = TValue{ .string = lexeme };
+        // Allocate string through GC
+        const str_obj = try self.gc.allocString(lexeme);
+        const const_value = TValue{ .string = str_obj };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }

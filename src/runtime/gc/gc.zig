@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const object = @import("object.zig");
 const GCObject = object.GCObject;
 const GCObjectType = object.GCObjectType;
+const StringObject = object.StringObject;
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -67,6 +68,24 @@ pub const GC = struct {
         return ptr;
     }
 
+    /// Allocate a new string object
+    pub fn allocString(self: *GC, str: []const u8) !*StringObject {
+        const obj = try self.allocObject(StringObject, str.len);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.string, self.objects);
+        obj.len = str.len;
+        obj.hash = StringObject.hashString(str);
+
+        // Copy string data inline
+        @memcpy(obj.data()[0..str.len], str);
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Main garbage collection entry point
     pub fn collectGarbage(self: *GC) void {
         const before = self.bytes_allocated;
@@ -82,8 +101,8 @@ pub const GC = struct {
         // Adjust next GC threshold based on survival rate
         self.next_gc = @max(@as(usize, @intFromFloat(@as(f64, @floatFromInt(after)) * self.gc_multiplier)), self.gc_min_threshold);
 
-        // Debug output in debug mode
-        if (builtin.mode == .Debug) {
+        // GC stats output (disabled in ReleaseFast for performance)
+        if (builtin.mode != .ReleaseFast) {
             std.log.info("GC: {} -> {} bytes, next at {}", .{ before, after, self.next_gc });
         }
     }
@@ -188,15 +207,14 @@ pub const GC = struct {
     }
 
     /// Free a GC object and update accounting
-    fn freeObject(_: *GC, obj: *GCObject) void {
+    fn freeObject(self: *GC, obj: *GCObject) void {
         switch (obj.type) {
             .string => {
-                // TODO: Implement when StringObject is available
-                // const str_obj = @fieldParentPtr(StringObject, "header", obj);
-                // const size = @sizeOf(StringObject) + str_obj.len;
-                // self.bytes_allocated -= size;
-                // const memory = @as([*]u8, @ptrCast(str_obj))[0..size];
-                // self.allocator.free(memory);
+                const str_obj: *StringObject = @fieldParentPtr("header", obj);
+                const size = @sizeOf(StringObject) + str_obj.len;
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(str_obj))[0..size];
+                self.allocator.free(memory);
             },
             .table => {
                 // TODO: Implement when TableObject is available

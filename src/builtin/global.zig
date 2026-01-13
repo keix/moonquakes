@@ -32,7 +32,7 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
             else => unreachable, // tostring must return string
         };
 
-        try stdout.writeAll(str_val);
+        try stdout.writeAll(str_val.asSlice());
 
         // Clean up temporary registers
         vm.top -= 2;
@@ -46,7 +46,7 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
 /// type(v) - Returns the type of its only argument, coded as a string
 pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const type_name = if (nargs > 0) blk: {
+    const type_name_str = if (nargs > 0) blk: {
         const arg = vm.stack[vm.base + func_reg + 1];
         break :blk switch (arg) {
             .nil => "nil",
@@ -61,6 +61,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     } else "nil";
 
     if (nresults > 0) {
+        const type_name = try vm.gc.allocString(type_name_str);
         vm.stack[vm.base + func_reg] = TValue{ .string = type_name };
     }
 }

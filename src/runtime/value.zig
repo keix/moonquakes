@@ -2,6 +2,7 @@ const std = @import("std");
 const Closure = @import("closure.zig").Closure;
 const Table = @import("table.zig").Table;
 const Function = @import("function.zig").Function;
+const StringObject = @import("gc/object.zig").StringObject;
 
 /// Note:
 /// Current TValue includes primitive types and closure.
@@ -24,7 +25,7 @@ pub const TValue = union(ValueType) {
     number: f64,
     closure: *const Closure,
     function: Function,
-    string: []const u8,
+    string: *const StringObject,
     table: *Table,
 
     pub fn isNil(self: TValue) bool {
@@ -108,7 +109,7 @@ pub const TValue = union(ValueType) {
                 .bytecode => |p| try writer.print("function: 0x{x}", .{@intFromPtr(p)}),
                 .native => |nf| try writer.print("native_function_{}", .{@intFromEnum(nf.id)}),
             },
-            .string => |s| try writer.print("{s}", .{s}),
+            .string => |s| try writer.print("{s}", .{s.asSlice()}),
             .table => |t| try writer.print("table: 0x{x}", .{@intFromPtr(t)}),
         }
     }
@@ -132,7 +133,7 @@ pub const TValue = union(ValueType) {
                 .bytecode => |ap| b == .function and b.function == .bytecode and ap == b.function.bytecode,
                 .native => |anf| b == .function and b.function == .native and std.mem.eql(u8, @tagName(anf.id), @tagName(b.function.native.id)),
             },
-            .string => |as| b == .string and std.mem.eql(u8, as, b.string),
+            .string => |as| b == .string and as == b.string, // Pointer equality (interned strings)
             .table => |at| b == .table and at == b.table,
         };
     }
