@@ -401,6 +401,14 @@ pub const ReturnTest = struct {
         try testing.expect(result.single.eql(expected));
     }
 
+    /// Compare single result with string content (for parser tests)
+    pub fn expectSingleString(result: VM.ReturnValue, expected_str: []const u8) !void {
+        try testing.expect(result == .single);
+        try testing.expect(result.single.isString());
+        const actual_str = result.single.string.asSlice();
+        try testing.expectEqualStrings(expected_str, actual_str);
+    }
+
     pub fn expectMultiple(result: VM.ReturnValue, expected: []const TValue) !void {
         try testing.expect(result == .multiple);
         try testing.expectEqual(expected.len, result.multiple.len);
