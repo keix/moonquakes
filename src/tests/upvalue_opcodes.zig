@@ -50,8 +50,11 @@ test "TBC opcode - no-op behavior" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate string through GC
+    const test_str = try vm.gc.allocString("test");
+
     // Initialize some registers
-    vm.stack[0] = .{ .string = "test" };
+    vm.stack[0] = .{ .string = test_str };
     vm.stack[1] = .{ .integer = 100 };
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
@@ -124,9 +127,12 @@ test "SETTABUP opcode - global variable assignment" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate string through GC
+    const myvar_str = try vm.gc.allocString("myvar");
+
     // Create constant for variable name
     const constants = [_]TValue{
-        .{ .string = "myvar" }, // K[0]
+        .{ .string = myvar_str }, // K[0]
     };
 
     // Initialize register with value to set
@@ -159,11 +165,16 @@ test "SETTABUP opcode - multiple global assignments" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate strings through GC
+    const var1_str = try vm.gc.allocString("var1");
+    const var2_str = try vm.gc.allocString("var2");
+    const var3_str = try vm.gc.allocString("var3");
+
     // Create constants for variable names
     const constants = [_]TValue{
-        .{ .string = "var1" }, // K[0]
-        .{ .string = "var2" }, // K[1]
-        .{ .string = "var3" }, // K[2]
+        .{ .string = var1_str }, // K[0]
+        .{ .string = var2_str }, // K[1]
+        .{ .string = var3_str }, // K[2]
     };
 
     // Initialize registers with values to set
@@ -234,8 +245,11 @@ test "All new opcodes - integration test" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate string through GC
+    const result_str = try vm.gc.allocString("result");
+
     const constants = [_]TValue{
-        .{ .string = "result" }, // K[0]
+        .{ .string = result_str }, // K[0]
     };
 
     // Initialize registers

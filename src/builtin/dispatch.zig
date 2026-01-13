@@ -3,6 +3,7 @@ const Table = @import("../runtime/table.zig").Table;
 const Function = @import("../runtime/function.zig").Function;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
+const GC = @import("../runtime/gc/gc.zig").GC;
 
 // Builtin library modules - organized by Lua manual chapters
 const string = @import("string.zig");
@@ -19,12 +20,14 @@ const modules = @import("modules.zig");
 
 /// Initialize the global environment with all Lua standard libraries
 /// Organized by Lua manual chapters for maintainability
-pub fn initGlobalEnvironment(globals: *Table, allocator: std.mem.Allocator) !void {
+pub fn initGlobalEnvironment(globals: *Table, gc: *GC) !void {
+    const allocator = gc.allocator;
+
     // Global Functions (Chapter 6.1)
     try initGlobalFunctions(globals);
 
     // Module System (Chapter 6.3) - skeleton
-    try initModuleSystem(globals, allocator);
+    try initModuleSystem(globals, gc);
 
     // String Library (Chapter 6.4) - skeleton
     try initStringLibrary(globals, allocator);
@@ -45,7 +48,7 @@ pub fn initGlobalEnvironment(globals: *Table, allocator: std.mem.Allocator) !voi
     try initDebugLibrary(globals, allocator);
 
     // UTF-8 Support (Chapter 6.5) - skeleton
-    try initUtf8Library(globals, allocator);
+    try initUtf8Library(globals, gc);
 
     // Coroutine Library (Chapter 2.6) - skeleton
     try initCoroutineLibrary(globals, allocator);
@@ -445,12 +448,14 @@ fn initDebugLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// UTF-8 Library: utf8.char, utf8.len, etc. (skeleton implementations)
-fn initUtf8Library(globals: *Table, allocator: std.mem.Allocator) !void {
+fn initUtf8Library(globals: *Table, gc: *GC) !void {
+    const allocator = gc.allocator;
     var utf8_table = try allocator.create(Table);
     utf8_table.* = Table.init(allocator);
 
     // UTF-8 pattern constant
-    try utf8_table.set("charpattern", .{ .string = utf8.UTF8_CHARPATTERN });
+    const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
+    try utf8_table.set("charpattern", .{ .string = charpattern_str });
 
     const char_fn = Function{ .native = .{ .id = NativeFnId.utf8_char } };
     try utf8_table.set("char", .{ .function = char_fn });
@@ -503,7 +508,9 @@ fn initCoroutineLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
-fn initModuleSystem(globals: *Table, allocator: std.mem.Allocator) !void {
+fn initModuleSystem(globals: *Table, gc: *GC) !void {
+    const allocator = gc.allocator;
+
     // Global require function
     const require_fn = Function{ .native = .{ .id = NativeFnId.require } };
     try globals.set("require", .{ .function = require_fn });
@@ -520,9 +527,14 @@ fn initModuleSystem(globals: *Table, allocator: std.mem.Allocator) !void {
     try package_table.set("searchpath", .{ .function = searchpath_fn });
 
     // Package configuration and paths (platform-specific in real implementation)
-    try package_table.set("config", .{ .string = "/\n;\n?\n!\n-" }); // Unix-style config
-    try package_table.set("path", .{ .string = "./?.lua;/usr/local/share/lua/5.4/?.lua" }); // Default Lua path
-    try package_table.set("cpath", .{ .string = "./?.so;/usr/local/lib/lua/5.4/?.so" }); // Default C path
+    const config_str = try gc.allocString("/\n;\n?\n!\n-");
+    try package_table.set("config", .{ .string = config_str }); // Unix-style config
+
+    const path_str = try gc.allocString("./?.lua;/usr/local/share/lua/5.4/?.lua");
+    try package_table.set("path", .{ .string = path_str }); // Default Lua path
+
+    const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
+    try package_table.set("cpath", .{ .string = cpath_str }); // Default C path
 
     // Package tables for loaded modules and searchers
     const loaded_table = try allocator.create(Table);

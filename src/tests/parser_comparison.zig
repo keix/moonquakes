@@ -12,8 +12,12 @@ fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
 }
 
 fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
+    // Create VM first so GC is available for compilation
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator);
+    var proto_builder = parser.ProtoBuilder.init(allocator, &vm.gc);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
@@ -23,8 +27,6 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !VM.ReturnV
     defer allocator.free(proto.code);
     defer allocator.free(proto.k);
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     return vm.execute(&proto);
 }
 
