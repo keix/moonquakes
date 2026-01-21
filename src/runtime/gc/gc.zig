@@ -236,6 +236,11 @@ pub const GC = struct {
         self.collectGarbage();
     }
 
+    /// Manually mark an object as reachable (for testing / root marking)
+    pub fn mark(self: *GC, obj: *GCObject) void {
+        markObject(self, obj);
+    }
+
     /// Get current memory usage statistics
     pub fn getStats(self: *GC) struct {
         bytes_allocated: usize,
@@ -256,3 +261,80 @@ pub const GC = struct {
         };
     }
 };
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "single string mark survives GC" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate a string
+    const str = try gc.allocString("hello");
+
+    // Verify it's in the object list
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_before.object_count);
+
+    // Mark the string
+    gc.mark(&str.header);
+    try std.testing.expect(str.header.marked);
+
+    // Run GC (sweep phase)
+    gc.sweep();
+
+    // String should survive
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
+
+    // Mark should be cleared for next cycle
+    try std.testing.expect(!str.header.marked);
+
+    // Verify string content is intact
+    try std.testing.expectEqualStrings("hello", str.asSlice());
+}
+
+test "unmarked string is collected" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate a string but don't mark it
+    _ = try gc.allocString("garbage");
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_before.object_count);
+
+    // Run GC without marking
+    gc.sweep();
+
+    // String should be collected
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 0), stats_after.object_count);
+}
+
+test "marked string survives, unmarked is collected" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate two strings
+    const survivor = try gc.allocString("keep me");
+    const garbage = try gc.allocString("delete me");
+    _ = garbage;
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
+
+    // Mark only the survivor
+    gc.mark(&survivor.header);
+
+    // Run GC
+    gc.sweep();
+
+    // Only survivor should remain
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
+
+    // Verify survivor content
+    try std.testing.expectEqualStrings("keep me", survivor.asSlice());
+}
