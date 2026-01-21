@@ -8,6 +8,9 @@ const string = @import("string.zig");
 pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const stdout = std.io.getStdOut().writer();
 
+    // Save original top to restore later
+    const saved_top = vm.top;
+
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         if (i > 0) {
@@ -38,6 +41,9 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
         vm.top -= 2;
     }
     try stdout.writeAll("\n");
+
+    // Restore original top to prevent stack growth
+    vm.top = saved_top;
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue{ .nil = {} };

@@ -109,6 +109,7 @@ pub const VM = struct {
         for (&vm.stack) |*v| {
             v.* = .nil;
         }
+
         return vm;
     }
 
@@ -145,6 +146,42 @@ pub const VM = struct {
         // Clean up globals table
         self.globals.deinit();
         self.allocator.destroy(self.globals);
+    }
+
+    /// Run garbage collection, marking all reachable objects from VM roots
+    pub fn collectGarbage(self: *VM) void {
+        const before = self.gc.bytes_allocated;
+
+        // Mark phase: mark all roots
+
+        // 1. Mark VM stack (active portion)
+        self.gc.markStack(self.stack[0..self.top]);
+
+        // 2. Mark constants from current function
+        if (self.ci) |ci| {
+            self.gc.markConstants(ci.func.k);
+        }
+
+        // 3. Mark constants from all call frames
+        for (self.callstack[0..self.callstack_size]) |frame| {
+            self.gc.markConstants(frame.func.k);
+        }
+
+        // TODO: Mark global environment (when tables become GC-managed)
+        // TODO: Mark upvalues (when closures are fully implemented)
+
+        // Sweep phase: free unmarked objects
+        self.gc.sweep();
+
+        const after = self.gc.bytes_allocated;
+
+        // TODO: Update GC threshold based on survival rate
+        // self.gc.next_gc = @max(after * gc_multiplier, gc_min_threshold);
+
+        // Debug output (disabled in ReleaseFast)
+        if (@import("builtin").mode != .ReleaseFast) {
+            std.log.info("GC: {} -> {} bytes", .{ before, after });
+        }
     }
 
     /// VM is just a bridge - dispatches to appropriate native function
@@ -379,6 +416,9 @@ pub const VM = struct {
     }
 
     pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
+        // Set VM reference in GC for automatic collection
+        self.gc.setVM(self);
+
         self.setupMainFrame(proto);
 
         // TODO (mnemonics.do): semantics frozen here.

@@ -137,6 +137,11 @@ pub const ProtoBuilder = struct {
         return reg;
     }
 
+    /// Get the number of local variables (base register count for statements)
+    pub fn getLocalCount(self: *ProtoBuilder) u8 {
+        return @intCast(self.variables.items.len);
+    }
+
     // emit functions grouped together
     pub fn emit(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8) !void {
         const instr = Instruction.initABC(op, a, b, c);
@@ -457,6 +462,9 @@ pub const Parser = struct {
     // Parse functions grouped together
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
+            // Save base register count before each statement
+            const base_reg = self.proto.getLocalCount();
+
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
@@ -482,6 +490,10 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedStatement;
             }
+
+            // Reset register allocation after each statement
+            // Temporary registers used by the statement can be reused
+            self.proto.next_reg = base_reg;
         }
 
         // Auto-append return nil if no explicit return was encountered
@@ -854,6 +866,9 @@ pub const Parser = struct {
                     std.mem.eql(u8, self.current.lexeme, "elseif") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
+            // Save base register count before each statement
+            const base_reg = self.proto.getLocalCount();
+
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
@@ -879,6 +894,10 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedStatement;
             }
+
+            // Reset register allocation after each statement
+            // Temporary registers used by the statement can be reused
+            self.proto.next_reg = base_reg;
         }
     }
 
@@ -901,10 +920,6 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Load function constant
-        // Skip past potential for loop registers (0-3) to avoid conflicts
-        while (self.proto.next_reg <= 4) {
-            _ = self.proto.allocReg();
-        }
         const func_reg = self.proto.allocReg();
         const func_id = if (std.mem.eql(u8, func_name, "print"))
             NativeFnId.print
@@ -1177,11 +1192,6 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Generate bytecode for io.write call
-        // Skip past potential for loop registers (0-3) to avoid conflicts
-        while (self.proto.next_reg <= 4) {
-            _ = self.proto.allocReg();
-        }
-
         // Get io table from global
         const io_reg = self.proto.allocReg();
         const io_key_const = try self.proto.addConstString("io");

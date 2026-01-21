@@ -4,6 +4,7 @@ const object = @import("object.zig");
 const GCObject = object.GCObject;
 const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
+const TValue = @import("../value.zig").TValue;
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -22,6 +23,10 @@ pub const GC = struct {
     /// Threshold for triggering next collection
     next_gc: usize,
 
+    /// Reference to VM for root marking during GC
+    /// Uses anyopaque to avoid circular import dependency
+    vm: ?*anyopaque,
+
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
     gc_min_threshold: usize = 1024, // Minimum bytes before first GC
@@ -32,14 +37,18 @@ pub const GC = struct {
             .objects = null,
             .bytes_allocated = 0,
             .next_gc = 1024, // gc_min_threshold
+            .vm = null,
         };
     }
 
-    pub fn deinit(self: *GC) void {
-        // Final cleanup - collect all remaining objects
-        self.collectGarbage();
+    /// Set VM reference for automatic GC triggering
+    pub fn setVM(self: *GC, vm: *anyopaque) void {
+        self.vm = vm;
+    }
 
-        // Free any remaining objects (should be none after collection)
+    pub fn deinit(self: *GC) void {
+        // Free all remaining objects without mark/sweep
+        // (no need to determine liveness at program exit)
         var current = self.objects;
         while (current) |obj| {
             const next = obj.next;
@@ -55,8 +64,7 @@ pub const GC = struct {
 
         // Check if GC should run before allocation
         if (self.bytes_allocated + size > self.next_gc) {
-            // TODO: Need VM reference for root marking
-            // self.collectGarbage(vm);
+            self.tryCollect();
         }
 
         // Allocate memory
@@ -66,6 +74,17 @@ pub const GC = struct {
         self.bytes_allocated += size;
 
         return ptr;
+    }
+
+    /// Try to run GC if VM reference is available
+    fn tryCollect(self: *GC) void {
+        // _ = self;
+        // TODO: Uncomment to enable automatic GC
+        if (self.vm) |vm_ptr| {
+            const VM = @import("../../vm/vm.zig").VM;
+            const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+            vm.collectGarbage();
+        }
     }
 
     /// Allocate a new string object
@@ -107,49 +126,32 @@ pub const GC = struct {
         }
     }
 
-    /// Mark phase: traverse and mark all reachable objects
-    fn markRoots(_: *GC, vm: anytype) void {
-        _ = vm; // TODO: Implement when VM integration is ready
+    /// Mark all values in a stack slice as reachable
+    pub fn markStack(self: *GC, stack: []const TValue) void {
+        for (stack) |value| {
+            self.markValue(value);
+        }
+    }
 
-        // TODO: Mark VM stack
-        // for (vm.stack[vm.base..vm.top]) |value| {
-        //     self.markValue(value);
-        // }
-
-        // TODO: Mark global environment
-        // if (vm.globals) |globals| {
-        //     self.markObject(&globals.header);
-        // }
-
-        // TODO: Mark constants in current function
-        // if (vm.current_proto) |proto| {
-        //     for (proto.k) |constant| {
-        //         self.markValue(constant);
-        //     }
-        // }
-
-        // TODO: Mark call stack
-        // for (vm.call_stack[0..vm.call_depth]) |frame| {
-        //     if (frame.proto) |proto| {
-        //         for (proto.k) |constant| {
-        //             self.markValue(constant);
-        //         }
-        //     }
-        // }
+    /// Mark constants array (e.g., from Proto.k)
+    pub fn markConstants(self: *GC, constants: []const TValue) void {
+        for (constants) |value| {
+            self.markValue(value);
+        }
     }
 
     /// Mark a TValue if it contains a GC object
-    fn markValue(self: *GC, value: anytype) void {
-        _ = self;
-        _ = value;
-
-        // TODO: Implement based on TValue structure
-        // switch (value) {
-        //     .string => |str_obj| self.markObject(&str_obj.header),
-        //     .table => |table_obj| self.markObject(&table_obj.header),
-        //     .function => |func_obj| self.markObject(&func_obj.header),
-        //     else => {}, // Immediate values don't need marking
-        // }
+    pub fn markValue(self: *GC, value: TValue) void {
+        switch (value) {
+            .string => |str_obj| {
+                // Cast away const to mark the header
+                const mutable_str: *StringObject = @constCast(str_obj);
+                markObject(self, &mutable_str.header);
+            },
+            // TODO: Mark tables when they become GC-managed
+            // .table => |table_obj| markObject(self, &table_obj.header),
+            else => {}, // Immediate values (nil, bool, number, etc.) don't need marking
+        }
     }
 
     /// Mark an object and recursively mark its children
@@ -180,7 +182,7 @@ pub const GC = struct {
     }
 
     /// Sweep phase: free all unmarked objects
-    fn sweep(self: *GC) void {
+    pub fn sweep(self: *GC) void {
         var prev: ?*GCObject = null;
         var current = self.objects;
 
@@ -337,4 +339,64 @@ test "marked string survives, unmarked is collected" {
 
     // Verify survivor content
     try std.testing.expectEqualStrings("keep me", survivor.asSlice());
+}
+
+test "markValue marks string in TValue" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate a string through GC
+    const str = try gc.allocString("hello from TValue");
+
+    // Wrap it in a TValue
+    const value = TValue{ .string = str };
+
+    // Mark through TValue
+    gc.markValue(value);
+
+    // Verify the string is marked
+    try std.testing.expect(str.header.marked);
+
+    // Run GC - string should survive
+    gc.sweep();
+
+    const stats = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats.object_count);
+    try std.testing.expectEqualStrings("hello from TValue", str.asSlice());
+}
+
+test "markStack marks all strings in stack slice" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate strings
+    const str1 = try gc.allocString("stack item 1");
+    const str2 = try gc.allocString("stack item 2");
+    const garbage = try gc.allocString("not on stack");
+    _ = garbage;
+
+    // Create a mock stack slice
+    var stack: [4]TValue = .{
+        TValue{ .string = str1 },
+        TValue{ .integer = 42 }, // Non-GC value
+        TValue{ .string = str2 },
+        TValue.nil,
+    };
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
+
+    // Mark stack
+    gc.markStack(&stack);
+
+    // Run GC
+    gc.sweep();
+
+    // Only stack items should survive (2 strings)
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats_after.object_count);
+
+    // Verify surviving strings
+    try std.testing.expectEqualStrings("stack item 1", str1.asSlice());
+    try std.testing.expectEqualStrings("stack item 2", str2.asSlice());
 }
