@@ -49,30 +49,38 @@ pub const GCObject = struct {
     }
 };
 
-/// Example: String Object (future implementation)
+/// String Object - GC-managed immutable strings
 ///
-/// This shows how GC objects should be structured:
-/// - GCObject header as first field
-/// - Object-specific data follows
-///
-/// ```zig
-/// pub const StringObject = struct {
-///     header: GCObject,
-///     len: usize,
-///     hash: u32, // For string interning
-///     data: [*]u8, // Flexible array member
-///
-///     pub fn init(gc: *GC, str: []const u8) !*StringObject {
-///         const obj = try gc.allocObject(StringObject, str.len);
-///         obj.header = GCObject.init(.string, gc.objects);
-///         obj.len = str.len;
-///         obj.hash = hashString(str);
-///         @memcpy(obj.data[0..str.len], str);
-///         gc.objects = &obj.header;
-///         return obj;
-///     }
-/// };
-/// ```
+/// StringObject stores string data inline after the struct.
+/// Layout: [GCObject header][len][hash][string bytes...]
+pub const StringObject = struct {
+    header: GCObject,
+    len: usize,
+    hash: u32, // FNV-1a hash for fast comparison and table keys
+
+    /// Get pointer to the string data (stored inline after struct)
+    pub fn data(self: *StringObject) [*]u8 {
+        const base = @intFromPtr(self);
+        const offset = @sizeOf(StringObject);
+        return @ptrFromInt(base + offset);
+    }
+
+    /// Get string as a slice
+    pub fn asSlice(self: *const StringObject) []const u8 {
+        const ptr = @as(*StringObject, @constCast(self));
+        return ptr.data()[0..self.len];
+    }
+
+    /// Calculate hash using FNV-1a algorithm
+    pub fn hashString(str: []const u8) u32 {
+        var hash: u32 = 2166136261; // FNV offset basis
+        for (str) |byte| {
+            hash ^= byte;
+            hash *%= 16777619; // FNV prime
+        }
+        return hash;
+    }
+};
 /// Example: Table Object (future implementation)
 ///
 /// ```zig
@@ -92,7 +100,7 @@ pub const GCObject = struct {
 /// const str_obj = getObject(StringObject, gc_obj);
 /// ```
 pub fn getObject(comptime T: type, header: *GCObject) *T {
-    return @fieldParentPtr(T, "header", header);
+    return @fieldParentPtr("header", header);
 }
 
 /// Calculate the size of a GC object including extra data

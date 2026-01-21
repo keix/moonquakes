@@ -71,9 +71,12 @@ test "GETFIELD with nil table returns error" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate string through GC
+    const name_str = try vm.gc.allocString("name");
+
     // Constants array with string key
     const constants = [_]TValue{
-        .{ .string = "name" }, // Index 0 - field name
+        .{ .string = name_str }, // Index 0 - field name
     };
 
     // GETFIELD R[1] := R[0][K[0]] where K[0] = "name", R[0] is nil
@@ -99,9 +102,12 @@ test "Multiple LOADKX operations" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
+    // Allocate string through GC
+    const hello_str = try vm.gc.allocString("hello");
+
     // Create constants with multiple values
     const constants = [_]TValue{
-        .{ .string = "hello" }, // Index 0
+        .{ .string = hello_str }, // Index 0
         .{ .number = 3.14 }, // Index 1
         .nil, .nil, .nil, // Padding
         .{ .integer = 100 }, // Index 5
@@ -138,7 +144,7 @@ test "Multiple LOADKX operations" {
     try test_utils.expectRegisters(&vm, 0, &[_]TValue{
         .{ .integer = 100 }, // R[0]
         .{ .boolean = true }, // R[1]
-        .{ .string = "hello" }, // R[2]
+        .{ .string = hello_str }, // R[2]
     });
 
     // Verify remaining registers are nil

@@ -172,8 +172,14 @@ test "unary: -5 + 3 = -2" {
 }
 
 test "unary: #\"hello\" = 5 (string length)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate string through GC
+    const hello_str = try vm.gc.allocString("hello");
+
     const constants = [_]TValue{
-        .{ .string = "hello" },
+        .{ .string = hello_str },
     };
 
     const code = [_]Instruction{
@@ -190,16 +196,20 @@ test "unary: #\"hello\" = 5 (string length)" {
         .maxstacksize = 2,
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 5 });
 }
 
 test "unary: #\"\" = 0 (empty string length)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate empty string through GC
+    const empty_str = try vm.gc.allocString("");
+
     const constants = [_]TValue{
-        .{ .string = "" },
+        .{ .string = empty_str },
     };
 
     const code = [_]Instruction{
@@ -216,8 +226,6 @@ test "unary: #\"\" = 0 (empty string length)" {
         .maxstacksize = 2,
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     const result = try vm.execute(&proto);
 
     try expectSingleResult(result, TValue{ .integer = 0 });

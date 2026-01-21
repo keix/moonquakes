@@ -10,6 +10,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
+const GC = @import("../runtime/gc/gc.zig").GC;
 
 /// parser.zig
 ///
@@ -77,17 +78,19 @@ pub const ProtoBuilder = struct {
     maxstacksize: u8,
     next_reg: u8,
     allocator: std.mem.Allocator,
+    gc: *GC, // For allocating GC-managed objects (strings, etc.)
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
-    pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
+    pub fn init(allocator: std.mem.Allocator, gc: *GC) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .constants = std.ArrayList(TValue).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .gc = gc,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .parent = null,
@@ -101,6 +104,7 @@ pub const ProtoBuilder = struct {
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
+            .gc = parent.gc, // Inherit GC from parent
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .parent = parent,
@@ -131,6 +135,11 @@ pub const ProtoBuilder = struct {
         self.next_reg += 1;
         self.updateMaxStack(self.next_reg);
         return reg;
+    }
+
+    /// Get the number of local variables (base register count for statements)
+    pub fn getLocalCount(self: *ProtoBuilder) u8 {
+        return @intCast(self.variables.items.len);
     }
 
     // emit functions grouped together
@@ -312,8 +321,9 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
-        // Store the actual string value
-        const const_value = TValue{ .string = lexeme };
+        // Allocate string through GC
+        const str_obj = try self.gc.allocString(lexeme);
+        const const_value = TValue{ .string = str_obj };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }
@@ -452,6 +462,9 @@ pub const Parser = struct {
     // Parse functions grouped together
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
+            // Save base register count before each statement
+            const base_reg = self.proto.getLocalCount();
+
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
@@ -477,6 +490,10 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedStatement;
             }
+
+            // Reset register allocation after each statement
+            // Temporary registers used by the statement can be reused
+            self.proto.next_reg = base_reg;
         }
 
         // Auto-append return nil if no explicit return was encountered
@@ -849,6 +866,9 @@ pub const Parser = struct {
                     std.mem.eql(u8, self.current.lexeme, "elseif") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
+            // Save base register count before each statement
+            const base_reg = self.proto.getLocalCount();
+
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
@@ -874,6 +894,10 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedStatement;
             }
+
+            // Reset register allocation after each statement
+            // Temporary registers used by the statement can be reused
+            self.proto.next_reg = base_reg;
         }
     }
 
@@ -896,10 +920,6 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Load function constant
-        // Skip past potential for loop registers (0-3) to avoid conflicts
-        while (self.proto.next_reg <= 4) {
-            _ = self.proto.allocReg();
-        }
         const func_reg = self.proto.allocReg();
         const func_id = if (std.mem.eql(u8, func_name, "print"))
             NativeFnId.print
@@ -1172,11 +1192,6 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Generate bytecode for io.write call
-        // Skip past potential for loop registers (0-3) to avoid conflicts
-        while (self.proto.next_reg <= 4) {
-            _ = self.proto.allocReg();
-        }
-
         // Get io table from global
         const io_reg = self.proto.allocReg();
         const io_key_const = try self.proto.addConstString("io");

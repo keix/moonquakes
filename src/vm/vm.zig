@@ -5,6 +5,8 @@ const Proto = @import("../compiler/proto.zig").Proto;
 const Table = @import("../runtime/table.zig").Table;
 const Function = @import("../runtime/function.zig").Function;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
+const GC = @import("../runtime/gc/gc.zig").GC;
+const StringObject = @import("../runtime/gc/object.zig").StringObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -79,14 +81,17 @@ pub const VM = struct {
     callstack_size: u8,
     globals: *Table,
     allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator, // TODO: Replace with GC when implemented
+    gc: GC, // Garbage collector (replaces arena)
 
     pub fn init(allocator: std.mem.Allocator) !VM {
+        // Initialize GC first so we can allocate strings
+        var gc = GC.init(allocator);
+
         const globals = try allocator.create(Table);
         globals.* = Table.init(allocator);
 
-        // Initialize global environment
-        try builtin.initGlobalEnvironment(globals, allocator);
+        // Initialize global environment (needs GC for string allocation)
+        try builtin.initGlobalEnvironment(globals, &gc);
 
         var vm = VM{
             .stack = undefined,
@@ -99,18 +104,18 @@ pub const VM = struct {
             .callstack_size = 0,
             .globals = globals,
             .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator), // TODO: Replace with GC.init()
+            .gc = gc,
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
         }
+
         return vm;
     }
 
     pub fn deinit(self: *VM) void {
-        // Clean up arena allocator
-        // TODO: Replace with GC.deinit() when implemented
-        self.arena.deinit();
+        // Clean up GC (will free all GC objects)
+        self.gc.deinit();
 
         // Clean up package table's nested tables first
         if (self.globals.get("package")) |package_val| {
@@ -141,6 +146,42 @@ pub const VM = struct {
         // Clean up globals table
         self.globals.deinit();
         self.allocator.destroy(self.globals);
+    }
+
+    /// Run garbage collection, marking all reachable objects from VM roots
+    pub fn collectGarbage(self: *VM) void {
+        const before = self.gc.bytes_allocated;
+
+        // Mark phase: mark all roots
+
+        // 1. Mark VM stack (active portion)
+        self.gc.markStack(self.stack[0..self.top]);
+
+        // 2. Mark constants from current function
+        if (self.ci) |ci| {
+            self.gc.markConstants(ci.func.k);
+        }
+
+        // 3. Mark constants from all call frames
+        for (self.callstack[0..self.callstack_size]) |frame| {
+            self.gc.markConstants(frame.func.k);
+        }
+
+        // TODO: Mark global environment (when tables become GC-managed)
+        // TODO: Mark upvalues (when closures are fully implemented)
+
+        // Sweep phase: free unmarked objects
+        self.gc.sweep();
+
+        const after = self.gc.bytes_allocated;
+
+        // TODO: Update GC threshold based on survival rate
+        // self.gc.next_gc = @max(after * gc_multiplier, gc_min_threshold);
+
+        // Debug output (disabled in ReleaseFast)
+        if (@import("builtin").mode != .ReleaseFast) {
+            std.log.info("GC: {} -> {} bytes", .{ before, after });
+        }
     }
 
     /// VM is just a bridge - dispatches to appropriate native function
@@ -375,6 +416,9 @@ pub const VM = struct {
     }
 
     pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
+        // Set VM reference in GC for automatic collection
+        self.gc.setVM(self);
+
         self.setupMainFrame(proto);
 
         // TODO (mnemonics.do): semantics frozen here.
@@ -836,7 +880,7 @@ pub const VM = struct {
                     const vb = &self.stack[self.base + b];
 
                     if (vb.isString()) {
-                        self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(vb.string.len)) };
+                        self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(vb.string.asSlice().len)) };
                     } else {
                         // TODO: table length support when tables are implemented
                         return error.LengthError;
@@ -853,7 +897,7 @@ pub const VM = struct {
                     for (b..c + 1) |i| {
                         const val = &self.stack[self.base + i];
                         if (val.isString()) {
-                            total_len += val.string.len;
+                            total_len += val.string.asSlice().len;
                         } else if (val.isInteger()) {
                             // Convert integer to string to get length
                             var buf: [32]u8 = undefined;
@@ -873,30 +917,34 @@ pub const VM = struct {
                         }
                     }
 
-                    // Allocate result string
-                    const result = try self.allocator.alloc(u8, total_len);
+                    // Allocate temporary buffer for concatenation
+                    const result_buf = try self.allocator.alloc(u8, total_len);
+                    defer self.allocator.free(result_buf);
                     var offset: usize = 0;
 
-                    // Concatenate all values
+                    // Concatenate all values into buffer
                     for (b..c + 1) |i| {
                         const val = &self.stack[self.base + i];
                         if (val.isString()) {
-                            @memcpy(result[offset .. offset + val.string.len], val.string);
-                            offset += val.string.len;
+                            const str_slice = val.string.asSlice();
+                            @memcpy(result_buf[offset .. offset + str_slice.len], str_slice);
+                            offset += str_slice.len;
                         } else if (val.isInteger()) {
-                            const str = std.fmt.bufPrint(result[offset..], "{d}", .{val.integer}) catch {
+                            const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.integer}) catch {
                                 return error.ArithmeticError;
                             };
                             offset += str.len;
                         } else if (val.isNumber()) {
-                            const str = std.fmt.bufPrint(result[offset..], "{d}", .{val.number}) catch {
+                            const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.number}) catch {
                                 return error.ArithmeticError;
                             };
                             offset += str.len;
                         }
                     }
 
-                    self.stack[self.base + a] = .{ .string = result };
+                    // Allocate through GC and store result
+                    const result_str = try self.gc.allocString(result_buf);
+                    self.stack[self.base + a] = .{ .string = result_str };
                 },
                 .EQ => {
                     const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
@@ -1283,7 +1331,7 @@ pub const VM = struct {
 
                     const key_val = ci.func.k[c];
                     if (key_val.isString()) {
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         const value = self.globals.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
@@ -1301,7 +1349,7 @@ pub const VM = struct {
                     const key_val = ci.func.k[b];
                     const value = self.stack[self.base + c];
                     if (key_val.isString()) {
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         try self.globals.set(key, value);
                     } else {
                         return error.InvalidTableKey;
@@ -1334,7 +1382,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         const value = table.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
@@ -1352,7 +1400,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         try table.set(key, value);
                     } else {
                         return error.InvalidTableOperation;
@@ -1408,7 +1456,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         const value = table.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
@@ -1426,7 +1474,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string;
+                        const key = key_val.string.asSlice();
                         try table.set(key, value);
                     } else {
                         return error.InvalidTableOperation;
