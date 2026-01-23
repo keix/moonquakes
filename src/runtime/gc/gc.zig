@@ -6,6 +6,7 @@ const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const UpvalueObject = object.UpvalueObject;
 const Proto = @import("../../compiler/proto.zig").Proto;
 const TValue = @import("../value.zig").TValue;
 
@@ -39,7 +40,7 @@ pub const GC = struct {
             .allocator = allocator,
             .objects = null,
             .bytes_allocated = 0,
-            .next_gc = 1024, // gc_min_threshold
+            .next_gc = 2048, // gc_min_threshold
             .vm = null,
         };
     }
@@ -137,6 +138,22 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new upvalue object
+    pub fn allocUpvalue(self: *GC, location: *TValue) !*UpvalueObject {
+        const obj = try self.allocObject(UpvalueObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.upvalue, self.objects);
+        obj.location = location;
+        obj.closed = TValue.nil;
+        obj.next_open = null;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Main garbage collection entry point
     pub fn collectGarbage(self: *GC) void {
         const before = self.bytes_allocated;
@@ -187,7 +204,7 @@ pub const GC = struct {
     }
 
     /// Mark an object and recursively mark its children
-    fn markObject(_: *GC, obj: *GCObject) void {
+    fn markObject(self: *GC, obj: *GCObject) void {
         if (obj.marked) return; // Already marked
 
         obj.marked = true;
@@ -206,6 +223,13 @@ pub const GC = struct {
                 // TODO: Mark function upvalues when implemented
                 // const func = @fieldParentPtr(FunctionObject, "header", obj);
                 // self.markFunction(func);
+            },
+            .upvalue => {
+                // Mark the closed value if the upvalue is closed
+                const upval: *UpvalueObject = @fieldParentPtr("header", obj);
+                if (upval.isClosed()) {
+                    self.markValue(upval.closed);
+                }
             },
             .userdata => {
                 // Basic userdata has no references
@@ -263,6 +287,13 @@ pub const GC = struct {
                 const size = @sizeOf(ClosureObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(closure_obj))[0..size];
+                self.allocator.free(memory);
+            },
+            .upvalue => {
+                const upval_obj: *UpvalueObject = @fieldParentPtr("header", obj);
+                const size = @sizeOf(UpvalueObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(upval_obj))[0..size];
                 self.allocator.free(memory);
             },
             .userdata => {
