@@ -1,12 +1,13 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const Closure = @import("../runtime/closure.zig").Closure;
 const Proto = @import("../compiler/proto.zig").Proto;
-const Table = @import("../runtime/table.zig").Table;
 const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const GC = @import("../runtime/gc/gc.zig").GC;
-const StringObject = @import("../runtime/gc/object.zig").StringObject;
+const object = @import("../runtime/gc/object.zig");
+const StringObject = object.StringObject;
+const TableObject = object.TableObject;
+const ClosureObject = object.ClosureObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -79,16 +80,16 @@ pub const VM = struct {
     base_ci: CallInfo,
     callstack: [35]CallInfo, // Support up to 35 nested calls
     callstack_size: u8,
-    globals: *Table,
+    globals: *TableObject,
     allocator: std.mem.Allocator,
     gc: GC, // Garbage collector (replaces arena)
 
     pub fn init(allocator: std.mem.Allocator) !VM {
-        // Initialize GC first so we can allocate strings
+        // Initialize GC first so we can allocate strings and tables
         var gc = GC.init(allocator);
 
-        const globals = try allocator.create(Table);
-        globals.* = Table.init(allocator);
+        // Create globals table via GC
+        const globals = try gc.allocTable();
 
         // Initialize global environment (needs GC for string allocation)
         try builtin.initGlobalEnvironment(globals, &gc);
@@ -114,38 +115,9 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
-        // Clean up GC (will free all GC objects)
+        // All tables are now GC-managed, so just clean up the GC
+        // GC.deinit() will free all allocated objects (tables, strings, closures)
         self.gc.deinit();
-
-        // Clean up package table's nested tables first
-        if (self.globals.get("package")) |package_val| {
-            if (package_val == .table) {
-                const package_subtables = [_][]const u8{ "loaded", "preload", "searchers" };
-                for (package_subtables) |subtable_name| {
-                    if (package_val.table.get(subtable_name)) |subtable_val| {
-                        if (subtable_val == .table) {
-                            subtable_val.table.deinit();
-                            self.allocator.destroy(subtable_val.table);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Clean up library tables (string, io, math, table, os, debug, utf8, coroutine, package)
-        const library_names = [_][]const u8{ "string", "io", "math", "table", "os", "debug", "utf8", "coroutine", "package" };
-        for (library_names) |lib_name| {
-            if (self.globals.get(lib_name)) |lib_val| {
-                if (lib_val == .table) {
-                    lib_val.table.deinit();
-                    self.allocator.destroy(lib_val.table);
-                }
-            }
-        }
-
-        // Clean up globals table
-        self.globals.deinit();
-        self.allocator.destroy(self.globals);
     }
 
     /// Run garbage collection, marking all reachable objects from VM roots

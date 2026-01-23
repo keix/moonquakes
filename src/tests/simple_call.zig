@@ -3,7 +3,8 @@ const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
 const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
-const Closure = @import("../runtime/closure.zig").Closure;
+const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
+const GC = @import("../runtime/gc/gc.zig").GC;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const test_utils = @import("test_utils.zig");
 
@@ -17,14 +18,20 @@ test "closure constant loading" {
         .maxstacksize = 1,
     };
 
-    const func_closure = Closure.init(&func_proto);
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Create closure via GC
+    const func_closure = try vm.gc.allocClosure(&func_proto);
+
+    // Build constants at runtime
+    var main_constants = [_]TValue{
+        .{ .closure = func_closure },
+    };
 
     const main_code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R[0] = closure
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
-    };
-    const main_constants = [_]TValue{
-        .{ .closure = &func_closure },
     };
     const main_proto = Proto{
         .k = &main_constants,
@@ -34,11 +41,9 @@ test "closure constant loading" {
         .maxstacksize = 1,
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
-    try test_utils.ReturnTest.expectSingle(result, .{ .closure = &func_closure });
+    try test_utils.ReturnTest.expectSingle(result, .{ .closure = func_closure });
 }
 
 test "simple function call without arguments" {
@@ -58,8 +63,16 @@ test "simple function call without arguments" {
         .maxstacksize = 1,
     };
 
-    // Create closure
-    const func_closure = Closure.init(&func_proto);
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Create closure via GC
+    const func_closure = try vm.gc.allocClosure(&func_proto);
+
+    // Build constants at runtime
+    var main_constants = [_]TValue{
+        .{ .closure = func_closure },
+    };
 
     // Main function that calls func()
     const main_code = [_]Instruction{
@@ -70,9 +83,6 @@ test "simple function call without arguments" {
         // Return the result
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_constants = [_]TValue{
-        .{ .closure = &func_closure },
-    };
     const main_proto = Proto{
         .k = &main_constants,
         .code = &main_code,
@@ -81,8 +91,6 @@ test "simple function call without arguments" {
         .maxstacksize = 2,
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
@@ -102,8 +110,18 @@ test "function call with arguments" {
         .maxstacksize = 3,
     };
 
-    // Create closure
-    const add_closure = Closure.init(&add_proto);
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Create closure via GC
+    const add_closure = try vm.gc.allocClosure(&add_proto);
+
+    // Build constants at runtime
+    var main_constants = [_]TValue{
+        .{ .closure = add_closure },
+        .{ .integer = 10 },
+        .{ .integer = 20 },
+    };
 
     // Main function that calls add(10, 20)
     const main_code = [_]Instruction{
@@ -113,11 +131,6 @@ test "function call with arguments" {
         Instruction.initABC(.CALL, 0, 3, 2), // R[0] = R[0](R[1], R[2])
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_constants = [_]TValue{
-        .{ .closure = &add_closure },
-        .{ .integer = 10 },
-        .{ .integer = 20 },
-    };
     const main_proto = Proto{
         .k = &main_constants,
         .code = &main_code,
@@ -126,8 +139,6 @@ test "function call with arguments" {
         .maxstacksize = 3,
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
     const result = try vm.execute(&main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });

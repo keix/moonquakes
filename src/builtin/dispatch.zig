@@ -1,5 +1,6 @@
 const std = @import("std");
-const Table = @import("../runtime/table.zig").Table;
+const object = @import("../runtime/gc/object.zig");
+const TableObject = object.TableObject;
 const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
@@ -20,9 +21,7 @@ const modules = @import("modules.zig");
 
 /// Initialize the global environment with all Lua standard libraries
 /// Organized by Lua manual chapters for maintainability
-pub fn initGlobalEnvironment(globals: *Table, gc: *GC) !void {
-    const allocator = gc.allocator;
-
+pub fn initGlobalEnvironment(globals: *TableObject, gc: *GC) !void {
     // Global Functions (Chapter 6.1)
     try initGlobalFunctions(globals);
 
@@ -30,32 +29,32 @@ pub fn initGlobalEnvironment(globals: *Table, gc: *GC) !void {
     try initModuleSystem(globals, gc);
 
     // String Library (Chapter 6.4) - skeleton
-    try initStringLibrary(globals, allocator);
+    try initStringLibrary(globals, gc);
 
     // IO Library (Chapter 6.8)
-    try initIOLibrary(globals, allocator);
+    try initIOLibrary(globals, gc);
 
     // Math Library (Chapter 6.7) - skeleton
-    try initMathLibrary(globals, allocator);
+    try initMathLibrary(globals, gc);
 
     // Table Library (Chapter 6.6) - skeleton
-    try initTableLibrary(globals, allocator);
+    try initTableLibrary(globals, gc);
 
     // OS Library (Chapter 6.9) - skeleton
-    try initOSLibrary(globals, allocator);
+    try initOSLibrary(globals, gc);
 
     // Debug Library (Chapter 6.10) - skeleton
-    try initDebugLibrary(globals, allocator);
+    try initDebugLibrary(globals, gc);
 
     // UTF-8 Support (Chapter 6.5) - skeleton
     try initUtf8Library(globals, gc);
 
     // Coroutine Library (Chapter 2.6) - skeleton
-    try initCoroutineLibrary(globals, allocator);
+    try initCoroutineLibrary(globals, gc);
 }
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
-fn initGlobalFunctions(globals: *Table) !void {
+fn initGlobalFunctions(globals: *TableObject) !void {
     // Core functions (implemented)
     const print_fn = FunctionKind{ .native = .{ .id = NativeFnId.print } };
     try globals.set("print", .{ .function = print_fn });
@@ -138,9 +137,8 @@ fn initGlobalFunctions(globals: *Table) !void {
 }
 
 /// String Library: string.len, string.sub, etc. (skeleton implementations)
-fn initStringLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var string_table = try allocator.create(Table);
-    string_table.* = Table.init(allocator);
+fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
+    const string_table = try gc.allocTable();
 
     const len_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_len } };
     try string_table.set("len", .{ .function = len_fn });
@@ -197,9 +195,8 @@ fn initStringLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// IO Library: io.write, io.open, etc. (skeleton implementations)
-fn initIOLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var io_table = try allocator.create(Table);
-    io_table.* = Table.init(allocator);
+fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
+    const io_table = try gc.allocTable();
 
     const write_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_write } };
     try io_table.set("write", .{ .function = write_fn });
@@ -238,9 +235,8 @@ fn initIOLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// Math Library: math.abs, math.ceil, etc. (skeleton implementations)
-fn initMathLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var math_table = try allocator.create(Table);
-    math_table.* = Table.init(allocator);
+fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
+    const math_table = try gc.allocTable();
 
     // Math constants
     try math_table.set("pi", .{ .number = math.MATH_PI });
@@ -322,9 +318,8 @@ fn initMathLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// Table Library: table.insert, table.remove, etc. (skeleton implementations)
-fn initTableLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var table_table = try allocator.create(Table);
-    table_table.* = Table.init(allocator);
+fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
+    const table_table = try gc.allocTable();
 
     const insert_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_insert } };
     try table_table.set("insert", .{ .function = insert_fn });
@@ -351,9 +346,8 @@ fn initTableLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// OS Library: os.clock, os.date, etc. (skeleton implementations)
-fn initOSLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var os_table = try allocator.create(Table);
-    os_table.* = Table.init(allocator);
+fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
+    const os_table = try gc.allocTable();
 
     const clock_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_clock } };
     try os_table.set("clock", .{ .function = clock_fn });
@@ -392,9 +386,8 @@ fn initOSLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// Debug Library: debug.debug, debug.getinfo, etc. (skeleton implementations)
-fn initDebugLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var debug_table = try allocator.create(Table);
-    debug_table.* = Table.init(allocator);
+fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
+    const debug_table = try gc.allocTable();
 
     const debug_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_debug } };
     try debug_table.set("debug", .{ .function = debug_fn });
@@ -448,10 +441,8 @@ fn initDebugLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// UTF-8 Library: utf8.char, utf8.len, etc. (skeleton implementations)
-fn initUtf8Library(globals: *Table, gc: *GC) !void {
-    const allocator = gc.allocator;
-    var utf8_table = try allocator.create(Table);
-    utf8_table.* = Table.init(allocator);
+fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
+    const utf8_table = try gc.allocTable();
 
     // UTF-8 pattern constant
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
@@ -476,9 +467,8 @@ fn initUtf8Library(globals: *Table, gc: *GC) !void {
 }
 
 /// Coroutine Library: coroutine.create, coroutine.resume, etc. (skeleton implementations)
-fn initCoroutineLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
-    var coroutine_table = try allocator.create(Table);
-    coroutine_table.* = Table.init(allocator);
+fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
+    const coroutine_table = try gc.allocTable();
 
     const create_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_create } };
     try coroutine_table.set("create", .{ .function = create_fn });
@@ -508,16 +498,13 @@ fn initCoroutineLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
 }
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
-fn initModuleSystem(globals: *Table, gc: *GC) !void {
-    const allocator = gc.allocator;
-
+fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     // Global require function
     const require_fn = FunctionKind{ .native = .{ .id = NativeFnId.require } };
     try globals.set("require", .{ .function = require_fn });
 
     // Package table for module system
-    var package_table = try allocator.create(Table);
-    package_table.* = Table.init(allocator);
+    const package_table = try gc.allocTable();
 
     // Package functions
     const loadlib_fn = FunctionKind{ .native = .{ .id = NativeFnId.package_loadlib } };
@@ -537,16 +524,13 @@ fn initModuleSystem(globals: *Table, gc: *GC) !void {
     try package_table.set("cpath", .{ .string = cpath_str }); // Default C path
 
     // Package tables for loaded modules and searchers
-    const loaded_table = try allocator.create(Table);
-    loaded_table.* = Table.init(allocator);
+    const loaded_table = try gc.allocTable();
     try package_table.set("loaded", .{ .table = loaded_table });
 
-    const preload_table = try allocator.create(Table);
-    preload_table.* = Table.init(allocator);
+    const preload_table = try gc.allocTable();
     try package_table.set("preload", .{ .table = preload_table });
 
-    const searchers_table = try allocator.create(Table);
-    searchers_table.* = Table.init(allocator);
+    const searchers_table = try gc.allocTable();
     try package_table.set("searchers", .{ .table = searchers_table });
 
     try globals.set("package", .{ .table = package_table });
