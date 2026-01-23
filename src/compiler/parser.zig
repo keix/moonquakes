@@ -5,7 +5,7 @@ const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("proto.zig").Proto;
-const Function = @import("../runtime/function.zig").Function;
+const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
@@ -330,13 +330,13 @@ pub const ProtoBuilder = struct {
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
         const native_fn = NativeFn.init(native_id);
-        const const_value = TValue{ .function = Function{ .native = native_fn } };
+        const const_value = TValue{ .function = FunctionKind{ .native = native_fn } };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }
 
     pub fn addBytecodeFunc(self: *ProtoBuilder, proto: *const Proto) !u32 {
-        const const_value = TValue{ .function = Function{ .bytecode = proto } };
+        const const_value = TValue{ .function = FunctionKind{ .bytecode = proto } };
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }

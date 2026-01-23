@@ -1,7 +1,7 @@
 const std = @import("std");
 const Closure = @import("closure.zig").Closure;
 const Table = @import("table.zig").Table;
-const Function = @import("function.zig").Function;
+const FunctionKind = @import("function.zig").FunctionKind;
 const StringObject = @import("gc/object.zig").StringObject;
 
 /// Note:
@@ -24,7 +24,7 @@ pub const TValue = union(ValueType) {
     integer: i64,
     number: f64,
     closure: *const Closure,
-    function: Function,
+    function: FunctionKind,
     string: *const StringObject,
     table: *Table,
 

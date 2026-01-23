@@ -1,6 +1,6 @@
 const std = @import("std");
 const Table = @import("../runtime/table.zig").Table;
-const Function = @import("../runtime/function.zig").Function;
+const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
 const GC = @import("../runtime/gc/gc.zig").GC;
@@ -57,83 +57,83 @@ pub fn initGlobalEnvironment(globals: *Table, gc: *GC) !void {
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
 fn initGlobalFunctions(globals: *Table) !void {
     // Core functions (implemented)
-    const print_fn = Function{ .native = .{ .id = NativeFnId.print } };
+    const print_fn = FunctionKind{ .native = .{ .id = NativeFnId.print } };
     try globals.set("print", .{ .function = print_fn });
 
-    const tostring_fn = Function{ .native = .{ .id = NativeFnId.tostring } };
+    const tostring_fn = FunctionKind{ .native = .{ .id = NativeFnId.tostring } };
     try globals.set("tostring", .{ .function = tostring_fn });
 
-    const assert_fn = Function{ .native = .{ .id = NativeFnId.assert } };
+    const assert_fn = FunctionKind{ .native = .{ .id = NativeFnId.assert } };
     try globals.set("assert", .{ .function = assert_fn });
 
-    const error_fn = Function{ .native = .{ .id = NativeFnId.lua_error } };
+    const error_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_error } };
     try globals.set("error", .{ .function = error_fn });
 
-    const collectgarbage_fn = Function{ .native = .{ .id = NativeFnId.collectgarbage } };
+    const collectgarbage_fn = FunctionKind{ .native = .{ .id = NativeFnId.collectgarbage } };
     try globals.set("collectgarbage", .{ .function = collectgarbage_fn });
 
     // Additional global functions (skeleton implementations)
-    const type_fn = Function{ .native = .{ .id = NativeFnId.lua_type } };
+    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_type } };
     try globals.set("type", .{ .function = type_fn });
 
-    const pcall_fn = Function{ .native = .{ .id = NativeFnId.pcall } };
+    const pcall_fn = FunctionKind{ .native = .{ .id = NativeFnId.pcall } };
     try globals.set("pcall", .{ .function = pcall_fn });
 
-    const xpcall_fn = Function{ .native = .{ .id = NativeFnId.xpcall } };
+    const xpcall_fn = FunctionKind{ .native = .{ .id = NativeFnId.xpcall } };
     try globals.set("xpcall", .{ .function = xpcall_fn });
 
-    const next_fn = Function{ .native = .{ .id = NativeFnId.next } };
+    const next_fn = FunctionKind{ .native = .{ .id = NativeFnId.next } };
     try globals.set("next", .{ .function = next_fn });
 
-    const pairs_fn = Function{ .native = .{ .id = NativeFnId.pairs } };
+    const pairs_fn = FunctionKind{ .native = .{ .id = NativeFnId.pairs } };
     try globals.set("pairs", .{ .function = pairs_fn });
 
-    const ipairs_fn = Function{ .native = .{ .id = NativeFnId.ipairs } };
+    const ipairs_fn = FunctionKind{ .native = .{ .id = NativeFnId.ipairs } };
     try globals.set("ipairs", .{ .function = ipairs_fn });
 
-    const getmetatable_fn = Function{ .native = .{ .id = NativeFnId.getmetatable } };
+    const getmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.getmetatable } };
     try globals.set("getmetatable", .{ .function = getmetatable_fn });
 
-    const setmetatable_fn = Function{ .native = .{ .id = NativeFnId.setmetatable } };
+    const setmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.setmetatable } };
     try globals.set("setmetatable", .{ .function = setmetatable_fn });
 
-    const rawget_fn = Function{ .native = .{ .id = NativeFnId.rawget } };
+    const rawget_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawget } };
     try globals.set("rawget", .{ .function = rawget_fn });
 
-    const rawset_fn = Function{ .native = .{ .id = NativeFnId.rawset } };
+    const rawset_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawset } };
     try globals.set("rawset", .{ .function = rawset_fn });
 
-    const rawlen_fn = Function{ .native = .{ .id = NativeFnId.rawlen } };
+    const rawlen_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawlen } };
     try globals.set("rawlen", .{ .function = rawlen_fn });
 
-    const rawequal_fn = Function{ .native = .{ .id = NativeFnId.rawequal } };
+    const rawequal_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawequal } };
     try globals.set("rawequal", .{ .function = rawequal_fn });
 
-    const select_fn = Function{ .native = .{ .id = NativeFnId.select } };
+    const select_fn = FunctionKind{ .native = .{ .id = NativeFnId.select } };
     try globals.set("select", .{ .function = select_fn });
 
-    const tonumber_fn = Function{ .native = .{ .id = NativeFnId.tonumber } };
+    const tonumber_fn = FunctionKind{ .native = .{ .id = NativeFnId.tonumber } };
     try globals.set("tonumber", .{ .function = tonumber_fn });
 
-    const load_fn = Function{ .native = .{ .id = NativeFnId.load } };
+    const load_fn = FunctionKind{ .native = .{ .id = NativeFnId.load } };
     try globals.set("load", .{ .function = load_fn });
 
-    const loadfile_fn = Function{ .native = .{ .id = NativeFnId.loadfile } };
+    const loadfile_fn = FunctionKind{ .native = .{ .id = NativeFnId.loadfile } };
     try globals.set("loadfile", .{ .function = loadfile_fn });
 
-    const dofile_fn = Function{ .native = .{ .id = NativeFnId.dofile } };
+    const dofile_fn = FunctionKind{ .native = .{ .id = NativeFnId.dofile } };
     try globals.set("dofile", .{ .function = dofile_fn });
 
-    const warn_fn = Function{ .native = .{ .id = NativeFnId.warn } };
+    const warn_fn = FunctionKind{ .native = .{ .id = NativeFnId.warn } };
     try globals.set("warn", .{ .function = warn_fn });
 
     // Note: _G and _VERSION are typically set to globals itself and a version string
     // They could be implemented as values rather than functions, but we keep them as
     // functions for consistency with the enum system
-    const g_fn = Function{ .native = .{ .id = NativeFnId.lua_G } };
+    const g_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_G } };
     try globals.set("_G", .{ .function = g_fn });
 
-    const version_fn = Function{ .native = .{ .id = NativeFnId.lua_VERSION } };
+    const version_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_VERSION } };
     try globals.set("_VERSION", .{ .function = version_fn });
 }
 
@@ -142,55 +142,55 @@ fn initStringLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var string_table = try allocator.create(Table);
     string_table.* = Table.init(allocator);
 
-    const len_fn = Function{ .native = .{ .id = NativeFnId.string_len } };
+    const len_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_len } };
     try string_table.set("len", .{ .function = len_fn });
 
-    const sub_fn = Function{ .native = .{ .id = NativeFnId.string_sub } };
+    const sub_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_sub } };
     try string_table.set("sub", .{ .function = sub_fn });
 
-    const upper_fn = Function{ .native = .{ .id = NativeFnId.string_upper } };
+    const upper_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_upper } };
     try string_table.set("upper", .{ .function = upper_fn });
 
-    const lower_fn = Function{ .native = .{ .id = NativeFnId.string_lower } };
+    const lower_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_lower } };
     try string_table.set("lower", .{ .function = lower_fn });
 
-    const byte_fn = Function{ .native = .{ .id = NativeFnId.string_byte } };
+    const byte_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_byte } };
     try string_table.set("byte", .{ .function = byte_fn });
 
-    const char_fn = Function{ .native = .{ .id = NativeFnId.string_char } };
+    const char_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_char } };
     try string_table.set("char", .{ .function = char_fn });
 
-    const rep_fn = Function{ .native = .{ .id = NativeFnId.string_rep } };
+    const rep_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_rep } };
     try string_table.set("rep", .{ .function = rep_fn });
 
-    const reverse_fn = Function{ .native = .{ .id = NativeFnId.string_reverse } };
+    const reverse_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_reverse } };
     try string_table.set("reverse", .{ .function = reverse_fn });
 
-    const find_fn = Function{ .native = .{ .id = NativeFnId.string_find } };
+    const find_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_find } };
     try string_table.set("find", .{ .function = find_fn });
 
-    const match_fn = Function{ .native = .{ .id = NativeFnId.string_match } };
+    const match_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_match } };
     try string_table.set("match", .{ .function = match_fn });
 
-    const gmatch_fn = Function{ .native = .{ .id = NativeFnId.string_gmatch } };
+    const gmatch_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_gmatch } };
     try string_table.set("gmatch", .{ .function = gmatch_fn });
 
-    const gsub_fn = Function{ .native = .{ .id = NativeFnId.string_gsub } };
+    const gsub_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_gsub } };
     try string_table.set("gsub", .{ .function = gsub_fn });
 
-    const format_fn = Function{ .native = .{ .id = NativeFnId.string_format } };
+    const format_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_format } };
     try string_table.set("format", .{ .function = format_fn });
 
-    const dump_fn = Function{ .native = .{ .id = NativeFnId.string_dump } };
+    const dump_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_dump } };
     try string_table.set("dump", .{ .function = dump_fn });
 
-    const pack_fn = Function{ .native = .{ .id = NativeFnId.string_pack } };
+    const pack_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_pack } };
     try string_table.set("pack", .{ .function = pack_fn });
 
-    const unpack_fn = Function{ .native = .{ .id = NativeFnId.string_unpack } };
+    const unpack_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_unpack } };
     try string_table.set("unpack", .{ .function = unpack_fn });
 
-    const packsize_fn = Function{ .native = .{ .id = NativeFnId.string_packsize } };
+    const packsize_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_packsize } };
     try string_table.set("packsize", .{ .function = packsize_fn });
 
     try globals.set("string", .{ .table = string_table });
@@ -201,37 +201,37 @@ fn initIOLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var io_table = try allocator.create(Table);
     io_table.* = Table.init(allocator);
 
-    const write_fn = Function{ .native = .{ .id = NativeFnId.io_write } };
+    const write_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_write } };
     try io_table.set("write", .{ .function = write_fn });
 
-    const close_fn = Function{ .native = .{ .id = NativeFnId.io_close } };
+    const close_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_close } };
     try io_table.set("close", .{ .function = close_fn });
 
-    const flush_fn = Function{ .native = .{ .id = NativeFnId.io_flush } };
+    const flush_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_flush } };
     try io_table.set("flush", .{ .function = flush_fn });
 
-    const input_fn = Function{ .native = .{ .id = NativeFnId.io_input } };
+    const input_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_input } };
     try io_table.set("input", .{ .function = input_fn });
 
-    const lines_fn = Function{ .native = .{ .id = NativeFnId.io_lines } };
+    const lines_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_lines } };
     try io_table.set("lines", .{ .function = lines_fn });
 
-    const open_fn = Function{ .native = .{ .id = NativeFnId.io_open } };
+    const open_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_open } };
     try io_table.set("open", .{ .function = open_fn });
 
-    const output_fn = Function{ .native = .{ .id = NativeFnId.io_output } };
+    const output_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_output } };
     try io_table.set("output", .{ .function = output_fn });
 
-    const popen_fn = Function{ .native = .{ .id = NativeFnId.io_popen } };
+    const popen_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_popen } };
     try io_table.set("popen", .{ .function = popen_fn });
 
-    const read_fn = Function{ .native = .{ .id = NativeFnId.io_read } };
+    const read_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_read } };
     try io_table.set("read", .{ .function = read_fn });
 
-    const tmpfile_fn = Function{ .native = .{ .id = NativeFnId.io_tmpfile } };
+    const tmpfile_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_tmpfile } };
     try io_table.set("tmpfile", .{ .function = tmpfile_fn });
 
-    const type_fn = Function{ .native = .{ .id = NativeFnId.io_type } };
+    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_type } };
     try io_table.set("type", .{ .function = type_fn });
 
     try globals.set("io", .{ .table = io_table });
@@ -249,73 +249,73 @@ fn initMathLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     try math_table.set("mininteger", .{ .integer = math.MATH_MININTEGER });
 
     // Math functions (skeleton implementations)
-    const abs_fn = Function{ .native = .{ .id = NativeFnId.math_abs } };
+    const abs_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_abs } };
     try math_table.set("abs", .{ .function = abs_fn });
 
-    const acos_fn = Function{ .native = .{ .id = NativeFnId.math_acos } };
+    const acos_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_acos } };
     try math_table.set("acos", .{ .function = acos_fn });
 
-    const asin_fn = Function{ .native = .{ .id = NativeFnId.math_asin } };
+    const asin_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_asin } };
     try math_table.set("asin", .{ .function = asin_fn });
 
-    const atan_fn = Function{ .native = .{ .id = NativeFnId.math_atan } };
+    const atan_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_atan } };
     try math_table.set("atan", .{ .function = atan_fn });
 
-    const ceil_fn = Function{ .native = .{ .id = NativeFnId.math_ceil } };
+    const ceil_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_ceil } };
     try math_table.set("ceil", .{ .function = ceil_fn });
 
-    const cos_fn = Function{ .native = .{ .id = NativeFnId.math_cos } };
+    const cos_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_cos } };
     try math_table.set("cos", .{ .function = cos_fn });
 
-    const deg_fn = Function{ .native = .{ .id = NativeFnId.math_deg } };
+    const deg_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_deg } };
     try math_table.set("deg", .{ .function = deg_fn });
 
-    const exp_fn = Function{ .native = .{ .id = NativeFnId.math_exp } };
+    const exp_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_exp } };
     try math_table.set("exp", .{ .function = exp_fn });
 
-    const floor_fn = Function{ .native = .{ .id = NativeFnId.math_floor } };
+    const floor_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_floor } };
     try math_table.set("floor", .{ .function = floor_fn });
 
-    const fmod_fn = Function{ .native = .{ .id = NativeFnId.math_fmod } };
+    const fmod_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_fmod } };
     try math_table.set("fmod", .{ .function = fmod_fn });
 
-    const log_fn = Function{ .native = .{ .id = NativeFnId.math_log } };
+    const log_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_log } };
     try math_table.set("log", .{ .function = log_fn });
 
-    const max_fn = Function{ .native = .{ .id = NativeFnId.math_max } };
+    const max_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_max } };
     try math_table.set("max", .{ .function = max_fn });
 
-    const min_fn = Function{ .native = .{ .id = NativeFnId.math_min } };
+    const min_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_min } };
     try math_table.set("min", .{ .function = min_fn });
 
-    const modf_fn = Function{ .native = .{ .id = NativeFnId.math_modf } };
+    const modf_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_modf } };
     try math_table.set("modf", .{ .function = modf_fn });
 
-    const rad_fn = Function{ .native = .{ .id = NativeFnId.math_rad } };
+    const rad_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_rad } };
     try math_table.set("rad", .{ .function = rad_fn });
 
-    const random_fn = Function{ .native = .{ .id = NativeFnId.math_random } };
+    const random_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_random } };
     try math_table.set("random", .{ .function = random_fn });
 
-    const randomseed_fn = Function{ .native = .{ .id = NativeFnId.math_randomseed } };
+    const randomseed_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_randomseed } };
     try math_table.set("randomseed", .{ .function = randomseed_fn });
 
-    const sin_fn = Function{ .native = .{ .id = NativeFnId.math_sin } };
+    const sin_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_sin } };
     try math_table.set("sin", .{ .function = sin_fn });
 
-    const sqrt_fn = Function{ .native = .{ .id = NativeFnId.math_sqrt } };
+    const sqrt_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_sqrt } };
     try math_table.set("sqrt", .{ .function = sqrt_fn });
 
-    const tan_fn = Function{ .native = .{ .id = NativeFnId.math_tan } };
+    const tan_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_tan } };
     try math_table.set("tan", .{ .function = tan_fn });
 
-    const tointeger_fn = Function{ .native = .{ .id = NativeFnId.math_tointeger } };
+    const tointeger_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_tointeger } };
     try math_table.set("tointeger", .{ .function = tointeger_fn });
 
-    const type_fn = Function{ .native = .{ .id = NativeFnId.math_type } };
+    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_type } };
     try math_table.set("type", .{ .function = type_fn });
 
-    const ult_fn = Function{ .native = .{ .id = NativeFnId.math_ult } };
+    const ult_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_ult } };
     try math_table.set("ult", .{ .function = ult_fn });
 
     try globals.set("math", .{ .table = math_table });
@@ -326,25 +326,25 @@ fn initTableLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var table_table = try allocator.create(Table);
     table_table.* = Table.init(allocator);
 
-    const insert_fn = Function{ .native = .{ .id = NativeFnId.table_insert } };
+    const insert_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_insert } };
     try table_table.set("insert", .{ .function = insert_fn });
 
-    const remove_fn = Function{ .native = .{ .id = NativeFnId.table_remove } };
+    const remove_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_remove } };
     try table_table.set("remove", .{ .function = remove_fn });
 
-    const sort_fn = Function{ .native = .{ .id = NativeFnId.table_sort } };
+    const sort_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_sort } };
     try table_table.set("sort", .{ .function = sort_fn });
 
-    const concat_fn = Function{ .native = .{ .id = NativeFnId.table_concat } };
+    const concat_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_concat } };
     try table_table.set("concat", .{ .function = concat_fn });
 
-    const move_fn = Function{ .native = .{ .id = NativeFnId.table_move } };
+    const move_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_move } };
     try table_table.set("move", .{ .function = move_fn });
 
-    const pack_fn = Function{ .native = .{ .id = NativeFnId.table_pack } };
+    const pack_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_pack } };
     try table_table.set("pack", .{ .function = pack_fn });
 
-    const unpack_fn = Function{ .native = .{ .id = NativeFnId.table_unpack } };
+    const unpack_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_unpack } };
     try table_table.set("unpack", .{ .function = unpack_fn });
 
     try globals.set("table", .{ .table = table_table });
@@ -355,37 +355,37 @@ fn initOSLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var os_table = try allocator.create(Table);
     os_table.* = Table.init(allocator);
 
-    const clock_fn = Function{ .native = .{ .id = NativeFnId.os_clock } };
+    const clock_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_clock } };
     try os_table.set("clock", .{ .function = clock_fn });
 
-    const date_fn = Function{ .native = .{ .id = NativeFnId.os_date } };
+    const date_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_date } };
     try os_table.set("date", .{ .function = date_fn });
 
-    const difftime_fn = Function{ .native = .{ .id = NativeFnId.os_difftime } };
+    const difftime_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_difftime } };
     try os_table.set("difftime", .{ .function = difftime_fn });
 
-    const execute_fn = Function{ .native = .{ .id = NativeFnId.os_execute } };
+    const execute_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_execute } };
     try os_table.set("execute", .{ .function = execute_fn });
 
-    const exit_fn = Function{ .native = .{ .id = NativeFnId.os_exit } };
+    const exit_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_exit } };
     try os_table.set("exit", .{ .function = exit_fn });
 
-    const getenv_fn = Function{ .native = .{ .id = NativeFnId.os_getenv } };
+    const getenv_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_getenv } };
     try os_table.set("getenv", .{ .function = getenv_fn });
 
-    const remove_fn = Function{ .native = .{ .id = NativeFnId.os_remove } };
+    const remove_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_remove } };
     try os_table.set("remove", .{ .function = remove_fn });
 
-    const rename_fn = Function{ .native = .{ .id = NativeFnId.os_rename } };
+    const rename_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_rename } };
     try os_table.set("rename", .{ .function = rename_fn });
 
-    const setlocale_fn = Function{ .native = .{ .id = NativeFnId.os_setlocale } };
+    const setlocale_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_setlocale } };
     try os_table.set("setlocale", .{ .function = setlocale_fn });
 
-    const time_fn = Function{ .native = .{ .id = NativeFnId.os_time } };
+    const time_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_time } };
     try os_table.set("time", .{ .function = time_fn });
 
-    const tmpname_fn = Function{ .native = .{ .id = NativeFnId.os_tmpname } };
+    const tmpname_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_tmpname } };
     try os_table.set("tmpname", .{ .function = tmpname_fn });
 
     try globals.set("os", .{ .table = os_table });
@@ -396,52 +396,52 @@ fn initDebugLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var debug_table = try allocator.create(Table);
     debug_table.* = Table.init(allocator);
 
-    const debug_fn = Function{ .native = .{ .id = NativeFnId.debug_debug } };
+    const debug_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_debug } };
     try debug_table.set("debug", .{ .function = debug_fn });
 
-    const gethook_fn = Function{ .native = .{ .id = NativeFnId.debug_gethook } };
+    const gethook_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_gethook } };
     try debug_table.set("gethook", .{ .function = gethook_fn });
 
-    const getinfo_fn = Function{ .native = .{ .id = NativeFnId.debug_getinfo } };
+    const getinfo_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getinfo } };
     try debug_table.set("getinfo", .{ .function = getinfo_fn });
 
-    const getlocal_fn = Function{ .native = .{ .id = NativeFnId.debug_getlocal } };
+    const getlocal_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getlocal } };
     try debug_table.set("getlocal", .{ .function = getlocal_fn });
 
-    const getmetatable_fn = Function{ .native = .{ .id = NativeFnId.debug_getmetatable } };
+    const getmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getmetatable } };
     try debug_table.set("getmetatable", .{ .function = getmetatable_fn });
 
-    const getregistry_fn = Function{ .native = .{ .id = NativeFnId.debug_getregistry } };
+    const getregistry_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getregistry } };
     try debug_table.set("getregistry", .{ .function = getregistry_fn });
 
-    const getupvalue_fn = Function{ .native = .{ .id = NativeFnId.debug_getupvalue } };
+    const getupvalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getupvalue } };
     try debug_table.set("getupvalue", .{ .function = getupvalue_fn });
 
-    const getuservalue_fn = Function{ .native = .{ .id = NativeFnId.debug_getuservalue } };
+    const getuservalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getuservalue } };
     try debug_table.set("getuservalue", .{ .function = getuservalue_fn });
 
-    const sethook_fn = Function{ .native = .{ .id = NativeFnId.debug_sethook } };
+    const sethook_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_sethook } };
     try debug_table.set("sethook", .{ .function = sethook_fn });
 
-    const setlocal_fn = Function{ .native = .{ .id = NativeFnId.debug_setlocal } };
+    const setlocal_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setlocal } };
     try debug_table.set("setlocal", .{ .function = setlocal_fn });
 
-    const setmetatable_fn = Function{ .native = .{ .id = NativeFnId.debug_setmetatable } };
+    const setmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setmetatable } };
     try debug_table.set("setmetatable", .{ .function = setmetatable_fn });
 
-    const setupvalue_fn = Function{ .native = .{ .id = NativeFnId.debug_setupvalue } };
+    const setupvalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setupvalue } };
     try debug_table.set("setupvalue", .{ .function = setupvalue_fn });
 
-    const setuservalue_fn = Function{ .native = .{ .id = NativeFnId.debug_setuservalue } };
+    const setuservalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setuservalue } };
     try debug_table.set("setuservalue", .{ .function = setuservalue_fn });
 
-    const traceback_fn = Function{ .native = .{ .id = NativeFnId.debug_traceback } };
+    const traceback_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_traceback } };
     try debug_table.set("traceback", .{ .function = traceback_fn });
 
-    const upvalueid_fn = Function{ .native = .{ .id = NativeFnId.debug_upvalueid } };
+    const upvalueid_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_upvalueid } };
     try debug_table.set("upvalueid", .{ .function = upvalueid_fn });
 
-    const upvaluejoin_fn = Function{ .native = .{ .id = NativeFnId.debug_upvaluejoin } };
+    const upvaluejoin_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_upvaluejoin } };
     try debug_table.set("upvaluejoin", .{ .function = upvaluejoin_fn });
 
     try globals.set("debug", .{ .table = debug_table });
@@ -457,19 +457,19 @@ fn initUtf8Library(globals: *Table, gc: *GC) !void {
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
     try utf8_table.set("charpattern", .{ .string = charpattern_str });
 
-    const char_fn = Function{ .native = .{ .id = NativeFnId.utf8_char } };
+    const char_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_char } };
     try utf8_table.set("char", .{ .function = char_fn });
 
-    const codes_fn = Function{ .native = .{ .id = NativeFnId.utf8_codes } };
+    const codes_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_codes } };
     try utf8_table.set("codes", .{ .function = codes_fn });
 
-    const codepoint_fn = Function{ .native = .{ .id = NativeFnId.utf8_codepoint } };
+    const codepoint_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_codepoint } };
     try utf8_table.set("codepoint", .{ .function = codepoint_fn });
 
-    const len_fn = Function{ .native = .{ .id = NativeFnId.utf8_len } };
+    const len_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_len } };
     try utf8_table.set("len", .{ .function = len_fn });
 
-    const offset_fn = Function{ .native = .{ .id = NativeFnId.utf8_offset } };
+    const offset_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_offset } };
     try utf8_table.set("offset", .{ .function = offset_fn });
 
     try globals.set("utf8", .{ .table = utf8_table });
@@ -480,28 +480,28 @@ fn initCoroutineLibrary(globals: *Table, allocator: std.mem.Allocator) !void {
     var coroutine_table = try allocator.create(Table);
     coroutine_table.* = Table.init(allocator);
 
-    const create_fn = Function{ .native = .{ .id = NativeFnId.coroutine_create } };
+    const create_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_create } };
     try coroutine_table.set("create", .{ .function = create_fn });
 
-    const resume_fn = Function{ .native = .{ .id = NativeFnId.coroutine_resume } };
+    const resume_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_resume } };
     try coroutine_table.set("resume", .{ .function = resume_fn });
 
-    const running_fn = Function{ .native = .{ .id = NativeFnId.coroutine_running } };
+    const running_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_running } };
     try coroutine_table.set("running", .{ .function = running_fn });
 
-    const status_fn = Function{ .native = .{ .id = NativeFnId.coroutine_status } };
+    const status_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_status } };
     try coroutine_table.set("status", .{ .function = status_fn });
 
-    const wrap_fn = Function{ .native = .{ .id = NativeFnId.coroutine_wrap } };
+    const wrap_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_wrap } };
     try coroutine_table.set("wrap", .{ .function = wrap_fn });
 
-    const yield_fn = Function{ .native = .{ .id = NativeFnId.coroutine_yield } };
+    const yield_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_yield } };
     try coroutine_table.set("yield", .{ .function = yield_fn });
 
-    const isyieldable_fn = Function{ .native = .{ .id = NativeFnId.coroutine_isyieldable } };
+    const isyieldable_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_isyieldable } };
     try coroutine_table.set("isyieldable", .{ .function = isyieldable_fn });
 
-    const close_fn = Function{ .native = .{ .id = NativeFnId.coroutine_close } };
+    const close_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_close } };
     try coroutine_table.set("close", .{ .function = close_fn });
 
     try globals.set("coroutine", .{ .table = coroutine_table });
@@ -512,7 +512,7 @@ fn initModuleSystem(globals: *Table, gc: *GC) !void {
     const allocator = gc.allocator;
 
     // Global require function
-    const require_fn = Function{ .native = .{ .id = NativeFnId.require } };
+    const require_fn = FunctionKind{ .native = .{ .id = NativeFnId.require } };
     try globals.set("require", .{ .function = require_fn });
 
     // Package table for module system
@@ -520,10 +520,10 @@ fn initModuleSystem(globals: *Table, gc: *GC) !void {
     package_table.* = Table.init(allocator);
 
     // Package functions
-    const loadlib_fn = Function{ .native = .{ .id = NativeFnId.package_loadlib } };
+    const loadlib_fn = FunctionKind{ .native = .{ .id = NativeFnId.package_loadlib } };
     try package_table.set("loadlib", .{ .function = loadlib_fn });
 
-    const searchpath_fn = Function{ .native = .{ .id = NativeFnId.package_searchpath } };
+    const searchpath_fn = FunctionKind{ .native = .{ .id = NativeFnId.package_searchpath } };
     try package_table.set("searchpath", .{ .function = searchpath_fn });
 
     // Package configuration and paths (platform-specific in real implementation)
