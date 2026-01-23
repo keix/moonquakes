@@ -6,6 +6,7 @@ pub const GCObjectType = enum(u8) {
     string,
     table,
     closure,
+    upvalue,
     userdata,
 };
 
@@ -121,6 +122,44 @@ pub const ClosureObject = struct {
     /// Get the underlying Proto
     pub fn getProto(self: *const ClosureObject) *const Proto {
         return self.proto;
+    }
+};
+
+/// Upvalue Object - GC-managed captured variable
+///
+/// Upvalues capture variables from enclosing scopes for closures.
+/// - "Open" upvalue: location points to a stack slot (variable still on stack)
+/// - "Closed" upvalue: location points to self.closed (stack frame popped)
+pub const UpvalueObject = struct {
+    const TValue = @import("../value.zig").TValue;
+
+    header: GCObject,
+    /// Pointer to the value (stack slot when open, &closed when closed)
+    location: *TValue,
+    /// Storage for the value when the upvalue is closed
+    closed: TValue,
+    /// Linked list of open upvalues (for efficient closing when stack frame pops)
+    next_open: ?*UpvalueObject,
+
+    /// Check if this upvalue is closed
+    pub fn isClosed(self: *const UpvalueObject) bool {
+        return self.location == &@constCast(self).closed;
+    }
+
+    /// Close this upvalue: copy the value and point to internal storage
+    pub fn close(self: *UpvalueObject) void {
+        self.closed = self.location.*;
+        self.location = &self.closed;
+    }
+
+    /// Get the current value
+    pub fn get(self: *const UpvalueObject) TValue {
+        return self.location.*;
+    }
+
+    /// Set the value
+    pub fn set(self: *UpvalueObject, value: TValue) void {
+        self.location.* = value;
     }
 };
 
