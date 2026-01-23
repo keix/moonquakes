@@ -266,3 +266,85 @@ pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Returns version string like "Lua 5.4" (or "Moonquakes 0.1")
     // Note: This could be implemented as a constant rather than a function
 }
+
+/// collectgarbage([opt [, arg]]) - Controls garbage collection
+const GcOption = enum {
+    collect,
+    stop,
+    restart,
+    count,
+    step,
+    isrunning,
+    incremental,
+    generational,
+};
+
+const gc_options = std.StaticStringMap(GcOption).initComptime(.{
+    .{ "collect", .collect },
+    .{ "stop", .stop },
+    .{ "restart", .restart },
+    .{ "count", .count },
+    .{ "step", .step },
+    .{ "isrunning", .isrunning },
+    .{ "incremental", .incremental },
+    .{ "generational", .generational },
+});
+
+pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    const opt = if (nargs > 0) blk: {
+        const opt_arg = vm.stack[vm.base + func_reg + 1];
+        break :blk switch (opt_arg) {
+            .string => |s| s.asSlice(),
+            else => "collect",
+        };
+    } else "collect";
+
+    const result: TValue = if (gc_options.get(opt)) |option| switch (option) {
+        .collect => blk: {
+            vm.gc.forceGC();
+            break :blk TValue{ .nil = {} };
+        },
+        .stop => TValue{ .nil = {} }, // TODO
+        .restart => TValue{ .nil = {} }, // TODO
+        .count => blk: {
+            const stats = vm.gc.getStats();
+            const kb: f64 = @as(f64, @floatFromInt(stats.bytes_allocated)) / 1024.0;
+            break :blk TValue{ .number = kb };
+        },
+        .step => blk: {
+            vm.gc.forceGC();
+            break :blk TValue{ .boolean = true };
+        },
+        .isrunning => TValue{ .boolean = true },
+        .incremental => TValue{ .nil = {} }, // TODO
+        .generational => TValue{ .nil = {} }, // TODO
+    } else blk: {
+        // TODO: Raise error for invalid option
+        break :blk TValue{ .nil = {} };
+    };
+
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = result;
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test "gc_options maps all valid Lua 5.4 options" {
+    // Valid options
+    try std.testing.expectEqual(GcOption.collect, gc_options.get("collect").?);
+    try std.testing.expectEqual(GcOption.stop, gc_options.get("stop").?);
+    try std.testing.expectEqual(GcOption.restart, gc_options.get("restart").?);
+    try std.testing.expectEqual(GcOption.count, gc_options.get("count").?);
+    try std.testing.expectEqual(GcOption.step, gc_options.get("step").?);
+    try std.testing.expectEqual(GcOption.isrunning, gc_options.get("isrunning").?);
+    try std.testing.expectEqual(GcOption.incremental, gc_options.get("incremental").?);
+    try std.testing.expectEqual(GcOption.generational, gc_options.get("generational").?);
+
+    // Invalid options return null
+    try std.testing.expect(gc_options.get("invalid") == null);
+    try std.testing.expect(gc_options.get("") == null);
+    try std.testing.expect(gc_options.get("COLLECT") == null); // case sensitive
+}

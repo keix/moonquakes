@@ -400,3 +400,50 @@ test "markStack marks all strings in stack slice" {
     try std.testing.expectEqualStrings("stack item 1", str1.asSlice());
     try std.testing.expectEqualStrings("stack item 2", str2.asSlice());
 }
+
+test "forceGC collects unmarked objects" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate strings
+    _ = try gc.allocString("garbage1");
+    _ = try gc.allocString("garbage2");
+    const survivor = try gc.allocString("keep");
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
+
+    // Mark only survivor
+    gc.mark(&survivor.header);
+
+    // forceGC should collect unmarked objects
+    gc.forceGC();
+
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "getStats returns correct memory usage" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const stats_empty = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 0), stats_empty.bytes_allocated);
+    try std.testing.expectEqual(@as(usize, 0), stats_empty.object_count);
+
+    // Allocate a string
+    const str = try gc.allocString("test");
+    _ = str;
+
+    const stats_one = gc.getStats();
+    try std.testing.expect(stats_one.bytes_allocated > 0);
+    try std.testing.expectEqual(@as(usize, 1), stats_one.object_count);
+
+    // Allocate another
+    _ = try gc.allocString("test2");
+
+    const stats_two = gc.getStats();
+    try std.testing.expect(stats_two.bytes_allocated > stats_one.bytes_allocated);
+    try std.testing.expectEqual(@as(usize, 2), stats_two.object_count);
+}

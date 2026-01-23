@@ -561,7 +561,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .tostring => try string.nativeToString(vm, func_reg, nargs, nresults),
         .assert => try error_handling.nativeAssert(vm, func_reg, nargs, nresults),
         .lua_error => try error_handling.nativeError(vm, func_reg, nargs, nresults),
-        .collectgarbage => try error_handling.nativeCollectGarbage(vm, func_reg, nargs, nresults),
+        .collectgarbage => try global.nativeCollectGarbage(vm, func_reg, nargs, nresults),
 
         // Additional Global Functions (Skeleton implementations)
         .lua_type => try global.nativeType(vm, func_reg, nargs, nresults),
