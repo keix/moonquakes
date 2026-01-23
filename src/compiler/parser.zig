@@ -72,6 +72,15 @@ const VariableEntry = struct {
     reg: u8,
 };
 
+/// Register scope marker for tracking temporary register usage
+/// Used to implement register lifetime management (mark/reset pattern)
+pub const RegMark = struct {
+    saved: u8,
+};
+
+/// Number of registers used by numeric for loop (idx, limit, step, user_var)
+pub const NUMERIC_FOR_REGS: u8 = 4;
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
@@ -140,6 +149,18 @@ pub const ProtoBuilder = struct {
     /// Get the number of local variables (base register count for statements)
     pub fn getLocalCount(self: *ProtoBuilder) u8 {
         return @intCast(self.variables.items.len);
+    }
+
+    /// Mark current register position for later reset
+    /// Call before compiling expressions that use temporary registers
+    pub fn markRegs(self: *ProtoBuilder) RegMark {
+        return .{ .saved = self.next_reg };
+    }
+
+    /// Reset register allocation to a previously marked position
+    /// Releases temporary registers used since the mark
+    pub fn resetRegs(self: *ProtoBuilder, mark: RegMark) void {
+        self.next_reg = mark.saved;
     }
 
     // emit functions grouped together
@@ -462,8 +483,8 @@ pub const Parser = struct {
     // Parse functions grouped together
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
-            // Save base register count before each statement
-            const base_reg = self.proto.getLocalCount();
+            // Mark registers before each statement
+            const stmt_mark = self.proto.markRegs();
 
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
@@ -491,9 +512,8 @@ pub const Parser = struct {
                 return error.UnsupportedStatement;
             }
 
-            // Reset register allocation after each statement
-            // Temporary registers used by the statement can be reused
-            self.proto.next_reg = base_reg;
+            // Release statement temporaries - allows register reuse
+            self.proto.resetRegs(stmt_mark);
         }
 
         // Auto-append return nil if no explicit return was encountered
@@ -690,6 +710,9 @@ pub const Parser = struct {
     fn parseIf(self: *Parser) ParseError!void {
         self.advance(); // consume 'if'
 
+        // Mark registers before condition - will reset after TEST
+        const cond_mark = self.proto.markRegs();
+
         // Parse condition
         const condition_reg = try self.parseExpr();
 
@@ -703,8 +726,17 @@ pub const Parser = struct {
         try self.proto.emitTEST(condition_reg, false);
         const false_jmp = try self.proto.emitPatchableJMP();
 
+        // Release condition temporaries
+        self.proto.resetRegs(cond_mark);
+
+        // Mark for then branch
+        const then_mark = self.proto.markRegs();
+
         // Parse then branch
         try self.parseStatements();
+
+        // Release then branch temporaries
+        self.proto.resetRegs(then_mark);
 
         // Always emit jump to skip else branch after then branch
         const else_jmp = try self.proto.emitPatchableJMP();
@@ -722,6 +754,9 @@ pub const Parser = struct {
             const elseif_start = @as(u32, @intCast(self.proto.code.items.len));
             self.proto.patchJMP(current_false_jmp, elseif_start);
 
+            // Mark for elseif condition
+            const elseif_cond_mark = self.proto.markRegs();
+
             // Parse elseif condition
             const elseif_condition_reg = try self.parseExpr();
 
@@ -735,8 +770,17 @@ pub const Parser = struct {
             try self.proto.emitTEST(elseif_condition_reg, false);
             current_false_jmp = try self.proto.emitPatchableJMP();
 
+            // Release elseif condition temporaries
+            self.proto.resetRegs(elseif_cond_mark);
+
+            // Mark for elseif body
+            const elseif_body_mark = self.proto.markRegs();
+
             // Parse elseif body
             try self.parseStatements();
+
+            // Release elseif body temporaries
+            self.proto.resetRegs(elseif_body_mark);
 
             // Jump over remaining elseif/else when this condition was true
             const jump_to_end = try self.proto.emitPatchableJMP();
@@ -753,8 +797,14 @@ pub const Parser = struct {
             const else_start = @as(u32, @intCast(self.proto.code.items.len));
             self.proto.patchJMP(current_false_jmp, else_start);
 
+            // Mark for else body
+            const else_body_mark = self.proto.markRegs();
+
             // Parse else branch
             try self.parseStatements();
+
+            // Release else body temporaries
+            self.proto.resetRegs(else_body_mark);
         }
 
         // Expect 'end'
@@ -839,8 +889,18 @@ pub const Parser = struct {
         const forprep_addr = try self.proto.emitPatchableFORPREP(base_reg);
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
 
+        // Set next_reg past for loop registers (idx, limit, step, user_var)
+        // This ensures statements inside the loop don't overwrite loop control registers
+        self.proto.next_reg = base_reg + NUMERIC_FOR_REGS;
+
+        // Mark for loop body - each iteration resets to this point
+        const loop_body_mark = self.proto.markRegs();
+
         // Parse loop body
         try self.parseStatements();
+
+        // Release loop body temporaries (will be reset on each iteration by VM)
+        self.proto.resetRegs(loop_body_mark);
 
         // Expect 'end'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
@@ -866,8 +926,8 @@ pub const Parser = struct {
                     std.mem.eql(u8, self.current.lexeme, "elseif") or
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
-            // Save base register count before each statement
-            const base_reg = self.proto.getLocalCount();
+            // Mark registers before each statement
+            const stmt_mark = self.proto.markRegs();
 
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
@@ -895,9 +955,8 @@ pub const Parser = struct {
                 return error.UnsupportedStatement;
             }
 
-            // Reset register allocation after each statement
-            // Temporary registers used by the statement can be reused
-            self.proto.next_reg = base_reg;
+            // Release statement temporaries
+            self.proto.resetRegs(stmt_mark);
         }
     }
 
