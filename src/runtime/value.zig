@@ -1,8 +1,9 @@
 const std = @import("std");
-const Closure = @import("closure.zig").Closure;
-const Table = @import("table.zig").Table;
-const Function = @import("function.zig").Function;
-const StringObject = @import("gc/object.zig").StringObject;
+const object = @import("gc/object.zig");
+const StringObject = object.StringObject;
+const TableObject = object.TableObject;
+const ClosureObject = object.ClosureObject;
+const FunctionKind = @import("function.zig").FunctionKind;
 
 /// Note:
 /// Current TValue includes primitive types and closure.
@@ -23,10 +24,10 @@ pub const TValue = union(ValueType) {
     boolean: bool,
     integer: i64,
     number: f64,
-    closure: *const Closure,
-    function: Function,
+    closure: *ClosureObject,
+    function: FunctionKind,
     string: *const StringObject,
-    table: *Table,
+    table: *TableObject,
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -84,7 +85,7 @@ pub const TValue = union(ValueType) {
         };
     }
 
-    pub fn toClosure(self: TValue) ?*const Closure {
+    pub fn toClosure(self: TValue) ?*ClosureObject {
         return switch (self) {
             .closure => |c| c,
             else => null,

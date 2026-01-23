@@ -20,8 +20,6 @@ test "manual multi-proto execution - simple call and return" {
     //     return z
     // end
 
-    const Closure = @import("../runtime/closure.zig").Closure;
-
     // Proto for add function
     const add_code = [_]Instruction{
         // R[0] = a, R[1] = b (parameters)
@@ -37,11 +35,16 @@ test "manual multi-proto execution - simple call and return" {
         .maxstacksize = 3,
     };
 
-    const add_closure = Closure.init(&add_proto);
+    // Test execution with real function call
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
 
-    // Proto for main function
-    const main_constants = [_]TValue{
-        .{ .closure = &add_closure },
+    // Create closure via GC
+    const add_closure = try vm.gc.allocClosure(&add_proto);
+
+    // Proto for main function - build constants at runtime
+    var main_constants = [_]TValue{
+        .{ .closure = add_closure },
         .{ .integer = 10 },
         .{ .integer = 20 },
     };
@@ -61,10 +64,6 @@ test "manual multi-proto execution - simple call and return" {
         .is_vararg = false,
         .maxstacksize = 4,
     };
-
-    // Test execution with real function call
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
 
     // Capture initial state
     var trace = test_utils.ExecutionTrace.captureInitial(&vm, 4);
@@ -190,7 +189,6 @@ test "VM call stack overflow" {
 
 test "nested function call with register tracking" {
     // Test a deeper call: main -> add -> multiply
-    const Closure = @import("../runtime/closure.zig").Closure;
 
     // multiply(a, b) returns a * b
     const mul_code = [_]Instruction{
@@ -204,7 +202,12 @@ test "nested function call with register tracking" {
         .is_vararg = false,
         .maxstacksize = 3,
     };
-    const mul_closure = Closure.init(&mul_proto);
+
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Create closures via GC
+    const mul_closure = try vm.gc.allocClosure(&mul_proto);
 
     // add_and_double(a, b) returns (a + b) * 2
     const add_double_code = [_]Instruction{
@@ -216,8 +219,8 @@ test "nested function call with register tracking" {
         Instruction.initABC(.CALL, 3, 3, 2), // R[3] = mul(R[4], R[5])
         Instruction.initABC(.RETURN, 3, 2, 0), // return R[3]
     };
-    const add_double_constants = [_]TValue{
-        .{ .closure = &mul_closure },
+    var add_double_constants = [_]TValue{
+        .{ .closure = mul_closure },
         .{ .integer = 0 }, // placeholder
         .{ .integer = 2 },
     };
@@ -228,7 +231,7 @@ test "nested function call with register tracking" {
         .is_vararg = false,
         .maxstacksize = 6,
     };
-    const add_double_closure = Closure.init(&add_double_proto);
+    const add_double_closure = try vm.gc.allocClosure(&add_double_proto);
 
     // main: add_and_double(3, 4)
     const main_code = [_]Instruction{
@@ -238,8 +241,8 @@ test "nested function call with register tracking" {
         Instruction.initABC(.CALL, 0, 3, 2), // R[0] = add_double(3, 4)
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_constants = [_]TValue{
-        .{ .closure = &add_double_closure },
+    var main_constants = [_]TValue{
+        .{ .closure = add_double_closure },
         .{ .integer = 3 },
         .{ .integer = 4 },
     };
@@ -250,9 +253,6 @@ test "nested function call with register tracking" {
         .is_vararg = false,
         .maxstacksize = 3,
     };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
 
     // Track call stack depth
     try std.testing.expect(vm.callstack_size == 0);

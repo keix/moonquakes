@@ -1,10 +1,11 @@
 const std = @import("std");
+const Proto = @import("../../compiler/proto.zig").Proto;
 
 /// Types of GC-managed objects
 pub const GCObjectType = enum(u8) {
     string,
     table,
-    function,
+    closure,
     userdata,
 };
 
@@ -81,17 +82,48 @@ pub const StringObject = struct {
         return hash;
     }
 };
-/// Example: Table Object (future implementation)
+
+/// Table Object - GC-managed Lua table
 ///
-/// ```zig
-/// pub const TableObject = struct {
-///     header: GCObject,
-///     array_part: ?[]TValue,
-///     hash_part: ?HashMap(*StringObject, TValue),
+/// Uses string keys for now. Array part will be added later.
+pub const TableObject = struct {
+    const TValue = @import("../value.zig").TValue;
+    pub const HashMap = std.HashMap([]const u8, TValue, std.hash_map.StringContext, std.hash_map.default_max_load_percentage);
+
+    header: GCObject,
+    hash_part: HashMap,
+    allocator: std.mem.Allocator,
+
+    /// Get a value by string key
+    pub fn get(self: *const TableObject, key: []const u8) ?TValue {
+        return self.hash_part.get(key);
+    }
+
+    /// Set a value by string key
+    pub fn set(self: *TableObject, key: []const u8, value: TValue) !void {
+        try self.hash_part.put(key, value);
+    }
+
+    /// Clean up internal data structures (called by GC during sweep)
+    pub fn deinit(self: *TableObject) void {
+        self.hash_part.deinit();
+    }
+};
+
+/// Closure Object - GC-managed function instance
 ///
-///     // Implementation details...
-/// };
-/// ```
+/// Wraps a Proto (bytecode) with potential upvalues (future).
+pub const ClosureObject = struct {
+    header: GCObject,
+    proto: *const Proto,
+    // TODO: upvalues: []UpValue,
+
+    /// Get the underlying Proto
+    pub fn getProto(self: *const ClosureObject) *const Proto {
+        return self.proto;
+    }
+};
+
 /// Utility functions for working with GC objects
 /// Get the concrete object from a GCObject header
 ///

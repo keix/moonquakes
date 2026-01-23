@@ -4,6 +4,9 @@ const object = @import("object.zig");
 const GCObject = object.GCObject;
 const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
+const TableObject = object.TableObject;
+const ClosureObject = object.ClosureObject;
+const Proto = @import("../../compiler/proto.zig").Proto;
 const TValue = @import("../value.zig").TValue;
 
 /// Moonquakes Mark & Sweep Garbage Collector
@@ -105,6 +108,35 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new table object
+    pub fn allocTable(self: *GC) !*TableObject {
+        const obj = try self.allocObject(TableObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.table, self.objects);
+        obj.hash_part = TableObject.HashMap.init(self.allocator);
+        obj.allocator = self.allocator;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
+    /// Allocate a new closure object
+    pub fn allocClosure(self: *GC, proto: *const Proto) !*ClosureObject {
+        const obj = try self.allocObject(ClosureObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.closure, self.objects);
+        obj.proto = proto;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Main garbage collection entry point
     pub fn collectGarbage(self: *GC) void {
         const before = self.bytes_allocated;
@@ -170,7 +202,7 @@ pub const GC = struct {
                 // const table = @fieldParentPtr(TableObject, "header", obj);
                 // self.markTable(table);
             },
-            .function => {
+            .closure => {
                 // TODO: Mark function upvalues when implemented
                 // const func = @fieldParentPtr(FunctionObject, "header", obj);
                 // self.markFunction(func);
@@ -219,13 +251,19 @@ pub const GC = struct {
                 self.allocator.free(memory);
             },
             .table => {
-                // TODO: Implement when TableObject is available
-                // const table_obj = @fieldParentPtr(TableObject, "header", obj);
-                // // Free table data structures
-                // self.allocator.destroy(table_obj);
+                const table_obj: *TableObject = @fieldParentPtr("header", obj);
+                table_obj.deinit(); // Free hash_part
+                const size = @sizeOf(TableObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(table_obj))[0..size];
+                self.allocator.free(memory);
             },
-            .function => {
-                // TODO: Implement when FunctionObject is available
+            .closure => {
+                const closure_obj: *ClosureObject = @fieldParentPtr("header", obj);
+                const size = @sizeOf(ClosureObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(closure_obj))[0..size];
+                self.allocator.free(memory);
             },
             .userdata => {
                 // TODO: Implement when userdata is available
@@ -399,4 +437,51 @@ test "markStack marks all strings in stack slice" {
     // Verify surviving strings
     try std.testing.expectEqualStrings("stack item 1", str1.asSlice());
     try std.testing.expectEqualStrings("stack item 2", str2.asSlice());
+}
+
+test "forceGC collects unmarked objects" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate strings
+    _ = try gc.allocString("garbage1");
+    _ = try gc.allocString("garbage2");
+    const survivor = try gc.allocString("keep");
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
+
+    // Mark only survivor
+    gc.mark(&survivor.header);
+
+    // forceGC should collect unmarked objects
+    gc.forceGC();
+
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "getStats returns correct memory usage" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const stats_empty = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 0), stats_empty.bytes_allocated);
+    try std.testing.expectEqual(@as(usize, 0), stats_empty.object_count);
+
+    // Allocate a string
+    const str = try gc.allocString("test");
+    _ = str;
+
+    const stats_one = gc.getStats();
+    try std.testing.expect(stats_one.bytes_allocated > 0);
+    try std.testing.expectEqual(@as(usize, 1), stats_one.object_count);
+
+    // Allocate another
+    _ = try gc.allocString("test2");
+
+    const stats_two = gc.getStats();
+    try std.testing.expect(stats_two.bytes_allocated > stats_one.bytes_allocated);
+    try std.testing.expectEqual(@as(usize, 2), stats_two.object_count);
 }
