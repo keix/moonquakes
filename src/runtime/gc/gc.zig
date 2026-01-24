@@ -131,6 +131,7 @@ pub const GC = struct {
         // Initialize GC header
         obj.header = GCObject.init(.closure, self.objects);
         obj.proto = proto;
+        obj.upvalues = &.{};
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -199,6 +200,9 @@ pub const GC = struct {
             .table => |table_obj| {
                 markObject(self, &table_obj.header);
             },
+            .closure => |closure_obj| {
+                markObject(self, &closure_obj.header);
+            },
             else => {}, // Immediate values (nil, bool, number, etc.) don't need marking
         }
     }
@@ -223,9 +227,10 @@ pub const GC = struct {
                 }
             },
             .closure => {
-                // TODO: Mark function upvalues when implemented
-                // const func = @fieldParentPtr(FunctionObject, "header", obj);
-                // self.markFunction(func);
+                const closure: *ClosureObject = @fieldParentPtr("header", obj);
+                for (closure.upvalues) |upval| {
+                    markObject(self, &upval.header);
+                }
             },
             .upvalue => {
                 // Mark the closed value if the upvalue is closed
@@ -550,4 +555,36 @@ test "table marks its contents" {
     const retrieved = table.get("key");
     try std.testing.expect(retrieved != null);
     try std.testing.expectEqualStrings("value in table", retrieved.?.string.asSlice());
+}
+
+test "markValue marks closure" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Create a minimal Proto for testing
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &[_]@import("../../compiler/opcodes.zig").Instruction{},
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    // Allocate a closure
+    const closure = try gc.allocClosure(&proto);
+    const garbage = try gc.allocString("not referenced");
+    _ = garbage;
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
+
+    // Mark the closure via TValue
+    gc.markValue(TValue{ .closure = closure });
+
+    // Run GC
+    gc.sweep();
+
+    // Closure should survive, garbage string should be collected
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
 }
