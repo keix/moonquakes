@@ -8,6 +8,7 @@ const object = @import("../runtime/gc/object.zig");
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const UpvalueObject = object.UpvalueObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -16,11 +17,19 @@ const ErrorHandler = @import("error.zig");
 
 // CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
+    // Function info
     func: *const Proto,
+    closure: ?*ClosureObject, // closure for upvalue access (null for main chunk)
+
+    // Execution state
     pc: [*]const Instruction,
+    savedpc: ?[*]const Instruction, // saved pc for yielding
+
+    // Stack frame
     base: u32,
     ret_base: u32, // Where to place return values in caller's frame
-    savedpc: ?[*]const Instruction, // saved pc for yielding
+
+    // Call control
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
 
@@ -83,6 +92,7 @@ pub const VM = struct {
     globals: *TableObject,
     allocator: std.mem.Allocator,
     gc: GC, // Garbage collector (replaces arena)
+    open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
 
     pub fn init(allocator: std.mem.Allocator) !VM {
         // Initialize GC first so we can allocate strings and tables
@@ -106,6 +116,7 @@ pub const VM = struct {
             .globals = globals,
             .allocator = allocator,
             .gc = gc,
+            .open_upvalues = null,
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
@@ -142,7 +153,12 @@ pub const VM = struct {
         // 4. Mark global environment
         self.gc.mark(&self.globals.header);
 
-        // TODO: Mark upvalues (when closures are fully implemented)
+        // 5. Mark open upvalues
+        var upval = self.open_upvalues;
+        while (upval) |uv| {
+            self.gc.mark(&uv.header);
+            upval = uv.next_open;
+        }
 
         // Sweep phase: free unmarked objects
         self.gc.sweep();
@@ -155,6 +171,19 @@ pub const VM = struct {
         // Debug output (disabled in ReleaseFast)
         if (@import("builtin").mode != .ReleaseFast) {
             std.log.info("GC: {} -> {} bytes", .{ before, after });
+        }
+    }
+
+    /// Close all upvalues at or above the given stack level
+    fn closeUpvalues(self: *VM, level: u32) void {
+        while (self.open_upvalues) |uv| {
+            // Check if this upvalue points to a stack slot at or above level
+            const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&self.stack[0])) / @sizeOf(TValue);
+            if (uv_level < level) break;
+
+            // Remove from open list and close
+            self.open_upvalues = uv.next_open;
+            uv.close();
         }
     }
 
@@ -214,10 +243,11 @@ pub const VM = struct {
         const new_ci = &self.callstack[self.callstack_size];
         new_ci.* = CallInfo{
             .func = func,
+            .closure = null, // TODO: set when calling a closure
             .pc = func.code.ptr,
+            .savedpc = null,
             .base = base,
             .ret_base = ret_base,
-            .savedpc = null,
             .nresults = nresults,
             .previous = self.ci,
         };
@@ -377,10 +407,11 @@ pub const VM = struct {
     fn setupMainFrame(self: *VM, proto: *const Proto) void {
         self.base_ci = CallInfo{
             .func = proto,
+            .closure = null, // main chunk has no closure
             .pc = proto.code.ptr,
+            .savedpc = null,
             .base = 0,
             .ret_base = 0,
-            .savedpc = null,
             .nresults = -1,
             .previous = null,
         };
@@ -1330,21 +1361,28 @@ pub const VM = struct {
                     }
                 },
                 .GETUPVAL => {
-                    // Legacy opcode - might need proper implementation later
-                    // For now, set to nil
+                    // GETUPVAL A B: R[A] := UpValue[B]
                     const a = inst.getA();
                     const b = inst.getB();
-                    _ = b; // Suppress unused warning
-                    self.stack[self.base + a] = .nil;
+                    if (ci.closure) |closure| {
+                        if (b < closure.upvalues.len) {
+                            self.stack[self.base + a] = closure.upvalues[b].get();
+                        } else {
+                            self.stack[self.base + a] = .nil;
+                        }
+                    } else {
+                        self.stack[self.base + a] = .nil;
+                    }
                 },
                 .SETUPVAL => {
                     // SETUPVAL A B: UpValue[B] := R[A]
-                    // For now, this is a no-op since we don't have proper upvalue implementation
-                    // TODO: Implement proper upvalue setting when upvalues are added
                     const a = inst.getA();
                     const b = inst.getB();
-                    _ = a; // Suppress unused warning
-                    _ = b; // Suppress unused warning
+                    if (ci.closure) |closure| {
+                        if (b < closure.upvalues.len) {
+                            closure.upvalues[b].set(self.stack[self.base + a]);
+                        }
+                    }
                 },
                 .GETTABLE => {
                     // GETTABLE A B C: R[A] := R[B][R[C]]
@@ -1546,10 +1584,8 @@ pub const VM = struct {
                 },
                 .CLOSE => {
                     // CLOSE A: close upvalues from R[A] upward
-                    // For now, this is a no-op since we don't have proper upvalue implementation
-                    // TODO: Implement proper upvalue closing when upvalues are added
                     const a = inst.getA();
-                    _ = a; // Suppress unused warning
+                    self.closeUpvalues(self.base + a);
                 },
                 .TBC => {
                     // TBC A: mark R[A] as to-be-closed variable

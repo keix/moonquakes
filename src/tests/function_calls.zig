@@ -72,9 +72,11 @@ pub const VMExt = struct {
         // Set up initial call frame
         self.base_vm.base_ci = CallInfo{
             .func = proto,
+            .closure = null,
             .pc = proto.code.ptr,
-            .base = 0,
             .savedpc = null,
+            .base = 0,
+            .ret_base = 0,
             .nresults = -1,
             .previous = null,
         };
