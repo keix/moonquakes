@@ -113,11 +113,11 @@ pub const TableObject = struct {
 
 /// Closure Object - GC-managed function instance
 ///
-/// Wraps a Proto (bytecode) with potential upvalues (future).
+/// Wraps a Proto (bytecode) with upvalues for captured variables.
 pub const ClosureObject = struct {
     header: GCObject,
     proto: *const Proto,
-    // TODO: upvalues: []UpValue,
+    upvalues: []*UpvalueObject,
 
     /// Get the underlying Proto
     pub fn getProto(self: *const ClosureObject) *const Proto {

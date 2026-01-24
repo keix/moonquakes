@@ -111,10 +111,11 @@ test "VM call stack push and pop" {
     // Set up initial call frame (simulating execute)
     vm.base_ci = .{
         .func = &proto1,
+        .closure = null,
         .pc = proto1.code.ptr,
+        .savedpc = null,
         .base = 0,
         .ret_base = 0,
-        .savedpc = null,
         .nresults = -1,
         .previous = null,
     };
@@ -168,10 +169,11 @@ test "VM call stack overflow" {
     // Set up initial frame
     vm.base_ci = .{
         .func = &dummy_proto,
+        .closure = null,
         .pc = dummy_proto.code.ptr,
+        .savedpc = null,
         .base = 0,
         .ret_base = 0,
-        .savedpc = null,
         .nresults = -1,
         .previous = null,
     };

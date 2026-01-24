@@ -33,7 +33,7 @@ pub const GC = struct {
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
-    gc_min_threshold: usize = 1024, // Minimum bytes before first GC
+    gc_min_threshold: usize = 2048, // Minimum bytes before first GC
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
@@ -131,6 +131,7 @@ pub const GC = struct {
         // Initialize GC header
         obj.header = GCObject.init(.closure, self.objects);
         obj.proto = proto;
+        obj.upvalues = &.{};
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -193,12 +194,15 @@ pub const GC = struct {
     pub fn markValue(self: *GC, value: TValue) void {
         switch (value) {
             .string => |str_obj| {
-                // Cast away const to mark the header
                 const mutable_str: *StringObject = @constCast(str_obj);
                 markObject(self, &mutable_str.header);
             },
-            // TODO: Mark tables when they become GC-managed
-            // .table => |table_obj| markObject(self, &table_obj.header),
+            .table => |table_obj| {
+                markObject(self, &table_obj.header);
+            },
+            .closure => |closure_obj| {
+                markObject(self, &closure_obj.header);
+            },
             else => {}, // Immediate values (nil, bool, number, etc.) don't need marking
         }
     }
@@ -215,14 +219,18 @@ pub const GC = struct {
                 // Strings have no references to other objects
             },
             .table => {
-                // TODO: Mark table contents when tables are implemented
-                // const table = @fieldParentPtr(TableObject, "header", obj);
-                // self.markTable(table);
+                const table: *TableObject = @fieldParentPtr("header", obj);
+                // Mark all values in the hash part
+                var iter = table.hash_part.valueIterator();
+                while (iter.next()) |value_ptr| {
+                    self.markValue(value_ptr.*);
+                }
             },
             .closure => {
-                // TODO: Mark function upvalues when implemented
-                // const func = @fieldParentPtr(FunctionObject, "header", obj);
-                // self.markFunction(func);
+                const closure: *ClosureObject = @fieldParentPtr("header", obj);
+                for (closure.upvalues) |upval| {
+                    markObject(self, &upval.header);
+                }
             },
             .upvalue => {
                 // Mark the closed value if the upvalue is closed
@@ -515,4 +523,68 @@ test "getStats returns correct memory usage" {
     const stats_two = gc.getStats();
     try std.testing.expect(stats_two.bytes_allocated > stats_one.bytes_allocated);
     try std.testing.expectEqual(@as(usize, 2), stats_two.object_count);
+}
+
+test "table marks its contents" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Allocate a table and a string
+    const table = try gc.allocTable();
+    const str = try gc.allocString("value in table");
+    const garbage = try gc.allocString("not referenced");
+    _ = garbage;
+
+    // Put string in table
+    try table.set("key", TValue{ .string = str });
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
+
+    // Mark only the table (should transitively mark the string inside)
+    gc.mark(&table.header);
+
+    // Run GC
+    gc.sweep();
+
+    // Table and its string should survive, garbage should be collected
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats_after.object_count);
+
+    // Verify string is still accessible through table
+    const retrieved = table.get("key");
+    try std.testing.expect(retrieved != null);
+    try std.testing.expectEqualStrings("value in table", retrieved.?.string.asSlice());
+}
+
+test "markValue marks closure" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Create a minimal Proto for testing
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &[_]@import("../../compiler/opcodes.zig").Instruction{},
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 1,
+    };
+
+    // Allocate a closure
+    const closure = try gc.allocClosure(&proto);
+    const garbage = try gc.allocString("not referenced");
+    _ = garbage;
+
+    const stats_before = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
+
+    // Mark the closure via TValue
+    gc.markValue(TValue{ .closure = closure });
+
+    // Run GC
+    gc.sweep();
+
+    // Closure should survive, garbage string should be collected
+    const stats_after = gc.getStats();
+    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
 }
