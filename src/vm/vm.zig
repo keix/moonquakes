@@ -139,7 +139,9 @@ pub const VM = struct {
             self.gc.markConstants(frame.func.k);
         }
 
-        // TODO: Mark global environment (when tables become GC-managed)
+        // 4. Mark global environment
+        self.gc.mark(&self.globals.header);
+
         // TODO: Mark upvalues (when closures are fully implemented)
 
         // Sweep phase: free unmarked objects
