@@ -219,6 +219,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit SETTABUP instruction: UpValue[A][K[C]] := R[B]
+    pub fn emitSETTABUP(self: *ProtoBuilder, upval: u8, key_const: u32, src: u8) !void {
+        const instr = Instruction.initABC(.SETTABUP, upval, src, @intCast(key_const));
+        try self.code.append(instr);
+    }
+
     pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
         const instr = Instruction.initsJ(.JMP, offset);
         try self.code.append(instr);
@@ -1030,7 +1036,7 @@ pub const Parser = struct {
         const func_name = self.current.lexeme;
 
         // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |user_func_proto| {
+        if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call
             self.advance(); // consume function name
 
@@ -1040,10 +1046,10 @@ pub const Parser = struct {
             }
             self.advance(); // consume '('
 
-            // Create closure from function prototype
+            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocReg();
-            const proto_idx = try self.proto.addProto(user_func_proto);
-            try self.proto.emitClosure(func_reg, proto_idx);
+            const name_const = try self.proto.addConstString(func_name);
+            try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
             // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
@@ -1126,7 +1132,7 @@ pub const Parser = struct {
         const func_name = self.current.lexeme;
 
         // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |user_func_proto| {
+        if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
 
@@ -1136,10 +1142,10 @@ pub const Parser = struct {
             }
             self.advance(); // consume '('
 
-            // Create closure from function prototype
+            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocReg();
-            const proto_idx = try self.proto.addProto(user_func_proto);
-            try self.proto.emitClosure(func_reg, proto_idx);
+            const name_const = try self.proto.addConstString(func_name);
+            try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
             // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
@@ -1376,6 +1382,14 @@ pub const Parser = struct {
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
 
-        // Proto is already registered in old_proto.functions, no need to replace
+        // Proto is already registered in old_proto.functions for recursive lookup
+        // Now emit CLOSURE + SETTABUP to store in _ENV (globals)
+        const closure_reg = old_proto.allocReg();
+        const proto_idx = try old_proto.addProto(proto_ptr);
+        try old_proto.emitClosure(closure_reg, proto_idx);
+
+        // Store closure in _ENV[func_name]
+        const name_const = try old_proto.addConstString(func_name);
+        try old_proto.emitSETTABUP(0, name_const, closure_reg);
     }
 };

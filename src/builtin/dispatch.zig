@@ -20,10 +20,18 @@ const utf8 = @import("utf8.zig");
 const coroutine = @import("coroutine.zig");
 const modules = @import("modules.zig");
 
+/// Set a table entry with a GC-allocated key string
+/// This ensures the key is properly managed by GC and can be marked during collection
+fn setStringKey(tbl: *TableObject, gc: *GC, name: []const u8, value: TValue) !void {
+    const key_str = try gc.allocString(name);
+    try tbl.set(key_str.asSlice(), value);
+}
+
 /// Register a native function in a table using NativeClosureObject
+/// Keys are GC-allocated strings to ensure proper marking during GC
 fn registerNative(tbl: *TableObject, gc: *GC, name: []const u8, id: NativeFnId) !void {
     const nc = try gc.allocNativeClosure(.{ .id = id });
-    try tbl.set(name, TValue.fromNativeClosure(nc));
+    try setStringKey(tbl, gc, name, TValue.fromNativeClosure(nc));
 }
 
 /// Initialize the global environment with all Lua standard libraries
@@ -116,7 +124,7 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(string_table, gc, "unpack", .string_unpack);
     try registerNative(string_table, gc, "packsize", .string_packsize);
 
-    try globals.set("string", .{ .table = string_table });
+    try setStringKey(globals, gc, "string", .{ .table = string_table });
 }
 
 /// IO Library: io.write, io.open, etc. (skeleton implementations)
@@ -135,7 +143,7 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(io_table, gc, "tmpfile", .io_tmpfile);
     try registerNative(io_table, gc, "type", .io_type);
 
-    try globals.set("io", .{ .table = io_table });
+    try setStringKey(globals, gc, "io", .{ .table = io_table });
 }
 
 /// Math Library: math.abs, math.ceil, etc. (skeleton implementations)
@@ -143,10 +151,10 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     const math_table = try gc.allocTable();
 
     // Math constants
-    try math_table.set("pi", .{ .number = math.MATH_PI });
-    try math_table.set("huge", .{ .number = math.MATH_HUGE });
-    try math_table.set("maxinteger", .{ .integer = math.MATH_MAXINTEGER });
-    try math_table.set("mininteger", .{ .integer = math.MATH_MININTEGER });
+    try setStringKey(math_table, gc, "pi", .{ .number = math.MATH_PI });
+    try setStringKey(math_table, gc, "huge", .{ .number = math.MATH_HUGE });
+    try setStringKey(math_table, gc, "maxinteger", .{ .integer = math.MATH_MAXINTEGER });
+    try setStringKey(math_table, gc, "mininteger", .{ .integer = math.MATH_MININTEGER });
 
     // Math functions
     try registerNative(math_table, gc, "abs", .math_abs);
@@ -173,7 +181,7 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(math_table, gc, "type", .math_type);
     try registerNative(math_table, gc, "ult", .math_ult);
 
-    try globals.set("math", .{ .table = math_table });
+    try setStringKey(globals, gc, "math", .{ .table = math_table });
 }
 
 /// Table Library: table.insert, table.remove, etc. (skeleton implementations)
@@ -188,7 +196,7 @@ fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(table_table, gc, "pack", .table_pack);
     try registerNative(table_table, gc, "unpack", .table_unpack);
 
-    try globals.set("table", .{ .table = table_table });
+    try setStringKey(globals, gc, "table", .{ .table = table_table });
 }
 
 /// OS Library: os.clock, os.date, etc. (skeleton implementations)
@@ -207,7 +215,7 @@ fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(os_table, gc, "time", .os_time);
     try registerNative(os_table, gc, "tmpname", .os_tmpname);
 
-    try globals.set("os", .{ .table = os_table });
+    try setStringKey(globals, gc, "os", .{ .table = os_table });
 }
 
 /// Debug Library: debug.debug, debug.getinfo, etc. (skeleton implementations)
@@ -231,7 +239,7 @@ fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(debug_table, gc, "upvalueid", .debug_upvalueid);
     try registerNative(debug_table, gc, "upvaluejoin", .debug_upvaluejoin);
 
-    try globals.set("debug", .{ .table = debug_table });
+    try setStringKey(globals, gc, "debug", .{ .table = debug_table });
 }
 
 /// UTF-8 Library: utf8.char, utf8.len, etc. (skeleton implementations)
@@ -240,7 +248,7 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
 
     // UTF-8 pattern constant
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
-    try utf8_table.set("charpattern", .{ .string = charpattern_str });
+    try setStringKey(utf8_table, gc, "charpattern", .{ .string = charpattern_str });
 
     try registerNative(utf8_table, gc, "char", .utf8_char);
     try registerNative(utf8_table, gc, "codes", .utf8_codes);
@@ -248,7 +256,7 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
     try registerNative(utf8_table, gc, "len", .utf8_len);
     try registerNative(utf8_table, gc, "offset", .utf8_offset);
 
-    try globals.set("utf8", .{ .table = utf8_table });
+    try setStringKey(globals, gc, "utf8", .{ .table = utf8_table });
 }
 
 /// Coroutine Library: coroutine.create, coroutine.resume, etc. (skeleton implementations)
@@ -264,7 +272,7 @@ fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(coroutine_table, gc, "isyieldable", .coroutine_isyieldable);
     try registerNative(coroutine_table, gc, "close", .coroutine_close);
 
-    try globals.set("coroutine", .{ .table = coroutine_table });
+    try setStringKey(globals, gc, "coroutine", .{ .table = coroutine_table });
 }
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
@@ -281,25 +289,25 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
 
     // Package configuration and paths (platform-specific in real implementation)
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
-    try package_table.set("config", .{ .string = config_str }); // Unix-style config
+    try setStringKey(package_table, gc, "config", .{ .string = config_str });
 
     const path_str = try gc.allocString("./?.lua;/usr/local/share/lua/5.4/?.lua");
-    try package_table.set("path", .{ .string = path_str }); // Default Lua path
+    try setStringKey(package_table, gc, "path", .{ .string = path_str });
 
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
-    try package_table.set("cpath", .{ .string = cpath_str }); // Default C path
+    try setStringKey(package_table, gc, "cpath", .{ .string = cpath_str });
 
     // Package tables for loaded modules and searchers
     const loaded_table = try gc.allocTable();
-    try package_table.set("loaded", .{ .table = loaded_table });
+    try setStringKey(package_table, gc, "loaded", .{ .table = loaded_table });
 
     const preload_table = try gc.allocTable();
-    try package_table.set("preload", .{ .table = preload_table });
+    try setStringKey(package_table, gc, "preload", .{ .table = preload_table });
 
     const searchers_table = try gc.allocTable();
-    try package_table.set("searchers", .{ .table = searchers_table });
+    try setStringKey(package_table, gc, "searchers", .{ .table = searchers_table });
 
-    try globals.set("package", .{ .table = package_table });
+    try setStringKey(globals, gc, "package", .{ .table = package_table });
 }
 
 /// Dispatch native function calls to appropriate implementations

@@ -131,6 +131,16 @@ pub const VM = struct {
         self.gc.deinit();
     }
 
+    /// Mark constants from a proto and all its nested protos recursively
+    fn markProtoConstants(self: *VM, proto: *const Proto) void {
+        // Mark this proto's constants
+        self.gc.markConstants(proto.k);
+        // Recursively mark nested protos' constants
+        for (proto.protos) |nested_proto| {
+            self.markProtoConstants(nested_proto);
+        }
+    }
+
     /// Run garbage collection, marking all reachable objects from VM roots
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
@@ -140,14 +150,14 @@ pub const VM = struct {
         // 1. Mark VM stack (active portion)
         self.gc.markStack(self.stack[0..self.top]);
 
-        // 2. Mark constants from current function
+        // 2. Mark constants from current function and its nested protos
         if (self.ci) |ci| {
-            self.gc.markConstants(ci.func.k);
+            self.markProtoConstants(ci.func);
         }
 
-        // 3. Mark constants from all call frames
+        // 3. Mark constants from all call frames and their nested protos
         for (self.callstack[0..self.callstack_size]) |frame| {
-            self.gc.markConstants(frame.func.k);
+            self.markProtoConstants(frame.func);
         }
 
         // 4. Mark global environment

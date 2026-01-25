@@ -15,7 +15,7 @@ const TValue = @import("../value.zig").TValue;
 // TODO:
 // Small fixed threshold for development/testing.
 // This will be replaced by a growth-based policy later.
-const GC_THRESHOLD = 10 * 1024 * 1024;
+const GC_THRESHOLD = 14 * 1024;
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -252,16 +252,30 @@ pub const GC = struct {
             },
             .table => {
                 const table: *TableObject = @fieldParentPtr("header", obj);
-                // Mark all values in the hash part
-                var iter = table.hash_part.valueIterator();
-                while (iter.next()) |value_ptr| {
-                    self.markValue(value_ptr.*);
+                // Mark all keys and values in the hash part
+                var iter = table.hash_part.iterator();
+                while (iter.next()) |entry| {
+                    // Mark key - the slice points to StringObject's inline data
+                    // StringObject layout: [header][len][hash][data...]
+                    // So we need to go back from data pointer to struct start
+                    const key_slice = entry.key_ptr.*;
+                    const data_ptr = @intFromPtr(key_slice.ptr);
+                    const str_obj_ptr = data_ptr - @sizeOf(StringObject);
+                    const str_obj: *StringObject = @ptrFromInt(str_obj_ptr);
+                    markObject(self, &str_obj.header);
+                    // Mark value
+                    self.markValue(entry.value_ptr.*);
                 }
             },
             .closure => {
                 const closure: *ClosureObject = @fieldParentPtr("header", obj);
+                // Mark upvalues
                 for (closure.upvalues) |upval| {
                     markObject(self, &upval.header);
+                }
+                // Mark constants in the proto (strings, etc.)
+                for (closure.proto.k) |value| {
+                    self.markValue(value);
                 }
             },
             .native_closure => {
