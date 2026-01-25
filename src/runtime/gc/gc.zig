@@ -124,14 +124,22 @@ pub const GC = struct {
         return obj;
     }
 
-    /// Allocate a new closure object
+    /// Allocate a new closure object with upvalues array
     pub fn allocClosure(self: *GC, proto: *const Proto) !*ClosureObject {
         const obj = try self.allocObject(ClosureObject, 0);
 
         // Initialize GC header
         obj.header = GCObject.init(.closure, self.objects);
         obj.proto = proto;
-        obj.upvalues = &.{};
+
+        // Allocate upvalues array if needed
+        if (proto.nups > 0) {
+            const upvals = try self.allocator.alloc(*UpvalueObject, proto.nups);
+            obj.upvalues = upvals;
+            self.bytes_allocated += proto.nups * @sizeOf(*UpvalueObject);
+        } else {
+            obj.upvalues = &.{};
+        }
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -292,6 +300,11 @@ pub const GC = struct {
             },
             .closure => {
                 const closure_obj: *ClosureObject = @fieldParentPtr("header", obj);
+                // Free upvalues array if allocated
+                if (closure_obj.upvalues.len > 0) {
+                    self.bytes_allocated -= closure_obj.upvalues.len * @sizeOf(*UpvalueObject);
+                    self.allocator.free(closure_obj.upvalues);
+                }
                 const size = @sizeOf(ClosureObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(closure_obj))[0..size];

@@ -187,6 +187,39 @@ pub const VM = struct {
         }
     }
 
+    /// Get existing open upvalue for stack slot, or create a new one
+    fn getOrCreateUpvalue(self: *VM, location: *TValue) !*UpvalueObject {
+        // Search for existing open upvalue pointing to this location
+        var prev: ?*UpvalueObject = null;
+        var current = self.open_upvalues;
+
+        while (current) |uv| {
+            if (@intFromPtr(uv.location) == @intFromPtr(location)) {
+                // Found existing upvalue
+                return uv;
+            }
+            if (@intFromPtr(uv.location) < @intFromPtr(location)) {
+                // Passed the insertion point (list is sorted by descending address)
+                break;
+            }
+            prev = uv;
+            current = uv.next_open;
+        }
+
+        // Create new upvalue
+        const new_uv = try self.gc.allocUpvalue(location);
+
+        // Insert into sorted list
+        new_uv.next_open = current;
+        if (prev) |p| {
+            p.next_open = new_uv;
+        } else {
+            self.open_upvalues = new_uv;
+        }
+
+        return new_uv;
+    }
+
     /// VM is just a bridge - dispatches to appropriate native function
     fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
         try builtin.invoke(id, self, func_reg, nargs, nresults);
@@ -1593,6 +1626,36 @@ pub const VM = struct {
                     // TODO: Implement proper to-be-closed marking when resource management is added
                     const a = inst.getA();
                     _ = a; // Suppress unused warning
+                },
+                .CLOSURE => {
+                    // CLOSURE A Bx: R[A] := closure(KPROTO[Bx])
+                    const a = inst.getA();
+                    const bx = inst.getBx();
+
+                    // Get child proto from current function's proto list
+                    const child_proto = ci.func.protos[bx];
+
+                    // Create closure
+                    const closure = try self.gc.allocClosure(child_proto);
+
+                    // Set up upvalues based on descriptors
+                    for (child_proto.upvalues, 0..) |upvaldesc, i| {
+                        if (upvaldesc.instack) {
+                            // Upvalue refers to a local in enclosing function's stack
+                            const stack_slot = &self.stack[self.base + upvaldesc.idx];
+                            closure.upvalues[i] = try self.getOrCreateUpvalue(stack_slot);
+                        } else {
+                            // Upvalue refers to enclosing function's upvalue
+                            if (ci.closure) |enclosing| {
+                                closure.upvalues[i] = enclosing.upvalues[upvaldesc.idx];
+                            } else {
+                                // Main chunk has no upvalues, create a nil upvalue
+                                closure.upvalues[i] = try self.gc.allocUpvalue(&self.stack[0]);
+                            }
+                        }
+                    }
+
+                    self.stack[self.base + a] = .{ .closure = closure };
                 },
                 .EXTRAARG => {
                     // EXTRAARG Ax: Extra argument for preceding instruction
