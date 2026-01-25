@@ -63,6 +63,13 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .function => "function",
             .table => "table",
             .closure => "function",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .upvalue => "upvalue",
+                .userdata => "userdata",
+            },
         };
     } else "nil";
 

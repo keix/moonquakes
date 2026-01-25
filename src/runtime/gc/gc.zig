@@ -6,9 +6,16 @@ const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const Proto = @import("../../compiler/proto.zig").Proto;
+const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
+
+// TODO:
+// Small fixed threshold for development/testing.
+// This will be replaced by a growth-based policy later.
+const GC_THRESHOLD = 5 * 1024;
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -33,14 +40,14 @@ pub const GC = struct {
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
-    gc_min_threshold: usize = 2048, // Minimum bytes before first GC
+    gc_min_threshold: usize = GC_THRESHOLD,
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
             .objects = null,
             .bytes_allocated = 0,
-            .next_gc = 2048, // gc_min_threshold
+            .next_gc = GC_THRESHOLD,
             .vm = null,
         };
     }
@@ -163,6 +170,20 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new native closure object
+    pub fn allocNativeClosure(self: *GC, func: NativeFn) !*NativeClosureObject {
+        const obj = try self.allocObject(NativeClosureObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.native_closure, self.objects);
+        obj.func = func;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Main garbage collection entry point
     pub fn collectGarbage(self: *GC) void {
         const before = self.bytes_allocated;
@@ -211,7 +232,10 @@ pub const GC = struct {
             .closure => |closure_obj| {
                 markObject(self, &closure_obj.header);
             },
-            else => {}, // Immediate values (nil, bool, number, etc.) don't need marking
+            .object => |obj| {
+                markObject(self, obj);
+            },
+            else => {}, // Immediate values (nil, bool, number, function) don't need marking
         }
     }
 
@@ -239,6 +263,9 @@ pub const GC = struct {
                 for (closure.upvalues) |upval| {
                     markObject(self, &upval.header);
                 }
+            },
+            .native_closure => {
+                // Native closures have no references to other objects
             },
             .upvalue => {
                 // Mark the closed value if the upvalue is closed
@@ -308,6 +335,13 @@ pub const GC = struct {
                 const size = @sizeOf(ClosureObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(closure_obj))[0..size];
+                self.allocator.free(memory);
+            },
+            .native_closure => {
+                const native_obj: *NativeClosureObject = @fieldParentPtr("header", obj);
+                const size = @sizeOf(NativeClosureObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(native_obj))[0..size];
                 self.allocator.free(memory);
             },
             .upvalue => {
