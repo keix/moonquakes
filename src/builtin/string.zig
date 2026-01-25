@@ -42,6 +42,13 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .function => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
             .table => break :blk TValue{ .string = try vm.gc.allocString("<table>") },
             .closure => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
+            .object => |obj| switch (obj.type) {
+                .string => break :blk v.*,
+                .table => break :blk TValue{ .string = try vm.gc.allocString("<table>") },
+                .closure, .native_closure => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
+                .upvalue => break :blk TValue{ .string = try vm.gc.allocString("<upvalue>") },
+                .userdata => break :blk TValue{ .string = try vm.gc.allocString("<userdata>") },
+            },
         };
         break :blk str_obj;
     } else TValue{ .string = try vm.gc.allocString("nil") };
