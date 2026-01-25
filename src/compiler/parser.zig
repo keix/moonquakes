@@ -55,6 +55,9 @@ const ParseError = error{
     ExpectedLeftParen,
     ExpectedRightParen,
     UnsupportedFunction,
+    UnsupportedTableField,
+    ExpectedFieldSeparator,
+    ExpectedCloseBrace,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -219,9 +222,9 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
-    /// Emit SETTABUP instruction: UpValue[A][K[C]] := R[B]
+    /// Emit SETTABUP instruction: UpValue[A][K[B]] := R[C]
     pub fn emitSETTABUP(self: *ProtoBuilder, upval: u8, key_const: u32, src: u8) !void {
-        const instr = Instruction.initABC(.SETTABUP, upval, src, @intCast(key_const));
+        const instr = Instruction.initABC(.SETTABUP, upval, @intCast(key_const), src);
         try self.code.append(instr);
     }
 
@@ -277,6 +280,26 @@ pub const ProtoBuilder = struct {
     pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(instr);
+    }
+
+    /// Emit NEWTABLE instruction: R[A] := {}
+    pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
+        const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
+        try self.code.append(instr);
+        self.updateMaxStack(dst + 1);
+    }
+
+    /// Emit SETFIELD instruction: R[A][K[B]] := R[C]
+    pub fn emitSETFIELD(self: *ProtoBuilder, table: u8, key_const: u32, src: u8) !void {
+        const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
+        try self.code.append(instr);
+    }
+
+    /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
+    pub fn emitGETFIELD(self: *ProtoBuilder, dst: u8, table: u8, key_const: u32) !void {
+        const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
+        try self.code.append(instr);
+        self.updateMaxStack(dst + 1);
     }
 
     pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
@@ -539,6 +562,11 @@ pub const Parser = struct {
 
     // Expression parsing (precedence order: Primary -> Mul -> Add -> Compare)
     fn parsePrimary(self: *Parser) ParseError!u8 {
+        // Table constructor: { field, field, ... }
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
+            return try self.parseTableConstructor();
+        }
+
         if (self.current.kind == .Number) {
             const reg = self.proto.allocReg();
             const k = try self.proto.addConstNumber(self.current.lexeme);
@@ -574,27 +602,111 @@ pub const Parser = struct {
                 return try self.parseFunctionCallExpr();
             }
             // For now, only support loop variable 'i' which is at base+3
+            var base_reg: u8 = undefined;
             if (std.mem.eql(u8, self.current.lexeme, "i")) {
-                const reg = self.proto.allocReg();
+                base_reg = self.proto.allocReg();
                 // Loop variable is stored at base+3, copy to new register
-                try self.proto.emitMOVE(reg, 3); // base+3 = loop variable
+                try self.proto.emitMOVE(base_reg, 3); // base+3 = loop variable
                 self.advance();
-                return reg;
             } else {
                 // Check if it's a variable/parameter
                 const var_name = self.current.lexeme;
                 if (self.proto.findVariable(var_name)) |var_reg| {
-                    const reg = self.proto.allocReg();
-                    try self.proto.emitMOVE(reg, var_reg);
+                    base_reg = self.proto.allocReg();
+                    try self.proto.emitMOVE(base_reg, var_reg);
                     self.advance();
-                    return reg;
                 } else {
                     return error.UnsupportedIdentifier;
                 }
             }
+
+            // Handle field access: t.field or t.a.b.c
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+                self.advance(); // consume '.'
+
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+
+                const field_name = self.current.lexeme;
+                self.advance(); // consume field name
+
+                // Add field name to constants
+                const key_const = try self.proto.addConstString(field_name);
+
+                // Emit GETFIELD: dst = base[key]
+                const dst_reg = self.proto.allocReg();
+                try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
+
+                // The result becomes the new base for chained access
+                base_reg = dst_reg;
+            }
+
+            return base_reg;
         }
 
         return error.ExpectedExpression;
+    }
+
+    /// Parse table constructor: { [field,]* }
+    /// field = Name '=' expr | '[' expr ']' '=' expr | expr
+    fn parseTableConstructor(self: *Parser) ParseError!u8 {
+        // Consume '{'
+        self.advance();
+
+        // Allocate register for table
+        const table_reg = self.proto.allocReg();
+        try self.proto.emitNEWTABLE(table_reg);
+
+        // Parse fields until '}'
+        while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            // Check for named field: Name '=' expr
+            if (self.current.kind == .Identifier and
+                self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "="))
+            {
+                // Named field
+                const field_name = self.current.lexeme;
+                self.advance(); // consume name
+                self.advance(); // consume '='
+
+                // Parse value expression (allocates temp register)
+                const base_reg = self.proto.next_reg;
+                const value_reg = try self.parseExpr();
+
+                // Add field name to constants
+                const key_const = try self.proto.addConstString(field_name);
+
+                // Emit SETFIELD: table[key] = value
+                try self.proto.emitSETFIELD(table_reg, key_const, value_reg);
+
+                // Free temp registers used by the expression
+                self.proto.next_reg = base_reg;
+            } else {
+                // For now, only support named fields
+                return error.UnsupportedTableField;
+            }
+
+            // Check for field separator (',' or ';') or end
+            if (self.current.kind == .Symbol) {
+                if (std.mem.eql(u8, self.current.lexeme, ",") or
+                    std.mem.eql(u8, self.current.lexeme, ";"))
+                {
+                    self.advance(); // consume separator
+                } else if (std.mem.eql(u8, self.current.lexeme, "}")) {
+                    break;
+                } else {
+                    return error.ExpectedFieldSeparator;
+                }
+            }
+        }
+
+        // Consume '}'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            return error.ExpectedCloseBrace;
+        }
+        self.advance();
+
+        return table_reg;
     }
 
     fn parseMul(self: *Parser) ParseError!u8 {
@@ -1306,6 +1418,9 @@ pub const Parser = struct {
             return error.ExpectedIdentifier;
         }
         const func_name = self.current.lexeme;
+        // Add function name to constants NOW, before lexer advances through body
+        // (func_name slice becomes invalid after advance)
+        const name_const = try self.proto.addConstString(func_name);
         self.advance(); // consume function name
 
         // Parse parameters: (param)
@@ -1388,8 +1503,7 @@ pub const Parser = struct {
         const proto_idx = try old_proto.addProto(proto_ptr);
         try old_proto.emitClosure(closure_reg, proto_idx);
 
-        // Store closure in _ENV[func_name]
-        const name_const = try old_proto.addConstString(func_name);
+        // Store closure in _ENV[func_name] using pre-computed constant index
         try old_proto.emitSETTABUP(0, name_const, closure_reg);
     }
 };
