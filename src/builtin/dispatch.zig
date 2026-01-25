@@ -2,7 +2,6 @@ const std = @import("std");
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
 const NativeClosureObject = object.NativeClosureObject;
-const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;

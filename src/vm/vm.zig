@@ -1,7 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
-const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const GC = @import("../runtime/gc/gc.zig").GC;
 const object = @import("../runtime/gc/object.zig");
@@ -1139,47 +1138,7 @@ pub const VM = struct {
                     // Get the function value
                     const func_val = &self.stack[self.base + a];
 
-                    // Handle function calls
-                    if (func_val.isFunction()) {
-                        const function = func_val.function;
-                        const nargs: u32 = if (b > 0) b - 1 else 0;
-                        const nresults: u32 = if (c > 0) c - 1 else 0;
-
-                        switch (function) {
-                            .native => |native_fn| {
-                                // VM just dispatches to native function
-                                try self.callNative(native_fn.id, a, nargs, nresults);
-                            },
-                            .bytecode => |func_proto| {
-                                // Handle bytecode function calls
-
-                                const new_base = self.base + a;
-                                const ret_base = self.base + a;
-
-                                // Move arguments to correct positions if needed
-                                // Arguments are already at R(A+1)..R(A+nargs), but callee expects them at R(0)..R(nargs-1)
-                                // Since callee base = R(A), we need to shift arguments down by 1
-                                if (nargs > 0) {
-                                    var i: u32 = 0;
-                                    while (i < nargs) : (i += 1) {
-                                        self.stack[new_base + i] = self.stack[new_base + 1 + i];
-                                    }
-                                }
-
-                                // Initialize remaining parameters to nil
-                                var i: u32 = nargs;
-                                while (i < func_proto.numparams) : (i += 1) {
-                                    self.stack[new_base + i] = .nil;
-                                }
-
-                                _ = try self.pushCallInfo(func_proto, new_base, ret_base, @intCast(nresults));
-                                self.top = new_base + func_proto.maxstacksize;
-                            },
-                        }
-                        continue;
-                    }
-
-                    // Handle .object variant (NativeClosureObject or ClosureObject)
+                    // Handle .object variant (NativeClosureObject)
                     if (func_val.isObject()) {
                         const obj = func_val.object;
                         if (obj.type == .native_closure) {
