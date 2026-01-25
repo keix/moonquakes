@@ -87,22 +87,41 @@ pub const StringObject = struct {
 
 /// Table Object - GC-managed Lua table
 ///
-/// Uses string keys for now. Array part will be added later.
+/// Uses StringObject pointers as keys for GC safety.
+/// Array part will be added later.
 pub const TableObject = struct {
     const TValue = @import("../value.zig").TValue;
-    pub const HashMap = std.HashMap([]const u8, TValue, std.hash_map.StringContext, std.hash_map.default_max_load_percentage);
+
+    /// Custom hash context for StringObject pointer keys
+    /// Uses pre-computed hash and pointer equality (assumes interned strings)
+    pub const StringKeyContext = struct {
+        pub fn hash(_: StringKeyContext, key: *const StringObject) u64 {
+            return key.hash;
+        }
+
+        pub fn eql(_: StringKeyContext, a: *const StringObject, b: *const StringObject) bool {
+            return a == b; // Pointer equality (interned strings)
+        }
+    };
+
+    pub const HashMap = std.HashMap(
+        *const StringObject,
+        TValue,
+        StringKeyContext,
+        std.hash_map.default_max_load_percentage,
+    );
 
     header: GCObject,
     hash_part: HashMap,
     allocator: std.mem.Allocator,
 
-    /// Get a value by string key
-    pub fn get(self: *const TableObject, key: []const u8) ?TValue {
+    /// Get a value by StringObject key
+    pub fn get(self: *const TableObject, key: *const StringObject) ?TValue {
         return self.hash_part.get(key);
     }
 
-    /// Set a value by string key
-    pub fn set(self: *TableObject, key: []const u8, value: TValue) !void {
+    /// Set a value by StringObject key
+    pub fn set(self: *TableObject, key: *const StringObject, value: TValue) !void {
         try self.hash_part.put(key, value);
     }
 

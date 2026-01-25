@@ -1355,8 +1355,7 @@ pub const VM = struct {
 
                     const key_val = ci.func.k[c];
                     if (key_val.isString()) {
-                        const key = key_val.string.asSlice();
-                        const value = self.globals.get(key) orelse .nil;
+                        const value = self.globals.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableKey;
@@ -1373,8 +1372,7 @@ pub const VM = struct {
                     const key_val = ci.func.k[b];
                     const value = self.stack[self.base + c];
                     if (key_val.isString()) {
-                        const key = key_val.string.asSlice();
-                        try self.globals.set(key, value);
+                        try self.globals.set(key_val.string, value);
                     } else {
                         return error.InvalidTableKey;
                     }
@@ -1413,8 +1411,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        const value = table.get(key) orelse .nil;
+                        const value = table.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableOperation;
@@ -1431,8 +1428,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        try table.set(key, value);
+                        try table.set(key_val.string, value);
                     } else {
                         return error.InvalidTableOperation;
                     }
@@ -1448,9 +1444,10 @@ pub const VM = struct {
                         const table = table_val.table;
                         // Convert integer index to string key (Lua tables use string keys internally)
                         var key_buffer: [32]u8 = undefined;
-                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
+                        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
                             return error.InvalidTableKey;
                         };
+                        const key = try self.gc.allocString(key_slice);
                         const value = table.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
@@ -1469,9 +1466,10 @@ pub const VM = struct {
                         const table = table_val.table;
                         // Convert integer index to string key
                         var key_buffer: [32]u8 = undefined;
-                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
+                        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
                             return error.InvalidTableKey;
                         };
+                        const key = try self.gc.allocString(key_slice);
                         try table.set(key, value);
                     } else {
                         return error.InvalidTableOperation;
@@ -1487,8 +1485,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        const value = table.get(key) orelse .nil;
+                        const value = table.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableOperation;
@@ -1505,8 +1502,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        try table.set(key, value);
+                        try table.set(key_val.string, value);
                     } else {
                         return error.InvalidTableOperation;
                     }
