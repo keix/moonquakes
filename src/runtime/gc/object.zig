@@ -6,6 +6,7 @@ pub const GCObjectType = enum(u8) {
     string,
     table,
     closure,
+    native_closure,
     upvalue,
     userdata,
 };
@@ -122,6 +123,22 @@ pub const ClosureObject = struct {
     /// Get the underlying Proto
     pub fn getProto(self: *const ClosureObject) *const Proto {
         return self.proto;
+    }
+};
+
+/// Native Closure Object - GC-managed native function
+///
+/// Wraps a native function pointer. Always reachable via globals,
+/// so effectively never collected, but visible to GC for consistency.
+pub const NativeClosureObject = struct {
+    const NativeFn = @import("../native.zig").NativeFn;
+
+    header: GCObject,
+    func: NativeFn,
+
+    /// Get the native function
+    pub fn getFunc(self: *const NativeClosureObject) NativeFn {
+        return self.func;
     }
 };
 

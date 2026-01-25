@@ -6,8 +6,10 @@ const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const Proto = @import("../../compiler/proto.zig").Proto;
+const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 
 /// Moonquakes Mark & Sweep Garbage Collector
@@ -163,6 +165,20 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new native closure object
+    pub fn allocNativeClosure(self: *GC, func: NativeFn) !*NativeClosureObject {
+        const obj = try self.allocObject(NativeClosureObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.native_closure, self.objects);
+        obj.func = func;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Main garbage collection entry point
     pub fn collectGarbage(self: *GC) void {
         const before = self.bytes_allocated;
@@ -240,6 +256,9 @@ pub const GC = struct {
                     markObject(self, &upval.header);
                 }
             },
+            .native_closure => {
+                // Native closures have no references to other objects
+            },
             .upvalue => {
                 // Mark the closed value if the upvalue is closed
                 const upval: *UpvalueObject = @fieldParentPtr("header", obj);
@@ -308,6 +327,13 @@ pub const GC = struct {
                 const size = @sizeOf(ClosureObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(closure_obj))[0..size];
+                self.allocator.free(memory);
+            },
+            .native_closure => {
+                const native_obj: *NativeClosureObject = @fieldParentPtr("header", obj);
+                const size = @sizeOf(NativeClosureObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(native_obj))[0..size];
                 self.allocator.free(memory);
             },
             .upvalue => {
