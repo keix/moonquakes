@@ -8,6 +8,7 @@ const object = @import("../runtime/gc/object.zig");
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
@@ -1178,10 +1179,26 @@ pub const VM = struct {
                         continue;
                     }
 
-                    if (!func_val.isClosure()) {
-                        return error.NotAFunction;
+                    // Handle .object variant (NativeClosureObject or ClosureObject)
+                    if (func_val.isObject()) {
+                        const obj = func_val.object;
+                        if (obj.type == .native_closure) {
+                            const nc = object.getObject(NativeClosureObject, obj);
+                            const nargs: u32 = if (b > 0) b - 1 else 0;
+                            const nresults: u32 = if (c > 0) c - 1 else 0;
+                            try self.callNative(nc.func.id, a, nargs, nresults);
+                            continue;
+                        }
+                        // .closure via .object variant - fall through to closure handling
                     }
-                    const closure = func_val.closure;
+
+                    // Get closure from either .closure or .object variant
+                    const closure = if (func_val.isClosure())
+                        func_val.closure
+                    else if (func_val.isObject() and func_val.object.type == .closure)
+                        object.getObject(ClosureObject, func_val.object)
+                    else
+                        return error.NotAFunction;
                     const func_proto = closure.proto;
 
                     // Calculate number of arguments
@@ -1635,25 +1652,37 @@ pub const VM = struct {
                     // Get child proto from current function's proto list
                     const child_proto = ci.func.protos[bx];
 
-                    // Create closure
-                    const closure = try self.gc.allocClosure(child_proto);
+                    // Upvalue pre-collection approach:
+                    // 1. Collect all upvalues first into a stack buffer (no GC allocation)
+                    // 2. Then allocate closure (may trigger GC)
+                    // 3. memcpy upvalues into closure
+                    // This ensures closure.upvalues is always fully initialized when closure exists
 
-                    // Set up upvalues based on descriptors
-                    for (child_proto.upvalues, 0..) |upvaldesc, i| {
+                    var upvals_buf: [256]*UpvalueObject = undefined;
+                    const nups = child_proto.nups;
+
+                    // Phase 1: Collect upvalues (all are root-reachable via open_upvalues)
+                    for (child_proto.upvalues[0..nups], 0..) |upvaldesc, i| {
                         if (upvaldesc.instack) {
                             // Upvalue refers to a local in enclosing function's stack
                             const stack_slot = &self.stack[self.base + upvaldesc.idx];
-                            closure.upvalues[i] = try self.getOrCreateUpvalue(stack_slot);
+                            upvals_buf[i] = try self.getOrCreateUpvalue(stack_slot);
                         } else {
                             // Upvalue refers to enclosing function's upvalue
                             if (ci.closure) |enclosing| {
-                                closure.upvalues[i] = enclosing.upvalues[upvaldesc.idx];
+                                upvals_buf[i] = enclosing.upvalues[upvaldesc.idx];
                             } else {
                                 // Main chunk has no upvalues, create a nil upvalue
-                                closure.upvalues[i] = try self.gc.allocUpvalue(&self.stack[0]);
+                                upvals_buf[i] = try self.gc.allocUpvalue(&self.stack[0]);
                             }
                         }
                     }
+
+                    // Phase 2: Allocate closure (may trigger GC, but upvalues are safe in open_upvalues)
+                    const closure = try self.gc.allocClosure(child_proto);
+
+                    // Phase 3: Copy upvalues into closure
+                    @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
 
                     self.stack[self.base + a] = .{ .closure = closure };
                 },

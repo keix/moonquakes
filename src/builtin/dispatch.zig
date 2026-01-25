@@ -1,7 +1,9 @@
 const std = @import("std");
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
+const NativeClosureObject = object.NativeClosureObject;
 const FunctionKind = @import("../runtime/function.zig").FunctionKind;
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
 const GC = @import("../runtime/gc/gc.zig").GC;
@@ -19,11 +21,17 @@ const utf8 = @import("utf8.zig");
 const coroutine = @import("coroutine.zig");
 const modules = @import("modules.zig");
 
+/// Register a native function in a table using NativeClosureObject
+fn registerNative(tbl: *TableObject, gc: *GC, name: []const u8, id: NativeFnId) !void {
+    const nc = try gc.allocNativeClosure(.{ .id = id });
+    try tbl.set(name, TValue.fromNativeClosure(nc));
+}
+
 /// Initialize the global environment with all Lua standard libraries
 /// Organized by Lua manual chapters for maintainability
 pub fn initGlobalEnvironment(globals: *TableObject, gc: *GC) !void {
     // Global Functions (Chapter 6.1)
-    try initGlobalFunctions(globals);
+    try initGlobalFunctions(globals, gc);
 
     // Module System (Chapter 6.3) - skeleton
     try initModuleSystem(globals, gc);
@@ -54,142 +62,60 @@ pub fn initGlobalEnvironment(globals: *TableObject, gc: *GC) !void {
 }
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
-fn initGlobalFunctions(globals: *TableObject) !void {
+fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     // Core functions (implemented)
-    const print_fn = FunctionKind{ .native = .{ .id = NativeFnId.print } };
-    try globals.set("print", .{ .function = print_fn });
-
-    const tostring_fn = FunctionKind{ .native = .{ .id = NativeFnId.tostring } };
-    try globals.set("tostring", .{ .function = tostring_fn });
-
-    const assert_fn = FunctionKind{ .native = .{ .id = NativeFnId.assert } };
-    try globals.set("assert", .{ .function = assert_fn });
-
-    const error_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_error } };
-    try globals.set("error", .{ .function = error_fn });
-
-    const collectgarbage_fn = FunctionKind{ .native = .{ .id = NativeFnId.collectgarbage } };
-    try globals.set("collectgarbage", .{ .function = collectgarbage_fn });
+    try registerNative(globals, gc, "print", .print);
+    try registerNative(globals, gc, "tostring", .tostring);
+    try registerNative(globals, gc, "assert", .assert);
+    try registerNative(globals, gc, "error", .lua_error);
+    try registerNative(globals, gc, "collectgarbage", .collectgarbage);
 
     // Additional global functions (skeleton implementations)
-    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_type } };
-    try globals.set("type", .{ .function = type_fn });
-
-    const pcall_fn = FunctionKind{ .native = .{ .id = NativeFnId.pcall } };
-    try globals.set("pcall", .{ .function = pcall_fn });
-
-    const xpcall_fn = FunctionKind{ .native = .{ .id = NativeFnId.xpcall } };
-    try globals.set("xpcall", .{ .function = xpcall_fn });
-
-    const next_fn = FunctionKind{ .native = .{ .id = NativeFnId.next } };
-    try globals.set("next", .{ .function = next_fn });
-
-    const pairs_fn = FunctionKind{ .native = .{ .id = NativeFnId.pairs } };
-    try globals.set("pairs", .{ .function = pairs_fn });
-
-    const ipairs_fn = FunctionKind{ .native = .{ .id = NativeFnId.ipairs } };
-    try globals.set("ipairs", .{ .function = ipairs_fn });
-
-    const getmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.getmetatable } };
-    try globals.set("getmetatable", .{ .function = getmetatable_fn });
-
-    const setmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.setmetatable } };
-    try globals.set("setmetatable", .{ .function = setmetatable_fn });
-
-    const rawget_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawget } };
-    try globals.set("rawget", .{ .function = rawget_fn });
-
-    const rawset_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawset } };
-    try globals.set("rawset", .{ .function = rawset_fn });
-
-    const rawlen_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawlen } };
-    try globals.set("rawlen", .{ .function = rawlen_fn });
-
-    const rawequal_fn = FunctionKind{ .native = .{ .id = NativeFnId.rawequal } };
-    try globals.set("rawequal", .{ .function = rawequal_fn });
-
-    const select_fn = FunctionKind{ .native = .{ .id = NativeFnId.select } };
-    try globals.set("select", .{ .function = select_fn });
-
-    const tonumber_fn = FunctionKind{ .native = .{ .id = NativeFnId.tonumber } };
-    try globals.set("tonumber", .{ .function = tonumber_fn });
-
-    const load_fn = FunctionKind{ .native = .{ .id = NativeFnId.load } };
-    try globals.set("load", .{ .function = load_fn });
-
-    const loadfile_fn = FunctionKind{ .native = .{ .id = NativeFnId.loadfile } };
-    try globals.set("loadfile", .{ .function = loadfile_fn });
-
-    const dofile_fn = FunctionKind{ .native = .{ .id = NativeFnId.dofile } };
-    try globals.set("dofile", .{ .function = dofile_fn });
-
-    const warn_fn = FunctionKind{ .native = .{ .id = NativeFnId.warn } };
-    try globals.set("warn", .{ .function = warn_fn });
+    try registerNative(globals, gc, "type", .lua_type);
+    try registerNative(globals, gc, "pcall", .pcall);
+    try registerNative(globals, gc, "xpcall", .xpcall);
+    try registerNative(globals, gc, "next", .next);
+    try registerNative(globals, gc, "pairs", .pairs);
+    try registerNative(globals, gc, "ipairs", .ipairs);
+    try registerNative(globals, gc, "getmetatable", .getmetatable);
+    try registerNative(globals, gc, "setmetatable", .setmetatable);
+    try registerNative(globals, gc, "rawget", .rawget);
+    try registerNative(globals, gc, "rawset", .rawset);
+    try registerNative(globals, gc, "rawlen", .rawlen);
+    try registerNative(globals, gc, "rawequal", .rawequal);
+    try registerNative(globals, gc, "select", .select);
+    try registerNative(globals, gc, "tonumber", .tonumber);
+    try registerNative(globals, gc, "load", .load);
+    try registerNative(globals, gc, "loadfile", .loadfile);
+    try registerNative(globals, gc, "dofile", .dofile);
+    try registerNative(globals, gc, "warn", .warn);
 
     // Note: _G and _VERSION are typically set to globals itself and a version string
-    // They could be implemented as values rather than functions, but we keep them as
-    // functions for consistency with the enum system
-    const g_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_G } };
-    try globals.set("_G", .{ .function = g_fn });
-
-    const version_fn = FunctionKind{ .native = .{ .id = NativeFnId.lua_VERSION } };
-    try globals.set("_VERSION", .{ .function = version_fn });
+    try registerNative(globals, gc, "_G", .lua_G);
+    try registerNative(globals, gc, "_VERSION", .lua_VERSION);
 }
 
 /// String Library: string.len, string.sub, etc. (skeleton implementations)
 fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     const string_table = try gc.allocTable();
 
-    const len_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_len } };
-    try string_table.set("len", .{ .function = len_fn });
-
-    const sub_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_sub } };
-    try string_table.set("sub", .{ .function = sub_fn });
-
-    const upper_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_upper } };
-    try string_table.set("upper", .{ .function = upper_fn });
-
-    const lower_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_lower } };
-    try string_table.set("lower", .{ .function = lower_fn });
-
-    const byte_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_byte } };
-    try string_table.set("byte", .{ .function = byte_fn });
-
-    const char_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_char } };
-    try string_table.set("char", .{ .function = char_fn });
-
-    const rep_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_rep } };
-    try string_table.set("rep", .{ .function = rep_fn });
-
-    const reverse_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_reverse } };
-    try string_table.set("reverse", .{ .function = reverse_fn });
-
-    const find_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_find } };
-    try string_table.set("find", .{ .function = find_fn });
-
-    const match_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_match } };
-    try string_table.set("match", .{ .function = match_fn });
-
-    const gmatch_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_gmatch } };
-    try string_table.set("gmatch", .{ .function = gmatch_fn });
-
-    const gsub_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_gsub } };
-    try string_table.set("gsub", .{ .function = gsub_fn });
-
-    const format_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_format } };
-    try string_table.set("format", .{ .function = format_fn });
-
-    const dump_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_dump } };
-    try string_table.set("dump", .{ .function = dump_fn });
-
-    const pack_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_pack } };
-    try string_table.set("pack", .{ .function = pack_fn });
-
-    const unpack_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_unpack } };
-    try string_table.set("unpack", .{ .function = unpack_fn });
-
-    const packsize_fn = FunctionKind{ .native = .{ .id = NativeFnId.string_packsize } };
-    try string_table.set("packsize", .{ .function = packsize_fn });
+    try registerNative(string_table, gc, "len", .string_len);
+    try registerNative(string_table, gc, "sub", .string_sub);
+    try registerNative(string_table, gc, "upper", .string_upper);
+    try registerNative(string_table, gc, "lower", .string_lower);
+    try registerNative(string_table, gc, "byte", .string_byte);
+    try registerNative(string_table, gc, "char", .string_char);
+    try registerNative(string_table, gc, "rep", .string_rep);
+    try registerNative(string_table, gc, "reverse", .string_reverse);
+    try registerNative(string_table, gc, "find", .string_find);
+    try registerNative(string_table, gc, "match", .string_match);
+    try registerNative(string_table, gc, "gmatch", .string_gmatch);
+    try registerNative(string_table, gc, "gsub", .string_gsub);
+    try registerNative(string_table, gc, "format", .string_format);
+    try registerNative(string_table, gc, "dump", .string_dump);
+    try registerNative(string_table, gc, "pack", .string_pack);
+    try registerNative(string_table, gc, "unpack", .string_unpack);
+    try registerNative(string_table, gc, "packsize", .string_packsize);
 
     try globals.set("string", .{ .table = string_table });
 }
@@ -198,38 +124,17 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
 fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     const io_table = try gc.allocTable();
 
-    const write_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_write } };
-    try io_table.set("write", .{ .function = write_fn });
-
-    const close_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_close } };
-    try io_table.set("close", .{ .function = close_fn });
-
-    const flush_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_flush } };
-    try io_table.set("flush", .{ .function = flush_fn });
-
-    const input_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_input } };
-    try io_table.set("input", .{ .function = input_fn });
-
-    const lines_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_lines } };
-    try io_table.set("lines", .{ .function = lines_fn });
-
-    const open_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_open } };
-    try io_table.set("open", .{ .function = open_fn });
-
-    const output_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_output } };
-    try io_table.set("output", .{ .function = output_fn });
-
-    const popen_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_popen } };
-    try io_table.set("popen", .{ .function = popen_fn });
-
-    const read_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_read } };
-    try io_table.set("read", .{ .function = read_fn });
-
-    const tmpfile_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_tmpfile } };
-    try io_table.set("tmpfile", .{ .function = tmpfile_fn });
-
-    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.io_type } };
-    try io_table.set("type", .{ .function = type_fn });
+    try registerNative(io_table, gc, "write", .io_write);
+    try registerNative(io_table, gc, "close", .io_close);
+    try registerNative(io_table, gc, "flush", .io_flush);
+    try registerNative(io_table, gc, "input", .io_input);
+    try registerNative(io_table, gc, "lines", .io_lines);
+    try registerNative(io_table, gc, "open", .io_open);
+    try registerNative(io_table, gc, "output", .io_output);
+    try registerNative(io_table, gc, "popen", .io_popen);
+    try registerNative(io_table, gc, "read", .io_read);
+    try registerNative(io_table, gc, "tmpfile", .io_tmpfile);
+    try registerNative(io_table, gc, "type", .io_type);
 
     try globals.set("io", .{ .table = io_table });
 }
@@ -244,75 +149,30 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     try math_table.set("maxinteger", .{ .integer = math.MATH_MAXINTEGER });
     try math_table.set("mininteger", .{ .integer = math.MATH_MININTEGER });
 
-    // Math functions (skeleton implementations)
-    const abs_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_abs } };
-    try math_table.set("abs", .{ .function = abs_fn });
-
-    const acos_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_acos } };
-    try math_table.set("acos", .{ .function = acos_fn });
-
-    const asin_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_asin } };
-    try math_table.set("asin", .{ .function = asin_fn });
-
-    const atan_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_atan } };
-    try math_table.set("atan", .{ .function = atan_fn });
-
-    const ceil_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_ceil } };
-    try math_table.set("ceil", .{ .function = ceil_fn });
-
-    const cos_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_cos } };
-    try math_table.set("cos", .{ .function = cos_fn });
-
-    const deg_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_deg } };
-    try math_table.set("deg", .{ .function = deg_fn });
-
-    const exp_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_exp } };
-    try math_table.set("exp", .{ .function = exp_fn });
-
-    const floor_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_floor } };
-    try math_table.set("floor", .{ .function = floor_fn });
-
-    const fmod_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_fmod } };
-    try math_table.set("fmod", .{ .function = fmod_fn });
-
-    const log_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_log } };
-    try math_table.set("log", .{ .function = log_fn });
-
-    const max_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_max } };
-    try math_table.set("max", .{ .function = max_fn });
-
-    const min_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_min } };
-    try math_table.set("min", .{ .function = min_fn });
-
-    const modf_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_modf } };
-    try math_table.set("modf", .{ .function = modf_fn });
-
-    const rad_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_rad } };
-    try math_table.set("rad", .{ .function = rad_fn });
-
-    const random_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_random } };
-    try math_table.set("random", .{ .function = random_fn });
-
-    const randomseed_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_randomseed } };
-    try math_table.set("randomseed", .{ .function = randomseed_fn });
-
-    const sin_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_sin } };
-    try math_table.set("sin", .{ .function = sin_fn });
-
-    const sqrt_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_sqrt } };
-    try math_table.set("sqrt", .{ .function = sqrt_fn });
-
-    const tan_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_tan } };
-    try math_table.set("tan", .{ .function = tan_fn });
-
-    const tointeger_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_tointeger } };
-    try math_table.set("tointeger", .{ .function = tointeger_fn });
-
-    const type_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_type } };
-    try math_table.set("type", .{ .function = type_fn });
-
-    const ult_fn = FunctionKind{ .native = .{ .id = NativeFnId.math_ult } };
-    try math_table.set("ult", .{ .function = ult_fn });
+    // Math functions
+    try registerNative(math_table, gc, "abs", .math_abs);
+    try registerNative(math_table, gc, "acos", .math_acos);
+    try registerNative(math_table, gc, "asin", .math_asin);
+    try registerNative(math_table, gc, "atan", .math_atan);
+    try registerNative(math_table, gc, "ceil", .math_ceil);
+    try registerNative(math_table, gc, "cos", .math_cos);
+    try registerNative(math_table, gc, "deg", .math_deg);
+    try registerNative(math_table, gc, "exp", .math_exp);
+    try registerNative(math_table, gc, "floor", .math_floor);
+    try registerNative(math_table, gc, "fmod", .math_fmod);
+    try registerNative(math_table, gc, "log", .math_log);
+    try registerNative(math_table, gc, "max", .math_max);
+    try registerNative(math_table, gc, "min", .math_min);
+    try registerNative(math_table, gc, "modf", .math_modf);
+    try registerNative(math_table, gc, "rad", .math_rad);
+    try registerNative(math_table, gc, "random", .math_random);
+    try registerNative(math_table, gc, "randomseed", .math_randomseed);
+    try registerNative(math_table, gc, "sin", .math_sin);
+    try registerNative(math_table, gc, "sqrt", .math_sqrt);
+    try registerNative(math_table, gc, "tan", .math_tan);
+    try registerNative(math_table, gc, "tointeger", .math_tointeger);
+    try registerNative(math_table, gc, "type", .math_type);
+    try registerNative(math_table, gc, "ult", .math_ult);
 
     try globals.set("math", .{ .table = math_table });
 }
@@ -321,26 +181,13 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
 fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
     const table_table = try gc.allocTable();
 
-    const insert_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_insert } };
-    try table_table.set("insert", .{ .function = insert_fn });
-
-    const remove_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_remove } };
-    try table_table.set("remove", .{ .function = remove_fn });
-
-    const sort_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_sort } };
-    try table_table.set("sort", .{ .function = sort_fn });
-
-    const concat_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_concat } };
-    try table_table.set("concat", .{ .function = concat_fn });
-
-    const move_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_move } };
-    try table_table.set("move", .{ .function = move_fn });
-
-    const pack_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_pack } };
-    try table_table.set("pack", .{ .function = pack_fn });
-
-    const unpack_fn = FunctionKind{ .native = .{ .id = NativeFnId.table_unpack } };
-    try table_table.set("unpack", .{ .function = unpack_fn });
+    try registerNative(table_table, gc, "insert", .table_insert);
+    try registerNative(table_table, gc, "remove", .table_remove);
+    try registerNative(table_table, gc, "sort", .table_sort);
+    try registerNative(table_table, gc, "concat", .table_concat);
+    try registerNative(table_table, gc, "move", .table_move);
+    try registerNative(table_table, gc, "pack", .table_pack);
+    try registerNative(table_table, gc, "unpack", .table_unpack);
 
     try globals.set("table", .{ .table = table_table });
 }
@@ -349,38 +196,17 @@ fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
 fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
     const os_table = try gc.allocTable();
 
-    const clock_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_clock } };
-    try os_table.set("clock", .{ .function = clock_fn });
-
-    const date_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_date } };
-    try os_table.set("date", .{ .function = date_fn });
-
-    const difftime_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_difftime } };
-    try os_table.set("difftime", .{ .function = difftime_fn });
-
-    const execute_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_execute } };
-    try os_table.set("execute", .{ .function = execute_fn });
-
-    const exit_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_exit } };
-    try os_table.set("exit", .{ .function = exit_fn });
-
-    const getenv_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_getenv } };
-    try os_table.set("getenv", .{ .function = getenv_fn });
-
-    const remove_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_remove } };
-    try os_table.set("remove", .{ .function = remove_fn });
-
-    const rename_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_rename } };
-    try os_table.set("rename", .{ .function = rename_fn });
-
-    const setlocale_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_setlocale } };
-    try os_table.set("setlocale", .{ .function = setlocale_fn });
-
-    const time_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_time } };
-    try os_table.set("time", .{ .function = time_fn });
-
-    const tmpname_fn = FunctionKind{ .native = .{ .id = NativeFnId.os_tmpname } };
-    try os_table.set("tmpname", .{ .function = tmpname_fn });
+    try registerNative(os_table, gc, "clock", .os_clock);
+    try registerNative(os_table, gc, "date", .os_date);
+    try registerNative(os_table, gc, "difftime", .os_difftime);
+    try registerNative(os_table, gc, "execute", .os_execute);
+    try registerNative(os_table, gc, "exit", .os_exit);
+    try registerNative(os_table, gc, "getenv", .os_getenv);
+    try registerNative(os_table, gc, "remove", .os_remove);
+    try registerNative(os_table, gc, "rename", .os_rename);
+    try registerNative(os_table, gc, "setlocale", .os_setlocale);
+    try registerNative(os_table, gc, "time", .os_time);
+    try registerNative(os_table, gc, "tmpname", .os_tmpname);
 
     try globals.set("os", .{ .table = os_table });
 }
@@ -389,53 +215,22 @@ fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
 fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     const debug_table = try gc.allocTable();
 
-    const debug_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_debug } };
-    try debug_table.set("debug", .{ .function = debug_fn });
-
-    const gethook_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_gethook } };
-    try debug_table.set("gethook", .{ .function = gethook_fn });
-
-    const getinfo_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getinfo } };
-    try debug_table.set("getinfo", .{ .function = getinfo_fn });
-
-    const getlocal_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getlocal } };
-    try debug_table.set("getlocal", .{ .function = getlocal_fn });
-
-    const getmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getmetatable } };
-    try debug_table.set("getmetatable", .{ .function = getmetatable_fn });
-
-    const getregistry_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getregistry } };
-    try debug_table.set("getregistry", .{ .function = getregistry_fn });
-
-    const getupvalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getupvalue } };
-    try debug_table.set("getupvalue", .{ .function = getupvalue_fn });
-
-    const getuservalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_getuservalue } };
-    try debug_table.set("getuservalue", .{ .function = getuservalue_fn });
-
-    const sethook_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_sethook } };
-    try debug_table.set("sethook", .{ .function = sethook_fn });
-
-    const setlocal_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setlocal } };
-    try debug_table.set("setlocal", .{ .function = setlocal_fn });
-
-    const setmetatable_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setmetatable } };
-    try debug_table.set("setmetatable", .{ .function = setmetatable_fn });
-
-    const setupvalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setupvalue } };
-    try debug_table.set("setupvalue", .{ .function = setupvalue_fn });
-
-    const setuservalue_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_setuservalue } };
-    try debug_table.set("setuservalue", .{ .function = setuservalue_fn });
-
-    const traceback_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_traceback } };
-    try debug_table.set("traceback", .{ .function = traceback_fn });
-
-    const upvalueid_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_upvalueid } };
-    try debug_table.set("upvalueid", .{ .function = upvalueid_fn });
-
-    const upvaluejoin_fn = FunctionKind{ .native = .{ .id = NativeFnId.debug_upvaluejoin } };
-    try debug_table.set("upvaluejoin", .{ .function = upvaluejoin_fn });
+    try registerNative(debug_table, gc, "debug", .debug_debug);
+    try registerNative(debug_table, gc, "gethook", .debug_gethook);
+    try registerNative(debug_table, gc, "getinfo", .debug_getinfo);
+    try registerNative(debug_table, gc, "getlocal", .debug_getlocal);
+    try registerNative(debug_table, gc, "getmetatable", .debug_getmetatable);
+    try registerNative(debug_table, gc, "getregistry", .debug_getregistry);
+    try registerNative(debug_table, gc, "getupvalue", .debug_getupvalue);
+    try registerNative(debug_table, gc, "getuservalue", .debug_getuservalue);
+    try registerNative(debug_table, gc, "sethook", .debug_sethook);
+    try registerNative(debug_table, gc, "setlocal", .debug_setlocal);
+    try registerNative(debug_table, gc, "setmetatable", .debug_setmetatable);
+    try registerNative(debug_table, gc, "setupvalue", .debug_setupvalue);
+    try registerNative(debug_table, gc, "setuservalue", .debug_setuservalue);
+    try registerNative(debug_table, gc, "traceback", .debug_traceback);
+    try registerNative(debug_table, gc, "upvalueid", .debug_upvalueid);
+    try registerNative(debug_table, gc, "upvaluejoin", .debug_upvaluejoin);
 
     try globals.set("debug", .{ .table = debug_table });
 }
@@ -448,20 +243,11 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
     try utf8_table.set("charpattern", .{ .string = charpattern_str });
 
-    const char_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_char } };
-    try utf8_table.set("char", .{ .function = char_fn });
-
-    const codes_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_codes } };
-    try utf8_table.set("codes", .{ .function = codes_fn });
-
-    const codepoint_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_codepoint } };
-    try utf8_table.set("codepoint", .{ .function = codepoint_fn });
-
-    const len_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_len } };
-    try utf8_table.set("len", .{ .function = len_fn });
-
-    const offset_fn = FunctionKind{ .native = .{ .id = NativeFnId.utf8_offset } };
-    try utf8_table.set("offset", .{ .function = offset_fn });
+    try registerNative(utf8_table, gc, "char", .utf8_char);
+    try registerNative(utf8_table, gc, "codes", .utf8_codes);
+    try registerNative(utf8_table, gc, "codepoint", .utf8_codepoint);
+    try registerNative(utf8_table, gc, "len", .utf8_len);
+    try registerNative(utf8_table, gc, "offset", .utf8_offset);
 
     try globals.set("utf8", .{ .table = utf8_table });
 }
@@ -470,29 +256,14 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
 fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
     const coroutine_table = try gc.allocTable();
 
-    const create_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_create } };
-    try coroutine_table.set("create", .{ .function = create_fn });
-
-    const resume_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_resume } };
-    try coroutine_table.set("resume", .{ .function = resume_fn });
-
-    const running_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_running } };
-    try coroutine_table.set("running", .{ .function = running_fn });
-
-    const status_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_status } };
-    try coroutine_table.set("status", .{ .function = status_fn });
-
-    const wrap_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_wrap } };
-    try coroutine_table.set("wrap", .{ .function = wrap_fn });
-
-    const yield_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_yield } };
-    try coroutine_table.set("yield", .{ .function = yield_fn });
-
-    const isyieldable_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_isyieldable } };
-    try coroutine_table.set("isyieldable", .{ .function = isyieldable_fn });
-
-    const close_fn = FunctionKind{ .native = .{ .id = NativeFnId.coroutine_close } };
-    try coroutine_table.set("close", .{ .function = close_fn });
+    try registerNative(coroutine_table, gc, "create", .coroutine_create);
+    try registerNative(coroutine_table, gc, "resume", .coroutine_resume);
+    try registerNative(coroutine_table, gc, "running", .coroutine_running);
+    try registerNative(coroutine_table, gc, "status", .coroutine_status);
+    try registerNative(coroutine_table, gc, "wrap", .coroutine_wrap);
+    try registerNative(coroutine_table, gc, "yield", .coroutine_yield);
+    try registerNative(coroutine_table, gc, "isyieldable", .coroutine_isyieldable);
+    try registerNative(coroutine_table, gc, "close", .coroutine_close);
 
     try globals.set("coroutine", .{ .table = coroutine_table });
 }
@@ -500,18 +271,14 @@ fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
 fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     // Global require function
-    const require_fn = FunctionKind{ .native = .{ .id = NativeFnId.require } };
-    try globals.set("require", .{ .function = require_fn });
+    try registerNative(globals, gc, "require", .require);
 
     // Package table for module system
     const package_table = try gc.allocTable();
 
     // Package functions
-    const loadlib_fn = FunctionKind{ .native = .{ .id = NativeFnId.package_loadlib } };
-    try package_table.set("loadlib", .{ .function = loadlib_fn });
-
-    const searchpath_fn = FunctionKind{ .native = .{ .id = NativeFnId.package_searchpath } };
-    try package_table.set("searchpath", .{ .function = searchpath_fn });
+    try registerNative(package_table, gc, "loadlib", .package_loadlib);
+    try registerNative(package_table, gc, "searchpath", .package_searchpath);
 
     // Package configuration and paths (platform-specific in real implementation)
     const config_str = try gc.allocString("/\n;\n?\n!\n-");

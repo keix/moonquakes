@@ -12,6 +12,11 @@ const Proto = @import("../../compiler/proto.zig").Proto;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 
+// TODO:
+// Small fixed threshold for development/testing.
+// This will be replaced by a growth-based policy later.
+const GC_THRESHOLD = 5 * 1024;
+
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
 /// This is a simple, non-incremental mark-and-sweep collector.
@@ -35,14 +40,14 @@ pub const GC = struct {
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
-    gc_min_threshold: usize = 2048, // Minimum bytes before first GC
+    gc_min_threshold: usize = GC_THRESHOLD,
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
             .objects = null,
             .bytes_allocated = 0,
-            .next_gc = 2048, // gc_min_threshold
+            .next_gc = GC_THRESHOLD,
             .vm = null,
         };
     }
@@ -227,7 +232,10 @@ pub const GC = struct {
             .closure => |closure_obj| {
                 markObject(self, &closure_obj.header);
             },
-            else => {}, // Immediate values (nil, bool, number, etc.) don't need marking
+            .object => |obj| {
+                markObject(self, obj);
+            },
+            else => {}, // Immediate values (nil, bool, number, function) don't need marking
         }
     }
 
