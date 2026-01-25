@@ -1,7 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
-const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const GC = @import("../runtime/gc/gc.zig").GC;
 const object = @import("../runtime/gc/object.zig");
@@ -132,6 +131,16 @@ pub const VM = struct {
         self.gc.deinit();
     }
 
+    /// Mark constants from a proto and all its nested protos recursively
+    fn markProtoConstants(self: *VM, proto: *const Proto) void {
+        // Mark this proto's constants
+        self.gc.markConstants(proto.k);
+        // Recursively mark nested protos' constants
+        for (proto.protos) |nested_proto| {
+            self.markProtoConstants(nested_proto);
+        }
+    }
+
     /// Run garbage collection, marking all reachable objects from VM roots
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
@@ -141,14 +150,14 @@ pub const VM = struct {
         // 1. Mark VM stack (active portion)
         self.gc.markStack(self.stack[0..self.top]);
 
-        // 2. Mark constants from current function
+        // 2. Mark constants from current function and its nested protos
         if (self.ci) |ci| {
-            self.gc.markConstants(ci.func.k);
+            self.markProtoConstants(ci.func);
         }
 
-        // 3. Mark constants from all call frames
+        // 3. Mark constants from all call frames and their nested protos
         for (self.callstack[0..self.callstack_size]) |frame| {
-            self.gc.markConstants(frame.func.k);
+            self.markProtoConstants(frame.func);
         }
 
         // 4. Mark global environment
@@ -1139,47 +1148,7 @@ pub const VM = struct {
                     // Get the function value
                     const func_val = &self.stack[self.base + a];
 
-                    // Handle function calls
-                    if (func_val.isFunction()) {
-                        const function = func_val.function;
-                        const nargs: u32 = if (b > 0) b - 1 else 0;
-                        const nresults: u32 = if (c > 0) c - 1 else 0;
-
-                        switch (function) {
-                            .native => |native_fn| {
-                                // VM just dispatches to native function
-                                try self.callNative(native_fn.id, a, nargs, nresults);
-                            },
-                            .bytecode => |func_proto| {
-                                // Handle bytecode function calls
-
-                                const new_base = self.base + a;
-                                const ret_base = self.base + a;
-
-                                // Move arguments to correct positions if needed
-                                // Arguments are already at R(A+1)..R(A+nargs), but callee expects them at R(0)..R(nargs-1)
-                                // Since callee base = R(A), we need to shift arguments down by 1
-                                if (nargs > 0) {
-                                    var i: u32 = 0;
-                                    while (i < nargs) : (i += 1) {
-                                        self.stack[new_base + i] = self.stack[new_base + 1 + i];
-                                    }
-                                }
-
-                                // Initialize remaining parameters to nil
-                                var i: u32 = nargs;
-                                while (i < func_proto.numparams) : (i += 1) {
-                                    self.stack[new_base + i] = .nil;
-                                }
-
-                                _ = try self.pushCallInfo(func_proto, new_base, ret_base, @intCast(nresults));
-                                self.top = new_base + func_proto.maxstacksize;
-                            },
-                        }
-                        continue;
-                    }
-
-                    // Handle .object variant (NativeClosureObject or ClosureObject)
+                    // Handle .object variant (NativeClosureObject)
                     if (func_val.isObject()) {
                         const obj = func_val.object;
                         if (obj.type == .native_closure) {
@@ -1386,8 +1355,7 @@ pub const VM = struct {
 
                     const key_val = ci.func.k[c];
                     if (key_val.isString()) {
-                        const key = key_val.string.asSlice();
-                        const value = self.globals.get(key) orelse .nil;
+                        const value = self.globals.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableKey;
@@ -1404,8 +1372,7 @@ pub const VM = struct {
                     const key_val = ci.func.k[b];
                     const value = self.stack[self.base + c];
                     if (key_val.isString()) {
-                        const key = key_val.string.asSlice();
-                        try self.globals.set(key, value);
+                        try self.globals.set(key_val.string, value);
                     } else {
                         return error.InvalidTableKey;
                     }
@@ -1444,8 +1411,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        const value = table.get(key) orelse .nil;
+                        const value = table.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableOperation;
@@ -1462,8 +1428,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        try table.set(key, value);
+                        try table.set(key_val.string, value);
                     } else {
                         return error.InvalidTableOperation;
                     }
@@ -1479,9 +1444,10 @@ pub const VM = struct {
                         const table = table_val.table;
                         // Convert integer index to string key (Lua tables use string keys internally)
                         var key_buffer: [32]u8 = undefined;
-                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
+                        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
                             return error.InvalidTableKey;
                         };
+                        const key = try self.gc.allocString(key_slice);
                         const value = table.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
@@ -1500,9 +1466,10 @@ pub const VM = struct {
                         const table = table_val.table;
                         // Convert integer index to string key
                         var key_buffer: [32]u8 = undefined;
-                        const key = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
+                        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
                             return error.InvalidTableKey;
                         };
+                        const key = try self.gc.allocString(key_slice);
                         try table.set(key, value);
                     } else {
                         return error.InvalidTableOperation;
@@ -1518,8 +1485,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        const value = table.get(key) orelse .nil;
+                        const value = table.get(key_val.string) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableOperation;
@@ -1536,8 +1502,7 @@ pub const VM = struct {
 
                     if (table_val.isTable() and key_val.isString()) {
                         const table = table_val.table;
-                        const key = key_val.string.asSlice();
-                        try table.set(key, value);
+                        try table.set(key_val.string, value);
                     } else {
                         return error.InvalidTableOperation;
                     }

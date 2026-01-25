@@ -5,7 +5,6 @@ const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("proto.zig").Proto;
-const FunctionKind = @import("../runtime/function.zig").FunctionKind;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
@@ -84,6 +83,7 @@ pub const NUMERIC_FOR_REGS: u8 = 4;
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
+    protos: std.ArrayList(*const Proto), // Nested function prototypes (for CLOSURE)
     maxstacksize: u8,
     next_reg: u8,
     allocator: std.mem.Allocator,
@@ -96,6 +96,7 @@ pub const ProtoBuilder = struct {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .constants = std.ArrayList(TValue).init(allocator),
+            .protos = std.ArrayList(*const Proto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
@@ -110,6 +111,7 @@ pub const ProtoBuilder = struct {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .constants = std.ArrayList(TValue).init(allocator),
+            .protos = std.ArrayList(*const Proto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .allocator = allocator,
@@ -122,19 +124,17 @@ pub const ProtoBuilder = struct {
 
     pub fn deinit(self: *ProtoBuilder) void {
         // Free function protos and their allocated arrays
+        // All slices are allocator-owned (even when len=0), so always free
         for (self.functions.items) |entry| {
-            // Free the allocated arrays
-            if (entry.proto.code.len > 0) {
-                self.allocator.free(entry.proto.code);
-            }
-            if (entry.proto.k.len > 0) {
-                self.allocator.free(entry.proto.k);
-            }
+            self.allocator.free(entry.proto.code);
+            self.allocator.free(entry.proto.k);
+            self.allocator.free(entry.proto.protos);
             self.allocator.destroy(entry.proto);
         }
 
         self.code.deinit();
         self.constants.deinit();
+        self.protos.deinit();
         self.functions.deinit();
         self.variables.deinit();
     }
@@ -219,6 +219,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit SETTABUP instruction: UpValue[A][K[C]] := R[B]
+    pub fn emitSETTABUP(self: *ProtoBuilder, upval: u8, key_const: u32, src: u8) !void {
+        const instr = Instruction.initABC(.SETTABUP, upval, src, @intCast(key_const));
+        try self.code.append(instr);
+    }
+
     pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
         const instr = Instruction.initsJ(.JMP, offset);
         try self.code.append(instr);
@@ -226,6 +232,13 @@ pub const ProtoBuilder = struct {
 
     pub fn emitLoadK(self: *ProtoBuilder, reg: u8, const_idx: u32) !void {
         const instr = Instruction.initABx(.LOADK, reg, @intCast(const_idx));
+        try self.code.append(instr);
+        self.updateMaxStack(reg + 1);
+    }
+
+    /// Emit CLOSURE instruction: R[A] := closure(KPROTO[Bx])
+    pub fn emitClosure(self: *ProtoBuilder, reg: u8, proto_idx: u32) !void {
+        const instr = Instruction.initABx(.CLOSURE, reg, @intCast(proto_idx));
         try self.code.append(instr);
         self.updateMaxStack(reg + 1);
     }
@@ -351,15 +364,16 @@ pub const ProtoBuilder = struct {
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
         const native_fn = NativeFn.init(native_id);
-        const const_value = TValue{ .function = FunctionKind{ .native = native_fn } };
+        const nc = try self.gc.allocNativeClosure(native_fn);
+        const const_value = TValue.fromNativeClosure(nc);
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }
 
-    pub fn addBytecodeFunc(self: *ProtoBuilder, proto: *const Proto) !u32 {
-        const const_value = TValue{ .function = FunctionKind{ .bytecode = proto } };
-        try self.constants.append(const_value);
-        return @intCast(self.constants.items.len - 1);
+    /// Add a nested function prototype for CLOSURE opcode
+    pub fn addProto(self: *ProtoBuilder, proto: *const Proto) !u32 {
+        try self.protos.append(proto);
+        return @intCast(self.protos.items.len - 1);
     }
 
     fn updateMaxStack(self: *ProtoBuilder, stack_size: u8) void {
@@ -403,17 +417,15 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
+        // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
-
-        // Handle empty constants case explicitly
-        const constants_slice = if (self.constants.items.len == 0)
-            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
-        else
-            try allocator.dupe(TValue, self.constants.items);
+        const constants_slice = try allocator.dupe(TValue, self.constants.items);
+        const protos_slice = try allocator.dupe(*const Proto, self.protos.items);
 
         return Proto{
             .code = code_slice,
             .k = constants_slice,
+            .protos = protos_slice,
             .numparams = 0,
             .is_vararg = false,
             .maxstacksize = self.maxstacksize,
@@ -421,17 +433,15 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn toProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !Proto {
+        // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
-
-        // Handle empty constants case explicitly
-        const constants_slice = if (self.constants.items.len == 0)
-            @as([]TValue, &[_]TValue{}) // Empty slice with valid pointer
-        else
-            try allocator.dupe(TValue, self.constants.items);
+        const constants_slice = try allocator.dupe(TValue, self.constants.items);
+        const protos_slice = try allocator.dupe(*const Proto, self.protos.items);
 
         return Proto{
             .code = code_slice,
             .k = constants_slice,
+            .protos = protos_slice,
             .numparams = num_params,
             .is_vararg = false,
             .maxstacksize = self.maxstacksize,
@@ -1026,7 +1036,7 @@ pub const Parser = struct {
         const func_name = self.current.lexeme;
 
         // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |user_func_proto| {
+        if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call
             self.advance(); // consume function name
 
@@ -1036,10 +1046,10 @@ pub const Parser = struct {
             }
             self.advance(); // consume '('
 
-            // Load function constant
+            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocReg();
-            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
-            try self.proto.emitLoadK(func_reg, func_const_idx);
+            const name_const = try self.proto.addConstString(func_name);
+            try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
             // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
@@ -1122,7 +1132,7 @@ pub const Parser = struct {
         const func_name = self.current.lexeme;
 
         // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |user_func_proto| {
+        if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
 
@@ -1132,10 +1142,10 @@ pub const Parser = struct {
             }
             self.advance(); // consume '('
 
-            // Load function constant
+            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocReg();
-            const func_const_idx = try self.proto.addBytecodeFunc(user_func_proto);
-            try self.proto.emitLoadK(func_reg, func_const_idx);
+            const name_const = try self.proto.addConstString(func_name);
+            try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
             // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
@@ -1372,6 +1382,14 @@ pub const Parser = struct {
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
 
-        // Proto is already registered in old_proto.functions, no need to replace
+        // Proto is already registered in old_proto.functions for recursive lookup
+        // Now emit CLOSURE + SETTABUP to store in _ENV (globals)
+        const closure_reg = old_proto.allocReg();
+        const proto_idx = try old_proto.addProto(proto_ptr);
+        try old_proto.emitClosure(closure_reg, proto_idx);
+
+        // Store closure in _ENV[func_name]
+        const name_const = try old_proto.addConstString(func_name);
+        try old_proto.emitSETTABUP(0, name_const, closure_reg);
     }
 };

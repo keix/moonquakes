@@ -39,7 +39,6 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .string => break :blk v.*,
             .nil => break :blk TValue{ .string = try vm.gc.allocString("nil") },
             .boolean => |b| break :blk TValue{ .string = try vm.gc.allocString(if (b) "true" else "false") },
-            .function => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
             .table => break :blk TValue{ .string = try vm.gc.allocString("<table>") },
             .closure => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
             .object => |obj| switch (obj.type) {

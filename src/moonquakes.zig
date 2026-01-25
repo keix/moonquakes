@@ -94,8 +94,10 @@ pub const Moonquakes = struct {
         try p.parseChunk();
 
         const proto = try builder.toProto(self.allocator);
+        // All slices are allocator-owned (even when len=0), so always free
         defer self.allocator.free(proto.code);
         defer self.allocator.free(proto.k);
+        defer self.allocator.free(proto.protos);
 
         // Execute on the same VM
         return vm.execute(&proto) catch |err| {

@@ -60,7 +60,6 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .integer => "number",
             .number => "number",
             .string => "string",
-            .function => "function",
             .table => "table",
             .closure => "function",
             .object => |obj| switch (obj.type) {

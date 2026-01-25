@@ -159,7 +159,7 @@ test "SETTABUP opcode - global variable assignment" {
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify the global variable was set
-    const global_val = vm.globals.get("myvar").?;
+    const global_val = vm.globals.get(myvar_str).?;
     try testing.expect(global_val.eql(.{ .integer = 42 }));
 }
 
@@ -203,9 +203,9 @@ test "SETTABUP opcode - multiple global assignments" {
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify all global variables were set correctly
-    const var1 = vm.globals.get("var1").?;
-    const var2 = vm.globals.get("var2").?;
-    const var3 = vm.globals.get("var3").?;
+    const var1 = vm.globals.get(var1_str).?;
+    const var2 = vm.globals.get(var2_str).?;
+    const var3 = vm.globals.get(var3_str).?;
 
     try testing.expect(var1.eql(.{ .integer = 10 }));
     try testing.expect(var2.eql(.{ .number = 3.14 }));
@@ -279,7 +279,7 @@ test "All new opcodes - integration test" {
     try test_utils.ReturnTest.expectNone(result);
 
     // Only SETTABUP should have side effects
-    const global_val = vm.globals.get("result").?;
+    const global_val = vm.globals.get(result_str).?;
     try testing.expect(global_val.eql(.{ .integer = 999 }));
 }
 

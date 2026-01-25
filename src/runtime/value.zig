@@ -5,21 +5,19 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
-const FunctionKind = @import("function.zig").FunctionKind;
 
 /// TValue type tag
 /// Note: 'object' variant added for gradual migration to unified GCObject pointer.
-/// Old variants (closure, function, string, table) kept for compatibility.
+/// Old variants (closure, string, table) kept for compatibility.
 pub const ValueType = enum(u8) {
     nil,
     boolean,
     integer,
     number,
     closure,
-    function,
     string,
     table,
-    object, // NEW: unified GCObject pointer (parallel with above)
+    object, // unified GCObject pointer
 };
 
 pub const TValue = union(ValueType) {
@@ -28,10 +26,9 @@ pub const TValue = union(ValueType) {
     integer: i64,
     number: f64,
     closure: *ClosureObject,
-    function: FunctionKind,
     string: *const StringObject,
     table: *TableObject,
-    object: *GCObject, // NEW: unified GCObject pointer
+    object: *GCObject, // unified GCObject pointer
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -55,10 +52,6 @@ pub const TValue = union(ValueType) {
 
     pub fn isString(self: TValue) bool {
         return self == .string;
-    }
-
-    pub fn isFunction(self: TValue) bool {
-        return self == .function;
     }
 
     pub fn isTable(self: TValue) bool {
@@ -178,10 +171,6 @@ pub const TValue = union(ValueType) {
             .integer => |i| try writer.print("{}", .{i}),
             .number => |n| try writer.print("{d}", .{n}),
             .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
-            .function => |f| switch (f) {
-                .bytecode => |p| try writer.print("function: 0x{x}", .{@intFromPtr(p)}),
-                .native => |nf| try writer.print("native_function_{}", .{@intFromEnum(nf.id)}),
-            },
             .string => |s| try writer.print("{s}", .{s.asSlice()}),
             .table => |t| try writer.print("table: 0x{x}", .{@intFromPtr(t)}),
             .object => |obj| switch (obj.type) {
@@ -213,10 +202,6 @@ pub const TValue = union(ValueType) {
                 else => false,
             },
             .closure => |ac| b == .closure and ac == b.closure,
-            .function => |af| switch (af) {
-                .bytecode => |ap| b == .function and b.function == .bytecode and ap == b.function.bytecode,
-                .native => |anf| b == .function and b.function == .native and std.mem.eql(u8, @tagName(anf.id), @tagName(b.function.native.id)),
-            },
             .string => |as| b == .string and as == b.string, // Pointer equality (interned strings)
             .table => |at| b == .table and at == b.table,
             .object => |ao| b == .object and ao == b.object, // Pointer equality

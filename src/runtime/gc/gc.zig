@@ -15,7 +15,7 @@ const TValue = @import("../value.zig").TValue;
 // TODO:
 // Small fixed threshold for development/testing.
 // This will be replaced by a growth-based policy later.
-const GC_THRESHOLD = 5 * 1024;
+const GC_THRESHOLD = 20 * 1024;
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -27,6 +27,10 @@ pub const GC = struct {
 
     /// Linked list of all GC-managed objects
     objects: ?*GCObject,
+
+    /// String intern table for deduplication
+    /// Maps string content to existing StringObject for pointer equality
+    strings: std.StringHashMap(*StringObject),
 
     /// Total bytes currently allocated
     bytes_allocated: usize,
@@ -46,6 +50,7 @@ pub const GC = struct {
         return .{
             .allocator = allocator,
             .objects = null,
+            .strings = std.StringHashMap(*StringObject).init(allocator),
             .bytes_allocated = 0,
             .next_gc = GC_THRESHOLD,
             .vm = null,
@@ -58,12 +63,15 @@ pub const GC = struct {
     }
 
     pub fn deinit(self: *GC) void {
+        // Clear intern table first (objects will be freed below)
+        self.strings.clearAndFree();
+
         // Free all remaining objects without mark/sweep
         // (no need to determine liveness at program exit)
         var current = self.objects;
         while (current) |obj| {
             const next = obj.next;
-            self.freeObject(obj);
+            self.freeObjectFinal(obj);
             current = next;
         }
     }
@@ -100,6 +108,12 @@ pub const GC = struct {
 
     /// Allocate a new string object
     pub fn allocString(self: *GC, str: []const u8) !*StringObject {
+        // Check intern table for existing string
+        if (self.strings.get(str)) |existing| {
+            return existing;
+        }
+
+        // Allocate new StringObject
         const obj = try self.allocObject(StringObject, str.len);
 
         // Initialize GC header
@@ -112,6 +126,9 @@ pub const GC = struct {
 
         // Add to GC object list
         self.objects = &obj.header;
+
+        // Add to intern table (key is the inline string data)
+        try self.strings.put(obj.asSlice(), obj);
 
         return obj;
     }
@@ -252,16 +269,25 @@ pub const GC = struct {
             },
             .table => {
                 const table: *TableObject = @fieldParentPtr("header", obj);
-                // Mark all values in the hash part
-                var iter = table.hash_part.valueIterator();
-                while (iter.next()) |value_ptr| {
-                    self.markValue(value_ptr.*);
+                // Mark all keys and values in the hash part
+                var iter = table.hash_part.iterator();
+                while (iter.next()) |entry| {
+                    // Mark key (StringObject pointer - no arithmetic needed)
+                    const key: *StringObject = @constCast(entry.key_ptr.*);
+                    markObject(self, &key.header);
+                    // Mark value
+                    self.markValue(entry.value_ptr.*);
                 }
             },
             .closure => {
                 const closure: *ClosureObject = @fieldParentPtr("header", obj);
+                // Mark upvalues
                 for (closure.upvalues) |upval| {
                     markObject(self, &upval.header);
+                }
+                // Mark constants in the proto (strings, etc.)
+                for (closure.proto.k) |value| {
+                    self.markValue(value);
                 }
             },
             .native_closure => {
@@ -309,6 +335,16 @@ pub const GC = struct {
 
     /// Free a GC object and update accounting
     fn freeObject(self: *GC, obj: *GCObject) void {
+        // For strings, remove from intern table before freeing
+        if (obj.type == .string) {
+            const str_obj: *StringObject = @fieldParentPtr("header", obj);
+            _ = self.strings.remove(str_obj.asSlice());
+        }
+        self.freeObjectFinal(obj);
+    }
+
+    /// Free object without updating intern table (for use during deinit)
+    fn freeObjectFinal(self: *GC, obj: *GCObject) void {
         switch (obj.type) {
             .string => {
                 const str_obj: *StringObject = @fieldParentPtr("header", obj);
@@ -583,23 +619,24 @@ test "table marks its contents" {
     _ = garbage;
 
     // Put string in table
-    try table.set("key", TValue{ .string = str });
+    const key = try gc.allocString("key");
+    try table.set(key, TValue{ .string = str });
 
     const stats_before = gc.getStats();
-    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
+    try std.testing.expectEqual(@as(usize, 4), stats_before.object_count);
 
-    // Mark only the table (should transitively mark the string inside)
+    // Mark only the table (should transitively mark key and value strings inside)
     gc.mark(&table.header);
 
     // Run GC
     gc.sweep();
 
-    // Table and its string should survive, garbage should be collected
+    // Table, key, and value string should survive, garbage should be collected
     const stats_after = gc.getStats();
-    try std.testing.expectEqual(@as(usize, 2), stats_after.object_count);
+    try std.testing.expectEqual(@as(usize, 3), stats_after.object_count);
 
     // Verify string is still accessible through table
-    const retrieved = table.get("key");
+    const retrieved = table.get(key);
     try std.testing.expect(retrieved != null);
     try std.testing.expectEqualStrings("value in table", retrieved.?.string.asSlice());
 }
