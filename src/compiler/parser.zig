@@ -319,6 +319,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit NOT instruction: R[A] := not R[B]
+    pub fn emitNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.NOT, dst, src, 0);
+        try self.code.append(instr);
+    }
+
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
@@ -564,6 +570,8 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
+                    try self.parseWhile();
                 } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
                     try self.parseFunctionDefinition();
                 } else {
@@ -599,6 +607,15 @@ pub const Parser = struct {
 
     // Expression parsing (precedence order: Primary -> Mul -> Add -> Compare)
     fn parsePrimary(self: *Parser) ParseError!u8 {
+        // Unary 'not' operator
+        if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "not")) {
+            self.advance(); // consume 'not'
+            const operand = try self.parsePrimary(); // recursive for chained: not not x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitNOT(dst, operand);
+            return dst;
+        }
+
         // Table constructor: { field, field, ... }
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
             return try self.parseTableConstructor();
@@ -1091,6 +1108,57 @@ pub const Parser = struct {
         self.proto.patchFORInstr(forloop_addr, loop_start);
     }
 
+    fn parseWhile(self: *Parser) ParseError!void {
+        self.advance(); // consume 'while'
+
+        // Record loop start address for backward jump
+        const loop_start = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Mark registers before condition
+        const cond_mark = self.proto.markTemps();
+
+        // Parse condition
+        const condition_reg = try self.parseExpr();
+
+        // Expect 'do'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
+            return error.ExpectedDo;
+        }
+        self.advance(); // consume 'do'
+
+        // TEST condition, skip if false
+        try self.proto.emitTEST(condition_reg, false);
+        const exit_jmp = try self.proto.emitPatchableJMP();
+
+        // Release condition temporaries
+        self.proto.resetTemps(cond_mark);
+
+        // Mark for loop body
+        const body_mark = self.proto.markTemps();
+        try self.proto.enterScope();
+
+        // Parse loop body
+        try self.parseStatements();
+
+        // Release loop body scope and temporaries
+        self.proto.leaveScope();
+        self.proto.resetTemps(body_mark);
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // Jump back to loop start
+        const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
+        try self.proto.emitJMP(@intCast(back_offset));
+
+        // Patch exit jump to after the loop
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        self.proto.patchJMP(exit_jmp, end_addr);
+    }
+
     fn parseStatements(self: *Parser) StatementError!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
@@ -1110,6 +1178,8 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
+                    try self.parseWhile();
                 } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
                     try self.parseLocalDecl();
                 } else {
