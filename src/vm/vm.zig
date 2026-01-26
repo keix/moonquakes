@@ -1507,10 +1507,11 @@ pub const VM = struct {
                     }
                 },
                 .NEWTABLE => {
-                    // Basic table creation (not fully implemented)
-                    // For now, just set to nil
+                    // NEWTABLE A B C: R[A] := {} (create new table)
+                    // B and C encode array/hash size hints (ignored for now)
                     const a = inst.getA();
-                    self.stack[self.base + a] = .nil;
+                    const table = try self.gc.allocTable();
+                    self.stack[self.base + a] = .{ .table = table };
                 },
                 .EQK => {
                     // EQK A B C: if not (R[B] == K[C]) then pc++
