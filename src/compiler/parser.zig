@@ -74,25 +74,27 @@ const VariableEntry = struct {
     reg: u8,
 };
 
-/// Register scope marker for tracking temporary register usage
-/// Used to implement register lifetime management (mark/reset pattern)
-pub const RegMark = struct {
-    saved: u8,
-};
-
 /// Number of registers used by numeric for loop (idx, limit, step, user_var)
 pub const NUMERIC_FOR_REGS: u8 = 4;
+
+/// Marker for scope boundaries (used with enterScope/leaveScope)
+const ScopeMark = struct {
+    var_len: usize, // variables list rollback point
+    locals_top: u8, // register watermark for this scope
+};
 
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     constants: std.ArrayList(TValue),
     protos: std.ArrayList(*const Proto), // Nested function prototypes (for CLOSURE)
     maxstacksize: u8,
-    next_reg: u8,
+    next_reg: u8, // Next available register (for temps)
+    locals_top: u8, // Register watermark: locals occupy [0, locals_top)
     allocator: std.mem.Allocator,
     gc: *GC, // For allocating GC-managed objects (strings, etc.)
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
+    scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
     pub fn init(allocator: std.mem.Allocator, gc: *GC) ProtoBuilder {
@@ -102,10 +104,12 @@ pub const ProtoBuilder = struct {
             .protos = std.ArrayList(*const Proto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
+            .locals_top = 0,
             .allocator = allocator,
             .gc = gc,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
+            .scope_starts = std.ArrayList(ScopeMark).init(allocator),
             .parent = null,
         };
     }
@@ -117,10 +121,12 @@ pub const ProtoBuilder = struct {
             .protos = std.ArrayList(*const Proto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
+            .locals_top = 0,
             .allocator = allocator,
             .gc = parent.gc, // Inherit GC from parent
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
+            .scope_starts = std.ArrayList(ScopeMark).init(allocator),
             .parent = parent,
         };
     }
@@ -140,30 +146,61 @@ pub const ProtoBuilder = struct {
         self.protos.deinit();
         self.functions.deinit();
         self.variables.deinit();
+        self.scope_starts.deinit();
     }
 
-    pub fn allocReg(self: *ProtoBuilder) u8 {
+    /// Allocate a temporary register (for expression evaluation)
+    /// Temps are released by resetTemps()
+    pub fn allocTemp(self: *ProtoBuilder) u8 {
         const reg = self.next_reg;
         self.next_reg += 1;
         self.updateMaxStack(self.next_reg);
         return reg;
     }
 
-    /// Get the number of local variables (base register count for statements)
-    pub fn getLocalCount(self: *ProtoBuilder) u8 {
-        return @intCast(self.variables.items.len);
+    /// Allocate a register for a local variable (register only, no name binding)
+    /// Use addVariable() to bind a name after the initializer is evaluated
+    /// Locals persist until leaveScope() is called
+    pub fn allocLocalReg(self: *ProtoBuilder) u8 {
+        const reg = self.locals_top;
+        self.locals_top += 1;
+        self.next_reg = @max(self.next_reg, self.locals_top);
+        self.updateMaxStack(self.next_reg);
+        return reg;
     }
+
+    /// Enter a new scope (for blocks, functions, loops)
+    pub fn enterScope(self: *ProtoBuilder) !void {
+        try self.scope_starts.append(.{
+            .var_len = self.variables.items.len,
+            .locals_top = self.locals_top,
+        });
+    }
+
+    /// Leave current scope, releasing all locals declared within
+    pub fn leaveScope(self: *ProtoBuilder) void {
+        const mark = self.scope_starts.pop().?;
+        self.variables.shrinkRetainingCapacity(mark.var_len);
+        self.locals_top = mark.locals_top;
+        self.next_reg = self.locals_top;
+    }
+
+    /// Marker for temporary register usage
+    pub const TempMark = struct {
+        saved: u8,
+    };
 
     /// Mark current register position for later reset
     /// Call before compiling expressions that use temporary registers
-    pub fn markRegs(self: *ProtoBuilder) RegMark {
+    pub fn markTemps(self: *ProtoBuilder) TempMark {
         return .{ .saved = self.next_reg };
     }
 
     /// Reset register allocation to a previously marked position
     /// Releases temporary registers used since the mark
-    pub fn resetRegs(self: *ProtoBuilder, mark: RegMark) void {
-        self.next_reg = mark.saved;
+    /// Note: Never resets below locals_top to protect scoped locals
+    pub fn resetTemps(self: *ProtoBuilder, mark: TempMark) void {
+        self.next_reg = @max(mark.saved, self.locals_top);
     }
 
     // emit functions grouped together
@@ -508,7 +545,7 @@ pub const Parser = struct {
 
     fn autoReturnNil(self: *Parser) ParseError!void {
         // Add nil constant and emit return nil
-        const reg = self.proto.allocReg();
+        const reg = self.proto.allocTemp();
         try self.proto.emitLOADNIL(reg, 1);
         try self.proto.emitReturn(reg);
     }
@@ -517,7 +554,7 @@ pub const Parser = struct {
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
             // Mark registers before each statement
-            const stmt_mark = self.proto.markRegs();
+            const stmt_mark = self.proto.markTemps();
 
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
@@ -546,7 +583,7 @@ pub const Parser = struct {
             }
 
             // Release statement temporaries - allows register reuse
-            self.proto.resetRegs(stmt_mark);
+            self.proto.resetTemps(stmt_mark);
         }
 
         // Auto-append return nil if no explicit return was encountered
@@ -568,13 +605,13 @@ pub const Parser = struct {
         }
 
         if (self.current.kind == .Number) {
-            const reg = self.proto.allocReg();
+            const reg = self.proto.allocTemp();
             const k = try self.proto.addConstNumber(self.current.lexeme);
             try self.proto.emitLoadK(reg, k);
             self.advance();
             return reg;
         } else if (self.current.kind == .String) {
-            const reg = self.proto.allocReg();
+            const reg = self.proto.allocTemp();
             // Remove quotes from string literal
             const str_content = self.current.lexeme[1 .. self.current.lexeme.len - 1];
             const k = try self.proto.addConstString(str_content);
@@ -583,7 +620,7 @@ pub const Parser = struct {
             return reg;
         } else if (self.current.kind == .Keyword) {
             if (std.mem.eql(u8, self.current.lexeme, "nil")) {
-                const reg = self.proto.allocReg();
+                const reg = self.proto.allocTemp();
                 try self.proto.emitLOADNIL(reg, 1);
                 self.advance();
                 return reg;
@@ -591,7 +628,7 @@ pub const Parser = struct {
                 std.mem.eql(u8, self.current.lexeme, "false"))
             {
                 const is_true = std.mem.eql(u8, self.current.lexeme, "true");
-                const reg = self.proto.allocReg();
+                const reg = self.proto.allocTemp();
                 try self.proto.emitLOADBOOL(reg, is_true, false);
                 self.advance();
                 return reg;
@@ -604,7 +641,7 @@ pub const Parser = struct {
             // For now, only support loop variable 'i' which is at base+3
             var base_reg: u8 = undefined;
             if (std.mem.eql(u8, self.current.lexeme, "i")) {
-                base_reg = self.proto.allocReg();
+                base_reg = self.proto.allocTemp();
                 // Loop variable is stored at base+3, copy to new register
                 try self.proto.emitMOVE(base_reg, 3); // base+3 = loop variable
                 self.advance();
@@ -612,7 +649,7 @@ pub const Parser = struct {
                 // Check if it's a variable/parameter
                 const var_name = self.current.lexeme;
                 if (self.proto.findVariable(var_name)) |var_reg| {
-                    base_reg = self.proto.allocReg();
+                    base_reg = self.proto.allocTemp();
                     try self.proto.emitMOVE(base_reg, var_reg);
                     self.advance();
                 } else {
@@ -635,7 +672,7 @@ pub const Parser = struct {
                 const key_const = try self.proto.addConstString(field_name);
 
                 // Emit GETFIELD: dst = base[key]
-                const dst_reg = self.proto.allocReg();
+                const dst_reg = self.proto.allocTemp();
                 try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
 
                 // The result becomes the new base for chained access
@@ -655,7 +692,7 @@ pub const Parser = struct {
         self.advance();
 
         // Allocate register for table
-        const table_reg = self.proto.allocReg();
+        const table_reg = self.proto.allocTemp();
         try self.proto.emitNEWTABLE(table_reg);
 
         // Parse fields until '}'
@@ -721,7 +758,7 @@ pub const Parser = struct {
             self.advance(); // consume operator
             const right = try self.parsePrimary();
 
-            const dst = self.proto.allocReg();
+            const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
             } else if (std.mem.eql(u8, op, "/")) {
@@ -748,7 +785,7 @@ pub const Parser = struct {
             self.advance(); // consume operator
             const right = try self.parseMul();
 
-            const dst = self.proto.allocReg();
+            const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "+")) {
                 try self.proto.emitAdd(dst, left, right);
             } else if (std.mem.eql(u8, op, "-")) {
@@ -786,7 +823,7 @@ pub const Parser = struct {
             self.advance(); // consume operator
             const right = try self.parseAdd();
 
-            const dst = self.proto.allocReg();
+            const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "==")) {
                 // For ==: if equal then set true, else set false
                 try self.proto.emitEQ(left, right, 0); // skip if equal (negate=0)
@@ -833,7 +870,7 @@ pub const Parser = struct {
         self.advance(); // consume 'if'
 
         // Mark registers before condition - will reset after TEST
-        const cond_mark = self.proto.markRegs();
+        const cond_mark = self.proto.markTemps();
 
         // Parse condition
         const condition_reg = try self.parseExpr();
@@ -849,16 +886,18 @@ pub const Parser = struct {
         const false_jmp = try self.proto.emitPatchableJMP();
 
         // Release condition temporaries
-        self.proto.resetRegs(cond_mark);
+        self.proto.resetTemps(cond_mark);
 
         // Mark for then branch
-        const then_mark = self.proto.markRegs();
+        const then_mark = self.proto.markTemps();
+        try self.proto.enterScope();
 
         // Parse then branch
         try self.parseStatements();
 
-        // Release then branch temporaries
-        self.proto.resetRegs(then_mark);
+        // Release then branch scope and temporaries
+        self.proto.leaveScope();
+        self.proto.resetTemps(then_mark);
 
         // Always emit jump to skip else branch after then branch
         const else_jmp = try self.proto.emitPatchableJMP();
@@ -877,7 +916,7 @@ pub const Parser = struct {
             self.proto.patchJMP(current_false_jmp, elseif_start);
 
             // Mark for elseif condition
-            const elseif_cond_mark = self.proto.markRegs();
+            const elseif_cond_mark = self.proto.markTemps();
 
             // Parse elseif condition
             const elseif_condition_reg = try self.parseExpr();
@@ -893,16 +932,18 @@ pub const Parser = struct {
             current_false_jmp = try self.proto.emitPatchableJMP();
 
             // Release elseif condition temporaries
-            self.proto.resetRegs(elseif_cond_mark);
+            self.proto.resetTemps(elseif_cond_mark);
 
             // Mark for elseif body
-            const elseif_body_mark = self.proto.markRegs();
+            const elseif_body_mark = self.proto.markTemps();
+            try self.proto.enterScope();
 
             // Parse elseif body
             try self.parseStatements();
 
-            // Release elseif body temporaries
-            self.proto.resetRegs(elseif_body_mark);
+            // Release elseif body scope and temporaries
+            self.proto.leaveScope();
+            self.proto.resetTemps(elseif_body_mark);
 
             // Jump over remaining elseif/else when this condition was true
             const jump_to_end = try self.proto.emitPatchableJMP();
@@ -920,13 +961,15 @@ pub const Parser = struct {
             self.proto.patchJMP(current_false_jmp, else_start);
 
             // Mark for else body
-            const else_body_mark = self.proto.markRegs();
+            const else_body_mark = self.proto.markTemps();
+            try self.proto.enterScope();
 
             // Parse else branch
             try self.parseStatements();
 
-            // Release else body temporaries
-            self.proto.resetRegs(else_body_mark);
+            // Release else body scope and temporaries
+            self.proto.leaveScope();
+            self.proto.resetTemps(else_body_mark);
         }
 
         // Expect 'end'
@@ -986,7 +1029,7 @@ pub const Parser = struct {
             step_reg = try self.parseExpr();
         } else {
             // Default step = 1
-            step_reg = self.proto.allocReg();
+            step_reg = self.proto.allocTemp();
             const const_idx = try self.proto.addConstNumber("1");
             try self.proto.emitLoadK(step_reg, const_idx);
         }
@@ -1011,18 +1054,26 @@ pub const Parser = struct {
         const forprep_addr = try self.proto.emitPatchableFORPREP(base_reg);
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
 
-        // Set next_reg past for loop registers (idx, limit, step, user_var)
+        // Save locals_top before for loop modifies it (for restoration after loop)
+        const saved_locals_top = self.proto.locals_top;
+
+        // Set next_reg and locals_top past for loop registers (idx, limit, step, user_var)
         // This ensures statements inside the loop don't overwrite loop control registers
         self.proto.next_reg = base_reg + NUMERIC_FOR_REGS;
+        self.proto.locals_top = base_reg + NUMERIC_FOR_REGS;
 
         // Mark for loop body - each iteration resets to this point
-        const loop_body_mark = self.proto.markRegs();
+        const loop_body_mark = self.proto.markTemps();
 
         // Parse loop body
         try self.parseStatements();
 
-        // Release loop body temporaries (will be reset on each iteration by VM)
-        self.proto.resetRegs(loop_body_mark);
+        // Release loop body temporaries
+        self.proto.resetTemps(loop_body_mark);
+
+        // Restore locals_top after for loop (loop control vars are no longer live)
+        self.proto.locals_top = saved_locals_top;
+        self.proto.next_reg = saved_locals_top;
 
         // Expect 'end'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
@@ -1049,7 +1100,7 @@ pub const Parser = struct {
                     std.mem.eql(u8, self.current.lexeme, "end"))))
         {
             // Mark registers before each statement
-            const stmt_mark = self.proto.markRegs();
+            const stmt_mark = self.proto.markTemps();
 
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
@@ -1059,6 +1110,8 @@ pub const Parser = struct {
                     try self.parseIf();
                 } else if (std.mem.eql(u8, self.current.lexeme, "for")) {
                     try self.parseFor();
+                } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
+                    try self.parseLocalDecl();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -1078,8 +1131,43 @@ pub const Parser = struct {
             }
 
             // Release statement temporaries
-            self.proto.resetRegs(stmt_mark);
+            self.proto.resetTemps(stmt_mark);
         }
+    }
+
+    /// Parse local variable declaration: local name = expr
+    /// Variable is only visible AFTER its initializer (so `local a = a` refers to outer a)
+    fn parseLocalDecl(self: *Parser) ParseError!void {
+        self.advance(); // consume 'local'
+
+        // Expect identifier
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const var_name = self.current.lexeme;
+        self.advance(); // consume identifier
+
+        // Allocate register from locals_top (not temps) - reserves the slot
+        const var_reg = self.proto.allocLocalReg();
+
+        // Check for initialization
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+            self.advance(); // consume '='
+
+            // Parse initializer expression (temps start after var_reg)
+            const expr_reg = try self.parseExpr();
+
+            // Move expression result to variable register if needed
+            if (expr_reg != var_reg) {
+                try self.proto.emitMOVE(var_reg, expr_reg);
+            }
+        } else {
+            // No initializer - initialize to nil
+            try self.proto.emitLOADNIL(var_reg, 1);
+        }
+
+        // NOW add to scope (variable visible after its initializer)
+        try self.proto.addVariable(var_name, var_reg);
     }
 
     // Function call parsing
@@ -1101,7 +1189,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Load function constant
-        const func_reg = self.proto.allocReg();
+        const func_reg = self.proto.allocTemp();
         const func_id = if (std.mem.eql(u8, func_name, "print"))
             NativeFnId.print
         else
@@ -1159,7 +1247,7 @@ pub const Parser = struct {
             self.advance(); // consume '('
 
             // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
-            const func_reg = self.proto.allocReg();
+            const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
@@ -1214,7 +1302,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Load function constant
-        const func_reg = self.proto.allocReg();
+        const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
@@ -1255,7 +1343,7 @@ pub const Parser = struct {
             self.advance(); // consume '('
 
             // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
-            const func_reg = self.proto.allocReg();
+            const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
@@ -1312,7 +1400,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Load function constant
-        const func_reg = self.proto.allocReg();
+        const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
@@ -1374,17 +1462,17 @@ pub const Parser = struct {
 
         // Generate bytecode for io.write call
         // Get io table from global
-        const io_reg = self.proto.allocReg();
+        const io_reg = self.proto.allocTemp();
         const io_key_const = try self.proto.addConstString("io");
         try self.proto.emitGETTABUP(io_reg, 0, io_key_const);
 
         // Get write method from io table
-        const write_reg = self.proto.allocReg();
+        const write_reg = self.proto.allocTemp();
         const write_key_const = try self.proto.addConstString("write");
         try self.proto.emitLoadK(write_reg, write_key_const);
 
         // Get io.write function
-        const func_reg = self.proto.allocReg();
+        const func_reg = self.proto.allocTemp();
         try self.proto.emitGETTABLE(func_reg, io_reg, write_reg);
 
         // Parse arguments
@@ -1463,7 +1551,9 @@ pub const Parser = struct {
                 param_count += 1;
             }
 
-            func_builder.next_reg = param_count; // Reserve registers for parameters
+            // Parameters occupy registers 0..param_count-1
+            func_builder.next_reg = param_count;
+            func_builder.locals_top = param_count;
         }
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
@@ -1499,7 +1589,7 @@ pub const Parser = struct {
 
         // Proto is already registered in old_proto.functions for recursive lookup
         // Now emit CLOSURE + SETTABUP to store in _ENV (globals)
-        const closure_reg = old_proto.allocReg();
+        const closure_reg = old_proto.allocTemp();
         const proto_idx = try old_proto.addProto(proto_ptr);
         try old_proto.emitClosure(closure_reg, proto_idx);
 

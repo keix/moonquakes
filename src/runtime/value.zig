@@ -20,6 +20,22 @@ pub const ValueType = enum(u8) {
     object, // unified GCObject pointer
 };
 
+// TODO: Refactor to final form with 5 variants only:
+//
+//   pub const TValue = union(enum) {
+//       nil,
+//       boolean: bool,
+//       integer: i64,
+//       number: f64,
+//       object: *GCObject,  // all GC types unified
+//   };
+//
+// Principles:
+// - TValue knows only "immediate or reference"
+// - GC knows only GCObject
+// - Type dispatch happens via GCObject.type field
+//
+// This removes closure/string/table variants and unifies all GC objects.
 pub const TValue = union(ValueType) {
     nil: void,
     boolean: bool,
