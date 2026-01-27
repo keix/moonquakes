@@ -59,6 +59,7 @@ const ParseError = error{
     ExpectedFieldSeparator,
     ExpectedCloseBrace,
     ExpectedCloseBracket,
+    ExpectedUntil,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -579,6 +580,8 @@ pub const Parser = struct {
                     try self.parseFor();
                 } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
                     try self.parseWhile();
+                } else if (std.mem.eql(u8, self.current.lexeme, "repeat")) {
+                    try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
                     try self.parseFunctionDefinition();
                 } else {
@@ -1241,13 +1244,49 @@ pub const Parser = struct {
         self.proto.patchJMP(exit_jmp, end_addr);
     }
 
+    fn parseRepeatUntil(self: *Parser) ParseError!void {
+        self.advance(); // consume 'repeat'
+
+        // Record loop start address
+        const loop_start = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Mark for loop body
+        const body_mark = self.proto.markTemps();
+        try self.proto.enterScope();
+
+        // Parse loop body (stops at 'until')
+        try self.parseStatements();
+
+        // Expect 'until'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "until"))) {
+            return error.ExpectedUntil;
+        }
+        self.advance(); // consume 'until'
+
+        // Parse condition (still inside scope so body locals are visible)
+        const cond_mark = self.proto.markTemps();
+        const condition_reg = try self.parseExpr();
+
+        // TEST: if condition is truthy, skip JMP (exit loop)
+        //       if condition is falsy, execute JMP (loop back)
+        try self.proto.emitTEST(condition_reg, false);
+        const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
+        try self.proto.emitJMP(@intCast(back_offset));
+
+        // Release condition temporaries and scope
+        self.proto.resetTemps(cond_mark);
+        self.proto.leaveScope();
+        self.proto.resetTemps(body_mark);
+    }
+
     fn parseStatements(self: *Parser) StatementError!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
                 (std.mem.eql(u8, self.current.lexeme, "else") or
                     std.mem.eql(u8, self.current.lexeme, "elseif") or
-                    std.mem.eql(u8, self.current.lexeme, "end"))))
+                    std.mem.eql(u8, self.current.lexeme, "end") or
+                    std.mem.eql(u8, self.current.lexeme, "until"))))
         {
             // Mark registers before each statement
             const stmt_mark = self.proto.markTemps();
@@ -1262,6 +1301,8 @@ pub const Parser = struct {
                     try self.parseFor();
                 } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
                     try self.parseWhile();
+                } else if (std.mem.eql(u8, self.current.lexeme, "repeat")) {
+                    try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
                     try self.parseLocalDecl();
                 } else {
