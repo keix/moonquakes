@@ -58,6 +58,7 @@ const ParseError = error{
     UnsupportedTableField,
     ExpectedFieldSeparator,
     ExpectedCloseBrace,
+    ExpectedCloseBracket,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -674,26 +675,39 @@ pub const Parser = struct {
                 }
             }
 
-            // Handle field access: t.field or t.a.b.c
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
-                self.advance(); // consume '.'
+            // Handle field/index access: t.field, t[key], or chained t.a[b].c
+            while (self.current.kind == .Symbol and
+                (std.mem.eql(u8, self.current.lexeme, ".") or
+                    std.mem.eql(u8, self.current.lexeme, "[")))
+            {
+                if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                    self.advance(); // consume '.'
 
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+
+                    const field_name = self.current.lexeme;
+                    self.advance(); // consume field name
+
+                    const key_const = try self.proto.addConstString(field_name);
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
+                    base_reg = dst_reg;
+                } else {
+                    self.advance(); // consume '['
+
+                    const key_reg = try self.parseExpr();
+
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume ']'
+
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
+                    base_reg = dst_reg;
                 }
-
-                const field_name = self.current.lexeme;
-                self.advance(); // consume field name
-
-                // Add field name to constants
-                const key_const = try self.proto.addConstString(field_name);
-
-                // Emit GETFIELD: dst = base[key]
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
-
-                // The result becomes the new base for chained access
-                base_reg = dst_reg;
             }
 
             return base_reg;
