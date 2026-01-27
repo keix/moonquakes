@@ -382,6 +382,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit TESTSET instruction: if (R[B].toBoolean() == k) R[A] := R[B] else pc++
+    pub fn emitTESTSET(self: *ProtoBuilder, dst: u8, src: u8, k: bool) !void {
+        const instr = Instruction.initABCk(.TESTSET, dst, src, 0, k);
+        try self.code.append(instr);
+    }
+
     pub fn emitTEST(self: *ProtoBuilder, reg: u8, condition: bool) !void {
         const k: u8 = if (condition) 1 else 0;
         const instr = Instruction.initABC(.TEST, reg, 0, k);
@@ -890,6 +896,68 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedOperator;
             }
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse 'and' expression with short-circuit evaluation
+    /// a and b: if a is falsy, return a; otherwise return b
+    fn parseAnd(self: *Parser) ParseError!u8 {
+        var left = try self.parseCompare();
+
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "and")) {
+            self.advance(); // consume 'and'
+
+            const dst = self.proto.allocTemp();
+
+            // TESTSET dst, left, false:
+            //   if left is falsy (== false): dst := left, continue to JMP -> end
+            //   if left is truthy (!= false): skip JMP -> evaluate b
+            try self.proto.emitTESTSET(dst, left, false);
+            const jmp_addr = try self.proto.emitPatchableJMP();
+
+            // Parse right operand
+            const right = try self.parseCompare();
+            if (right != dst) {
+                try self.proto.emitMOVE(dst, right);
+            }
+
+            const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(jmp_addr, end_addr);
+
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse 'or' expression with short-circuit evaluation
+    /// a or b: if a is truthy, return a; otherwise return b
+    fn parseOr(self: *Parser) ParseError!u8 {
+        var left = try self.parseAnd();
+
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "or")) {
+            self.advance(); // consume 'or'
+
+            const dst = self.proto.allocTemp();
+
+            // TESTSET dst, left, true:
+            //   if left is truthy (== true): dst := left, continue to JMP -> end
+            //   if left is falsy (!= true): skip JMP -> evaluate b
+            try self.proto.emitTESTSET(dst, left, true);
+            const jmp_addr = try self.proto.emitPatchableJMP();
+
+            // Parse right operand
+            const right = try self.parseAnd();
+            if (right != dst) {
+                try self.proto.emitMOVE(dst, right);
+            }
+
+            const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(jmp_addr, end_addr);
+
             left = dst;
         }
 
@@ -1514,7 +1582,7 @@ pub const Parser = struct {
     }
 
     fn parseExpr(self: *Parser) ParseError!u8 {
-        return self.parseCompare();
+        return self.parseOr();
     }
 
     // Special parsing functions
