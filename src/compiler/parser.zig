@@ -58,6 +58,8 @@ const ParseError = error{
     UnsupportedTableField,
     ExpectedFieldSeparator,
     ExpectedCloseBrace,
+    ExpectedCloseBracket,
+    ExpectedUntil,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -381,6 +383,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit TESTSET instruction: if (R[B].toBoolean() == k) R[A] := R[B] else pc++
+    pub fn emitTESTSET(self: *ProtoBuilder, dst: u8, src: u8, k: bool) !void {
+        const instr = Instruction.initABCk(.TESTSET, dst, src, 0, k);
+        try self.code.append(instr);
+    }
+
     pub fn emitTEST(self: *ProtoBuilder, reg: u8, condition: bool) !void {
         const k: u8 = if (condition) 1 else 0;
         const instr = Instruction.initABC(.TEST, reg, 0, k);
@@ -572,6 +580,8 @@ pub const Parser = struct {
                     try self.parseFor();
                 } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
                     try self.parseWhile();
+                } else if (std.mem.eql(u8, self.current.lexeme, "repeat")) {
+                    try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
                     try self.parseFunctionDefinition();
                 } else {
@@ -674,26 +684,39 @@ pub const Parser = struct {
                 }
             }
 
-            // Handle field access: t.field or t.a.b.c
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
-                self.advance(); // consume '.'
+            // Handle field/index access: t.field, t[key], or chained t.a[b].c
+            while (self.current.kind == .Symbol and
+                (std.mem.eql(u8, self.current.lexeme, ".") or
+                    std.mem.eql(u8, self.current.lexeme, "[")))
+            {
+                if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                    self.advance(); // consume '.'
 
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+
+                    const field_name = self.current.lexeme;
+                    self.advance(); // consume field name
+
+                    const key_const = try self.proto.addConstString(field_name);
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
+                    base_reg = dst_reg;
+                } else {
+                    self.advance(); // consume '['
+
+                    const key_reg = try self.parseExpr();
+
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume ']'
+
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
+                    base_reg = dst_reg;
                 }
-
-                const field_name = self.current.lexeme;
-                self.advance(); // consume field name
-
-                // Add field name to constants
-                const key_const = try self.proto.addConstString(field_name);
-
-                // Emit GETFIELD: dst = base[key]
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
-
-                // The result becomes the new base for chained access
-                base_reg = dst_reg;
             }
 
             return base_reg;
@@ -876,6 +899,68 @@ pub const Parser = struct {
             } else {
                 return error.UnsupportedOperator;
             }
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse 'and' expression with short-circuit evaluation
+    /// a and b: if a is falsy, return a; otherwise return b
+    fn parseAnd(self: *Parser) ParseError!u8 {
+        var left = try self.parseCompare();
+
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "and")) {
+            self.advance(); // consume 'and'
+
+            const dst = self.proto.allocTemp();
+
+            // TESTSET dst, left, false:
+            //   if left is falsy (== false): dst := left, continue to JMP -> end
+            //   if left is truthy (!= false): skip JMP -> evaluate b
+            try self.proto.emitTESTSET(dst, left, false);
+            const jmp_addr = try self.proto.emitPatchableJMP();
+
+            // Parse right operand
+            const right = try self.parseCompare();
+            if (right != dst) {
+                try self.proto.emitMOVE(dst, right);
+            }
+
+            const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(jmp_addr, end_addr);
+
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse 'or' expression with short-circuit evaluation
+    /// a or b: if a is truthy, return a; otherwise return b
+    fn parseOr(self: *Parser) ParseError!u8 {
+        var left = try self.parseAnd();
+
+        while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "or")) {
+            self.advance(); // consume 'or'
+
+            const dst = self.proto.allocTemp();
+
+            // TESTSET dst, left, true:
+            //   if left is truthy (== true): dst := left, continue to JMP -> end
+            //   if left is falsy (!= true): skip JMP -> evaluate b
+            try self.proto.emitTESTSET(dst, left, true);
+            const jmp_addr = try self.proto.emitPatchableJMP();
+
+            // Parse right operand
+            const right = try self.parseAnd();
+            if (right != dst) {
+                try self.proto.emitMOVE(dst, right);
+            }
+
+            const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+            self.proto.patchJMP(jmp_addr, end_addr);
+
             left = dst;
         }
 
@@ -1159,13 +1244,49 @@ pub const Parser = struct {
         self.proto.patchJMP(exit_jmp, end_addr);
     }
 
+    fn parseRepeatUntil(self: *Parser) ParseError!void {
+        self.advance(); // consume 'repeat'
+
+        // Record loop start address
+        const loop_start = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Mark for loop body
+        const body_mark = self.proto.markTemps();
+        try self.proto.enterScope();
+
+        // Parse loop body (stops at 'until')
+        try self.parseStatements();
+
+        // Expect 'until'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "until"))) {
+            return error.ExpectedUntil;
+        }
+        self.advance(); // consume 'until'
+
+        // Parse condition (still inside scope so body locals are visible)
+        const cond_mark = self.proto.markTemps();
+        const condition_reg = try self.parseExpr();
+
+        // TEST: if condition is truthy, skip JMP (exit loop)
+        //       if condition is falsy, execute JMP (loop back)
+        try self.proto.emitTEST(condition_reg, false);
+        const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
+        try self.proto.emitJMP(@intCast(back_offset));
+
+        // Release condition temporaries and scope
+        self.proto.resetTemps(cond_mark);
+        self.proto.leaveScope();
+        self.proto.resetTemps(body_mark);
+    }
+
     fn parseStatements(self: *Parser) StatementError!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
             !(self.current.kind == .Keyword and
                 (std.mem.eql(u8, self.current.lexeme, "else") or
                     std.mem.eql(u8, self.current.lexeme, "elseif") or
-                    std.mem.eql(u8, self.current.lexeme, "end"))))
+                    std.mem.eql(u8, self.current.lexeme, "end") or
+                    std.mem.eql(u8, self.current.lexeme, "until"))))
         {
             // Mark registers before each statement
             const stmt_mark = self.proto.markTemps();
@@ -1180,6 +1301,8 @@ pub const Parser = struct {
                     try self.parseFor();
                 } else if (std.mem.eql(u8, self.current.lexeme, "while")) {
                     try self.parseWhile();
+                } else if (std.mem.eql(u8, self.current.lexeme, "repeat")) {
+                    try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
                     try self.parseLocalDecl();
                 } else {
@@ -1500,7 +1623,7 @@ pub const Parser = struct {
     }
 
     fn parseExpr(self: *Parser) ParseError!u8 {
-        return self.parseCompare();
+        return self.parseOr();
     }
 
     // Special parsing functions
