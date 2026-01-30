@@ -158,7 +158,7 @@ test "parser: return 100 + 200" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 300 });
 }
 
-test "parser: local x = 42 (unsupported statement)" {
+test "parser: local x = 42" {
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
@@ -166,8 +166,11 @@ test "parser: local x = 42 (unsupported statement)" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(&vm, allocator, "local x = 42");
-    try testing.expectError(error.UnsupportedStatement, result);
+    const result = try parseAndExecute(&vm, allocator,
+        \\local x = 42
+        \\return x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
 }
 
 test "parser: return + 5 (unexpected token)" {
@@ -233,4 +236,68 @@ test "parser: return 5 - 3 (subtraction)" {
 
     const result = try parseAndExecute(&vm, allocator, "return 5 - 3");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 2 });
+}
+
+test "parser: local variable assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local x = 10
+        \\x = 20
+        \\return x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 20 });
+}
+
+test "parser: local variable assignment with expression" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local x = 5
+        \\x = x + 10
+        \\return x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
+}
+
+test "parser: table field assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = {}
+        \\t.x = 42
+        \\return t.x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+}
+
+test "parser: table nested field assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = { inner = {} }
+        \\t.inner.value = 100
+        \\return t.inner.value
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 100 });
 }
