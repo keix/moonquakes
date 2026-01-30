@@ -584,6 +584,8 @@ pub const Parser = struct {
                     try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
                     try self.parseFunctionDefinition();
+                } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
+                    try self.parseLocalDecl();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -593,6 +595,9 @@ pub const Parser = struct {
                     try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
+                    // Simple assignment: x = expr
+                    try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -613,6 +618,29 @@ pub const Parser = struct {
         self.advance(); // consume 'return'
         const reg = try self.parseExpr();
         try self.proto.emitReturn(reg);
+    }
+
+    // Assignment: x = expr
+    fn parseAssignment(self: *Parser) ParseError!void {
+        const name = self.current.lexeme;
+        self.advance(); // consume identifier
+
+        // Expect '='
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+            return error.ExpectedEquals;
+        }
+        self.advance(); // consume '='
+
+        const value_reg = try self.parseExpr();
+
+        if (self.proto.findVariable(name)) |local_reg| {
+            // Local variable: use MOVE
+            try self.proto.emitMOVE(local_reg, value_reg);
+        } else {
+            // Global variable: SETTABUP (_ENV[name] = value)
+            const name_const = try self.proto.addConstString(name);
+            try self.proto.emitSETTABUP(0, name_const, value_reg);
+        }
     }
 
     // Expression parsing (precedence order: Primary -> Mul -> Add -> Compare)
