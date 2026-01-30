@@ -592,6 +592,8 @@ pub const Parser = struct {
                     try self.parseFunctionDefinition();
                 } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
                     try self.parseLocalDecl();
+                } else if (std.mem.eql(u8, self.current.lexeme, "do")) {
+                    try self.parseDoEnd();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -630,6 +632,21 @@ pub const Parser = struct {
         self.advance(); // consume 'return'
         const reg = try self.parseExpr();
         try self.proto.emitReturn(reg);
+    }
+
+    // do ... end block (creates a new scope)
+    fn parseDoEnd(self: *Parser) ParseError!void {
+        self.advance(); // consume 'do'
+
+        try self.proto.enterScope();
+        try self.parseStatements();
+        self.proto.leaveScope();
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
     }
 
     // Assignment: x = expr, t.field = expr, t.a.b = expr, t[key] = expr
@@ -1448,6 +1465,8 @@ pub const Parser = struct {
                     try self.parseRepeatUntil();
                 } else if (std.mem.eql(u8, self.current.lexeme, "local")) {
                     try self.parseLocalDecl();
+                } else if (std.mem.eql(u8, self.current.lexeme, "do")) {
+                    try self.parseDoEnd();
                 } else {
                     return error.UnsupportedStatement;
                 }
