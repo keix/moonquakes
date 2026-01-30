@@ -340,6 +340,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit SETTABLE instruction: R[A][R[B]] := R[C]
+    pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
+        const instr = Instruction.initABC(.SETTABLE, table, key, src);
+        try self.code.append(instr);
+    }
+
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
     pub fn emitGETFIELD(self: *ProtoBuilder, dst: u8, table: u8, key_const: u32) !void {
         const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
@@ -601,6 +607,9 @@ pub const Parser = struct {
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
                     // Field assignment: t.field = expr
                     try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
+                    // Index assignment: t[key] = expr
+                    try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -623,7 +632,7 @@ pub const Parser = struct {
         try self.proto.emitReturn(reg);
     }
 
-    // Assignment: x = expr, t.field = expr, t.a.b = expr
+    // Assignment: x = expr, t.field = expr, t.a.b = expr, t[key] = expr
     fn parseAssignment(self: *Parser) ParseError!void {
         const name = self.current.lexeme;
         self.advance(); // consume identifier
@@ -641,23 +650,46 @@ pub const Parser = struct {
                 try self.proto.emitGETTABUP(table_reg, 0, name_const);
             }
 
-            // Parse field chain: .a.b.c until we hit '='
-            var field_name: []const u8 = undefined;
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
-                self.advance(); // consume '.'
+            // Parse field chain: .a.b.c or [key] until we hit '='
+            var last_key_reg: ?u8 = null;
+            var last_key_const: ?u32 = null;
 
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                field_name = self.current.lexeme;
-                self.advance(); // consume field name
-
-                // If next is another '.', navigate deeper
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
-                    const key_const = try self.proto.addConstString(field_name);
+            while (self.current.kind == .Symbol and
+                (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
+            {
+                // If we have a pending key, navigate to it first
+                if (last_key_const) |kc| {
                     const next_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(next_reg, table_reg, key_const);
+                    try self.proto.emitGETFIELD(next_reg, table_reg, kc);
                     table_reg = next_reg;
+                    last_key_const = null;
+                } else if (last_key_reg) |kr| {
+                    const next_reg = self.proto.allocTemp();
+                    try self.proto.emitGETTABLE(next_reg, table_reg, kr);
+                    table_reg = next_reg;
+                    last_key_reg = null;
+                }
+
+                if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                    self.advance(); // consume '.'
+
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+                    const field_name = self.current.lexeme;
+                    self.advance(); // consume field name
+
+                    last_key_const = try self.proto.addConstString(field_name);
+                } else {
+                    // '['
+                    self.advance(); // consume '['
+
+                    last_key_reg = try self.parseExpr();
+
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume ']'
                 }
             }
 
@@ -669,9 +701,42 @@ pub const Parser = struct {
 
             const value_reg = try self.parseExpr();
 
-            // Emit SETFIELD for the final field
-            const key_const = try self.proto.addConstString(field_name);
-            try self.proto.emitSETFIELD(table_reg, key_const, value_reg);
+            // Emit SET instruction for the final key
+            if (last_key_const) |kc| {
+                try self.proto.emitSETFIELD(table_reg, kc, value_reg);
+            } else if (last_key_reg) |kr| {
+                try self.proto.emitSETTABLE(table_reg, kr, value_reg);
+            }
+        } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
+            // Index assignment: t[key] = expr
+            var table_reg: u8 = undefined;
+            if (self.proto.findVariable(name)) |local_reg| {
+                table_reg = local_reg;
+            } else {
+                // Global variable: load from _ENV
+                table_reg = self.proto.allocTemp();
+                const name_const = try self.proto.addConstString(name);
+                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+            }
+
+            self.advance(); // consume '['
+
+            const key_reg = try self.parseExpr();
+
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                return error.ExpectedCloseBracket;
+            }
+            self.advance(); // consume ']'
+
+            // Expect '='
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+                return error.ExpectedEquals;
+            }
+            self.advance(); // consume '='
+
+            const value_reg = try self.parseExpr();
+
+            try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
         } else {
             // Simple assignment: x = expr
             // Expect '='
@@ -1399,6 +1464,9 @@ pub const Parser = struct {
                     try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
                     // Field assignment: t.field = expr
+                    try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
+                    // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;

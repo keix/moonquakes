@@ -16,13 +16,19 @@ const ErrorHandler = @import("vm/error.zig");
 ///
 pub const Moonquakes = struct {
     allocator: std.mem.Allocator,
+    vm: ?VM,
 
     pub fn init(allocator: std.mem.Allocator) Moonquakes {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .vm = null,
+        };
     }
 
     pub fn deinit(self: *Moonquakes) void {
-        _ = self;
+        if (self.vm) |*vm| {
+            vm.deinit();
+        }
     }
 
     /// Compile Lua source code into bytecode
@@ -81,9 +87,11 @@ pub const Moonquakes = struct {
 
     /// Compile and execute Lua source in one step
     pub fn runSource(self: *Moonquakes, source: []const u8) !VM.ReturnValue {
-        // Create VM first so GC is available for compilation
-        var vm = try VM.init(self.allocator);
-        defer vm.deinit();
+        // Initialize VM if not already initialized (keeps GC alive for return values)
+        if (self.vm == null) {
+            self.vm = try VM.init(self.allocator);
+        }
+        var vm = &self.vm.?;
 
         // Compile with access to VM's GC
         var lx = lexer.Lexer.init(source);

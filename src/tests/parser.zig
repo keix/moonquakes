@@ -301,3 +301,37 @@ test "parser: table nested field assignment" {
     );
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 100 });
 }
+
+test "parser: table index assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = {}
+        \\local key = "x"
+        \\t[key] = 42
+        \\return t.x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+}
+
+test "parser: mixed field and index assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = { data = {} }
+        \\local key = "value"
+        \\t.data[key] = 50
+        \\return t.data.value
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 50 });
+}
