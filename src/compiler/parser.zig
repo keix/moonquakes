@@ -598,6 +598,9 @@ pub const Parser = struct {
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
+                    // Field assignment: t.field = expr
+                    try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -620,26 +623,73 @@ pub const Parser = struct {
         try self.proto.emitReturn(reg);
     }
 
-    // Assignment: x = expr
+    // Assignment: x = expr, t.field = expr, t.a.b = expr
     fn parseAssignment(self: *Parser) ParseError!void {
         const name = self.current.lexeme;
         self.advance(); // consume identifier
 
-        // Expect '='
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
-            return error.ExpectedEquals;
-        }
-        self.advance(); // consume '='
+        // Check for field access: t.field or t.a.b.c
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+            // Get the base table
+            var table_reg: u8 = undefined;
+            if (self.proto.findVariable(name)) |local_reg| {
+                table_reg = local_reg;
+            } else {
+                // Global variable: load from _ENV
+                table_reg = self.proto.allocTemp();
+                const name_const = try self.proto.addConstString(name);
+                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+            }
 
-        const value_reg = try self.parseExpr();
+            // Parse field chain: .a.b.c until we hit '='
+            var field_name: []const u8 = undefined;
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+                self.advance(); // consume '.'
 
-        if (self.proto.findVariable(name)) |local_reg| {
-            // Local variable: use MOVE
-            try self.proto.emitMOVE(local_reg, value_reg);
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                field_name = self.current.lexeme;
+                self.advance(); // consume field name
+
+                // If next is another '.', navigate deeper
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+                    const key_const = try self.proto.addConstString(field_name);
+                    const next_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(next_reg, table_reg, key_const);
+                    table_reg = next_reg;
+                }
+            }
+
+            // Expect '='
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+                return error.ExpectedEquals;
+            }
+            self.advance(); // consume '='
+
+            const value_reg = try self.parseExpr();
+
+            // Emit SETFIELD for the final field
+            const key_const = try self.proto.addConstString(field_name);
+            try self.proto.emitSETFIELD(table_reg, key_const, value_reg);
         } else {
-            // Global variable: SETTABUP (_ENV[name] = value)
-            const name_const = try self.proto.addConstString(name);
-            try self.proto.emitSETTABUP(0, name_const, value_reg);
+            // Simple assignment: x = expr
+            // Expect '='
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+                return error.ExpectedEquals;
+            }
+            self.advance(); // consume '='
+
+            const value_reg = try self.parseExpr();
+
+            if (self.proto.findVariable(name)) |local_reg| {
+                // Local variable: use MOVE
+                try self.proto.emitMOVE(local_reg, value_reg);
+            } else {
+                // Global variable: SETTABUP (_ENV[name] = value)
+                const name_const = try self.proto.addConstString(name);
+                try self.proto.emitSETTABUP(0, name_const, value_reg);
+            }
         }
     }
 
@@ -1344,6 +1394,12 @@ pub const Parser = struct {
                     try self.parseFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
+                    // Simple assignment: x = expr
+                    try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
+                    // Field assignment: t.field = expr
+                    try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }

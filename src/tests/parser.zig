@@ -269,3 +269,35 @@ test "parser: local variable assignment with expression" {
     );
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
 }
+
+test "parser: table field assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = {}
+        \\t.x = 42
+        \\return t.x
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+}
+
+test "parser: table nested field assignment" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const result = try parseAndExecute(&vm, allocator,
+        \\local t = { inner = {} }
+        \\t.inner.value = 100
+        \\return t.inner.value
+    );
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 100 });
+}
