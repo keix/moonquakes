@@ -93,6 +93,7 @@ pub const Moonquakes = struct {
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
+        defer p.deinit();
         try p.parseChunk();
 
         return try builder.toProto(self.allocator);
@@ -133,6 +134,7 @@ pub const Moonquakes = struct {
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
+        defer p.deinit();
         try p.parseChunk();
 
         const proto = try builder.toProto(self.allocator);

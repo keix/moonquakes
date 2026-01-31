@@ -109,8 +109,31 @@ pub const Lexer = struct {
         const start = self.pos;
         const start_line = self.line;
 
-        while (self.pos < self.src.len and isDigit(self.peek())) {
-            _ = self.advance();
+        // Check for hex prefix (0x or 0X)
+        if (self.peek() == '0' and self.pos + 1 < self.src.len and
+            (self.src[self.pos + 1] == 'x' or self.src[self.pos + 1] == 'X'))
+        {
+            _ = self.advance(); // consume '0'
+            _ = self.advance(); // consume 'x' or 'X'
+            while (self.pos < self.src.len and isHexDigit(self.peek())) {
+                _ = self.advance();
+            }
+        } else {
+            // Decimal integer part
+            while (self.pos < self.src.len and isDigit(self.peek())) {
+                _ = self.advance();
+            }
+
+            // Fractional part (e.g., 3.14)
+            if (self.pos < self.src.len and self.peek() == '.') {
+                // Check next char to distinguish from ".." operator
+                if (self.pos + 1 < self.src.len and isDigit(self.src[self.pos + 1])) {
+                    _ = self.advance(); // consume '.'
+                    while (self.pos < self.src.len and isDigit(self.peek())) {
+                        _ = self.advance();
+                    }
+                }
+            }
         }
 
         return .{
@@ -118,6 +141,10 @@ pub const Lexer = struct {
             .lexeme = self.src[start..self.pos],
             .line = start_line,
         };
+    }
+
+    fn isHexDigit(c: u8) bool {
+        return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
     }
 
     fn readString(self: *Lexer) Token {
