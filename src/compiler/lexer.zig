@@ -43,7 +43,7 @@ pub const Lexer = struct {
 
         if (isAlpha(c) or c == '_') return self.readIdentifier();
         if (isDigit(c)) return self.readNumber();
-        if (c == '"') return self.readString();
+        if (c == '"' or c == '\'') return self.readString();
 
         return self.readSymbol();
     }
@@ -123,10 +123,9 @@ pub const Lexer = struct {
     fn readString(self: *Lexer) Token {
         const start = self.pos;
         const start_line = self.line;
+        const quote = self.advance(); // Get and skip opening quote (" or ')
 
-        _ = self.advance(); // Skip opening quote
-
-        while (self.pos < self.src.len and self.peek() != '"') {
+        while (self.pos < self.src.len and self.peek() != quote) {
             if (self.peek() == '\n') self.line += 1;
             _ = self.advance();
         }

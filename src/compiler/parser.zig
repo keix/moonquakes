@@ -327,6 +327,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit UNM instruction: R[A] := -R[B]
+    pub fn emitUNM(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.UNM, dst, src, 0);
+        try self.code.append(instr);
+    }
+
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
@@ -343,6 +349,12 @@ pub const ProtoBuilder = struct {
     /// Emit SETTABLE instruction: R[A][R[B]] := R[C]
     pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETTABLE, table, key, src);
+        try self.code.append(instr);
+    }
+
+    /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
+    pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
+        const instr = Instruction.initABC(.SETI, table, index, src);
         try self.code.append(instr);
     }
 
@@ -786,9 +798,29 @@ pub const Parser = struct {
             return dst;
         }
 
+        // Unary minus operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
+            self.advance(); // consume '-'
+            const operand = try self.parsePrimary(); // recursive for chained: --x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitUNM(dst, operand);
+            return dst;
+        }
+
         // Table constructor: { field, field, ... }
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
             return try self.parseTableConstructor();
+        }
+
+        // Parenthesized expression: (expr)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            self.advance(); // consume '('
+            const result = try self.parseExpr();
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+            return result;
         }
 
         if (self.current.kind == .Number) {
@@ -895,6 +927,9 @@ pub const Parser = struct {
         const table_reg = self.proto.allocTemp();
         try self.proto.emitNEWTABLE(table_reg);
 
+        // List index counter (Lua arrays start at 1)
+        var list_index: u8 = 1;
+
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
             // Check for named field: Name '=' expr
@@ -919,8 +954,16 @@ pub const Parser = struct {
                 // Free temp registers used by the expression
                 self.proto.next_reg = base_reg;
             } else {
-                // For now, only support named fields
-                return error.UnsupportedTableField;
+                // List element: expr (no key, use auto-index)
+                const base_reg = self.proto.next_reg;
+                const value_reg = try self.parseExpr();
+
+                // Emit SETI: table[index] = value
+                try self.proto.emitSETI(table_reg, list_index, value_reg);
+                list_index += 1;
+
+                // Free temp registers used by the expression
+                self.proto.next_reg = base_reg;
             }
 
             // Check for field separator (',' or ';') or end

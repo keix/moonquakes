@@ -1408,10 +1408,23 @@ pub const VM = struct {
                     const table_val = self.stack[self.base + b];
                     const key_val = self.stack[self.base + c];
 
-                    if (table_val.isTable() and key_val.isString()) {
+                    if (table_val.isTable()) {
                         const table = table_val.table;
-                        const value = table.get(key_val.string) orelse .nil;
-                        self.stack[self.base + a] = value;
+                        if (key_val.isString()) {
+                            const value = table.get(key_val.string) orelse .nil;
+                            self.stack[self.base + a] = value;
+                        } else if (key_val.isInteger()) {
+                            // Convert integer key to string (Lua tables use string keys internally)
+                            var key_buffer: [32]u8 = undefined;
+                            const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
+                                return error.InvalidTableKey;
+                            };
+                            const key = try self.gc.allocString(key_slice);
+                            const value = table.get(key) orelse .nil;
+                            self.stack[self.base + a] = value;
+                        } else {
+                            return error.InvalidTableOperation;
+                        }
                     } else {
                         return error.InvalidTableOperation;
                     }
@@ -1425,9 +1438,21 @@ pub const VM = struct {
                     const key_val = self.stack[self.base + b];
                     const value = self.stack[self.base + c];
 
-                    if (table_val.isTable() and key_val.isString()) {
+                    if (table_val.isTable()) {
                         const table = table_val.table;
-                        try table.set(key_val.string, value);
+                        if (key_val.isString()) {
+                            try table.set(key_val.string, value);
+                        } else if (key_val.isInteger()) {
+                            // Convert integer key to string (Lua tables use string keys internally)
+                            var key_buffer: [32]u8 = undefined;
+                            const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
+                                return error.InvalidTableOperation;
+                            };
+                            const key = try self.gc.allocString(key_slice);
+                            try table.set(key, value);
+                        } else {
+                            return error.InvalidTableOperation;
+                        }
                     } else {
                         return error.InvalidTableOperation;
                     }
