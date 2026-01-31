@@ -352,6 +352,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
+    pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
+        const instr = Instruction.initABC(.SETI, table, index, src);
+        try self.code.append(instr);
+    }
+
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
     pub fn emitGETFIELD(self: *ProtoBuilder, dst: u8, table: u8, key_const: u32) !void {
         const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
@@ -921,6 +927,9 @@ pub const Parser = struct {
         const table_reg = self.proto.allocTemp();
         try self.proto.emitNEWTABLE(table_reg);
 
+        // List index counter (Lua arrays start at 1)
+        var list_index: u8 = 1;
+
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
             // Check for named field: Name '=' expr
@@ -945,8 +954,16 @@ pub const Parser = struct {
                 // Free temp registers used by the expression
                 self.proto.next_reg = base_reg;
             } else {
-                // For now, only support named fields
-                return error.UnsupportedTableField;
+                // List element: expr (no key, use auto-index)
+                const base_reg = self.proto.next_reg;
+                const value_reg = try self.parseExpr();
+
+                // Emit SETI: table[index] = value
+                try self.proto.emitSETI(table_reg, list_index, value_reg);
+                list_index += 1;
+
+                // Free temp registers used by the expression
+                self.proto.next_reg = base_reg;
             }
 
             // Check for field separator (',' or ';') or end
