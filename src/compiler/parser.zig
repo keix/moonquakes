@@ -227,6 +227,11 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitIDIV(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.IDIV, dst, left, right);
+        try self.code.append(instr);
+    }
+
     pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.EQ, negate, left, right);
         try self.code.append(instr);
@@ -380,6 +385,11 @@ pub const ProtoBuilder = struct {
 
     pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MUL, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitPOW(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.POW, dst, left, right);
         try self.code.append(instr);
     }
 
@@ -828,35 +838,9 @@ pub const Parser = struct {
         }
     }
 
-    // Expression parsing (precedence order: Primary -> Mul -> Add -> Compare)
-    fn parsePrimary(self: *Parser) ParseError!u8 {
-        // Unary 'not' operator
-        if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "not")) {
-            self.advance(); // consume 'not'
-            const operand = try self.parsePrimary(); // recursive for chained: not not x
-            const dst = self.proto.allocTemp();
-            try self.proto.emitNOT(dst, operand);
-            return dst;
-        }
-
-        // Unary minus operator
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
-            self.advance(); // consume '-'
-            const operand = try self.parsePrimary(); // recursive for chained: --x
-            const dst = self.proto.allocTemp();
-            try self.proto.emitUNM(dst, operand);
-            return dst;
-        }
-
-        // Length operator
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "#")) {
-            self.advance(); // consume '#'
-            const operand = try self.parsePrimary(); // recursive for chained: ##x
-            const dst = self.proto.allocTemp();
-            try self.proto.emitLEN(dst, operand);
-            return dst;
-        }
-
+    // Expression parsing (precedence order: Atom -> Pow -> Primary -> Mul -> Add -> Compare)
+    // parseAtom: literals, parentheses, table constructors, identifiers
+    fn parseAtom(self: *Parser) ParseError!u8 {
         // Table constructor: { field, field, ... }
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
             return try self.parseTableConstructor();
@@ -959,6 +943,54 @@ pub const Parser = struct {
         return error.ExpectedExpression;
     }
 
+    // parsePow: handles ^ (right-associative, highest precedence binary operator)
+    fn parsePow(self: *Parser) ParseError!u8 {
+        var left = try self.parseAtom();
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "^")) {
+            self.advance(); // consume '^'
+            const right = try self.parsePow(); // right-associative: recursive call
+
+            const dst = self.proto.allocTemp();
+            try self.proto.emitPOW(dst, left, right);
+            left = dst;
+        }
+
+        return left;
+    }
+
+    // parsePrimary: handles unary operators (not, -, #)
+    fn parsePrimary(self: *Parser) ParseError!u8 {
+        // Unary 'not' operator
+        if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "not")) {
+            self.advance(); // consume 'not'
+            const operand = try self.parsePrimary(); // recursive for chained: not not x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitNOT(dst, operand);
+            return dst;
+        }
+
+        // Unary minus operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
+            self.advance(); // consume '-'
+            const operand = try self.parsePrimary(); // recursive for chained: --x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitUNM(dst, operand);
+            return dst;
+        }
+
+        // Length operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "#")) {
+            self.advance(); // consume '#'
+            const operand = try self.parsePrimary(); // recursive for chained: ##x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitLEN(dst, operand);
+            return dst;
+        }
+
+        return try self.parsePow();
+    }
+
     /// Parse table constructor: { [field,]* }
     /// field = Name '=' expr | '[' expr ']' '=' expr | expr
     fn parseTableConstructor(self: *Parser) ParseError!u8 {
@@ -1037,6 +1069,7 @@ pub const Parser = struct {
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "*") or
                 std.mem.eql(u8, self.current.lexeme, "/") or
+                std.mem.eql(u8, self.current.lexeme, "//") or
                 std.mem.eql(u8, self.current.lexeme, "%")))
         {
             const op = self.current.lexeme;
@@ -1046,6 +1079,8 @@ pub const Parser = struct {
             const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
+            } else if (std.mem.eql(u8, op, "//")) {
+                try self.proto.emitIDIV(dst, left, right);
             } else if (std.mem.eql(u8, op, "/")) {
                 try self.proto.emitDiv(dst, left, right);
             } else if (std.mem.eql(u8, op, "%")) {
