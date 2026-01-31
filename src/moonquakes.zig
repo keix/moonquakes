@@ -6,6 +6,47 @@ const lexer = @import("compiler/lexer.zig");
 const parser = @import("compiler/parser.zig");
 const ErrorHandler = @import("vm/error.zig");
 
+/// Owned value that doesn't depend on VM/GC lifetime.
+/// Strings are copied and owned by the caller.
+pub const OwnedValue = union(enum) {
+    nil,
+    boolean: bool,
+    integer: i64,
+    number: f64,
+    string: []u8,
+
+    pub fn deinit(self: *OwnedValue, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .string => |s| allocator.free(s),
+            else => {},
+        }
+    }
+
+    pub fn format(self: OwnedValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (self) {
+            .nil => try writer.writeAll("nil"),
+            .boolean => |b| try writer.print("{}", .{b}),
+            .integer => |i| try writer.print("{}", .{i}),
+            .number => |n| try writer.print("{d}", .{n}),
+            .string => |s| try writer.print("{s}", .{s}),
+        }
+    }
+};
+
+/// Return value from Moonquakes execution.
+/// Owns all GC-managed data (strings copied out).
+pub const OwnedReturnValue = union(enum) {
+    none,
+    single: OwnedValue,
+
+    pub fn deinit(self: *OwnedReturnValue, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .single => |*v| v.deinit(allocator),
+            .none => {},
+        }
+    }
+};
+
 /// This project is a clean-room implementation inspired by
 /// the Lua 5.4 language specification.
 /// It does not include or depend on the original Lua source code.
@@ -79,9 +120,10 @@ pub const Moonquakes = struct {
         };
     }
 
-    /// Compile and execute Lua source in one step
-    pub fn runSource(self: *Moonquakes, source: []const u8) !VM.ReturnValue {
-        // Create VM first so GC is available for compilation
+    /// Compile and execute Lua source in one step.
+    /// Returns owned values that don't depend on VM lifetime.
+    pub fn runSource(self: *Moonquakes, source: []const u8) !OwnedReturnValue {
+        // Create VM (will be destroyed at end of function)
         var vm = try VM.init(self.allocator);
         defer vm.deinit();
 
@@ -94,30 +136,30 @@ pub const Moonquakes = struct {
         try p.parseChunk();
 
         const proto = try builder.toProto(self.allocator);
-        // All slices are allocator-owned (even when len=0), so always free
         defer self.allocator.free(proto.code);
         defer self.allocator.free(proto.k);
         defer self.allocator.free(proto.protos);
 
-        // Execute on the same VM
-        return vm.execute(&proto) catch |err| {
-            // Translate VM errors to user-friendly messages using Sugar Layer
+        // Execute
+        const result = vm.execute(&proto) catch |err| {
             const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
                 error.OutOfMemory => "out of memory during error translation",
             };
             defer if (translated_error.len > 0) self.allocator.free(translated_error);
 
-            // Print the user-friendly error message
             const stderr = std.io.getStdErr().writer();
             stderr.print("{s}\n", .{translated_error}) catch {};
 
-            // Propagate the original error for proper control flow
             return err;
         };
+
+        // Convert to owned values before VM is destroyed
+        return self.toOwnedReturnValue(result);
     }
 
-    /// Load and execute Lua file
-    pub fn loadFile(self: *Moonquakes, file_path: []const u8) !VM.ReturnValue {
+    /// Load and execute Lua file.
+    /// Returns owned values that don't depend on VM lifetime.
+    pub fn loadFile(self: *Moonquakes, file_path: []const u8) !OwnedReturnValue {
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
 
@@ -127,6 +169,29 @@ pub const Moonquakes = struct {
 
         _ = try file.readAll(source);
         return try self.runSource(source);
+    }
+
+    /// Convert VM ReturnValue to OwnedReturnValue (copies GC-managed data)
+    fn toOwnedReturnValue(self: *Moonquakes, result: VM.ReturnValue) !OwnedReturnValue {
+        return switch (result) {
+            .none => .none,
+            .single => |val| .{ .single = try self.toOwnedValue(val) },
+            .multiple => .none, // TODO: support multiple return values
+        };
+    }
+
+    /// Convert TValue to OwnedValue (copies strings)
+    fn toOwnedValue(self: *Moonquakes, val: TValue) !OwnedValue {
+        return switch (val) {
+            .nil => .nil,
+            .boolean => |b| .{ .boolean = b },
+            .integer => |i| .{ .integer = i },
+            .number => |n| .{ .number = n },
+            .string => |s| .{ .string = try self.allocator.dupe(u8, s.asSlice()) },
+            .table => .nil, // TODO: serialize table
+            .closure => .nil, // TODO: represent closure
+            .object => .nil, // TODO: handle generic object
+        };
     }
 
     /// Debug: dump all tokens from source

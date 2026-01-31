@@ -1,5 +1,6 @@
 const std = @import("std");
-const Moonquakes = @import("moonquakes.zig").Moonquakes;
+const mq_mod = @import("moonquakes.zig");
+const Moonquakes = mq_mod.Moonquakes;
 
 pub fn main() !void {
     const stdout = std.io.getStdOut().writer();
@@ -18,26 +19,20 @@ pub fn main() !void {
         const file_path = args[1];
         try stdout.print("Reading from file: {s}\n", .{file_path});
 
-        const result = mq.loadFile(file_path) catch |err| switch (err) {
+        var result = mq.loadFile(file_path) catch |err| switch (err) {
             error.FileNotFound => {
                 try stdout.print("Error: File '{s}' not found\n", .{file_path});
                 return;
             },
             else => return err,
         };
+        defer result.deinit(allocator);
 
         try stdout.print("Moonquakes speaks for the first time!\n", .{});
         try stdout.print("Result: ", .{});
         switch (result) {
             .none => try stdout.print("nil\n", .{}),
             .single => |val| try stdout.print("{}\n", .{val}),
-            .multiple => |vals| {
-                for (vals, 0..) |val, i| {
-                    if (i > 0) try stdout.print(", ", .{});
-                    try stdout.print("{}", .{val});
-                }
-                try stdout.print("\n", .{});
-            },
         }
     } else {
         try stdout.print("Usage: moonquakes <lua_file>\n", .{});
