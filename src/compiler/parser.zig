@@ -60,6 +60,7 @@ const ParseError = error{
     ExpectedCloseBrace,
     ExpectedCloseBracket,
     ExpectedUntil,
+    BreakOutsideLoop,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -528,7 +529,11 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
-        for (self.variables.items) |entry| {
+        // Search in reverse order so inner scope shadows outer
+        var i = self.variables.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = self.variables.items[i];
             if (std.mem.eql(u8, entry.name, name)) {
                 return entry.reg;
             }
@@ -573,15 +578,23 @@ pub const Parser = struct {
     lexer: *Lexer,
     current: Token,
     proto: *ProtoBuilder,
+    break_jumps: std.ArrayList(u32),
+    loop_depth: usize,
 
     pub fn init(lx: *Lexer, proto: *ProtoBuilder) Parser {
         var p = Parser{
             .lexer = lx,
             .proto = proto,
             .current = undefined,
+            .break_jumps = std.ArrayList(u32).init(proto.allocator),
+            .loop_depth = 0,
         };
         p.advance();
         return p;
+    }
+
+    pub fn deinit(self: *Parser) void {
+        self.break_jumps.deinit();
     }
 
     fn advance(self: *Parser) void {
@@ -894,23 +907,15 @@ pub const Parser = struct {
             if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
                 return try self.parseFunctionCallExpr();
             }
-            // For now, only support loop variable 'i' which is at base+3
+            // Check if it's a variable/parameter (includes loop variables)
+            const var_name = self.current.lexeme;
             var base_reg: u8 = undefined;
-            if (std.mem.eql(u8, self.current.lexeme, "i")) {
+            if (self.proto.findVariable(var_name)) |var_reg| {
                 base_reg = self.proto.allocTemp();
-                // Loop variable is stored at base+3, copy to new register
-                try self.proto.emitMOVE(base_reg, 3); // base+3 = loop variable
+                try self.proto.emitMOVE(base_reg, var_reg);
                 self.advance();
             } else {
-                // Check if it's a variable/parameter
-                const var_name = self.current.lexeme;
-                if (self.proto.findVariable(var_name)) |var_reg| {
-                    base_reg = self.proto.allocTemp();
-                    try self.proto.emitMOVE(base_reg, var_reg);
-                    self.advance();
-                } else {
-                    return error.UnsupportedIdentifier;
-                }
+                return error.UnsupportedIdentifier;
             }
 
             // Handle field/index access: t.field, t[key], or chained t.a[b].c
@@ -1377,10 +1382,15 @@ pub const Parser = struct {
     fn parseFor(self: *Parser) ParseError!void {
         self.advance(); // consume 'for'
 
-        // Expect variable name (for now, we'll ignore it and use a fixed register)
+        // Track loop for break statements
+        self.loop_depth += 1;
+        const break_count = self.break_jumps.items.len;
+
+        // Expect variable name
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
         }
+        const loop_var_name = self.current.lexeme;
         self.advance(); // consume identifier
 
         // Expect '='
@@ -1433,13 +1443,17 @@ pub const Parser = struct {
         const forprep_addr = try self.proto.emitPatchableFORPREP(base_reg);
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
 
-        // Save locals_top before for loop modifies it (for restoration after loop)
+        // Save locals_top and variables before for loop modifies them
         const saved_locals_top = self.proto.locals_top;
+        const saved_var_len = self.proto.variables.items.len;
 
         // Set next_reg and locals_top past for loop registers (idx, limit, step, user_var)
         // This ensures statements inside the loop don't overwrite loop control registers
         self.proto.next_reg = base_reg + NUMERIC_FOR_REGS;
         self.proto.locals_top = base_reg + NUMERIC_FOR_REGS;
+
+        // Register loop variable (user_var is at base_reg + 3)
+        try self.proto.addVariable(loop_var_name, base_reg + 3);
 
         // Mark for loop body - each iteration resets to this point
         const loop_body_mark = self.proto.markTemps();
@@ -1447,8 +1461,9 @@ pub const Parser = struct {
         // Parse loop body
         try self.parseStatements();
 
-        // Release loop body temporaries
+        // Release loop body temporaries and variables
         self.proto.resetTemps(loop_body_mark);
+        self.proto.variables.shrinkRetainingCapacity(saved_var_len);
 
         // Restore locals_top after for loop (loop control vars are no longer live)
         self.proto.locals_top = saved_locals_top;
@@ -1468,10 +1483,23 @@ pub const Parser = struct {
 
         // Patch FORLOOP to jump back to loop start
         self.proto.patchFORInstr(forloop_addr, loop_start);
+
+        // Patch all break jumps to after the loop
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        for (self.break_jumps.items[break_count..]) |jmp| {
+            self.proto.patchJMP(jmp, end_addr);
+        }
+        self.break_jumps.shrinkRetainingCapacity(break_count);
+
+        self.loop_depth -= 1;
     }
 
     fn parseWhile(self: *Parser) ParseError!void {
         self.advance(); // consume 'while'
+
+        // Track loop for break statements
+        self.loop_depth += 1;
+        const break_count = self.break_jumps.items.len;
 
         // Record loop start address for backward jump
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
@@ -1516,13 +1544,25 @@ pub const Parser = struct {
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
         try self.proto.emitJMP(@intCast(back_offset));
 
-        // Patch exit jump to after the loop
+        // Patch exit jump and all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
         self.proto.patchJMP(exit_jmp, end_addr);
+
+        // Patch all break jumps from this loop
+        for (self.break_jumps.items[break_count..]) |jmp| {
+            self.proto.patchJMP(jmp, end_addr);
+        }
+        self.break_jumps.shrinkRetainingCapacity(break_count);
+
+        self.loop_depth -= 1;
     }
 
     fn parseRepeatUntil(self: *Parser) ParseError!void {
         self.advance(); // consume 'repeat'
+
+        // Track loop for break statements
+        self.loop_depth += 1;
+        const break_count = self.break_jumps.items.len;
 
         // Record loop start address
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
@@ -1550,10 +1590,31 @@ pub const Parser = struct {
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
         try self.proto.emitJMP(@intCast(back_offset));
 
+        // Patch all break jumps to after the loop
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        for (self.break_jumps.items[break_count..]) |jmp| {
+            self.proto.patchJMP(jmp, end_addr);
+        }
+        self.break_jumps.shrinkRetainingCapacity(break_count);
+
+        self.loop_depth -= 1;
+
         // Release condition temporaries and scope
         self.proto.resetTemps(cond_mark);
         self.proto.leaveScope();
         self.proto.resetTemps(body_mark);
+    }
+
+    fn parseBreak(self: *Parser) ParseError!void {
+        self.advance(); // consume 'break'
+
+        if (self.loop_depth == 0) {
+            return error.BreakOutsideLoop;
+        }
+
+        // Emit JMP to be patched later at end of loop
+        const jmp_addr = try self.proto.emitPatchableJMP();
+        try self.break_jumps.append(jmp_addr);
     }
 
     fn parseStatements(self: *Parser) StatementError!void {
@@ -1584,6 +1645,8 @@ pub const Parser = struct {
                     try self.parseLocalDecl();
                 } else if (std.mem.eql(u8, self.current.lexeme, "do")) {
                     try self.parseDoEnd();
+                } else if (std.mem.eql(u8, self.current.lexeme, "break")) {
+                    try self.parseBreak();
                 } else {
                     return error.UnsupportedStatement;
                 }
