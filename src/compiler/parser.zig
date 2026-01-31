@@ -339,6 +339,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit CONCAT instruction: R[A] := R[B] .. ... .. R[C]
+    pub fn emitCONCAT(self: *ProtoBuilder, dst: u8, start: u8, end: u8) !void {
+        const instr = Instruction.initABC(.CONCAT, dst, start, end);
+        try self.code.append(instr);
+    }
+
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
@@ -446,10 +452,26 @@ pub const ProtoBuilder = struct {
 
     // add functions grouped together
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
-        const value = std.fmt.parseInt(i64, lexeme, 10) catch return error.InvalidNumber;
-        const const_value = TValue{ .integer = value };
-        try self.constants.append(const_value);
-        return @intCast(self.constants.items.len - 1);
+        // Check for hex prefix (0x or 0X)
+        if (lexeme.len > 2 and lexeme[0] == '0' and (lexeme[1] == 'x' or lexeme[1] == 'X')) {
+            const value = std.fmt.parseInt(i64, lexeme[2..], 16) catch return error.InvalidNumber;
+            const const_value = TValue{ .integer = value };
+            try self.constants.append(const_value);
+            return @intCast(self.constants.items.len - 1);
+        }
+
+        // Try parsing as decimal integer first
+        if (std.fmt.parseInt(i64, lexeme, 10)) |value| {
+            const const_value = TValue{ .integer = value };
+            try self.constants.append(const_value);
+            return @intCast(self.constants.items.len - 1);
+        } else |_| {
+            // Try parsing as float
+            const value = std.fmt.parseFloat(f64, lexeme) catch return error.InvalidNumber;
+            const const_value = TValue{ .number = value };
+            try self.constants.append(const_value);
+            return @intCast(self.constants.items.len - 1);
+        }
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
@@ -1057,6 +1079,43 @@ pub const Parser = struct {
         return left;
     }
 
+    /// Parse string concatenation
+    /// Collects all operands first, then emits a single CONCAT instruction
+    /// a .. b .. c -> CONCAT(dst, a_reg, c_reg) with operands in consecutive registers
+    fn parseConcat(self: *Parser) ParseError!u8 {
+        const first = try self.parseAdd();
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".."))) {
+            return first;
+        }
+
+        // Collect all operand registers first
+        var operands: [256]u8 = undefined;
+        operands[0] = first;
+        var count: usize = 1;
+
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "..")) {
+            self.advance(); // consume '..'
+            operands[count] = try self.parseAdd();
+            count += 1;
+        }
+
+        // Now allocate consecutive registers and copy operands
+        const start_reg = self.proto.next_reg;
+        for (0..count) |i| {
+            const dst = self.proto.allocTemp();
+            if (operands[i] != dst) {
+                try self.proto.emitMOVE(dst, operands[i]);
+            }
+        }
+        const end_reg = self.proto.next_reg - 1;
+
+        // Emit single CONCAT for all operands
+        const result = self.proto.allocTemp();
+        try self.proto.emitCONCAT(result, start_reg, end_reg);
+        return result;
+    }
+
     // Comparison operators are lowered into conditional jumps + LOADBOOL.
     // This mirrors Lua VM semantics:
     //   - comparison emits a test instruction (EQ/LT/LE)
@@ -1067,7 +1126,7 @@ pub const Parser = struct {
     // this block may be refactored into a more compact form.
 
     fn parseCompare(self: *Parser) ParseError!u8 {
-        var left = try self.parseAdd();
+        var left = try self.parseConcat();
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "==") or
@@ -1079,7 +1138,7 @@ pub const Parser = struct {
         {
             const op = self.current.lexeme;
             self.advance(); // consume operator
-            const right = try self.parseAdd();
+            const right = try self.parseConcat();
 
             const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "==")) {
