@@ -928,8 +928,22 @@ pub const VM = struct {
 
                     if (vb.isString()) {
                         self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(vb.string.asSlice().len)) };
+                    } else if (vb.isTable()) {
+                        // Count consecutive integer keys starting from 1
+                        // TODO: Consider adding gc.findString() to avoid allocating strings
+                        // that don't exist in the intern table. Currently allocString() is used
+                        // which may allocate unnecessary strings when the key doesn't exist.
+                        const table = vb.table;
+                        var len: i64 = 0;
+                        var key_buffer: [32]u8 = undefined;
+                        while (true) {
+                            const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
+                            const key = self.gc.allocString(key_slice) catch break;
+                            if (table.get(key) == null) break;
+                            len += 1;
+                        }
+                        self.stack[self.base + a] = .{ .integer = len };
                     } else {
-                        // TODO: table length support when tables are implemented
                         return error.LengthError;
                     }
                 },

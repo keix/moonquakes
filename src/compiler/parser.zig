@@ -333,6 +333,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit LEN instruction: R[A] := #R[B]
+    pub fn emitLEN(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.LEN, dst, src, 0);
+        try self.code.append(instr);
+    }
+
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
@@ -804,6 +810,15 @@ pub const Parser = struct {
             const operand = try self.parsePrimary(); // recursive for chained: --x
             const dst = self.proto.allocTemp();
             try self.proto.emitUNM(dst, operand);
+            return dst;
+        }
+
+        // Length operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "#")) {
+            self.advance(); // consume '#'
+            const operand = try self.parsePrimary(); // recursive for chained: ##x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitLEN(dst, operand);
             return dst;
         }
 
