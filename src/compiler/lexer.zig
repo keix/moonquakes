@@ -208,6 +208,11 @@ pub const Lexer = struct {
                         _ = self.advance();
                     }
                 },
+                '/' => {
+                    if (second_char == '/') {
+                        _ = self.advance();
+                    }
+                },
                 else => {},
             }
         }
