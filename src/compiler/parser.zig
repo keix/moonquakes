@@ -327,6 +327,12 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    /// Emit UNM instruction: R[A] := -R[B]
+    pub fn emitUNM(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.UNM, dst, src, 0);
+        try self.code.append(instr);
+    }
+
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
@@ -786,9 +792,29 @@ pub const Parser = struct {
             return dst;
         }
 
+        // Unary minus operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
+            self.advance(); // consume '-'
+            const operand = try self.parsePrimary(); // recursive for chained: --x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitUNM(dst, operand);
+            return dst;
+        }
+
         // Table constructor: { field, field, ... }
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
             return try self.parseTableConstructor();
+        }
+
+        // Parenthesized expression: (expr)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            self.advance(); // consume '('
+            const result = try self.parseExpr();
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance(); // consume ')'
+            return result;
         }
 
         if (self.current.kind == .Number) {
