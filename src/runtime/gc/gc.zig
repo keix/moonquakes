@@ -201,25 +201,20 @@ pub const GC = struct {
         return obj;
     }
 
-    /// Main garbage collection entry point
-    pub fn collectGarbage(self: *GC) void {
-        const before = self.bytes_allocated;
+    /// Check if GC should run (policy decision)
+    pub fn shouldCollect(self: *GC, additional_bytes: usize) bool {
+        return self.bytes_allocated + additional_bytes > self.next_gc;
+    }
 
-        // TODO: Mark phase - need VM reference
-        // self.markRoots(vm);
-
-        // Sweep phase
+    /// Sweep phase + threshold update (called after VM marks roots)
+    pub fn collect(self: *GC) void {
         self.sweep();
 
-        const after = self.bytes_allocated;
-
         // Adjust next GC threshold based on survival rate
-        self.next_gc = @max(@as(usize, @intFromFloat(@as(f64, @floatFromInt(after)) * self.gc_multiplier)), self.gc_min_threshold);
-
-        // GC stats output (disabled in ReleaseFast for performance)
-        if (builtin.mode != .ReleaseFast) {
-            std.log.info("GC: {} -> {} bytes, next at {}", .{ before, after, self.next_gc });
-        }
+        self.next_gc = @max(
+            @as(usize, @intFromFloat(@as(f64, @floatFromInt(self.bytes_allocated)) * self.gc_multiplier)),
+            self.gc_min_threshold,
+        );
     }
 
     /// Mark all values in a stack slice as reachable
@@ -394,8 +389,9 @@ pub const GC = struct {
     }
 
     /// Force garbage collection (for debugging/testing)
+    /// Note: Only runs sweep phase. Mark roots manually before calling.
     pub fn forceGC(self: *GC) void {
-        self.collectGarbage();
+        self.collect();
     }
 
     /// Manually mark an object as reachable (for testing / root marking)
