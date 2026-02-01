@@ -169,17 +169,12 @@ pub const VM = struct {
             upval = uv.next_open;
         }
 
-        // Sweep phase: free unmarked objects
-        self.gc.sweep();
-
-        const after = self.gc.bytes_allocated;
-
-        // TODO: Update GC threshold based on survival rate
-        // self.gc.next_gc = @max(after * gc_multiplier, gc_min_threshold);
+        // Sweep phase + threshold update
+        self.gc.collect();
 
         // Debug output (disabled in ReleaseFast)
         if (@import("builtin").mode != .ReleaseFast) {
-            std.log.info("GC: {} -> {} bytes", .{ before, after });
+            std.log.info("GC: {} -> {} bytes, next at {}", .{ before, self.gc.bytes_allocated, self.gc.next_gc });
         }
     }
 
