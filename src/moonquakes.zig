@@ -1,9 +1,12 @@
 const std = @import("std");
 const TValue = @import("runtime/value.zig").TValue;
-const Proto = @import("compiler/proto.zig").Proto;
+const proto_mod = @import("compiler/proto.zig");
+const Proto = proto_mod.Proto;
+const RawProto = proto_mod.RawProto;
 const VM = @import("vm/vm.zig").VM;
 const lexer = @import("compiler/lexer.zig");
 const parser = @import("compiler/parser.zig");
+const materialize = @import("compiler/materialize.zig").materialize;
 const ErrorHandler = @import("vm/error.zig");
 
 /// Owned value that doesn't depend on VM/GC lifetime.
@@ -124,26 +127,27 @@ pub const Moonquakes = struct {
     /// Compile and execute Lua source in one step.
     /// Returns owned values that don't depend on VM lifetime.
     pub fn runSource(self: *Moonquakes, source: []const u8) !OwnedReturnValue {
-        // Create VM (will be destroyed at end of function)
-        var vm = try VM.init(self.allocator);
-        defer vm.deinit();
-
-        // Compile with access to VM's GC
+        // Phase 1: Compile to RawProto (no GC needed)
         var lx = lexer.Lexer.init(source);
-        var builder = parser.ProtoBuilder.init(self.allocator, &vm.gc);
+        var builder = parser.ProtoBuilder.init(self.allocator);
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
         defer p.deinit();
         try p.parseChunk();
 
-        const proto = try builder.toProto(self.allocator);
-        defer self.allocator.free(proto.code);
-        defer self.allocator.free(proto.k);
-        defer self.allocator.free(proto.protos);
+        const raw_proto = try builder.toRawProto(self.allocator);
+        defer freeRawProto(self.allocator, raw_proto);
 
-        // Execute
-        const result = vm.execute(&proto) catch |err| {
+        // Phase 2: Create VM and materialize constants
+        var vm = try VM.init(self.allocator);
+        defer vm.deinit();
+
+        const proto = try materialize(&raw_proto, &vm.gc, self.allocator);
+        defer freeProto(self.allocator, proto);
+
+        // Phase 3: Execute
+        const result = vm.execute(proto) catch |err| {
             const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
                 error.OutOfMemory => "out of memory during error translation",
             };
@@ -157,6 +161,36 @@ pub const Moonquakes = struct {
 
         // Convert to owned values before VM is destroyed
         return self.toOwnedReturnValue(result);
+    }
+
+    fn freeRawProto(allocator: std.mem.Allocator, raw: RawProto) void {
+        allocator.free(raw.code);
+        allocator.free(raw.booleans);
+        allocator.free(raw.integers);
+        allocator.free(raw.numbers);
+        for (raw.strings) |s| {
+            allocator.free(s);
+        }
+        allocator.free(raw.strings);
+        allocator.free(raw.native_ids);
+        allocator.free(raw.const_refs);
+        for (raw.protos) |nested| {
+            // Recursively free contents, then destroy the struct itself
+            freeRawProto(allocator, nested.*);
+            allocator.destroy(@constCast(nested));
+        }
+        allocator.free(raw.protos);
+    }
+
+    fn freeProto(allocator: std.mem.Allocator, proto: *Proto) void {
+        allocator.free(proto.k);
+        allocator.free(proto.code);
+        allocator.free(proto.upvalues);
+        for (proto.protos) |nested| {
+            freeProto(allocator, @constCast(nested));
+        }
+        allocator.free(proto.protos);
+        allocator.destroy(proto);
     }
 
     /// Load and execute Lua file.

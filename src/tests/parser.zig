@@ -2,23 +2,26 @@ const std = @import("std");
 const testing = std.testing;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
+const materialize = @import("../compiler/materialize.zig").materialize;
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const test_utils = @import("test_utils.zig");
 
 fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator, &vm.gc);
+    var proto_builder = parser.ProtoBuilder.init(allocator);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
     try p.parseChunk();
 
-    const proto = try proto_builder.toProto(allocator);
-    defer allocator.free(proto.code);
-    defer allocator.free(proto.k);
+    const raw_proto = try proto_builder.toRawProto(allocator);
+    // Note: raw_proto memory managed by arena, no explicit free needed
 
-    return vm.execute(&proto);
+    const proto = try materialize(&raw_proto, &vm.gc, allocator);
+    // Note: proto memory managed by arena, no explicit free needed
+
+    return vm.execute(proto);
 }
 
 test "parser: return 42" {

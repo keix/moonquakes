@@ -5,6 +5,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
+const materialize = @import("../compiler/materialize.zig").materialize;
 
 fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -12,22 +13,23 @@ fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
 }
 
 fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
-    // Create VM first so GC is available for compilation
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
+    // Compile to RawProto (no GC needed)
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator, &vm.gc);
+    var proto_builder = parser.ProtoBuilder.init(allocator);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
     try p.parseChunk();
 
-    const proto = try proto_builder.toProto(allocator);
-    defer allocator.free(proto.code);
-    defer allocator.free(proto.k);
+    const raw_proto = try proto_builder.toRawProto(allocator);
 
-    return vm.execute(&proto);
+    // Create VM and materialize
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    const proto = try materialize(&raw_proto, &vm.gc, allocator);
+
+    return vm.execute(proto);
 }
 
 fn testParserExpression(source: []const u8, expected: TValue) !void {
