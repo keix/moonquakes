@@ -268,7 +268,7 @@ pub const VM = struct {
     const BitwiseOp = enum { band, bor, bxor };
 
     // Push a new call info onto the call stack
-    pub fn pushCallInfo(self: *VM, func: *const Proto, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+    pub fn pushCallInfo(self: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
         if (self.callstack_size >= self.callstack.len) {
             return error.CallStackOverflow;
         }
@@ -280,7 +280,7 @@ pub const VM = struct {
         const new_ci = &self.callstack[self.callstack_size];
         new_ci.* = CallInfo{
             .func = func,
-            .closure = null, // TODO: set when calling a closure
+            .closure = closure, // closure for upvalue access (null for main chunk)
             .pc = func.code.ptr,
             .savedpc = null,
             .base = base,
@@ -1202,8 +1202,8 @@ pub const VM = struct {
                         self.stack[new_base + i] = .nil;
                     }
 
-                    // Push new call info
-                    _ = try self.pushCallInfo(func_proto, new_base, ret_base, nresults);
+                    // Push new call info with closure for upvalue access
+                    _ = try self.pushCallInfo(func_proto, closure, new_base, ret_base, nresults);
 
                     // Update top for the new function
                     self.top = new_base + func_proto.maxstacksize;

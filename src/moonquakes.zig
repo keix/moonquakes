@@ -180,6 +180,7 @@ pub const Moonquakes = struct {
             allocator.destroy(@constCast(nested));
         }
         allocator.free(raw.protos);
+        allocator.free(raw.upvalues);
     }
 
     fn freeProto(allocator: std.mem.Allocator, proto: *Proto) void {
