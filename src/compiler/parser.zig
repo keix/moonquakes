@@ -3,13 +3,12 @@ const lexer = @import("lexer.zig");
 const Lexer = lexer.Lexer;
 const Token = lexer.Token;
 const TokenKind = lexer.TokenKind;
-const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("proto.zig").Proto;
-const NativeFn = @import("../runtime/native.zig").NativeFn;
+const proto_mod = @import("proto.zig");
+const RawProto = proto_mod.RawProto;
+const ConstRef = proto_mod.ConstRef;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
-const GC = @import("../runtime/gc/gc.zig").GC;
 
 /// parser.zig
 ///
@@ -65,10 +64,31 @@ const ParseError = error{
 
 const StatementError = std.mem.Allocator.Error || ParseError;
 
+/// Free a RawProto and all its owned memory
+pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
+    allocator.free(proto.code);
+    allocator.free(proto.booleans);
+    allocator.free(proto.integers);
+    allocator.free(proto.numbers);
+    // Free each string's content
+    for (proto.strings) |s| {
+        allocator.free(s);
+    }
+    allocator.free(proto.strings);
+    allocator.free(proto.native_ids);
+    allocator.free(proto.const_refs);
+    // Recursively free nested protos
+    for (proto.protos) |nested| {
+        freeRawProto(allocator, @constCast(nested));
+    }
+    allocator.free(proto.protos);
+    allocator.destroy(proto);
+}
+
 // Simple function storage for minimal implementation
 const FunctionEntry = struct {
     name: []const u8,
-    proto: *Proto,
+    proto: *RawProto,
 };
 
 // Variable entry for scope management
@@ -88,28 +108,38 @@ const ScopeMark = struct {
 
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
-    constants: std.ArrayList(TValue),
-    protos: std.ArrayList(*const Proto), // Nested function prototypes (for CLOSURE)
+    // Type-specific constant arrays (unmaterialized)
+    booleans: std.ArrayList(bool),
+    integers: std.ArrayList(i64),
+    numbers: std.ArrayList(f64),
+    strings: std.ArrayList([]const u8),
+    native_ids: std.ArrayList(NativeFnId),
+    // Ordered constant references
+    const_refs: std.ArrayList(ConstRef),
+    protos: std.ArrayList(*const RawProto), // Nested function prototypes (for CLOSURE)
     maxstacksize: u8,
     next_reg: u8, // Next available register (for temps)
     locals_top: u8, // Register watermark: locals occupy [0, locals_top)
     allocator: std.mem.Allocator,
-    gc: *GC, // For allocating GC-managed objects (strings, etc.)
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
     scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
-    pub fn init(allocator: std.mem.Allocator, gc: *GC) ProtoBuilder {
+    pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
-            .constants = std.ArrayList(TValue).init(allocator),
-            .protos = std.ArrayList(*const Proto).init(allocator),
+            .booleans = std.ArrayList(bool).init(allocator),
+            .integers = std.ArrayList(i64).init(allocator),
+            .numbers = std.ArrayList(f64).init(allocator),
+            .strings = std.ArrayList([]const u8).init(allocator),
+            .native_ids = std.ArrayList(NativeFnId).init(allocator),
+            .const_refs = std.ArrayList(ConstRef).init(allocator),
+            .protos = std.ArrayList(*const RawProto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .locals_top = 0,
             .allocator = allocator,
-            .gc = gc,
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .scope_starts = std.ArrayList(ScopeMark).init(allocator),
@@ -120,13 +150,17 @@ pub const ProtoBuilder = struct {
     pub fn initWithParent(allocator: std.mem.Allocator, parent: *ProtoBuilder) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
-            .constants = std.ArrayList(TValue).init(allocator),
-            .protos = std.ArrayList(*const Proto).init(allocator),
+            .booleans = std.ArrayList(bool).init(allocator),
+            .integers = std.ArrayList(i64).init(allocator),
+            .numbers = std.ArrayList(f64).init(allocator),
+            .strings = std.ArrayList([]const u8).init(allocator),
+            .native_ids = std.ArrayList(NativeFnId).init(allocator),
+            .const_refs = std.ArrayList(ConstRef).init(allocator),
+            .protos = std.ArrayList(*const RawProto).init(allocator),
             .maxstacksize = 0,
             .next_reg = 0,
             .locals_top = 0,
             .allocator = allocator,
-            .gc = parent.gc, // Inherit GC from parent
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .scope_starts = std.ArrayList(ScopeMark).init(allocator),
@@ -138,14 +172,21 @@ pub const ProtoBuilder = struct {
         // Free function protos and their allocated arrays
         // All slices are allocator-owned (even when len=0), so always free
         for (self.functions.items) |entry| {
-            self.allocator.free(entry.proto.code);
-            self.allocator.free(entry.proto.k);
-            self.allocator.free(entry.proto.protos);
-            self.allocator.destroy(entry.proto);
+            freeRawProto(self.allocator, entry.proto);
+        }
+
+        // Free duplicated strings
+        for (self.strings.items) |s| {
+            self.allocator.free(s);
         }
 
         self.code.deinit();
-        self.constants.deinit();
+        self.booleans.deinit();
+        self.integers.deinit();
+        self.numbers.deinit();
+        self.strings.deinit();
+        self.native_ids.deinit();
+        self.const_refs.deinit();
         self.protos.deinit();
         self.functions.deinit();
         self.variables.deinit();
@@ -466,43 +507,53 @@ pub const ProtoBuilder = struct {
         // Check for hex prefix (0x or 0X)
         if (lexeme.len > 2 and lexeme[0] == '0' and (lexeme[1] == 'x' or lexeme[1] == 'X')) {
             const value = std.fmt.parseInt(i64, lexeme[2..], 16) catch return error.InvalidNumber;
-            const const_value = TValue{ .integer = value };
-            try self.constants.append(const_value);
-            return @intCast(self.constants.items.len - 1);
+            const idx: u16 = @intCast(self.integers.items.len);
+            try self.integers.append(value);
+            try self.const_refs.append(.{ .kind = .integer, .index = idx });
+            return @intCast(self.const_refs.items.len - 1);
         }
 
         // Try parsing as decimal integer first
         if (std.fmt.parseInt(i64, lexeme, 10)) |value| {
-            const const_value = TValue{ .integer = value };
-            try self.constants.append(const_value);
-            return @intCast(self.constants.items.len - 1);
+            const idx: u16 = @intCast(self.integers.items.len);
+            try self.integers.append(value);
+            try self.const_refs.append(.{ .kind = .integer, .index = idx });
+            return @intCast(self.const_refs.items.len - 1);
         } else |_| {
             // Try parsing as float
             const value = std.fmt.parseFloat(f64, lexeme) catch return error.InvalidNumber;
-            const const_value = TValue{ .number = value };
-            try self.constants.append(const_value);
-            return @intCast(self.constants.items.len - 1);
+            const idx: u16 = @intCast(self.numbers.items.len);
+            try self.numbers.append(value);
+            try self.const_refs.append(.{ .kind = .number, .index = idx });
+            return @intCast(self.const_refs.items.len - 1);
         }
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
-        // Allocate string through GC
-        const str_obj = try self.gc.allocString(lexeme);
-        const const_value = TValue.fromString(str_obj);
-        try self.constants.append(const_value);
-        return @intCast(self.constants.items.len - 1);
+        // Store raw string data (no GC allocation)
+        // TODO: String deduplication strategy
+        // - Currently: Each string is duplicated independently (no dedup within RawProto)
+        // - Future consideration: Intern strings at materialize time via GC.allocString?
+        //   GC.allocString already interns, so duplicates in RawProto will merge at runtime.
+        // - Alternative: Dedup at compile time using a hash map in ProtoBuilder
+        // For now, simple duplication is sufficient; GC handles runtime interning.
+        const idx: u16 = @intCast(self.strings.items.len);
+        const duped = try self.allocator.dupe(u8, lexeme);
+        try self.strings.append(duped);
+        try self.const_refs.append(.{ .kind = .string, .index = idx });
+        return @intCast(self.const_refs.items.len - 1);
     }
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
-        const native_fn = NativeFn.init(native_id);
-        const nc = try self.gc.allocNativeClosure(native_fn);
-        const const_value = TValue.fromNativeClosure(nc);
-        try self.constants.append(const_value);
-        return @intCast(self.constants.items.len - 1);
+        // Store native function ID (no GC allocation)
+        const idx: u16 = @intCast(self.native_ids.items.len);
+        try self.native_ids.append(native_id);
+        try self.const_refs.append(.{ .kind = .native_fn, .index = idx });
+        return @intCast(self.const_refs.items.len - 1);
     }
 
     /// Add a nested function prototype for CLOSURE opcode
-    pub fn addProto(self: *ProtoBuilder, proto: *const Proto) !u32 {
+    pub fn addProto(self: *ProtoBuilder, proto: *const RawProto) !u32 {
         try self.protos.append(proto);
         return @intCast(self.protos.items.len - 1);
     }
@@ -513,14 +564,14 @@ pub const ProtoBuilder = struct {
         }
     }
 
-    pub fn addFunction(self: *ProtoBuilder, name: []const u8, proto: *Proto) !void {
+    pub fn addFunction(self: *ProtoBuilder, name: []const u8, proto: *RawProto) !void {
         try self.functions.append(FunctionEntry{
             .name = name,
             .proto = proto,
         });
     }
 
-    pub fn findFunction(self: *ProtoBuilder, name: []const u8) ?*Proto {
+    pub fn findFunction(self: *ProtoBuilder, name: []const u8) ?*RawProto {
         for (self.functions.items) |entry| {
             if (std.mem.eql(u8, entry.name, name)) {
                 return entry.proto;
@@ -551,31 +602,39 @@ pub const ProtoBuilder = struct {
         return null;
     }
 
-    pub fn toProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !Proto {
-        // Always allocate via allocator (even for len=0) to ensure ownership
-        const code_slice = try allocator.dupe(Instruction, self.code.items);
-        const constants_slice = try allocator.dupe(TValue, self.constants.items);
-        const protos_slice = try allocator.dupe(*const Proto, self.protos.items);
-
-        return Proto{
-            .code = code_slice,
-            .k = constants_slice,
-            .protos = protos_slice,
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = self.maxstacksize,
-        };
+    pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !RawProto {
+        return self.toRawProtoWithParams(allocator, 0);
     }
 
-    pub fn toProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !Proto {
+    pub fn toRawProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
         // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
-        const constants_slice = try allocator.dupe(TValue, self.constants.items);
-        const protos_slice = try allocator.dupe(*const Proto, self.protos.items);
+        const booleans_slice = try allocator.dupe(bool, self.booleans.items);
+        const integers_slice = try allocator.dupe(i64, self.integers.items);
+        const numbers_slice = try allocator.dupe(f64, self.numbers.items);
+        const native_ids_slice = try allocator.dupe(NativeFnId, self.native_ids.items);
+        const const_refs_slice = try allocator.dupe(ConstRef, self.const_refs.items);
+        const protos_slice = try allocator.dupe(*const RawProto, self.protos.items);
 
-        return Proto{
+        // Deep copy strings (each string's actual data, not just pointers)
+        const strings_slice = try allocator.alloc([]const u8, self.strings.items.len);
+        for (self.strings.items, 0..) |s, i| {
+            strings_slice[i] = try allocator.dupe(u8, s);
+        }
+
+        // Transfer ownership: clear functions list so deinit() won't double-free
+        // The output RawProto now owns all nested protos via protos_slice
+        self.functions.clearRetainingCapacity();
+        self.protos.clearRetainingCapacity();
+
+        return RawProto{
             .code = code_slice,
-            .k = constants_slice,
+            .booleans = booleans_slice,
+            .integers = integers_slice,
+            .numbers = numbers_slice,
+            .strings = strings_slice,
+            .native_ids = native_ids_slice,
+            .const_refs = const_refs_slice,
             .protos = protos_slice,
             .numparams = num_params,
             .is_vararg = false,
@@ -2100,10 +2159,10 @@ pub const Parser = struct {
         var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
         defer func_builder.deinit(); // Clean up at end of function
 
-        // Create Proto container early (address is fixed, content will be filled later)
-        const proto_ptr = try self.proto.allocator.create(Proto);
+        // Create RawProto container early (address is fixed, content will be filled later)
+        const proto_ptr = try self.proto.allocator.create(RawProto);
 
-        // Temporarily add function for recursive calls with unfilled Proto
+        // Temporarily add function for recursive calls with unfilled RawProto
         try self.proto.addFunction(func_name, proto_ptr);
 
         // Parse parameters and assign to registers
@@ -2160,8 +2219,8 @@ pub const Parser = struct {
             try func_builder.emit(.RETURN, 0, 1, 0);
         }
 
-        // Convert function builder to Proto with dynamic allocation
-        const func_proto_data = try func_builder.toProtoWithParams(self.proto.allocator, param_count);
+        // Convert function builder to RawProto with dynamic allocation
+        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
 
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;

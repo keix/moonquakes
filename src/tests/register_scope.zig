@@ -2,22 +2,21 @@ const std = @import("std");
 const testing = std.testing;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
-const VM = @import("../vm/vm.zig").VM;
 
 /// Compile source code and return the maxstacksize
-fn compileAndGetMaxStack(allocator: std.mem.Allocator, gc: *@import("../runtime/gc/gc.zig").GC, source: []const u8) !u8 {
+/// No GC needed - parser now produces RawProto
+fn compileAndGetMaxStack(allocator: std.mem.Allocator, source: []const u8) !u8 {
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator, gc);
+    var proto_builder = parser.ProtoBuilder.init(allocator);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
     try p.parseChunk();
 
-    const proto = try proto_builder.toProto(allocator);
-    defer allocator.free(proto.code);
-    defer allocator.free(proto.k);
+    const raw_proto = try proto_builder.toRawProto(allocator);
+    // Note: raw_proto managed by arena, no explicit free needed
 
-    return proto.maxstacksize;
+    return raw_proto.maxstacksize;
 }
 
 /// Generate Lua code with N elseif branches
@@ -48,20 +47,17 @@ fn generateSequentialCalls(allocator: std.mem.Allocator, n: usize) ![]const u8 {
 }
 
 test "register scope: elseif chain does not accumulate registers" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Small chain (10 elseif)
     const small_code = try generateElseifChain(allocator, 10);
-    const small_max = try compileAndGetMaxStack(allocator, &vm.gc, small_code);
+    const small_max = try compileAndGetMaxStack(allocator, small_code);
 
     // Large chain (100 elseif)
     const large_code = try generateElseifChain(allocator, 100);
-    const large_max = try compileAndGetMaxStack(allocator, &vm.gc, large_code);
+    const large_max = try compileAndGetMaxStack(allocator, large_code);
 
     // Max stack should be roughly the same (bounded)
     // Without scope guards, large would be ~100+ registers
@@ -72,20 +68,17 @@ test "register scope: elseif chain does not accumulate registers" {
 }
 
 test "register scope: sequential calls do not accumulate registers" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Small sequence (10 calls)
     const small_code = try generateSequentialCalls(allocator, 10);
-    const small_max = try compileAndGetMaxStack(allocator, &vm.gc, small_code);
+    const small_max = try compileAndGetMaxStack(allocator, small_code);
 
     // Large sequence (100 calls)
     const large_code = try generateSequentialCalls(allocator, 100);
-    const large_max = try compileAndGetMaxStack(allocator, &vm.gc, large_code);
+    const large_max = try compileAndGetMaxStack(allocator, large_code);
 
     // Max stack should be roughly the same (bounded)
     // Without scope guards, large would be ~100+ registers
@@ -96,9 +89,6 @@ test "register scope: sequential calls do not accumulate registers" {
 }
 
 test "register scope: for loop body does not accumulate registers" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -109,7 +99,7 @@ test "register scope: for loop body does not accumulate registers" {
         \\  print(i)
         \\end
     ;
-    const single_max = try compileAndGetMaxStack(allocator, &vm.gc, single_stmt);
+    const single_max = try compileAndGetMaxStack(allocator, single_stmt);
 
     // Multiple statements in for loop
     const multi_stmt =
@@ -121,7 +111,7 @@ test "register scope: for loop body does not accumulate registers" {
         \\  print(i)
         \\end
     ;
-    const multi_max = try compileAndGetMaxStack(allocator, &vm.gc, multi_stmt);
+    const multi_max = try compileAndGetMaxStack(allocator, multi_stmt);
 
     // For loop uses NUMERIC_FOR_REGS (4) registers + temporaries
     // Max stack should be bounded regardless of statement count
