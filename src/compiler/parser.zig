@@ -6,6 +6,7 @@ const TokenKind = lexer.TokenKind;
 const proto_mod = @import("proto.zig");
 const RawProto = proto_mod.RawProto;
 const ConstRef = proto_mod.ConstRef;
+const Upvaldesc = proto_mod.Upvaldesc;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const opcodes = @import("opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -124,6 +125,7 @@ pub const ProtoBuilder = struct {
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
     scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
+    upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
     pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
@@ -143,6 +145,7 @@ pub const ProtoBuilder = struct {
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .scope_starts = std.ArrayList(ScopeMark).init(allocator),
+            .upvalues = std.ArrayList(Upvaldesc).init(allocator),
             .parent = null,
         };
     }
@@ -164,6 +167,7 @@ pub const ProtoBuilder = struct {
             .functions = std.ArrayList(FunctionEntry).init(allocator),
             .variables = std.ArrayList(VariableEntry).init(allocator),
             .scope_starts = std.ArrayList(ScopeMark).init(allocator),
+            .upvalues = std.ArrayList(Upvaldesc).init(allocator),
             .parent = parent,
         };
     }
@@ -191,6 +195,7 @@ pub const ProtoBuilder = struct {
         self.functions.deinit();
         self.variables.deinit();
         self.scope_starts.deinit();
+        self.upvalues.deinit();
     }
 
     /// Allocate a temporary register (for expression evaluation)
@@ -366,6 +371,13 @@ pub const ProtoBuilder = struct {
     pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(instr);
+    }
+
+    /// Emit GETUPVAL instruction: R[A] := UpValue[B]
+    pub fn emitGETUPVAL(self: *ProtoBuilder, dst: u8, upval_idx: u8) !void {
+        const instr = Instruction.initABC(.GETUPVAL, dst, upval_idx, 0);
+        try self.code.append(instr);
+        self.updateMaxStack(dst + 1);
     }
 
     /// Emit NOT instruction: R[A] := not R[B]
@@ -602,6 +614,51 @@ pub const ProtoBuilder = struct {
         return null;
     }
 
+    /// Result of variable resolution - either local register or upvalue index
+    pub const VarLocation = union(enum) {
+        local: u8, // register index in current function
+        upvalue: u8, // upvalue index
+    };
+
+    /// Resolve a variable, searching current scope and parent scopes.
+    /// If found in parent scope, creates an upvalue to capture it.
+    pub fn resolveVariable(self: *ProtoBuilder, name: []const u8) !?VarLocation {
+        // 1. Check local scope first
+        if (self.findVariable(name)) |reg| {
+            return .{ .local = reg };
+        }
+
+        // 2. Check if already captured as upvalue
+        for (self.upvalues.items, 0..) |upval, i| {
+            // Compare by checking parent's variable at that location
+            // For simplicity, we'd need to store name in Upvaldesc or track differently
+            // For now, rely on not creating duplicates by searching parent fresh each time
+            _ = upval;
+            _ = i;
+        }
+
+        // 3. If no parent, variable not found
+        const parent = self.parent orelse return null;
+
+        // 4. Try to resolve in parent (recursively)
+        const parent_loc = try parent.resolveVariable(name) orelse return null;
+
+        // 5. Create upvalue to capture from parent
+        const upval_idx: u8 = @intCast(self.upvalues.items.len);
+        switch (parent_loc) {
+            .local => |reg| {
+                // Parent has it as a local - capture from parent's stack
+                try self.upvalues.append(.{ .instack = true, .idx = reg });
+            },
+            .upvalue => |idx| {
+                // Parent has it as upvalue - capture from parent's upvalues
+                try self.upvalues.append(.{ .instack = false, .idx = idx });
+            },
+        }
+
+        return .{ .upvalue = upval_idx };
+    }
+
     pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !RawProto {
         return self.toRawProtoWithParams(allocator, 0);
     }
@@ -622,6 +679,9 @@ pub const ProtoBuilder = struct {
             strings_slice[i] = try allocator.dupe(u8, s);
         }
 
+        // Duplicate upvalues
+        const upvalues_slice = try allocator.dupe(Upvaldesc, self.upvalues.items);
+
         // Transfer ownership: clear functions list so deinit() won't double-free
         // The output RawProto now owns all nested protos via protos_slice
         self.functions.clearRetainingCapacity();
@@ -639,6 +699,8 @@ pub const ProtoBuilder = struct {
             .numparams = num_params,
             .is_vararg = false,
             .maxstacksize = self.maxstacksize,
+            .nups = @intCast(self.upvalues.items.len),
+            .upvalues = upvalues_slice,
         };
     }
 };
@@ -950,12 +1012,15 @@ pub const Parser = struct {
             if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
                 return try self.parseFunctionCallExpr();
             }
-            // Check if it's a variable/parameter (includes loop variables)
+            // Check if it's a variable/parameter (includes loop variables) or upvalue
             const var_name = self.current.lexeme;
             var base_reg: u8 = undefined;
-            if (self.proto.findVariable(var_name)) |var_reg| {
+            if (try self.proto.resolveVariable(var_name)) |loc| {
                 base_reg = self.proto.allocTemp();
-                try self.proto.emitMOVE(base_reg, var_reg);
+                switch (loc) {
+                    .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
+                    .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
+                }
                 self.advance();
             } else {
                 return error.UnsupportedIdentifier;
@@ -1778,6 +1843,11 @@ pub const Parser = struct {
     fn parseLocalDecl(self: *Parser) ParseError!void {
         self.advance(); // consume 'local'
 
+        // Check for 'local function' syntax
+        if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "function")) {
+            return self.parseLocalFunction();
+        }
+
         // Expect identifier
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
@@ -1969,7 +2039,15 @@ pub const Parser = struct {
         // Parse function call that returns a value
         const func_name = self.current.lexeme;
 
-        // Check if it's a user-defined function first
+        // Check if it's a local variable or upvalue (local function, closure)
+        if (try self.proto.resolveVariable(func_name)) |loc| {
+            return switch (loc) {
+                .local => |reg| try self.parseLocalFunctionCall(reg),
+                .upvalue => |idx| try self.parseUpvalueFunctionCall(idx),
+            };
+        }
+
+        // Check if it's a user-defined global function
         if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
@@ -2064,6 +2142,100 @@ pub const Parser = struct {
         try self.proto.emitCall(func_reg, arg_count, 1);
 
         // Return the register where the result is stored
+        return func_reg;
+    }
+
+    /// Parse a function call where the function is stored in a local register
+    fn parseLocalFunctionCall(self: *Parser, closure_reg: u8) ParseError!u8 {
+        self.advance(); // consume function name
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Move closure to a temp register for the call
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitMOVE(func_reg, closure_reg);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+
+            // Parse additional arguments
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                const next_arg = try self.parseExpr();
+                arg_count += 1;
+                if (next_arg != func_reg + arg_count) {
+                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                }
+            }
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (1 result)
+        try self.proto.emitCall(func_reg, arg_count, 1);
+
+        return func_reg;
+    }
+
+    /// Parse a function call where the function is captured as an upvalue
+    fn parseUpvalueFunctionCall(self: *Parser, upval_idx: u8) ParseError!u8 {
+        self.advance(); // consume function name
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Load closure from upvalue to a temp register for the call
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitGETUPVAL(func_reg, upval_idx);
+
+        // Parse arguments
+        var arg_count: u8 = 0;
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            // Parse first argument
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            arg_count = 1;
+
+            // Parse additional arguments
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                const next_arg = try self.parseExpr();
+                arg_count += 1;
+                if (next_arg != func_reg + arg_count) {
+                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                }
+            }
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Emit CALL instruction (1 result)
+        try self.proto.emitCall(func_reg, arg_count, 1);
+
         return func_reg;
     }
 
@@ -2233,5 +2405,96 @@ pub const Parser = struct {
 
         // Store closure in _ENV[func_name] using pre-computed constant index
         try old_proto.emitSETTABUP(0, name_const, closure_reg);
+    }
+
+    /// Parse 'local function name(...) ... end'
+    /// Equivalent to: local name; name = function(...) ... end
+    fn parseLocalFunction(self: *Parser) ParseError!void {
+        self.advance(); // consume 'function'
+
+        // Parse function name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const func_name = self.current.lexeme;
+        self.advance(); // consume function name
+
+        // Allocate local register for this function
+        const func_reg = self.proto.allocLocalReg();
+
+        // Parse parameters: (param, ...)
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Create a separate builder for function body with parent reference
+        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        defer func_builder.deinit();
+
+        // Create RawProto container
+        const proto_ptr = try self.proto.allocator.create(RawProto);
+
+        // Add function to parent's function list for recursive calls
+        try self.proto.addFunction(func_name, proto_ptr);
+
+        // Add function name to local scope NOW (enables recursion via local lookup)
+        try self.proto.addVariable(func_name, func_reg);
+
+        // Parse parameters
+        var param_count: u8 = 0;
+        if (self.current.kind == .Identifier) {
+            const param_name = self.current.lexeme;
+            self.advance();
+            try func_builder.addVariable(param_name, param_count);
+            param_count += 1;
+
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const next_param = self.current.lexeme;
+                self.advance();
+                try func_builder.addVariable(next_param, param_count);
+                param_count += 1;
+            }
+
+            func_builder.next_reg = param_count;
+            func_builder.locals_top = param_count;
+        }
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Parse function body
+        const old_proto = self.proto;
+        self.proto = &func_builder;
+        defer self.proto = old_proto;
+
+        try self.parseStatements();
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // Add implicit RETURN if needed
+        if (func_builder.code.items.len == 0 or
+            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
+        {
+            try func_builder.emit(.RETURN, 0, 1, 0);
+        }
+
+        // Convert to RawProto
+        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        proto_ptr.* = func_proto_data;
+
+        // Emit CLOSURE to local register (no SETTABUP - it's local, not global)
+        const proto_idx = try old_proto.addProto(proto_ptr);
+        try old_proto.emitClosure(func_reg, proto_idx);
     }
 };
