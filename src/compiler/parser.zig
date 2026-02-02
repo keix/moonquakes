@@ -488,7 +488,7 @@ pub const ProtoBuilder = struct {
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         // Allocate string through GC
         const str_obj = try self.gc.allocString(lexeme);
-        const const_value = TValue{ .string = str_obj };
+        const const_value = TValue.fromString(str_obj);
         try self.constants.append(const_value);
         return @intCast(self.constants.items.len - 1);
     }

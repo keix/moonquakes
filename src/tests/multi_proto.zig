@@ -44,7 +44,7 @@ test "manual multi-proto execution - simple call and return" {
 
     // Proto for main function - build constants at runtime
     var main_constants = [_]TValue{
-        .{ .closure = add_closure },
+        TValue.fromClosure(add_closure),
         .{ .integer = 10 },
         .{ .integer = 20 },
     };
@@ -222,7 +222,7 @@ test "nested function call with register tracking" {
         Instruction.initABC(.RETURN, 3, 2, 0), // return R[3]
     };
     var add_double_constants = [_]TValue{
-        .{ .closure = mul_closure },
+        TValue.fromClosure(mul_closure),
         .{ .integer = 0 }, // placeholder
         .{ .integer = 2 },
     };
@@ -244,7 +244,7 @@ test "nested function call with register tracking" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
     var main_constants = [_]TValue{
-        .{ .closure = add_double_closure },
+        TValue.fromClosure(add_double_closure),
         .{ .integer = 3 },
         .{ .integer = 4 },
     };

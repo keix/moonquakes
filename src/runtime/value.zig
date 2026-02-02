@@ -1,50 +1,23 @@
 const std = @import("std");
 const object = @import("gc/object.zig");
 const GCObject = object.GCObject;
+const GCObjectType = object.GCObjectType;
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 
-/// TValue type tag
-/// Note: 'object' variant added for gradual migration to unified GCObject pointer.
-/// Old variants (closure, string, table) kept for compatibility.
-pub const ValueType = enum(u8) {
+/// TValue: Lua value representation
+/// - Immediate values: nil, boolean, integer, number
+/// - Reference values: object (all GC-managed types)
+pub const TValue = union(enum) {
     nil,
-    boolean,
-    integer,
-    number,
-    closure,
-    string,
-    table,
-    object, // unified GCObject pointer
-};
-
-// TODO: Refactor to final form with 5 variants only:
-//
-//   pub const TValue = union(enum) {
-//       nil,
-//       boolean: bool,
-//       integer: i64,
-//       number: f64,
-//       object: *GCObject,  // all GC types unified
-//   };
-//
-// Principles:
-// - TValue knows only "immediate or reference"
-// - GC knows only GCObject
-// - Type dispatch happens via GCObject.type field
-//
-// This removes closure/string/table variants and unifies all GC objects.
-pub const TValue = union(ValueType) {
-    nil: void,
     boolean: bool,
     integer: i64,
     number: f64,
-    closure: *ClosureObject,
-    string: *const StringObject,
-    table: *TableObject,
-    object: *GCObject, // unified GCObject pointer
+    object: *GCObject,
+
+    // ===== Type predicates =====
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -62,25 +35,32 @@ pub const TValue = union(ValueType) {
         return self == .number;
     }
 
-    pub fn isClosure(self: TValue) bool {
-        return self == .closure;
-    }
-
-    pub fn isString(self: TValue) bool {
-        return self == .string;
-    }
-
-    pub fn isTable(self: TValue) bool {
-        return self == .table;
-    }
-
     pub fn isObject(self: TValue) bool {
         return self == .object;
     }
 
-    // ===== Object accessors (for .object variant) =====
+    pub fn isString(self: TValue) bool {
+        return self == .object and self.object.type == .string;
+    }
 
-    /// Get StringObject from .object variant
+    pub fn isTable(self: TValue) bool {
+        return self == .object and self.object.type == .table;
+    }
+
+    pub fn isClosure(self: TValue) bool {
+        return self == .object and self.object.type == .closure;
+    }
+
+    pub fn isNativeClosure(self: TValue) bool {
+        return self == .object and self.object.type == .native_closure;
+    }
+
+    pub fn isCallable(self: TValue) bool {
+        return self == .object and (self.object.type == .closure or self.object.type == .native_closure);
+    }
+
+    // ===== Object accessors =====
+
     pub fn asString(self: TValue) ?*StringObject {
         if (self == .object and self.object.type == .string) {
             return object.getObject(StringObject, self.object);
@@ -88,7 +68,6 @@ pub const TValue = union(ValueType) {
         return null;
     }
 
-    /// Get TableObject from .object variant
     pub fn asTable(self: TValue) ?*TableObject {
         if (self == .object and self.object.type == .table) {
             return object.getObject(TableObject, self.object);
@@ -96,7 +75,6 @@ pub const TValue = union(ValueType) {
         return null;
     }
 
-    /// Get ClosureObject from .object variant
     pub fn asClosure(self: TValue) ?*ClosureObject {
         if (self == .object and self.object.type == .closure) {
             return object.getObject(ClosureObject, self.object);
@@ -104,7 +82,6 @@ pub const TValue = union(ValueType) {
         return null;
     }
 
-    /// Get NativeClosureObject from .object variant
     pub fn asNativeClosure(self: TValue) ?*NativeClosureObject {
         if (self == .object and self.object.type == .native_closure) {
             return object.getObject(NativeClosureObject, self.object);
@@ -112,13 +89,7 @@ pub const TValue = union(ValueType) {
         return null;
     }
 
-    /// Check if .object variant is callable (closure or native_closure)
-    pub fn isCallable(self: TValue) bool {
-        if (self == .object) {
-            return self.object.type == .closure or self.object.type == .native_closure;
-        }
-        return false;
-    }
+    // ===== Numeric conversions =====
 
     pub fn toInteger(self: TValue) ?i64 {
         return switch (self) {
@@ -144,34 +115,25 @@ pub const TValue = union(ValueType) {
         };
     }
 
-    pub fn toClosure(self: TValue) ?*ClosureObject {
-        return switch (self) {
-            .closure => |c| c,
-            else => null,
-        };
-    }
+    // ===== Constructors =====
 
-    // ===== Constructors (create TValue from GC objects via .object variant) =====
-
-    /// Create TValue from StringObject
     pub fn fromString(str: *StringObject) TValue {
         return .{ .object = &str.header };
     }
 
-    /// Create TValue from TableObject
     pub fn fromTable(tbl: *TableObject) TValue {
         return .{ .object = &tbl.header };
     }
 
-    /// Create TValue from ClosureObject
     pub fn fromClosure(closure: *ClosureObject) TValue {
         return .{ .object = &closure.header };
     }
 
-    /// Create TValue from NativeClosureObject
     pub fn fromNativeClosure(nc: *NativeClosureObject) TValue {
         return .{ .object = &nc.header };
     }
+
+    // ===== Formatting =====
 
     pub fn format(
         self: TValue,
@@ -186,9 +148,6 @@ pub const TValue = union(ValueType) {
             .boolean => |b| try writer.print("{}", .{b}),
             .integer => |i| try writer.print("{}", .{i}),
             .number => |n| try writer.print("{d}", .{n}),
-            .closure => |c| try writer.print("function: 0x{x}", .{@intFromPtr(c)}),
-            .string => |s| try writer.print("{s}", .{s.asSlice()}),
-            .table => |t| try writer.print("table: 0x{x}", .{@intFromPtr(t)}),
             .object => |obj| switch (obj.type) {
                 .string => {
                     const s = object.getObject(StringObject, obj);
@@ -202,6 +161,8 @@ pub const TValue = union(ValueType) {
             },
         }
     }
+
+    // ===== Equality =====
 
     pub fn eql(a: TValue, b: TValue) bool {
         return switch (a) {
@@ -217,10 +178,7 @@ pub const TValue = union(ValueType) {
                 .number => |bn| an == bn,
                 else => false,
             },
-            .closure => |ac| b == .closure and ac == b.closure,
-            .string => |as| b == .string and as == b.string, // Pointer equality (interned strings)
-            .table => |at| b == .table and at == b.table,
-            .object => |ao| b == .object and ao == b.object, // Pointer equality
+            .object => |ao| b == .object and ao == b.object,
         };
     }
 };

@@ -26,7 +26,7 @@ test "closure constant loading" {
 
     // Build constants at runtime
     var main_constants = [_]TValue{
-        .{ .closure = func_closure },
+        TValue.fromClosure(func_closure),
     };
 
     const main_code = [_]Instruction{
@@ -43,7 +43,7 @@ test "closure constant loading" {
 
     const result = try vm.execute(&main_proto);
 
-    try test_utils.ReturnTest.expectSingle(result, .{ .closure = func_closure });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromClosure(func_closure));
 }
 
 test "simple function call without arguments" {
@@ -71,7 +71,7 @@ test "simple function call without arguments" {
 
     // Build constants at runtime
     var main_constants = [_]TValue{
-        .{ .closure = func_closure },
+        TValue.fromClosure(func_closure),
     };
 
     // Main function that calls func()
@@ -118,7 +118,7 @@ test "function call with arguments" {
 
     // Build constants at runtime
     var main_constants = [_]TValue{
-        .{ .closure = add_closure },
+        TValue.fromClosure(add_closure),
         .{ .integer = 10 },
         .{ .integer = 20 },
     };

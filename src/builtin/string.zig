@@ -25,32 +25,28 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const allocator = vm.allocator;
 
     const result = if (arg) |v| blk: {
-        const str_obj = switch (v.*) {
-            .number => |n| {
+        break :blk switch (v.*) {
+            .number => |n| ret: {
                 const formatted = try formatNumber(allocator, n);
                 defer allocator.free(formatted);
-                break :blk TValue{ .string = try vm.gc.allocString(formatted) };
+                break :ret TValue.fromString(try vm.gc.allocString(formatted));
             },
-            .integer => |i| {
+            .integer => |i| ret: {
                 const formatted = try formatInteger(allocator, i);
                 defer allocator.free(formatted);
-                break :blk TValue{ .string = try vm.gc.allocString(formatted) };
+                break :ret TValue.fromString(try vm.gc.allocString(formatted));
             },
-            .string => break :blk v.*,
-            .nil => break :blk TValue{ .string = try vm.gc.allocString("nil") },
-            .boolean => |b| break :blk TValue{ .string = try vm.gc.allocString(if (b) "true" else "false") },
-            .table => break :blk TValue{ .string = try vm.gc.allocString("<table>") },
-            .closure => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
+            .nil => TValue.fromString(try vm.gc.allocString("nil")),
+            .boolean => |b| TValue.fromString(try vm.gc.allocString(if (b) "true" else "false")),
             .object => |obj| switch (obj.type) {
-                .string => break :blk v.*,
-                .table => break :blk TValue{ .string = try vm.gc.allocString("<table>") },
-                .closure, .native_closure => break :blk TValue{ .string = try vm.gc.allocString("<function>") },
-                .upvalue => break :blk TValue{ .string = try vm.gc.allocString("<upvalue>") },
-                .userdata => break :blk TValue{ .string = try vm.gc.allocString("<userdata>") },
+                .string => v.*,
+                .table => TValue.fromString(try vm.gc.allocString("<table>")),
+                .closure, .native_closure => TValue.fromString(try vm.gc.allocString("<function>")),
+                .upvalue => TValue.fromString(try vm.gc.allocString("<upvalue>")),
+                .userdata => TValue.fromString(try vm.gc.allocString("<userdata>")),
             },
         };
-        break :blk str_obj;
-    } else TValue{ .string = try vm.gc.allocString("nil") };
+    } else TValue.fromString(try vm.gc.allocString("nil"));
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = result;

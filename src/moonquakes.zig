@@ -189,10 +189,12 @@ pub const Moonquakes = struct {
             .boolean => |b| .{ .boolean = b },
             .integer => |i| .{ .integer = i },
             .number => |n| .{ .number = n },
-            .string => |s| .{ .string = try self.allocator.dupe(u8, s.asSlice()) },
-            .table => .nil, // TODO: serialize table
-            .closure => .nil, // TODO: represent closure
-            .object => .nil, // TODO: handle generic object
+            .object => |obj| switch (obj.type) {
+                .string => .{ .string = try self.allocator.dupe(u8, val.asString().?.asSlice()) },
+                .table => .nil, // TODO: serialize table
+                .closure, .native_closure => .nil, // TODO: represent closure
+                .upvalue, .userdata => .nil,
+            },
         };
     }
 
