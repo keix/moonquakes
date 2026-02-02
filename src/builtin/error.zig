@@ -23,10 +23,7 @@ pub fn nativeAssert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         // Get optional message from second argument
         const message = if (nargs >= 2) blk: {
             const msg_arg = vm.stack[vm.base + func_reg + 2];
-            break :blk switch (msg_arg) {
-                .string => |s| s.asSlice(),
-                else => "assertion failed!",
-            };
+            break :blk if (msg_arg.asString()) |s| s.asSlice() else "assertion failed!";
         } else "assertion failed!";
 
         return raiseError(vm, message);
@@ -46,10 +43,7 @@ pub fn nativeError(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
     const message = if (nargs > 0) blk: {
         const msg_arg = vm.stack[vm.base + func_reg + 1];
-        break :blk switch (msg_arg) {
-            .string => |s| s.asSlice(),
-            else => "error",
-        };
+        break :blk if (msg_arg.asString()) |s| s.asSlice() else "error";
     } else "error";
 
     // TODO: Handle optional level parameter for stack unwinding

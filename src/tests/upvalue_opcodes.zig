@@ -56,7 +56,7 @@ test "TBC opcode - no-op behavior" {
     const test_str = try vm.gc.allocString("test");
 
     // Initialize some registers
-    vm.stack[0] = .{ .string = test_str };
+    vm.stack[0] = TValue.fromString(test_str);
     vm.stack[1] = .{ .integer = 100 };
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
@@ -134,7 +134,7 @@ test "SETTABUP opcode - global variable assignment" {
 
     // Create constant for variable name
     const constants = [_]TValue{
-        .{ .string = myvar_str }, // K[0]
+        TValue.fromString(myvar_str), // K[0]
     };
 
     // Initialize register with value to set
@@ -174,9 +174,9 @@ test "SETTABUP opcode - multiple global assignments" {
 
     // Create constants for variable names
     const constants = [_]TValue{
-        .{ .string = var1_str }, // K[0]
-        .{ .string = var2_str }, // K[1]
-        .{ .string = var3_str }, // K[2]
+        TValue.fromString(var1_str), // K[0]
+        TValue.fromString(var2_str), // K[1]
+        TValue.fromString(var3_str), // K[2]
     };
 
     // Initialize registers with values to set
@@ -251,7 +251,7 @@ test "All new opcodes - integration test" {
     const result_str = try vm.gc.allocString("result");
 
     const constants = [_]TValue{
-        .{ .string = result_str }, // K[0]
+        TValue.fromString(result_str), // K[0]
     };
 
     // Initialize registers
@@ -326,7 +326,7 @@ test "CLOSURE opcode - create closure without upvalues" {
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
-            const closure = val.closure;
+            const closure = val.asClosure().?;
             try testing.expectEqual(&child_proto, closure.proto);
             try testing.expectEqual(@as(usize, 0), closure.upvalues.len);
         },
@@ -386,7 +386,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
-            const closure = val.closure;
+            const closure = val.asClosure().?;
             try testing.expectEqual(&child_proto, closure.proto);
             try testing.expectEqual(@as(usize, 1), closure.upvalues.len);
 
@@ -450,7 +450,7 @@ test "CLOSE opcode - closes open upvalues" {
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
-            const closure = val.closure;
+            const closure = val.asClosure().?;
             const upval = closure.upvalues[0];
 
             // After CLOSE, the upvalue should be closed
@@ -520,7 +520,7 @@ test "GETUPVAL and SETUPVAL with closure" {
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
-            const closure = val.closure;
+            const closure = val.asClosure().?;
             const upval = closure.upvalues[0];
 
             // Initial value should be 10

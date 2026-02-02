@@ -210,7 +210,7 @@ test "parser: return \"hello\" (string literal)" {
     try testing.expect(result == .single);
     try testing.expect(result.single.isString());
     // Verify string content matches
-    const actual_str = result.single.string.asSlice();
+    const actual_str = result.single.asString().?.asSlice();
     try testing.expectEqualStrings("hello", actual_str);
 }
 

@@ -30,10 +30,7 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
         // Get the string result from tostring
         const result = vm.stack[vm.base + tmp_reg];
-        const str_val = switch (result) {
-            .string => |s| s,
-            else => unreachable, // tostring must return string
-        };
+        const str_val = result.asString() orelse unreachable; // tostring must return string
 
         try stdout.writeAll(str_val.asSlice());
 
@@ -59,9 +56,6 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .boolean => "boolean",
             .integer => "number",
             .number => "number",
-            .string => "string",
-            .table => "table",
-            .closure => "function",
             .object => |obj| switch (obj.type) {
                 .string => "string",
                 .table => "table",
@@ -74,7 +68,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     if (nresults > 0) {
         const type_name = try vm.gc.allocString(type_name_str);
-        vm.stack[vm.base + func_reg] = TValue{ .string = type_name };
+        vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
     }
 }
 
@@ -299,10 +293,7 @@ const gc_options = std.StaticStringMap(GcOption).initComptime(.{
 pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const opt = if (nargs > 0) blk: {
         const opt_arg = vm.stack[vm.base + func_reg + 1];
-        break :blk switch (opt_arg) {
-            .string => |s| s.asSlice(),
-            else => "collect",
-        };
+        break :blk if (opt_arg.asString()) |s| s.asSlice() else "collect";
     } else "collect";
 
     const result: TValue = if (gc_options.get(opt)) |option| switch (option) {

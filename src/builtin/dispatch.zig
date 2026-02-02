@@ -124,7 +124,7 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(string_table, gc, "unpack", .string_unpack);
     try registerNative(string_table, gc, "packsize", .string_packsize);
 
-    try setStringKey(globals, gc, "string", .{ .table = string_table });
+    try setStringKey(globals, gc, "string", TValue.fromTable(string_table));
 }
 
 /// IO Library: io.write, io.open, etc. (skeleton implementations)
@@ -143,7 +143,7 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(io_table, gc, "tmpfile", .io_tmpfile);
     try registerNative(io_table, gc, "type", .io_type);
 
-    try setStringKey(globals, gc, "io", .{ .table = io_table });
+    try setStringKey(globals, gc, "io", TValue.fromTable(io_table));
 }
 
 /// Math Library: math.abs, math.ceil, etc. (skeleton implementations)
@@ -181,7 +181,7 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(math_table, gc, "type", .math_type);
     try registerNative(math_table, gc, "ult", .math_ult);
 
-    try setStringKey(globals, gc, "math", .{ .table = math_table });
+    try setStringKey(globals, gc, "math", TValue.fromTable(math_table));
 }
 
 /// Table Library: table.insert, table.remove, etc. (skeleton implementations)
@@ -196,7 +196,7 @@ fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(table_table, gc, "pack", .table_pack);
     try registerNative(table_table, gc, "unpack", .table_unpack);
 
-    try setStringKey(globals, gc, "table", .{ .table = table_table });
+    try setStringKey(globals, gc, "table", TValue.fromTable(table_table));
 }
 
 /// OS Library: os.clock, os.date, etc. (skeleton implementations)
@@ -215,7 +215,7 @@ fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(os_table, gc, "time", .os_time);
     try registerNative(os_table, gc, "tmpname", .os_tmpname);
 
-    try setStringKey(globals, gc, "os", .{ .table = os_table });
+    try setStringKey(globals, gc, "os", TValue.fromTable(os_table));
 }
 
 /// Debug Library: debug.debug, debug.getinfo, etc. (skeleton implementations)
@@ -239,7 +239,7 @@ fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(debug_table, gc, "upvalueid", .debug_upvalueid);
     try registerNative(debug_table, gc, "upvaluejoin", .debug_upvaluejoin);
 
-    try setStringKey(globals, gc, "debug", .{ .table = debug_table });
+    try setStringKey(globals, gc, "debug", TValue.fromTable(debug_table));
 }
 
 /// UTF-8 Library: utf8.char, utf8.len, etc. (skeleton implementations)
@@ -248,7 +248,7 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
 
     // UTF-8 pattern constant
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
-    try setStringKey(utf8_table, gc, "charpattern", .{ .string = charpattern_str });
+    try setStringKey(utf8_table, gc, "charpattern", TValue.fromString(charpattern_str));
 
     try registerNative(utf8_table, gc, "char", .utf8_char);
     try registerNative(utf8_table, gc, "codes", .utf8_codes);
@@ -256,7 +256,7 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
     try registerNative(utf8_table, gc, "len", .utf8_len);
     try registerNative(utf8_table, gc, "offset", .utf8_offset);
 
-    try setStringKey(globals, gc, "utf8", .{ .table = utf8_table });
+    try setStringKey(globals, gc, "utf8", TValue.fromTable(utf8_table));
 }
 
 /// Coroutine Library: coroutine.create, coroutine.resume, etc. (skeleton implementations)
@@ -272,7 +272,7 @@ fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(coroutine_table, gc, "isyieldable", .coroutine_isyieldable);
     try registerNative(coroutine_table, gc, "close", .coroutine_close);
 
-    try setStringKey(globals, gc, "coroutine", .{ .table = coroutine_table });
+    try setStringKey(globals, gc, "coroutine", TValue.fromTable(coroutine_table));
 }
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
@@ -289,25 +289,25 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
 
     // Package configuration and paths (platform-specific in real implementation)
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
-    try setStringKey(package_table, gc, "config", .{ .string = config_str });
+    try setStringKey(package_table, gc, "config", TValue.fromString(config_str));
 
     const path_str = try gc.allocString("./?.lua;/usr/local/share/lua/5.4/?.lua");
-    try setStringKey(package_table, gc, "path", .{ .string = path_str });
+    try setStringKey(package_table, gc, "path", TValue.fromString(path_str));
 
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
-    try setStringKey(package_table, gc, "cpath", .{ .string = cpath_str });
+    try setStringKey(package_table, gc, "cpath", TValue.fromString(cpath_str));
 
     // Package tables for loaded modules and searchers
     const loaded_table = try gc.allocTable();
-    try setStringKey(package_table, gc, "loaded", .{ .table = loaded_table });
+    try setStringKey(package_table, gc, "loaded", TValue.fromTable(loaded_table));
 
     const preload_table = try gc.allocTable();
-    try setStringKey(package_table, gc, "preload", .{ .table = preload_table });
+    try setStringKey(package_table, gc, "preload", TValue.fromTable(preload_table));
 
     const searchers_table = try gc.allocTable();
-    try setStringKey(package_table, gc, "searchers", .{ .table = searchers_table });
+    try setStringKey(package_table, gc, "searchers", TValue.fromTable(searchers_table));
 
-    try setStringKey(globals, gc, "package", .{ .table = package_table });
+    try setStringKey(globals, gc, "package", TValue.fromTable(package_table));
 }
 
 /// Dispatch native function calls to appropriate implementations

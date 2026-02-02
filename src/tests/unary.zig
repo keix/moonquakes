@@ -179,7 +179,7 @@ test "unary: #\"hello\" = 5 (string length)" {
     const hello_str = try vm.gc.allocString("hello");
 
     const constants = [_]TValue{
-        .{ .string = hello_str },
+        TValue.fromString(hello_str),
     };
 
     const code = [_]Instruction{
@@ -209,7 +209,7 @@ test "unary: #\"\" = 0 (empty string length)" {
     const empty_str = try vm.gc.allocString("");
 
     const constants = [_]TValue{
-        .{ .string = empty_str },
+        TValue.fromString(empty_str),
     };
 
     const code = [_]Instruction{

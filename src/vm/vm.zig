@@ -921,14 +921,13 @@ pub const VM = struct {
                     const b = inst.getB();
                     const vb = &self.stack[self.base + b];
 
-                    if (vb.isString()) {
-                        self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(vb.string.asSlice().len)) };
-                    } else if (vb.isTable()) {
+                    if (vb.asString()) |str| {
+                        self.stack[self.base + a] = .{ .integer = @as(i64, @intCast(str.asSlice().len)) };
+                    } else if (vb.asTable()) |table| {
                         // Count consecutive integer keys starting from 1
                         // TODO: Consider adding gc.findString() to avoid allocating strings
                         // that don't exist in the intern table. Currently allocString() is used
                         // which may allocate unnecessary strings when the key doesn't exist.
-                        const table = vb.table;
                         var len: i64 = 0;
                         var key_buffer: [32]u8 = undefined;
                         while (true) {
@@ -952,8 +951,8 @@ pub const VM = struct {
                     var total_len: usize = 0;
                     for (b..c + 1) |i| {
                         const val = &self.stack[self.base + i];
-                        if (val.isString()) {
-                            total_len += val.string.asSlice().len;
+                        if (val.asString()) |str| {
+                            total_len += str.asSlice().len;
                         } else if (val.isInteger()) {
                             // Convert integer to string to get length
                             var buf: [32]u8 = undefined;
@@ -981,8 +980,8 @@ pub const VM = struct {
                     // Concatenate all values into buffer
                     for (b..c + 1) |i| {
                         const val = &self.stack[self.base + i];
-                        if (val.isString()) {
-                            const str_slice = val.string.asSlice();
+                        if (val.asString()) |str| {
+                            const str_slice = str.asSlice();
                             @memcpy(result_buf[offset .. offset + str_slice.len], str_slice);
                             offset += str_slice.len;
                         } else if (val.isInteger()) {
@@ -1000,7 +999,7 @@ pub const VM = struct {
 
                     // Allocate through GC and store result
                     const result_str = try self.gc.allocString(result_buf);
-                    self.stack[self.base + a] = .{ .string = result_str };
+                    self.stack[self.base + a] = TValue.fromString(result_str);
                 },
                 .EQ => {
                     const negate = inst.getA(); // A is negate flag (0: normal, 1: negated)
@@ -1169,13 +1168,8 @@ pub const VM = struct {
                         // .closure via .object variant - fall through to closure handling
                     }
 
-                    // Get closure from either .closure or .object variant
-                    const closure = if (func_val.isClosure())
-                        func_val.closure
-                    else if (func_val.isObject() and func_val.object.type == .closure)
-                        object.getObject(ClosureObject, func_val.object)
-                    else
-                        return error.NotAFunction;
+                    // Get closure
+                    const closure = func_val.asClosure() orelse return error.NotAFunction;
                     const func_proto = closure.proto;
 
                     // Calculate number of arguments
@@ -1362,8 +1356,8 @@ pub const VM = struct {
                     _ = b; // Assume B=0 for _ENV (global environment)
 
                     const key_val = ci.func.k[c];
-                    if (key_val.isString()) {
-                        const value = self.globals.get(key_val.string) orelse .nil;
+                    if (key_val.asString()) |key| {
+                        const value = self.globals.get(key) orelse .nil;
                         self.stack[self.base + a] = value;
                     } else {
                         return error.InvalidTableKey;
@@ -1379,8 +1373,8 @@ pub const VM = struct {
 
                     const key_val = ci.func.k[b];
                     const value = self.stack[self.base + c];
-                    if (key_val.isString()) {
-                        try self.globals.set(key_val.string, value);
+                    if (key_val.asString()) |key| {
+                        try self.globals.set(key, value);
                     } else {
                         return error.InvalidTableKey;
                     }
@@ -1417,10 +1411,9 @@ pub const VM = struct {
                     const table_val = self.stack[self.base + b];
                     const key_val = self.stack[self.base + c];
 
-                    if (table_val.isTable()) {
-                        const table = table_val.table;
-                        if (key_val.isString()) {
-                            const value = table.get(key_val.string) orelse .nil;
+                    if (table_val.asTable()) |table| {
+                        if (key_val.asString()) |key| {
+                            const value = table.get(key) orelse .nil;
                             self.stack[self.base + a] = value;
                         } else if (key_val.isInteger()) {
                             // Convert integer key to string (Lua tables use string keys internally)
@@ -1447,10 +1440,9 @@ pub const VM = struct {
                     const key_val = self.stack[self.base + b];
                     const value = self.stack[self.base + c];
 
-                    if (table_val.isTable()) {
-                        const table = table_val.table;
-                        if (key_val.isString()) {
-                            try table.set(key_val.string, value);
+                    if (table_val.asTable()) |table| {
+                        if (key_val.asString()) |key| {
+                            try table.set(key, value);
                         } else if (key_val.isInteger()) {
                             // Convert integer key to string (Lua tables use string keys internally)
                             var key_buffer: [32]u8 = undefined;
@@ -1473,8 +1465,7 @@ pub const VM = struct {
                     const c = inst.getC();
                     const table_val = self.stack[self.base + b];
 
-                    if (table_val.isTable()) {
-                        const table = table_val.table;
+                    if (table_val.asTable()) |table| {
                         // Convert integer index to string key (Lua tables use string keys internally)
                         var key_buffer: [32]u8 = undefined;
                         const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
@@ -1495,8 +1486,7 @@ pub const VM = struct {
                     const table_val = self.stack[self.base + a];
                     const value = self.stack[self.base + c];
 
-                    if (table_val.isTable()) {
-                        const table = table_val.table;
+                    if (table_val.asTable()) |table| {
                         // Convert integer index to string key
                         var key_buffer: [32]u8 = undefined;
                         const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
@@ -1516,10 +1506,13 @@ pub const VM = struct {
                     const table_val = self.stack[self.base + b];
                     const key_val = ci.func.k[c];
 
-                    if (table_val.isTable() and key_val.isString()) {
-                        const table = table_val.table;
-                        const value = table.get(key_val.string) orelse .nil;
-                        self.stack[self.base + a] = value;
+                    if (table_val.asTable()) |table| {
+                        if (key_val.asString()) |key| {
+                            const value = table.get(key) orelse .nil;
+                            self.stack[self.base + a] = value;
+                        } else {
+                            return error.InvalidTableOperation;
+                        }
                     } else {
                         return error.InvalidTableOperation;
                     }
@@ -1533,9 +1526,12 @@ pub const VM = struct {
                     const key_val = ci.func.k[b];
                     const value = self.stack[self.base + c];
 
-                    if (table_val.isTable() and key_val.isString()) {
-                        const table = table_val.table;
-                        try table.set(key_val.string, value);
+                    if (table_val.asTable()) |table| {
+                        if (key_val.asString()) |key| {
+                            try table.set(key, value);
+                        } else {
+                            return error.InvalidTableOperation;
+                        }
                     } else {
                         return error.InvalidTableOperation;
                     }
@@ -1545,7 +1541,7 @@ pub const VM = struct {
                     // B and C encode array/hash size hints (ignored for now)
                     const a = inst.getA();
                     const table = try self.gc.allocTable();
-                    self.stack[self.base + a] = .{ .table = table };
+                    self.stack[self.base + a] = TValue.fromTable(table);
                 },
                 .EQK => {
                     // EQK A B C: if not (R[B] == K[C]) then pc++
@@ -1683,7 +1679,7 @@ pub const VM = struct {
                     // Phase 3: Copy upvalues into closure
                     @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
 
-                    self.stack[self.base + a] = .{ .closure = closure };
+                    self.stack[self.base + a] = TValue.fromClosure(closure);
                 },
                 .EXTRAARG => {
                     // EXTRAARG Ax: Extra argument for preceding instruction

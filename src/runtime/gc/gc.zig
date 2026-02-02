@@ -40,6 +40,14 @@ pub const GC = struct {
 
     /// Reference to VM for root marking during GC
     /// Uses anyopaque to avoid circular import dependency
+    ///
+    /// TODO: Refactor to use RootProvider interface for better type safety
+    /// Current design (gc.setVM) mirrors Lua's approach and works, but:
+    /// - `?*anyopaque` lacks type safety and has unclear responsibility boundaries
+    /// Ideal future design:
+    /// - GC knows only a `RootProvider` interface (markStack, markGlobals)
+    /// - VM implements RootProvider
+    /// - GC calls provider.markRoots() without knowing VM internals
     vm: ?*anyopaque,
 
     // GC tuning parameters
@@ -233,21 +241,19 @@ pub const GC = struct {
 
     /// Mark a TValue if it contains a GC object
     pub fn markValue(self: *GC, value: TValue) void {
-        switch (value) {
-            .string => |str_obj| {
-                const mutable_str: *StringObject = @constCast(str_obj);
-                markObject(self, &mutable_str.header);
-            },
-            .table => |table_obj| {
-                markObject(self, &table_obj.header);
-            },
-            .closure => |closure_obj| {
-                markObject(self, &closure_obj.header);
-            },
-            .object => |obj| {
-                markObject(self, obj);
-            },
-            else => {}, // Immediate values (nil, bool, number, function) don't need marking
+        if (value == .object) {
+            markObject(self, value.object);
+        }
+        // Immediate values (nil, bool, integer, number) don't need marking
+    }
+
+    /// Mark proto constants recursively (including nested protos)
+    fn markProto(self: *GC, proto: *const Proto) void {
+        for (proto.k) |value| {
+            self.markValue(value);
+        }
+        for (proto.protos) |child| {
+            self.markProto(child);
         }
     }
 
@@ -280,10 +286,8 @@ pub const GC = struct {
                 for (closure.upvalues) |upval| {
                     markObject(self, &upval.header);
                 }
-                // Mark constants in the proto (strings, etc.)
-                for (closure.proto.k) |value| {
-                    self.markValue(value);
-                }
+                // Mark proto constants (including nested protos)
+                self.markProto(closure.proto);
             },
             .native_closure => {
                 // Native closures have no references to other objects
@@ -505,7 +509,7 @@ test "markValue marks string in TValue" {
     const str = try gc.allocString("hello from TValue");
 
     // Wrap it in a TValue
-    const value = TValue{ .string = str };
+    const value = TValue.fromString(str);
 
     // Mark through TValue
     gc.markValue(value);
@@ -533,9 +537,9 @@ test "markStack marks all strings in stack slice" {
 
     // Create a mock stack slice
     var stack: [4]TValue = .{
-        TValue{ .string = str1 },
+        TValue.fromString(str1),
         TValue{ .integer = 42 }, // Non-GC value
-        TValue{ .string = str2 },
+        TValue.fromString(str2),
         TValue.nil,
     };
 
@@ -616,7 +620,7 @@ test "table marks its contents" {
 
     // Put string in table
     const key = try gc.allocString("key");
-    try table.set(key, TValue{ .string = str });
+    try table.set(key, TValue.fromString(str));
 
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 4), stats_before.object_count);
@@ -634,7 +638,7 @@ test "table marks its contents" {
     // Verify string is still accessible through table
     const retrieved = table.get(key);
     try std.testing.expect(retrieved != null);
-    try std.testing.expectEqualStrings("value in table", retrieved.?.string.asSlice());
+    try std.testing.expectEqualStrings("value in table", retrieved.?.asString().?.asSlice());
 }
 
 test "markValue marks closure" {
@@ -659,7 +663,7 @@ test "markValue marks closure" {
     try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
 
     // Mark the closure via TValue
-    gc.markValue(TValue{ .closure = closure });
+    gc.markValue(TValue.fromClosure(closure));
 
     // Run GC
     gc.sweep();

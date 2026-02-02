@@ -76,7 +76,7 @@ test "GETFIELD with nil table returns error" {
 
     // Constants array with string key
     const constants = [_]TValue{
-        .{ .string = name_str }, // Index 0 - field name
+        TValue.fromString(name_str), // Index 0 - field name
     };
 
     // GETFIELD R[1] := R[0][K[0]] where K[0] = "name", R[0] is nil
@@ -107,7 +107,7 @@ test "Multiple LOADKX operations" {
 
     // Create constants with multiple values
     const constants = [_]TValue{
-        .{ .string = hello_str }, // Index 0
+        TValue.fromString(hello_str), // Index 0
         .{ .number = 3.14 }, // Index 1
         .nil, .nil, .nil, // Padding
         .{ .integer = 100 }, // Index 5
@@ -144,7 +144,7 @@ test "Multiple LOADKX operations" {
     try test_utils.expectRegisters(&vm, 0, &[_]TValue{
         .{ .integer = 100 }, // R[0]
         .{ .boolean = true }, // R[1]
-        .{ .string = hello_str }, // R[2]
+        TValue.fromString(hello_str), // R[2]
     });
 
     // Verify remaining registers are nil
