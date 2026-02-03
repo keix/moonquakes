@@ -44,6 +44,12 @@ pub const Lexer = struct {
         if (isAlpha(c) or c == '_') return self.readIdentifier();
         if (isDigit(c)) return self.readNumber();
         if (c == '"' or c == '\'') return self.readString();
+        if (c == '[') {
+            // Check for long bracket string: [[ or [=[ or [==[ etc.
+            if (self.checkLongBracketStart()) |level| {
+                return self.readLongBracketString(level);
+            }
+        }
 
         return self.readSymbol();
     }
@@ -134,6 +140,19 @@ pub const Lexer = struct {
                     }
                 }
             }
+
+            // Exponent part (e.g., 1e10, 1E-5, 3.14e+2)
+            if (self.pos < self.src.len and (self.peek() == 'e' or self.peek() == 'E')) {
+                _ = self.advance(); // consume 'e' or 'E'
+                // Optional sign
+                if (self.pos < self.src.len and (self.peek() == '+' or self.peek() == '-')) {
+                    _ = self.advance();
+                }
+                // Exponent digits
+                while (self.pos < self.src.len and isDigit(self.peek())) {
+                    _ = self.advance();
+                }
+            }
         }
 
         return .{
@@ -153,12 +172,82 @@ pub const Lexer = struct {
         const quote = self.advance(); // Get and skip opening quote (" or ')
 
         while (self.pos < self.src.len and self.peek() != quote) {
-            if (self.peek() == '\n') self.line += 1;
-            _ = self.advance();
+            if (self.peek() == '\\' and self.pos + 1 < self.src.len) {
+                // Skip escape sequence (backslash + next char)
+                _ = self.advance();
+                _ = self.advance();
+            } else {
+                if (self.peek() == '\n') self.line += 1;
+                _ = self.advance();
+            }
         }
 
         if (self.pos < self.src.len) {
             _ = self.advance(); // Skip closing quote
+        }
+
+        return .{
+            .kind = .String,
+            .lexeme = self.src[start..self.pos],
+            .line = start_line,
+        };
+    }
+
+    /// Check if current position starts a long bracket: [[ or [=[ or [==[ etc.
+    /// Returns the level (number of '=' signs) if it's a long bracket, null otherwise.
+    fn checkLongBracketStart(self: *Lexer) ?usize {
+        if (self.pos >= self.src.len or self.src[self.pos] != '[') return null;
+
+        var i = self.pos + 1;
+        var level: usize = 0;
+
+        // Count '=' signs
+        while (i < self.src.len and self.src[i] == '=') {
+            level += 1;
+            i += 1;
+        }
+
+        // Check for closing '['
+        if (i < self.src.len and self.src[i] == '[') {
+            return level;
+        }
+
+        return null;
+    }
+
+    /// Read a long bracket string: [[...]] or [=[...]=] etc.
+    fn readLongBracketString(self: *Lexer, level: usize) Token {
+        const start = self.pos;
+        const start_line = self.line;
+
+        // Skip opening bracket: [ + level * '=' + [
+        self.pos += 2 + level;
+
+        // Find matching close bracket: ] + level * '=' + ]
+        while (self.pos < self.src.len) {
+            if (self.src[self.pos] == '\n') {
+                self.line += 1;
+                self.pos += 1;
+            } else if (self.src[self.pos] == ']') {
+                // Check for matching close bracket
+                var i = self.pos + 1;
+                var eq_count: usize = 0;
+
+                while (i < self.src.len and self.src[i] == '=') {
+                    eq_count += 1;
+                    i += 1;
+                }
+
+                if (eq_count == level and i < self.src.len and self.src[i] == ']') {
+                    // Found matching close bracket
+                    self.pos = i + 1;
+                    break;
+                } else {
+                    self.pos += 1;
+                }
+            } else {
+                self.pos += 1;
+            }
         }
 
         return .{
@@ -189,12 +278,12 @@ pub const Lexer = struct {
                     }
                 },
                 '<' => {
-                    if (second_char == '=') {
+                    if (second_char == '=' or second_char == '<') {
                         _ = self.advance();
                     }
                 },
                 '>' => {
-                    if (second_char == '=') {
+                    if (second_char == '=' or second_char == '>') {
                         _ = self.advance();
                     }
                 },

@@ -263,6 +263,36 @@ pub const ProtoBuilder = struct {
         try self.code.append(instr);
     }
 
+    pub fn emitBAND(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.BAND, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitBOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.BOR, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitBXOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.BXOR, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitBNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
+        const instr = Instruction.initABC(.BNOT, dst, src, 0);
+        try self.code.append(instr);
+    }
+
+    pub fn emitSHL(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.SHL, dst, left, right);
+        try self.code.append(instr);
+    }
+
+    pub fn emitSHR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
+        const instr = Instruction.initABC(.SHR, dst, left, right);
+        try self.code.append(instr);
+    }
+
     pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
         const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
         try self.code.append(instr);
@@ -986,10 +1016,32 @@ pub const Parser = struct {
             return reg;
         } else if (self.current.kind == .String) {
             const reg = self.proto.allocTemp();
-            // Remove quotes from string literal
-            const str_content = self.current.lexeme[1 .. self.current.lexeme.len - 1];
-            const k = try self.proto.addConstString(str_content);
-            try self.proto.emitLoadK(reg, k);
+            const lexeme = self.current.lexeme;
+
+            // Check for long bracket string: [[...]] or [=[...]=] etc.
+            if (lexeme.len >= 2 and lexeme[0] == '[') {
+                // Count '=' signs to determine level
+                var level: usize = 0;
+                var i: usize = 1;
+                while (i < lexeme.len and lexeme[i] == '=') {
+                    level += 1;
+                    i += 1;
+                }
+                // Extract content between [[ and ]] (or [=[ and ]=] etc.)
+                const start = 2 + level; // skip [[ or [=[ etc.
+                const end = lexeme.len - 2 - level; // skip ]] or ]=] etc.
+                const str_content = lexeme[start..end];
+                // Long bracket strings don't process escapes
+                const k = try self.proto.addConstString(str_content);
+                try self.proto.emitLoadK(reg, k);
+            } else {
+                // Regular quoted string: remove quotes and process escape sequences
+                const str_raw = lexeme[1 .. lexeme.len - 1];
+                const str_content = try processEscapes(self.proto.allocator, str_raw);
+                defer self.proto.allocator.free(str_content);
+                const k = try self.proto.addConstString(str_content);
+                try self.proto.emitLoadK(reg, k);
+            }
             self.advance();
             return reg;
         } else if (self.current.kind == .Keyword) {
@@ -1006,6 +1058,9 @@ pub const Parser = struct {
                 try self.proto.emitLOADBOOL(reg, is_true, false);
                 self.advance();
                 return reg;
+            } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
+                // Anonymous function: function(params) body end
+                return try self.parseAnonymousFunction();
             }
         } else if (self.current.kind == .Identifier) {
             // Check for function calls that return values
@@ -1109,6 +1164,15 @@ pub const Parser = struct {
             const operand = try self.parsePrimary(); // recursive for chained: ##x
             const dst = self.proto.allocTemp();
             try self.proto.emitLEN(dst, operand);
+            return dst;
+        }
+
+        // Bitwise NOT operator (unary ~)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "~")) {
+            self.advance(); // consume '~'
+            const operand = try self.parsePrimary(); // recursive for chained: ~~x
+            const dst = self.proto.allocTemp();
+            try self.proto.emitBNOT(dst, operand);
             return dst;
         }
 
@@ -1243,6 +1307,76 @@ pub const Parser = struct {
         return left;
     }
 
+    /// Parse bitwise OR: a | b
+    fn parseBitOr(self: *Parser) ParseError!u8 {
+        var left = try self.parseBitXor();
+
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "|")) {
+            self.advance(); // consume '|'
+            const right = try self.parseBitXor();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitBOR(dst, left, right);
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse bitwise XOR: a ~ b (binary)
+    fn parseBitXor(self: *Parser) ParseError!u8 {
+        var left = try self.parseBitAnd();
+
+        // Note: lexer returns "~" for XOR and "~=" for not-equal as separate tokens
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "~")) {
+            self.advance(); // consume '~'
+            const right = try self.parseBitAnd();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitBXOR(dst, left, right);
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse bitwise AND: a & b
+    fn parseBitAnd(self: *Parser) ParseError!u8 {
+        var left = try self.parseShift();
+
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "&")) {
+            self.advance(); // consume '&'
+            const right = try self.parseShift();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitBAND(dst, left, right);
+            left = dst;
+        }
+
+        return left;
+    }
+
+    /// Parse shift operators: a << b, a >> b
+    fn parseShift(self: *Parser) ParseError!u8 {
+        var left = try self.parseConcat();
+
+        while (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, "<<") or
+                std.mem.eql(u8, self.current.lexeme, ">>")))
+        {
+            const op = self.current.lexeme;
+            self.advance(); // consume operator
+            const right = try self.parseConcat();
+            const dst = self.proto.allocTemp();
+
+            if (std.mem.eql(u8, op, "<<")) {
+                try self.proto.emitSHL(dst, left, right);
+            } else {
+                try self.proto.emitSHR(dst, left, right);
+            }
+            left = dst;
+        }
+
+        return left;
+    }
+
     /// Parse string concatenation
     /// Collects all operands first, then emits a single CONCAT instruction
     /// a .. b .. c -> CONCAT(dst, a_reg, c_reg) with operands in consecutive registers
@@ -1290,7 +1424,7 @@ pub const Parser = struct {
     // this block may be refactored into a more compact form.
 
     fn parseCompare(self: *Parser) ParseError!u8 {
-        var left = try self.parseConcat();
+        var left = try self.parseBitOr();
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "==") or
@@ -1302,7 +1436,7 @@ pub const Parser = struct {
         {
             const op = self.current.lexeme;
             self.advance(); // consume operator
-            const right = try self.parseConcat();
+            const right = try self.parseBitOr();
 
             const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "==")) {
@@ -2497,4 +2631,134 @@ pub const Parser = struct {
         const proto_idx = try old_proto.addProto(proto_ptr);
         try old_proto.emitClosure(func_reg, proto_idx);
     }
+
+    /// Parse anonymous function: function(params) body end
+    /// Returns register containing the closure
+    fn parseAnonymousFunction(self: *Parser) ParseError!u8 {
+        self.advance(); // consume 'function'
+
+        // Allocate register for the closure result
+        const func_reg = self.proto.allocTemp();
+
+        // Parse parameters: (param, ...)
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Create a separate builder for function body with parent reference
+        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        defer func_builder.deinit();
+
+        // Create RawProto container
+        const proto_ptr = try self.proto.allocator.create(RawProto);
+
+        // Parse parameters
+        var param_count: u8 = 0;
+        if (self.current.kind == .Identifier) {
+            const param_name = self.current.lexeme;
+            self.advance();
+            try func_builder.addVariable(param_name, param_count);
+            param_count += 1;
+
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const next_param = self.current.lexeme;
+                self.advance();
+                try func_builder.addVariable(next_param, param_count);
+                param_count += 1;
+            }
+
+            func_builder.next_reg = param_count;
+            func_builder.locals_top = param_count;
+        }
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        // Parse function body
+        const old_proto = self.proto;
+        self.proto = &func_builder;
+        defer self.proto = old_proto;
+
+        try self.parseStatements();
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // Add implicit RETURN if needed
+        if (func_builder.code.items.len == 0 or
+            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
+        {
+            try func_builder.emit(.RETURN, 0, 1, 0);
+        }
+
+        // Convert to RawProto
+        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        proto_ptr.* = func_proto_data;
+
+        // Emit CLOSURE instruction
+        const proto_idx = try old_proto.addProto(proto_ptr);
+        try old_proto.emitClosure(func_reg, proto_idx);
+
+        return func_reg;
+    }
 };
+
+/// Process escape sequences in a string literal (after quotes are removed).
+/// Supports: \n, \t, \r, \\, \", \'
+fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit();
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '\\' and i + 1 < input.len) {
+            const next = input[i + 1];
+            switch (next) {
+                'n' => {
+                    try result.append('\n');
+                    i += 2;
+                },
+                't' => {
+                    try result.append('\t');
+                    i += 2;
+                },
+                'r' => {
+                    try result.append('\r');
+                    i += 2;
+                },
+                '\\' => {
+                    try result.append('\\');
+                    i += 2;
+                },
+                '"' => {
+                    try result.append('"');
+                    i += 2;
+                },
+                '\'' => {
+                    try result.append('\'');
+                    i += 2;
+                },
+                else => {
+                    // Unknown escape - keep as-is
+                    try result.append(input[i]);
+                    i += 1;
+                },
+            }
+        } else {
+            try result.append(input[i]);
+            i += 1;
+        }
+    }
+
+    return try allocator.dupe(u8, result.items);
+}
