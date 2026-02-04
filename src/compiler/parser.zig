@@ -61,6 +61,7 @@ const ParseError = error{
     ExpectedCloseBracket,
     ExpectedUntil,
     BreakOutsideLoop,
+    ExpectedColon,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -128,29 +129,7 @@ pub const ProtoBuilder = struct {
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
-    pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
-        return .{
-            .code = std.ArrayList(Instruction).init(allocator),
-            .booleans = std.ArrayList(bool).init(allocator),
-            .integers = std.ArrayList(i64).init(allocator),
-            .numbers = std.ArrayList(f64).init(allocator),
-            .strings = std.ArrayList([]const u8).init(allocator),
-            .native_ids = std.ArrayList(NativeFnId).init(allocator),
-            .const_refs = std.ArrayList(ConstRef).init(allocator),
-            .protos = std.ArrayList(*const RawProto).init(allocator),
-            .maxstacksize = 0,
-            .next_reg = 0,
-            .locals_top = 0,
-            .allocator = allocator,
-            .functions = std.ArrayList(FunctionEntry).init(allocator),
-            .variables = std.ArrayList(VariableEntry).init(allocator),
-            .scope_starts = std.ArrayList(ScopeMark).init(allocator),
-            .upvalues = std.ArrayList(Upvaldesc).init(allocator),
-            .parent = null,
-        };
-    }
-
-    pub fn initWithParent(allocator: std.mem.Allocator, parent: *ProtoBuilder) ProtoBuilder {
+    pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .booleans = std.ArrayList(bool).init(allocator),
@@ -410,6 +389,12 @@ pub const ProtoBuilder = struct {
         self.updateMaxStack(dst + 1);
     }
 
+    /// Emit SETUPVAL instruction: UpValue[B] := R[A]
+    pub fn emitSETUPVAL(self: *ProtoBuilder, src: u8, upval_idx: u8) !void {
+        const instr = Instruction.initABC(.SETUPVAL, src, upval_idx, 0);
+        try self.code.append(instr);
+    }
+
     /// Emit NOT instruction: R[A] := not R[B]
     pub fn emitNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.NOT, dst, src, 0);
@@ -548,11 +533,32 @@ pub const ProtoBuilder = struct {
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         // Check for hex prefix (0x or 0X)
         if (lexeme.len > 2 and lexeme[0] == '0' and (lexeme[1] == 'x' or lexeme[1] == 'X')) {
-            const value = std.fmt.parseInt(i64, lexeme[2..], 16) catch return error.InvalidNumber;
-            const idx: u16 = @intCast(self.integers.items.len);
-            try self.integers.append(value);
-            try self.const_refs.append(.{ .kind = .integer, .index = idx });
-            return @intCast(self.const_refs.items.len - 1);
+            const hex_part = lexeme[2..];
+
+            // Check if it's a hex float (contains '.' or 'p'/'P')
+            var is_hex_float = false;
+            for (hex_part) |c| {
+                if (c == '.' or c == 'p' or c == 'P') {
+                    is_hex_float = true;
+                    break;
+                }
+            }
+
+            if (is_hex_float) {
+                // Parse as hex float
+                const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
+                const idx: u16 = @intCast(self.numbers.items.len);
+                try self.numbers.append(value);
+                try self.const_refs.append(.{ .kind = .number, .index = idx });
+                return @intCast(self.const_refs.items.len - 1);
+            } else {
+                // Parse as hex integer
+                const value = std.fmt.parseInt(i64, hex_part, 16) catch return error.InvalidNumber;
+                const idx: u16 = @intCast(self.integers.items.len);
+                try self.integers.append(value);
+                try self.const_refs.append(.{ .kind = .integer, .index = idx });
+                return @intCast(self.const_refs.items.len - 1);
+            }
         }
 
         // Try parsing as decimal integer first
@@ -569,6 +575,72 @@ pub const ProtoBuilder = struct {
             try self.const_refs.append(.{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         }
+    }
+
+    /// Parse hex float like 0x1.5p10, 0x1p4, 0x1.8p-1
+    fn parseHexFloat(lexeme: []const u8) !f64 {
+        // Skip 0x prefix
+        var i: usize = 2;
+
+        // Parse integer part (hex digits)
+        var int_part: f64 = 0;
+        while (i < lexeme.len and isHexDigit(lexeme[i])) {
+            int_part = int_part * 16 + @as(f64, @floatFromInt(hexDigitValue(lexeme[i])));
+            i += 1;
+        }
+
+        // Parse fractional part if present
+        var frac_part: f64 = 0;
+        if (i < lexeme.len and lexeme[i] == '.') {
+            i += 1;
+            var frac_mult: f64 = 1.0 / 16.0;
+            while (i < lexeme.len and isHexDigit(lexeme[i])) {
+                frac_part += @as(f64, @floatFromInt(hexDigitValue(lexeme[i]))) * frac_mult;
+                frac_mult /= 16.0;
+                i += 1;
+            }
+        }
+
+        var mantissa = int_part + frac_part;
+
+        // Parse binary exponent if present (p or P followed by decimal exponent)
+        if (i < lexeme.len and (lexeme[i] == 'p' or lexeme[i] == 'P')) {
+            i += 1;
+
+            // Parse exponent sign
+            var exp_neg = false;
+            if (i < lexeme.len and lexeme[i] == '-') {
+                exp_neg = true;
+                i += 1;
+            } else if (i < lexeme.len and lexeme[i] == '+') {
+                i += 1;
+            }
+
+            // Parse exponent value (decimal digits)
+            var exp: i32 = 0;
+            while (i < lexeme.len and lexeme[i] >= '0' and lexeme[i] <= '9') {
+                exp = exp * 10 + @as(i32, @intCast(lexeme[i] - '0'));
+                i += 1;
+            }
+
+            if (exp_neg) exp = -exp;
+
+            // Apply binary exponent: mantissa * 2^exp
+            mantissa = mantissa * std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exp)));
+        }
+
+        return mantissa;
+    }
+
+    fn isHexDigit(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+    }
+
+    fn hexDigitValue(c: u8) u8 {
+        if (c >= '0' and c <= '9') return c - '0';
+        if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+        return 0;
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
@@ -689,11 +761,7 @@ pub const ProtoBuilder = struct {
         return .{ .upvalue = upval_idx };
     }
 
-    pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !RawProto {
-        return self.toRawProtoWithParams(allocator, 0);
-    }
-
-    pub fn toRawProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
+    pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
         // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
         const booleans_slice = try allocator.dupe(bool, self.booleans.items);
@@ -812,8 +880,13 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Look ahead to see if it's a function call
-                if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+                // Look ahead to see if it's a function call (with parens or no-parens)
+                const next = self.peek();
+                const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+                const is_call_no_parens = next.kind == .String or
+                    (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+                if (is_call_with_parens or is_call_no_parens) {
                     try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
@@ -821,8 +894,11 @@ pub const Parser = struct {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Field assignment: t.field = expr
-                    try self.parseAssignment();
+                    // Check for chained method call: t.a:method() or field assignment
+                    try self.parseFieldAccessOrMethodCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    // Method call: t:method()
+                    try self.parseMethodCallStatement();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
@@ -978,9 +1054,11 @@ pub const Parser = struct {
 
             const value_reg = try self.parseExpr();
 
-            if (self.proto.findVariable(name)) |local_reg| {
-                // Local variable: use MOVE
-                try self.proto.emitMOVE(local_reg, value_reg);
+            if (try self.proto.resolveVariable(name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| try self.proto.emitMOVE(local_reg, value_reg),
+                    .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
+                }
             } else {
                 // Global variable: SETTABUP (_ENV[name] = value)
                 const name_const = try self.proto.addConstString(name);
@@ -1063,8 +1141,13 @@ pub const Parser = struct {
                 return try self.parseAnonymousFunction();
             }
         } else if (self.current.kind == .Identifier) {
-            // Check for function calls that return values
-            if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+            // Check for function calls that return values (with parens or no-parens)
+            const next = self.peek();
+            const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+            const is_call_no_parens = next.kind == .String or
+                (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+            if (is_call_with_parens or is_call_no_parens) {
                 return try self.parseFunctionCallExpr();
             }
             // Check if it's a variable/parameter (includes loop variables) or upvalue
@@ -1081,10 +1164,11 @@ pub const Parser = struct {
                 return error.UnsupportedIdentifier;
             }
 
-            // Handle field/index access: t.field, t[key], or chained t.a[b].c
+            // Handle field/index access and method calls: t.field, t[key], t:method(), or chained
             while (self.current.kind == .Symbol and
                 (std.mem.eql(u8, self.current.lexeme, ".") or
-                    std.mem.eql(u8, self.current.lexeme, "[")))
+                    std.mem.eql(u8, self.current.lexeme, "[") or
+                    std.mem.eql(u8, self.current.lexeme, ":")))
             {
                 if (std.mem.eql(u8, self.current.lexeme, ".")) {
                     self.advance(); // consume '.'
@@ -1100,7 +1184,7 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
                     base_reg = dst_reg;
-                } else {
+                } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                     self.advance(); // consume '['
 
                     const key_reg = try self.parseExpr();
@@ -1113,6 +1197,31 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
                     base_reg = dst_reg;
+                } else {
+                    // Method call: t:method() - returns result
+                    self.advance(); // consume ':'
+
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+                    const method_name = self.current.lexeme;
+                    self.advance(); // consume method name
+
+                    // Get method from receiver
+                    const method_const = try self.proto.addConstString(method_name);
+                    const func_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(func_reg, base_reg, method_const);
+
+                    // Reserve slot for receiver and place it there
+                    const self_reg = self.proto.allocTemp(); // = func_reg + 1
+                    try self.proto.emitMOVE(self_reg, base_reg);
+
+                    // Parse extra arguments starting at func_reg + 2
+                    const extra_args = try self.parseMethodArgs(func_reg);
+
+                    // Call with 1 result (expression context)
+                    try self.proto.emitCall(func_reg, extra_args + 1, 1);
+                    base_reg = func_reg; // Result is in func_reg
                 }
             }
 
@@ -1944,19 +2053,25 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Handle function calls like print(...) or tostring(...)
-                if (std.mem.eql(u8, self.current.lexeme, "print") or
-                    std.mem.eql(u8, self.current.lexeme, "tostring"))
-                {
-                    try self.parseFunctionCall();
+                // Look ahead to see if it's a function call (with parens or no-parens)
+                const next = self.peek();
+                const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+                const is_call_no_parens = next.kind == .String or
+                    (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+                if (is_call_with_parens or is_call_no_parens) {
+                    try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Field assignment: t.field = expr
-                    try self.parseAssignment();
+                    // Check for chained method call: t.a:method() or field assignment
+                    try self.parseFieldAccessOrMethodCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    // Method call: t:method()
+                    try self.parseMethodCallStatement();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
@@ -2077,52 +2192,38 @@ pub const Parser = struct {
         // Parse function call - support native and user-defined functions
         const func_name = self.current.lexeme;
 
-        // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |_| {
-            // Handle user-defined function call
+        // Check if it's a local variable (including local functions) or upvalue first
+        if (try self.proto.resolveVariable(func_name)) |loc| {
+            // Handle local/upvalue function call
             self.advance(); // consume function name
 
-            // Expect '('
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-                return error.ExpectedLeftParen;
+            // Load closure from local register or upvalue
+            const func_reg = self.proto.allocTemp();
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(func_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(func_reg, idx),
             }
-            self.advance(); // consume '('
 
-            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
+
+            // Emit CALL instruction (0 results for statements)
+            try self.proto.emitCall(func_reg, arg_count, 0);
+            return;
+        }
+
+        // Check if it's a global function (defined with 'function name()')
+        if (self.proto.findFunction(func_name)) |_| {
+            self.advance(); // consume function name
+
+            // Load closure from _ENV[func_name] via GETTABUP
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
-            // Parse arguments with expression evaluation
-            var arg_count: u8 = 0;
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                // Parse first argument
-                const arg_reg = try self.parseExpr();
-                // Move argument to correct position (func_reg + 1)
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
-                }
-                arg_count = 1;
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
 
-                // Parse additional arguments
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    self.advance(); // consume ','
-                    const next_arg = try self.parseExpr();
-                    arg_count += 1;
-                    // Move to correct position
-                    if (next_arg != func_reg + arg_count) {
-                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                    }
-                }
-            }
-
-            // Expect ')'
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                return error.ExpectedRightParen;
-            }
-            self.advance(); // consume ')'
-
-            // Emit CALL instruction (0 results for statements)
             try self.proto.emitCall(func_reg, arg_count, 0);
             return;
         }
@@ -2137,33 +2238,13 @@ pub const Parser = struct {
 
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Load function constant
         const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (0 results for statements)
         try self.proto.emitCall(func_reg, arg_count, 0);
@@ -2186,45 +2267,13 @@ pub const Parser = struct {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
 
-            // Expect '('
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-                return error.ExpectedLeftParen;
-            }
-            self.advance(); // consume '('
-
             // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
-            // Parse arguments with expression evaluation
-            var arg_count: u8 = 0;
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                // Parse first argument
-                const arg_reg = try self.parseExpr();
-                // Move argument to correct position (func_reg + 1)
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
-                }
-                arg_count = 1;
-
-                // Parse additional arguments
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    self.advance(); // consume ','
-                    const next_arg = try self.parseExpr();
-                    arg_count += 1;
-                    // Move to correct position
-                    if (next_arg != func_reg + arg_count) {
-                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                    }
-                }
-            }
-
-            // Expect ')'
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                return error.ExpectedRightParen;
-            }
-            self.advance(); // consume ')'
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
 
             // Emit CALL instruction (1 result)
             try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2243,34 +2292,13 @@ pub const Parser = struct {
 
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Load function constant
         const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            // Move argument to correct position (func_reg + 1)
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (1 result)
         try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2283,42 +2311,12 @@ pub const Parser = struct {
     fn parseLocalFunctionCall(self: *Parser, closure_reg: u8) ParseError!u8 {
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Move closure to a temp register for the call
         const func_reg = self.proto.allocTemp();
         try self.proto.emitMOVE(func_reg, closure_reg);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-
-            // Parse additional arguments
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                self.advance(); // consume ','
-                const next_arg = try self.parseExpr();
-                arg_count += 1;
-                if (next_arg != func_reg + arg_count) {
-                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                }
-            }
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (1 result)
         try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2330,18 +2328,51 @@ pub const Parser = struct {
     fn parseUpvalueFunctionCall(self: *Parser, upval_idx: u8) ParseError!u8 {
         self.advance(); // consume function name
 
-        // Expect '('
+        // Load closure from upvalue to a temp register for the call
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitGETUPVAL(func_reg, upval_idx);
+
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
+
+        // Emit CALL instruction (1 result)
+        try self.proto.emitCall(func_reg, arg_count, 1);
+
+        return func_reg;
+    }
+
+    fn parseExpr(self: *Parser) ParseError!u8 {
+        return self.parseOr();
+    }
+
+    /// Check if current token starts a no-parens call argument (string or table)
+    fn isNoParensArg(self: *Parser) bool {
+        return self.current.kind == .String or
+            (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{"));
+    }
+
+    /// Parse function call arguments, handling both parenthesized and no-parens styles.
+    /// Returns the argument count. func_reg should already be allocated.
+    fn parseCallArgs(self: *Parser, func_reg: u8) ParseError!u8 {
+        var arg_count: u8 = 0;
+
+        // Check for no-parens call: f "string" or f {table}
+        if (self.isNoParensArg()) {
+            // Single argument without parentheses
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            return 1;
+        }
+
+        // Normal call with parentheses
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
             return error.ExpectedLeftParen;
         }
         self.advance(); // consume '('
 
-        // Load closure from upvalue to a temp register for the call
-        const func_reg = self.proto.allocTemp();
-        try self.proto.emitGETUPVAL(func_reg, upval_idx);
-
         // Parse arguments
-        var arg_count: u8 = 0;
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             // Parse first argument
             const arg_reg = try self.parseExpr();
@@ -2367,17 +2398,217 @@ pub const Parser = struct {
         }
         self.advance(); // consume ')'
 
-        // Emit CALL instruction (1 result)
-        try self.proto.emitCall(func_reg, arg_count, 1);
-
-        return func_reg;
-    }
-
-    fn parseExpr(self: *Parser) ParseError!u8 {
-        return self.parseOr();
+        return arg_count;
     }
 
     // Special parsing functions
+
+    /// Parse method call statement: t:method(args)
+    /// Transforms to: t.method(t, args)
+    fn parseMethodCallStatement(self: *Parser) ParseError!void {
+        // Load receiver (t) into register
+        const receiver_name = self.current.lexeme;
+        var receiver_reg: u8 = undefined;
+
+        if (try self.proto.resolveVariable(receiver_name)) |loc| {
+            receiver_reg = self.proto.allocTemp();
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(receiver_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(receiver_reg, idx),
+            }
+        } else {
+            return error.UnsupportedIdentifier;
+        }
+        self.advance(); // consume receiver name
+
+        // Expect ':'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":"))) {
+            return error.ExpectedColon;
+        }
+        self.advance(); // consume ':'
+
+        // Parse method name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const method_name = self.current.lexeme;
+        self.advance(); // consume method name
+
+        // Get method from receiver: t.method
+        const method_const = try self.proto.addConstString(method_name);
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
+
+        // Reserve slot for receiver (self) and place it there
+        const self_reg = self.proto.allocTemp(); // = func_reg + 1
+        try self.proto.emitMOVE(self_reg, receiver_reg);
+
+        // Parse extra arguments starting at func_reg + 2
+        const extra_args = try self.parseMethodArgs(func_reg);
+
+        // Total args = receiver + extra args
+        try self.proto.emitCall(func_reg, extra_args + 1, 0);
+    }
+
+    /// Parse method call arguments (for method calls where receiver is already at func_reg+1)
+    /// Places arguments at func_reg+2, func_reg+3, etc. Returns extra argument count.
+    fn parseMethodArgs(self: *Parser, func_reg: u8) ParseError!u8 {
+        var arg_count: u8 = 0;
+
+        // Check for no-parens call
+        if (self.isNoParensArg()) {
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 2) {
+                try self.proto.emitMOVE(func_reg + 2, arg_reg);
+            }
+            return 1;
+        }
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Parse arguments
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            const arg_reg = try self.parseExpr();
+            // First extra arg goes to func_reg + 2
+            if (arg_reg != func_reg + 2) {
+                try self.proto.emitMOVE(func_reg + 2, arg_reg);
+            }
+            arg_count = 1;
+
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                const next_arg = try self.parseExpr();
+                arg_count += 1;
+                // Args go to func_reg + 2 + (arg_count - 1) = func_reg + 1 + arg_count
+                if (next_arg != func_reg + 1 + arg_count) {
+                    try self.proto.emitMOVE(func_reg + 1 + arg_count, next_arg);
+                }
+            }
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        return arg_count;
+    }
+
+    /// Parse field access that may end with method call or assignment
+    /// Handles: t.a = expr, t.a.b = expr, t.a:method()
+    fn parseFieldAccessOrMethodCall(self: *Parser) ParseError!void {
+        // Load base table
+        const base_name = self.current.lexeme;
+        var base_reg: u8 = undefined;
+
+        if (try self.proto.resolveVariable(base_name)) |loc| {
+            base_reg = self.proto.allocTemp();
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
+            }
+        } else {
+            return error.UnsupportedIdentifier;
+        }
+        self.advance(); // consume base name
+
+        // Process chain of field accesses
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+            self.advance(); // consume '.'
+
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            const field_name = self.current.lexeme;
+            self.advance(); // consume field name
+
+            // Check what comes next
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                // Field assignment: t.field = expr
+                self.advance(); // consume '='
+                const value_reg = try self.parseExpr();
+                const field_const = try self.proto.addConstString(field_name);
+                try self.proto.emitSETFIELD(base_reg, field_const, value_reg);
+                return;
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+                // Method call: t.a:method()
+                self.advance(); // consume ':'
+
+                // Get the field first (t.a)
+                const field_const = try self.proto.addConstString(field_name);
+                const receiver_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(receiver_reg, base_reg, field_const);
+
+                // Parse method name
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const method_name = self.current.lexeme;
+                self.advance(); // consume method name
+
+                // Get method from receiver
+                const method_const = try self.proto.addConstString(method_name);
+                const func_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
+
+                // Reserve slot for receiver and place it there
+                const self_reg = self.proto.allocTemp(); // = func_reg + 1
+                try self.proto.emitMOVE(self_reg, receiver_reg);
+
+                // Parse extra arguments
+                const extra_args = try self.parseMethodArgs(func_reg);
+
+                try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                return;
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+                // Continue chaining: get this field and continue
+                const field_const = try self.proto.addConstString(field_name);
+                const next_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(next_reg, base_reg, field_const);
+                base_reg = next_reg;
+                // Loop continues
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
+                // Mixed access: t.field[key] = expr
+                // First get the field
+                const field_const = try self.proto.addConstString(field_name);
+                const table_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(table_reg, base_reg, field_const);
+
+                // Parse index
+                self.advance(); // consume '['
+                const key_reg = try self.parseExpr();
+
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume ']'
+
+                // Check for more chaining or assignment
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                    // Index assignment: t.field[key] = expr
+                    self.advance(); // consume '='
+                    const value_reg = try self.parseExpr();
+                    try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                    return;
+                } else {
+                    // Could support more chaining here, but for now error
+                    return error.UnsupportedStatement;
+                }
+            } else {
+                // Unknown pattern after field access
+                return error.UnsupportedStatement;
+            }
+        }
+
+        // If we reach here, it's an error (no = or : found)
+        return error.UnsupportedStatement;
+    }
+
     fn parseIoCall(self: *Parser) ParseError!void {
         // Parse "io.write(...)" calls
         // Current token should be "io"
@@ -2462,7 +2693,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit(); // Clean up at end of function
 
         // Create RawProto container early (address is fixed, content will be filled later)
@@ -2526,7 +2757,7 @@ pub const Parser = struct {
         }
 
         // Convert function builder to RawProto with dynamic allocation
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
 
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
@@ -2563,7 +2794,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container
@@ -2624,7 +2855,7 @@ pub const Parser = struct {
         }
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE to local register (no SETTABUP - it's local, not global)
@@ -2647,7 +2878,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container
@@ -2702,7 +2933,7 @@ pub const Parser = struct {
         }
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE instruction

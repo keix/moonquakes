@@ -9,13 +9,13 @@ const test_utils = @import("test_utils.zig");
 
 fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator);
+    var proto_builder = parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
     try p.parseChunk();
 
-    const raw_proto = try proto_builder.toRawProto(allocator);
+    const raw_proto = try proto_builder.toRawProto(allocator, 0);
     // Note: raw_proto memory managed by arena, no explicit free needed
 
     const proto = try materialize(&raw_proto, &vm.gc, allocator);

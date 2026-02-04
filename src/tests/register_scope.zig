@@ -7,13 +7,13 @@ const parser = @import("../compiler/parser.zig");
 /// No GC needed - parser now produces RawProto
 fn compileAndGetMaxStack(allocator: std.mem.Allocator, source: []const u8) !u8 {
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator);
+    var proto_builder = parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);
     try p.parseChunk();
 
-    const raw_proto = try proto_builder.toRawProto(allocator);
+    const raw_proto = try proto_builder.toRawProto(allocator, 0);
     // Note: raw_proto managed by arena, no explicit free needed
 
     return raw_proto.maxstacksize;
