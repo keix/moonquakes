@@ -128,29 +128,7 @@ pub const ProtoBuilder = struct {
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
 
-    pub fn init(allocator: std.mem.Allocator) ProtoBuilder {
-        return .{
-            .code = std.ArrayList(Instruction).init(allocator),
-            .booleans = std.ArrayList(bool).init(allocator),
-            .integers = std.ArrayList(i64).init(allocator),
-            .numbers = std.ArrayList(f64).init(allocator),
-            .strings = std.ArrayList([]const u8).init(allocator),
-            .native_ids = std.ArrayList(NativeFnId).init(allocator),
-            .const_refs = std.ArrayList(ConstRef).init(allocator),
-            .protos = std.ArrayList(*const RawProto).init(allocator),
-            .maxstacksize = 0,
-            .next_reg = 0,
-            .locals_top = 0,
-            .allocator = allocator,
-            .functions = std.ArrayList(FunctionEntry).init(allocator),
-            .variables = std.ArrayList(VariableEntry).init(allocator),
-            .scope_starts = std.ArrayList(ScopeMark).init(allocator),
-            .upvalues = std.ArrayList(Upvaldesc).init(allocator),
-            .parent = null,
-        };
-    }
-
-    pub fn initWithParent(allocator: std.mem.Allocator, parent: *ProtoBuilder) ProtoBuilder {
+    pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
             .code = std.ArrayList(Instruction).init(allocator),
             .booleans = std.ArrayList(bool).init(allocator),
@@ -408,6 +386,12 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(.GETUPVAL, dst, upval_idx, 0);
         try self.code.append(instr);
         self.updateMaxStack(dst + 1);
+    }
+
+    /// Emit SETUPVAL instruction: UpValue[B] := R[A]
+    pub fn emitSETUPVAL(self: *ProtoBuilder, src: u8, upval_idx: u8) !void {
+        const instr = Instruction.initABC(.SETUPVAL, src, upval_idx, 0);
+        try self.code.append(instr);
     }
 
     /// Emit NOT instruction: R[A] := not R[B]
@@ -689,11 +673,7 @@ pub const ProtoBuilder = struct {
         return .{ .upvalue = upval_idx };
     }
 
-    pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator) !RawProto {
-        return self.toRawProtoWithParams(allocator, 0);
-    }
-
-    pub fn toRawProtoWithParams(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
+    pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
         // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
         const booleans_slice = try allocator.dupe(bool, self.booleans.items);
@@ -978,9 +958,11 @@ pub const Parser = struct {
 
             const value_reg = try self.parseExpr();
 
-            if (self.proto.findVariable(name)) |local_reg| {
-                // Local variable: use MOVE
-                try self.proto.emitMOVE(local_reg, value_reg);
+            if (try self.proto.resolveVariable(name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| try self.proto.emitMOVE(local_reg, value_reg),
+                    .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
+                }
             } else {
                 // Global variable: SETTABUP (_ENV[name] = value)
                 const name_const = try self.proto.addConstString(name);
@@ -2077,9 +2059,9 @@ pub const Parser = struct {
         // Parse function call - support native and user-defined functions
         const func_name = self.current.lexeme;
 
-        // Check if it's a user-defined function first
-        if (self.proto.findFunction(func_name)) |_| {
-            // Handle user-defined function call
+        // Check if it's a local variable (including local functions) or upvalue first
+        if (try self.proto.resolveVariable(func_name)) |loc| {
+            // Handle local/upvalue function call
             self.advance(); // consume function name
 
             // Expect '('
@@ -2088,10 +2070,12 @@ pub const Parser = struct {
             }
             self.advance(); // consume '('
 
-            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
+            // Load closure from local register or upvalue
             const func_reg = self.proto.allocTemp();
-            const name_const = try self.proto.addConstString(func_name);
-            try self.proto.emitGETTABUP(func_reg, 0, name_const);
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(func_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(func_reg, idx),
+            }
 
             // Parse arguments with expression evaluation
             var arg_count: u8 = 0;
@@ -2123,6 +2107,48 @@ pub const Parser = struct {
             self.advance(); // consume ')'
 
             // Emit CALL instruction (0 results for statements)
+            try self.proto.emitCall(func_reg, arg_count, 0);
+            return;
+        }
+
+        // Check if it's a global function (defined with 'function name()')
+        if (self.proto.findFunction(func_name)) |_| {
+            self.advance(); // consume function name
+
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+                return error.ExpectedLeftParen;
+            }
+            self.advance(); // consume '('
+
+            // Load closure from _ENV[func_name] via GETTABUP
+            const func_reg = self.proto.allocTemp();
+            const name_const = try self.proto.addConstString(func_name);
+            try self.proto.emitGETTABUP(func_reg, 0, name_const);
+
+            // Parse arguments
+            var arg_count: u8 = 0;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                const arg_reg = try self.parseExpr();
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.advance();
+                    const next_arg = try self.parseExpr();
+                    arg_count += 1;
+                    if (next_arg != func_reg + arg_count) {
+                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    }
+                }
+            }
+
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+                return error.ExpectedRightParen;
+            }
+            self.advance();
+
             try self.proto.emitCall(func_reg, arg_count, 0);
             return;
         }
@@ -2462,7 +2488,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit(); // Clean up at end of function
 
         // Create RawProto container early (address is fixed, content will be filled later)
@@ -2526,7 +2552,7 @@ pub const Parser = struct {
         }
 
         // Convert function builder to RawProto with dynamic allocation
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
 
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
@@ -2563,7 +2589,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container
@@ -2624,7 +2650,7 @@ pub const Parser = struct {
         }
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE to local register (no SETTABUP - it's local, not global)
@@ -2647,7 +2673,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.initWithParent(self.proto.allocator, self.proto);
+        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container
@@ -2702,7 +2728,7 @@ pub const Parser = struct {
         }
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProtoWithParams(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE instruction

@@ -90,9 +90,9 @@ pub const Moonquakes = struct {
     }
 
     /// Compile Lua source code with GC for string allocation
-    fn compileWithGC(self: *Moonquakes, source: []const u8, gc: *@import("runtime/gc/gc.zig").GC) !Proto {
+    fn compileWithGC(self: *Moonquakes, source: []const u8, _: *@import("runtime/gc/gc.zig").GC) !Proto {
         var lx = lexer.Lexer.init(source);
-        var builder = parser.ProtoBuilder.init(self.allocator, gc);
+        var builder = parser.ProtoBuilder.init(self.allocator, null);
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
@@ -129,14 +129,14 @@ pub const Moonquakes = struct {
     pub fn runSource(self: *Moonquakes, source: []const u8) !OwnedReturnValue {
         // Phase 1: Compile to RawProto (no GC needed)
         var lx = lexer.Lexer.init(source);
-        var builder = parser.ProtoBuilder.init(self.allocator);
+        var builder = parser.ProtoBuilder.init(self.allocator, null);
         defer builder.deinit();
 
         var p = parser.Parser.init(&lx, &builder);
         defer p.deinit();
         try p.parseChunk();
 
-        const raw_proto = try builder.toRawProto(self.allocator);
+        const raw_proto = try builder.toRawProto(self.allocator, 0);
         defer freeRawProto(self.allocator, raw_proto);
 
         // Phase 2: Create VM and materialize constants
