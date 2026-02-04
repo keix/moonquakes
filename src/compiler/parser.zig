@@ -61,6 +61,7 @@ const ParseError = error{
     ExpectedCloseBracket,
     ExpectedUntil,
     BreakOutsideLoop,
+    ExpectedColon,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -893,8 +894,11 @@ pub const Parser = struct {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Field assignment: t.field = expr
-                    try self.parseAssignment();
+                    // Check for chained method call: t.a:method() or field assignment
+                    try self.parseFieldAccessOrMethodCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    // Method call: t:method()
+                    try self.parseMethodCallStatement();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
@@ -1160,10 +1164,11 @@ pub const Parser = struct {
                 return error.UnsupportedIdentifier;
             }
 
-            // Handle field/index access: t.field, t[key], or chained t.a[b].c
+            // Handle field/index access and method calls: t.field, t[key], t:method(), or chained
             while (self.current.kind == .Symbol and
                 (std.mem.eql(u8, self.current.lexeme, ".") or
-                    std.mem.eql(u8, self.current.lexeme, "[")))
+                    std.mem.eql(u8, self.current.lexeme, "[") or
+                    std.mem.eql(u8, self.current.lexeme, ":")))
             {
                 if (std.mem.eql(u8, self.current.lexeme, ".")) {
                     self.advance(); // consume '.'
@@ -1179,7 +1184,7 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
                     base_reg = dst_reg;
-                } else {
+                } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                     self.advance(); // consume '['
 
                     const key_reg = try self.parseExpr();
@@ -1192,6 +1197,31 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
                     base_reg = dst_reg;
+                } else {
+                    // Method call: t:method() - returns result
+                    self.advance(); // consume ':'
+
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+                    const method_name = self.current.lexeme;
+                    self.advance(); // consume method name
+
+                    // Get method from receiver
+                    const method_const = try self.proto.addConstString(method_name);
+                    const func_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(func_reg, base_reg, method_const);
+
+                    // Reserve slot for receiver and place it there
+                    const self_reg = self.proto.allocTemp(); // = func_reg + 1
+                    try self.proto.emitMOVE(self_reg, base_reg);
+
+                    // Parse extra arguments starting at func_reg + 2
+                    const extra_args = try self.parseMethodArgs(func_reg);
+
+                    // Call with 1 result (expression context)
+                    try self.proto.emitCall(func_reg, extra_args + 1, 1);
+                    base_reg = func_reg; // Result is in func_reg
                 }
             }
 
@@ -2023,19 +2053,25 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Handle function calls like print(...) or tostring(...)
-                if (std.mem.eql(u8, self.current.lexeme, "print") or
-                    std.mem.eql(u8, self.current.lexeme, "tostring"))
-                {
-                    try self.parseFunctionCall();
+                // Look ahead to see if it's a function call (with parens or no-parens)
+                const next = self.peek();
+                const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+                const is_call_no_parens = next.kind == .String or
+                    (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+                if (is_call_with_parens or is_call_no_parens) {
+                    try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Field assignment: t.field = expr
-                    try self.parseAssignment();
+                    // Check for chained method call: t.a:method() or field assignment
+                    try self.parseFieldAccessOrMethodCall();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    // Method call: t:method()
+                    try self.parseMethodCallStatement();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
@@ -2366,6 +2402,213 @@ pub const Parser = struct {
     }
 
     // Special parsing functions
+
+    /// Parse method call statement: t:method(args)
+    /// Transforms to: t.method(t, args)
+    fn parseMethodCallStatement(self: *Parser) ParseError!void {
+        // Load receiver (t) into register
+        const receiver_name = self.current.lexeme;
+        var receiver_reg: u8 = undefined;
+
+        if (try self.proto.resolveVariable(receiver_name)) |loc| {
+            receiver_reg = self.proto.allocTemp();
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(receiver_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(receiver_reg, idx),
+            }
+        } else {
+            return error.UnsupportedIdentifier;
+        }
+        self.advance(); // consume receiver name
+
+        // Expect ':'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":"))) {
+            return error.ExpectedColon;
+        }
+        self.advance(); // consume ':'
+
+        // Parse method name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const method_name = self.current.lexeme;
+        self.advance(); // consume method name
+
+        // Get method from receiver: t.method
+        const method_const = try self.proto.addConstString(method_name);
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
+
+        // Reserve slot for receiver (self) and place it there
+        const self_reg = self.proto.allocTemp(); // = func_reg + 1
+        try self.proto.emitMOVE(self_reg, receiver_reg);
+
+        // Parse extra arguments starting at func_reg + 2
+        const extra_args = try self.parseMethodArgs(func_reg);
+
+        // Total args = receiver + extra args
+        try self.proto.emitCall(func_reg, extra_args + 1, 0);
+    }
+
+    /// Parse method call arguments (for method calls where receiver is already at func_reg+1)
+    /// Places arguments at func_reg+2, func_reg+3, etc. Returns extra argument count.
+    fn parseMethodArgs(self: *Parser, func_reg: u8) ParseError!u8 {
+        var arg_count: u8 = 0;
+
+        // Check for no-parens call
+        if (self.isNoParensArg()) {
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 2) {
+                try self.proto.emitMOVE(func_reg + 2, arg_reg);
+            }
+            return 1;
+        }
+
+        // Expect '('
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
+            return error.ExpectedLeftParen;
+        }
+        self.advance(); // consume '('
+
+        // Parse arguments
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            const arg_reg = try self.parseExpr();
+            // First extra arg goes to func_reg + 2
+            if (arg_reg != func_reg + 2) {
+                try self.proto.emitMOVE(func_reg + 2, arg_reg);
+            }
+            arg_count = 1;
+
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                const next_arg = try self.parseExpr();
+                arg_count += 1;
+                // Args go to func_reg + 2 + (arg_count - 1) = func_reg + 1 + arg_count
+                if (next_arg != func_reg + 1 + arg_count) {
+                    try self.proto.emitMOVE(func_reg + 1 + arg_count, next_arg);
+                }
+            }
+        }
+
+        // Expect ')'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
+            return error.ExpectedRightParen;
+        }
+        self.advance(); // consume ')'
+
+        return arg_count;
+    }
+
+    /// Parse field access that may end with method call or assignment
+    /// Handles: t.a = expr, t.a.b = expr, t.a:method()
+    fn parseFieldAccessOrMethodCall(self: *Parser) ParseError!void {
+        // Load base table
+        const base_name = self.current.lexeme;
+        var base_reg: u8 = undefined;
+
+        if (try self.proto.resolveVariable(base_name)) |loc| {
+            base_reg = self.proto.allocTemp();
+            switch (loc) {
+                .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
+                .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
+            }
+        } else {
+            return error.UnsupportedIdentifier;
+        }
+        self.advance(); // consume base name
+
+        // Process chain of field accesses
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+            self.advance(); // consume '.'
+
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            const field_name = self.current.lexeme;
+            self.advance(); // consume field name
+
+            // Check what comes next
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                // Field assignment: t.field = expr
+                self.advance(); // consume '='
+                const value_reg = try self.parseExpr();
+                const field_const = try self.proto.addConstString(field_name);
+                try self.proto.emitSETFIELD(base_reg, field_const, value_reg);
+                return;
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+                // Method call: t.a:method()
+                self.advance(); // consume ':'
+
+                // Get the field first (t.a)
+                const field_const = try self.proto.addConstString(field_name);
+                const receiver_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(receiver_reg, base_reg, field_const);
+
+                // Parse method name
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const method_name = self.current.lexeme;
+                self.advance(); // consume method name
+
+                // Get method from receiver
+                const method_const = try self.proto.addConstString(method_name);
+                const func_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
+
+                // Reserve slot for receiver and place it there
+                const self_reg = self.proto.allocTemp(); // = func_reg + 1
+                try self.proto.emitMOVE(self_reg, receiver_reg);
+
+                // Parse extra arguments
+                const extra_args = try self.parseMethodArgs(func_reg);
+
+                try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                return;
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+                // Continue chaining: get this field and continue
+                const field_const = try self.proto.addConstString(field_name);
+                const next_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(next_reg, base_reg, field_const);
+                base_reg = next_reg;
+                // Loop continues
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
+                // Mixed access: t.field[key] = expr
+                // First get the field
+                const field_const = try self.proto.addConstString(field_name);
+                const table_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(table_reg, base_reg, field_const);
+
+                // Parse index
+                self.advance(); // consume '['
+                const key_reg = try self.parseExpr();
+
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume ']'
+
+                // Check for more chaining or assignment
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                    // Index assignment: t.field[key] = expr
+                    self.advance(); // consume '='
+                    const value_reg = try self.parseExpr();
+                    try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                    return;
+                } else {
+                    // Could support more chaining here, but for now error
+                    return error.UnsupportedStatement;
+                }
+            } else {
+                // Unknown pattern after field access
+                return error.UnsupportedStatement;
+            }
+        }
+
+        // If we reach here, it's an error (no = or : found)
+        return error.UnsupportedStatement;
+    }
+
     fn parseIoCall(self: *Parser) ParseError!void {
         // Parse "io.write(...)" calls
         // Current token should be "io"
