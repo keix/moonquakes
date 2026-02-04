@@ -532,11 +532,32 @@ pub const ProtoBuilder = struct {
     pub fn addConstNumber(self: *ProtoBuilder, lexeme: []const u8) !u32 {
         // Check for hex prefix (0x or 0X)
         if (lexeme.len > 2 and lexeme[0] == '0' and (lexeme[1] == 'x' or lexeme[1] == 'X')) {
-            const value = std.fmt.parseInt(i64, lexeme[2..], 16) catch return error.InvalidNumber;
-            const idx: u16 = @intCast(self.integers.items.len);
-            try self.integers.append(value);
-            try self.const_refs.append(.{ .kind = .integer, .index = idx });
-            return @intCast(self.const_refs.items.len - 1);
+            const hex_part = lexeme[2..];
+
+            // Check if it's a hex float (contains '.' or 'p'/'P')
+            var is_hex_float = false;
+            for (hex_part) |c| {
+                if (c == '.' or c == 'p' or c == 'P') {
+                    is_hex_float = true;
+                    break;
+                }
+            }
+
+            if (is_hex_float) {
+                // Parse as hex float
+                const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
+                const idx: u16 = @intCast(self.numbers.items.len);
+                try self.numbers.append(value);
+                try self.const_refs.append(.{ .kind = .number, .index = idx });
+                return @intCast(self.const_refs.items.len - 1);
+            } else {
+                // Parse as hex integer
+                const value = std.fmt.parseInt(i64, hex_part, 16) catch return error.InvalidNumber;
+                const idx: u16 = @intCast(self.integers.items.len);
+                try self.integers.append(value);
+                try self.const_refs.append(.{ .kind = .integer, .index = idx });
+                return @intCast(self.const_refs.items.len - 1);
+            }
         }
 
         // Try parsing as decimal integer first
@@ -553,6 +574,72 @@ pub const ProtoBuilder = struct {
             try self.const_refs.append(.{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         }
+    }
+
+    /// Parse hex float like 0x1.5p10, 0x1p4, 0x1.8p-1
+    fn parseHexFloat(lexeme: []const u8) !f64 {
+        // Skip 0x prefix
+        var i: usize = 2;
+
+        // Parse integer part (hex digits)
+        var int_part: f64 = 0;
+        while (i < lexeme.len and isHexDigit(lexeme[i])) {
+            int_part = int_part * 16 + @as(f64, @floatFromInt(hexDigitValue(lexeme[i])));
+            i += 1;
+        }
+
+        // Parse fractional part if present
+        var frac_part: f64 = 0;
+        if (i < lexeme.len and lexeme[i] == '.') {
+            i += 1;
+            var frac_mult: f64 = 1.0 / 16.0;
+            while (i < lexeme.len and isHexDigit(lexeme[i])) {
+                frac_part += @as(f64, @floatFromInt(hexDigitValue(lexeme[i]))) * frac_mult;
+                frac_mult /= 16.0;
+                i += 1;
+            }
+        }
+
+        var mantissa = int_part + frac_part;
+
+        // Parse binary exponent if present (p or P followed by decimal exponent)
+        if (i < lexeme.len and (lexeme[i] == 'p' or lexeme[i] == 'P')) {
+            i += 1;
+
+            // Parse exponent sign
+            var exp_neg = false;
+            if (i < lexeme.len and lexeme[i] == '-') {
+                exp_neg = true;
+                i += 1;
+            } else if (i < lexeme.len and lexeme[i] == '+') {
+                i += 1;
+            }
+
+            // Parse exponent value (decimal digits)
+            var exp: i32 = 0;
+            while (i < lexeme.len and lexeme[i] >= '0' and lexeme[i] <= '9') {
+                exp = exp * 10 + @as(i32, @intCast(lexeme[i] - '0'));
+                i += 1;
+            }
+
+            if (exp_neg) exp = -exp;
+
+            // Apply binary exponent: mantissa * 2^exp
+            mantissa = mantissa * std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exp)));
+        }
+
+        return mantissa;
+    }
+
+    fn isHexDigit(c: u8) bool {
+        return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+    }
+
+    fn hexDigitValue(c: u8) u8 {
+        if (c >= '0' and c <= '9') return c - '0';
+        if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+        return 0;
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
@@ -792,8 +879,13 @@ pub const Parser = struct {
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Identifier) {
-                // Look ahead to see if it's a function call
-                if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+                // Look ahead to see if it's a function call (with parens or no-parens)
+                const next = self.peek();
+                const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+                const is_call_no_parens = next.kind == .String or
+                    (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+                if (is_call_with_parens or is_call_no_parens) {
                     try self.parseGenericFunctionCall();
                 } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
                     try self.parseIoCall();
@@ -1045,8 +1137,13 @@ pub const Parser = struct {
                 return try self.parseAnonymousFunction();
             }
         } else if (self.current.kind == .Identifier) {
-            // Check for function calls that return values
-            if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "(")) {
+            // Check for function calls that return values (with parens or no-parens)
+            const next = self.peek();
+            const is_call_with_parens = next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "(");
+            const is_call_no_parens = next.kind == .String or
+                (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
+
+            if (is_call_with_parens or is_call_no_parens) {
                 return try self.parseFunctionCallExpr();
             }
             // Check if it's a variable/parameter (includes loop variables) or upvalue
@@ -2064,12 +2161,6 @@ pub const Parser = struct {
             // Handle local/upvalue function call
             self.advance(); // consume function name
 
-            // Expect '('
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-                return error.ExpectedLeftParen;
-            }
-            self.advance(); // consume '('
-
             // Load closure from local register or upvalue
             const func_reg = self.proto.allocTemp();
             switch (loc) {
@@ -2077,34 +2168,8 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(func_reg, idx),
             }
 
-            // Parse arguments with expression evaluation
-            var arg_count: u8 = 0;
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                // Parse first argument
-                const arg_reg = try self.parseExpr();
-                // Move argument to correct position (func_reg + 1)
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
-                }
-                arg_count = 1;
-
-                // Parse additional arguments
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    self.advance(); // consume ','
-                    const next_arg = try self.parseExpr();
-                    arg_count += 1;
-                    // Move to correct position
-                    if (next_arg != func_reg + arg_count) {
-                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                    }
-                }
-            }
-
-            // Expect ')'
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                return error.ExpectedRightParen;
-            }
-            self.advance(); // consume ')'
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
 
             // Emit CALL instruction (0 results for statements)
             try self.proto.emitCall(func_reg, arg_count, 0);
@@ -2115,39 +2180,13 @@ pub const Parser = struct {
         if (self.proto.findFunction(func_name)) |_| {
             self.advance(); // consume function name
 
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-                return error.ExpectedLeftParen;
-            }
-            self.advance(); // consume '('
-
             // Load closure from _ENV[func_name] via GETTABUP
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
-            // Parse arguments
-            var arg_count: u8 = 0;
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                const arg_reg = try self.parseExpr();
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
-                }
-                arg_count = 1;
-
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    self.advance();
-                    const next_arg = try self.parseExpr();
-                    arg_count += 1;
-                    if (next_arg != func_reg + arg_count) {
-                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                    }
-                }
-            }
-
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                return error.ExpectedRightParen;
-            }
-            self.advance();
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
 
             try self.proto.emitCall(func_reg, arg_count, 0);
             return;
@@ -2163,33 +2202,13 @@ pub const Parser = struct {
 
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Load function constant
         const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (0 results for statements)
         try self.proto.emitCall(func_reg, arg_count, 0);
@@ -2212,45 +2231,13 @@ pub const Parser = struct {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
 
-            // Expect '('
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-                return error.ExpectedLeftParen;
-            }
-            self.advance(); // consume '('
-
             // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
             try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
-            // Parse arguments with expression evaluation
-            var arg_count: u8 = 0;
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                // Parse first argument
-                const arg_reg = try self.parseExpr();
-                // Move argument to correct position (func_reg + 1)
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
-                }
-                arg_count = 1;
-
-                // Parse additional arguments
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                    self.advance(); // consume ','
-                    const next_arg = try self.parseExpr();
-                    arg_count += 1;
-                    // Move to correct position
-                    if (next_arg != func_reg + arg_count) {
-                        try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                    }
-                }
-            }
-
-            // Expect ')'
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-                return error.ExpectedRightParen;
-            }
-            self.advance(); // consume ')'
+            // Parse arguments (handles both parens and no-parens styles)
+            const arg_count = try self.parseCallArgs(func_reg);
 
             // Emit CALL instruction (1 result)
             try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2269,34 +2256,13 @@ pub const Parser = struct {
 
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Load function constant
         const func_reg = self.proto.allocTemp();
         const func_const_idx = try self.proto.addNativeFunc(func_id);
         try self.proto.emitLoadK(func_reg, func_const_idx);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            // Move argument to correct position (func_reg + 1)
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (1 result)
         try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2309,42 +2275,12 @@ pub const Parser = struct {
     fn parseLocalFunctionCall(self: *Parser, closure_reg: u8) ParseError!u8 {
         self.advance(); // consume function name
 
-        // Expect '('
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
-            return error.ExpectedLeftParen;
-        }
-        self.advance(); // consume '('
-
         // Move closure to a temp register for the call
         const func_reg = self.proto.allocTemp();
         try self.proto.emitMOVE(func_reg, closure_reg);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-
-            // Parse additional arguments
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                self.advance(); // consume ','
-                const next_arg = try self.parseExpr();
-                arg_count += 1;
-                if (next_arg != func_reg + arg_count) {
-                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
-                }
-            }
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (1 result)
         try self.proto.emitCall(func_reg, arg_count, 1);
@@ -2356,18 +2292,51 @@ pub const Parser = struct {
     fn parseUpvalueFunctionCall(self: *Parser, upval_idx: u8) ParseError!u8 {
         self.advance(); // consume function name
 
-        // Expect '('
+        // Load closure from upvalue to a temp register for the call
+        const func_reg = self.proto.allocTemp();
+        try self.proto.emitGETUPVAL(func_reg, upval_idx);
+
+        // Parse arguments (handles both parens and no-parens styles)
+        const arg_count = try self.parseCallArgs(func_reg);
+
+        // Emit CALL instruction (1 result)
+        try self.proto.emitCall(func_reg, arg_count, 1);
+
+        return func_reg;
+    }
+
+    fn parseExpr(self: *Parser) ParseError!u8 {
+        return self.parseOr();
+    }
+
+    /// Check if current token starts a no-parens call argument (string or table)
+    fn isNoParensArg(self: *Parser) bool {
+        return self.current.kind == .String or
+            (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{"));
+    }
+
+    /// Parse function call arguments, handling both parenthesized and no-parens styles.
+    /// Returns the argument count. func_reg should already be allocated.
+    fn parseCallArgs(self: *Parser, func_reg: u8) ParseError!u8 {
+        var arg_count: u8 = 0;
+
+        // Check for no-parens call: f "string" or f {table}
+        if (self.isNoParensArg()) {
+            // Single argument without parentheses
+            const arg_reg = try self.parseExpr();
+            if (arg_reg != func_reg + 1) {
+                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            }
+            return 1;
+        }
+
+        // Normal call with parentheses
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
             return error.ExpectedLeftParen;
         }
         self.advance(); // consume '('
 
-        // Load closure from upvalue to a temp register for the call
-        const func_reg = self.proto.allocTemp();
-        try self.proto.emitGETUPVAL(func_reg, upval_idx);
-
         // Parse arguments
-        var arg_count: u8 = 0;
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             // Parse first argument
             const arg_reg = try self.parseExpr();
@@ -2393,14 +2362,7 @@ pub const Parser = struct {
         }
         self.advance(); // consume ')'
 
-        // Emit CALL instruction (1 result)
-        try self.proto.emitCall(func_reg, arg_count, 1);
-
-        return func_reg;
-    }
-
-    fn parseExpr(self: *Parser) ParseError!u8 {
-        return self.parseOr();
+        return arg_count;
     }
 
     // Special parsing functions

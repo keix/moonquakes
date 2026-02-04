@@ -121,8 +121,28 @@ pub const Lexer = struct {
         {
             _ = self.advance(); // consume '0'
             _ = self.advance(); // consume 'x' or 'X'
+            // Hex integer part
             while (self.pos < self.src.len and isHexDigit(self.peek())) {
                 _ = self.advance();
+            }
+            // Hex fractional part (e.g., 0x1.5)
+            if (self.pos < self.src.len and self.peek() == '.') {
+                _ = self.advance(); // consume '.'
+                while (self.pos < self.src.len and isHexDigit(self.peek())) {
+                    _ = self.advance();
+                }
+            }
+            // Hex exponent part (e.g., 0x1.5p10, 0x1P-5)
+            if (self.pos < self.src.len and (self.peek() == 'p' or self.peek() == 'P')) {
+                _ = self.advance(); // consume 'p' or 'P'
+                // Optional sign
+                if (self.pos < self.src.len and (self.peek() == '+' or self.peek() == '-')) {
+                    _ = self.advance();
+                }
+                // Exponent digits (decimal)
+                while (self.pos < self.src.len and isDigit(self.peek())) {
+                    _ = self.advance();
+                }
             }
         } else {
             // Decimal integer part
