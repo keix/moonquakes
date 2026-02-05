@@ -1184,6 +1184,15 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
                     base_reg = dst_reg;
+
+                    // Check for function call: t.g()
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        // The field value is a function, call it
+                        const func_reg = base_reg;
+                        const arg_count = try self.parseCallArgs(func_reg);
+                        try self.proto.emitCall(func_reg, arg_count, 1);
+                        base_reg = func_reg; // Result is in func_reg
+                    }
                 } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                     self.advance(); // consume '['
 
@@ -1197,6 +1206,14 @@ pub const Parser = struct {
                     const dst_reg = self.proto.allocTemp();
                     try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
                     base_reg = dst_reg;
+
+                    // Check for function call: t["key"]() or t[k]()
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                        const func_reg = base_reg;
+                        const arg_count = try self.parseCallArgs(func_reg);
+                        try self.proto.emitCall(func_reg, arg_count, 1);
+                        base_reg = func_reg; // Result is in func_reg
+                    }
                 } else {
                     // Method call: t:method() - returns result
                     self.advance(); // consume ':'
