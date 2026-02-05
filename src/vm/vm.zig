@@ -1219,6 +1219,9 @@ pub const VM = struct {
                         const nresults = returning_ci.nresults;
                         const dst_base = returning_ci.ret_base; // Where to place results in caller's frame
 
+                        // Close upvalues before destroying stack frame
+                        self.closeUpvalues(returning_ci.base);
+
                         // Pop the call info
                         self.popCallInfo();
 
@@ -1291,6 +1294,9 @@ pub const VM = struct {
                         const nresults = returning_ci.nresults;
                         const dst_base = returning_ci.ret_base;
 
+                        // Close upvalues before destroying stack frame
+                        self.closeUpvalues(returning_ci.base);
+
                         // Pop the call info
                         self.popCallInfo();
 
@@ -1319,6 +1325,9 @@ pub const VM = struct {
                         const returning_ci = self.ci.?;
                         const nresults = returning_ci.nresults;
                         const dst_base = returning_ci.ret_base;
+
+                        // Close upvalues before destroying stack frame
+                        self.closeUpvalues(returning_ci.base);
 
                         // Pop the call info
                         self.popCallInfo();
