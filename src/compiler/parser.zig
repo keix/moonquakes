@@ -482,8 +482,9 @@ pub const ProtoBuilder = struct {
         return @intCast(addr);
     }
 
-    pub fn emitReturn(self: *ProtoBuilder, reg: u8) !void {
-        const instr = Instruction.initABC(.RETURN, reg, 2, 0);
+    pub fn emitReturn(self: *ProtoBuilder, reg: u8, count: u8) !void {
+        // B = count + 1 (B=1 means 0 values, B=2 means 1 value, etc.)
+        const instr = Instruction.initABC(.RETURN, reg, count + 1, 0);
         try self.code.append(instr);
     }
 
@@ -849,7 +850,7 @@ pub const Parser = struct {
         // Add nil constant and emit return nil
         const reg = self.proto.allocTemp();
         try self.proto.emitLOADNIL(reg, 1);
-        try self.proto.emitReturn(reg);
+        try self.proto.emitReturn(reg, 1);
     }
 
     // Parse functions grouped together
@@ -920,8 +921,40 @@ pub const Parser = struct {
     // Statement parsing
     fn parseReturn(self: *Parser) ParseError!void {
         self.advance(); // consume 'return'
-        const reg = try self.parseExpr();
-        try self.proto.emitReturn(reg);
+
+        // Check for bare return (no values)
+        if (self.current.kind == .Keyword and
+            (std.mem.eql(u8, self.current.lexeme, "end") or
+                std.mem.eql(u8, self.current.lexeme, "else") or
+                std.mem.eql(u8, self.current.lexeme, "elseif") or
+                std.mem.eql(u8, self.current.lexeme, "until")))
+        {
+            try self.proto.emitReturn(0, 0);
+            return;
+        }
+        if (self.current.kind == .Eof) {
+            try self.proto.emitReturn(0, 0);
+            return;
+        }
+
+        // Parse first return value
+        const first_reg = try self.parseExpr();
+        var count: u8 = 1;
+
+        // Parse additional return values (comma-separated)
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            const expr_reg = try self.parseExpr();
+
+            // Values must be in consecutive registers
+            const expected_reg = first_reg + count;
+            if (expr_reg != expected_reg) {
+                try self.proto.emitMOVE(expected_reg, expr_reg);
+            }
+            count += 1;
+        }
+
+        try self.proto.emitReturn(first_reg, count);
     }
 
     // do ... end block (creates a new scope)
@@ -1320,11 +1353,39 @@ pub const Parser = struct {
 
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
-            // Check for named field: Name '=' expr
-            if (self.current.kind == .Identifier and
+            // Check for indexed field: '[' expr ']' '=' expr
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
+                self.advance(); // consume '['
+
+                const base_reg = self.proto.next_reg;
+
+                // Parse key expression
+                const key_reg = try self.parseExpr();
+
+                // Expect ']'
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume ']'
+
+                // Expect '='
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+                    return error.ExpectedEquals;
+                }
+                self.advance(); // consume '='
+
+                // Parse value expression
+                const value_reg = try self.parseExpr();
+
+                // Emit SETTABLE: table[key] = value
+                try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+
+                // Free temp registers
+                self.proto.next_reg = base_reg;
+            } else if (self.current.kind == .Identifier and
                 self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "="))
             {
-                // Named field
+                // Named field: Name '=' expr
                 const field_name = self.current.lexeme;
                 self.advance(); // consume name
                 self.advance(); // consume '='
@@ -2114,34 +2175,81 @@ pub const Parser = struct {
             return self.parseLocalFunction();
         }
 
-        // Expect identifier
+        // Parse variable names (comma-separated)
+        var var_names: [256][]const u8 = undefined;
+        var var_count: u8 = 0;
+
+        // First identifier
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
         }
-        const var_name = self.current.lexeme;
-        self.advance(); // consume identifier
+        var_names[var_count] = self.current.lexeme;
+        var_count += 1;
+        self.advance();
 
-        // Allocate register from locals_top (not temps) - reserves the slot
-        const var_reg = self.proto.allocLocalReg();
+        // Additional identifiers after comma
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            var_names[var_count] = self.current.lexeme;
+            var_count += 1;
+            self.advance();
+        }
+
+        // Allocate registers for all variables
+        const first_reg = self.proto.allocLocalReg();
+        var i: u8 = 1;
+        while (i < var_count) : (i += 1) {
+            _ = self.proto.allocLocalReg();
+        }
 
         // Check for initialization
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
             self.advance(); // consume '='
 
-            // Parse initializer expression (temps start after var_reg)
-            const expr_reg = try self.parseExpr();
+            // Parse initializer expressions (comma-separated)
+            var expr_count: u8 = 0;
+            var expr_reg = try self.parseExpr();
 
-            // Move expression result to variable register if needed
-            if (expr_reg != var_reg) {
-                try self.proto.emitMOVE(var_reg, expr_reg);
+            // Move first expression to first variable register
+            if (expr_reg != first_reg) {
+                try self.proto.emitMOVE(first_reg, expr_reg);
+            }
+            expr_count += 1;
+
+            // Parse remaining expressions
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                expr_reg = try self.parseExpr();
+
+                if (expr_count < var_count) {
+                    const target_reg = first_reg + expr_count;
+                    if (expr_reg != target_reg) {
+                        try self.proto.emitMOVE(target_reg, expr_reg);
+                    }
+                }
+                // If more values than variables, discard extras
+                expr_count += 1;
+            }
+
+            // Fill remaining variables with nil if fewer values
+            if (expr_count < var_count) {
+                const nil_start = first_reg + expr_count;
+                const nil_count = var_count - expr_count;
+                try self.proto.emitLOADNIL(nil_start, nil_count);
             }
         } else {
-            // No initializer - initialize to nil
-            try self.proto.emitLOADNIL(var_reg, 1);
+            // No initializer - initialize all to nil
+            try self.proto.emitLOADNIL(first_reg, var_count);
         }
 
-        // NOW add to scope (variable visible after its initializer)
-        try self.proto.addVariable(var_name, var_reg);
+        // Add all variables to scope (visible after initializers)
+        i = 0;
+        while (i < var_count) : (i += 1) {
+            try self.proto.addVariable(var_names[i], first_reg + i);
+        }
     }
 
     // Function call parsing

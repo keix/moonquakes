@@ -9,47 +9,6 @@ const parser = @import("compiler/parser.zig");
 const materialize = @import("compiler/materialize.zig").materialize;
 const ErrorHandler = @import("vm/error.zig");
 
-/// Owned value that doesn't depend on VM/GC lifetime.
-/// Strings are copied and owned by the caller.
-pub const OwnedValue = union(enum) {
-    nil,
-    boolean: bool,
-    integer: i64,
-    number: f64,
-    string: []u8,
-
-    pub fn deinit(self: *OwnedValue, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .string => |s| allocator.free(s),
-            else => {},
-        }
-    }
-
-    pub fn format(self: OwnedValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (self) {
-            .nil => try writer.writeAll("nil"),
-            .boolean => |b| try writer.print("{}", .{b}),
-            .integer => |i| try writer.print("{}", .{i}),
-            .number => |n| try writer.print("{d}", .{n}),
-            .string => |s| try writer.print("{s}", .{s}),
-        }
-    }
-};
-
-/// Return value from Moonquakes execution.
-/// Owns all GC-managed data (strings copied out).
-pub const OwnedReturnValue = union(enum) {
-    none,
-    single: OwnedValue,
-
-    pub fn deinit(self: *OwnedReturnValue, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .single => |*v| v.deinit(allocator),
-            .none => {},
-        }
-    }
-};
-
 /// This project is a clean-room implementation inspired by
 /// the Lua 5.4 language specification.
 /// It does not include or depend on the original Lua source code.
@@ -213,7 +172,13 @@ pub const Moonquakes = struct {
         return switch (result) {
             .none => .none,
             .single => |val| .{ .single = try self.toOwnedValue(val) },
-            .multiple => .none, // TODO: support multiple return values
+            .multiple => |vals| {
+                // Return first value for now (multi-value assignment handled separately)
+                if (vals.len > 0) {
+                    return .{ .single = try self.toOwnedValue(vals[0]) };
+                }
+                return .none;
+            },
         };
     }
 
@@ -310,5 +275,46 @@ pub const Moonquakes = struct {
 
         // Use Sugar Layer to translate the error
         return ErrorHandler.reportError(vm_error_typed, self.allocator, null);
+    }
+};
+
+/// Owned value that doesn't depend on VM/GC lifetime.
+/// Strings are copied and owned by the caller.
+pub const OwnedValue = union(enum) {
+    nil,
+    boolean: bool,
+    integer: i64,
+    number: f64,
+    string: []u8,
+
+    pub fn deinit(self: *OwnedValue, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .string => |s| allocator.free(s),
+            else => {},
+        }
+    }
+
+    pub fn format(self: OwnedValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (self) {
+            .nil => try writer.writeAll("nil"),
+            .boolean => |b| try writer.print("{}", .{b}),
+            .integer => |i| try writer.print("{}", .{i}),
+            .number => |n| try writer.print("{d}", .{n}),
+            .string => |s| try writer.print("{s}", .{s}),
+        }
+    }
+};
+
+/// Return value from Moonquakes execution.
+/// Owns all GC-managed data (strings copied out).
+pub const OwnedReturnValue = union(enum) {
+    none,
+    single: OwnedValue,
+
+    pub fn deinit(self: *OwnedReturnValue, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .single => |*v| v.deinit(allocator),
+            .none => {},
+        }
     }
 };
