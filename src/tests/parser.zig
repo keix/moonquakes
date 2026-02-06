@@ -196,8 +196,9 @@ test "parser: return (no expression)" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(&vm, allocator, "return");
-    try testing.expectError(error.ExpectedExpression, result);
+    // Bare return is valid - returns no values
+    const result = try parseAndExecute(&vm, allocator, "return");
+    try testing.expectEqual(VM.ReturnValue.none, result);
 }
 
 test "parser: return \"hello\" (string literal)" {
