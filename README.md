@@ -13,6 +13,20 @@ Even decades after its creation, Lua's architecture remains one of the most eleg
 
 Moonquakes carries that elegance forward — rewritten in Zig.
 
+## Dependencies
+Moonquakes has intentionally minimal dependencies.  
+No external libraries, system runtimes, or original Lua source code are required.
+
+- **Zig compiler 0.15.2** (required)
+
+As Zig evolves, compiler and build APIs may change.
+
+For a stable and reproducible environment, using Nix is recommended.
+Nix is optional and leaves your system untouched.
+
+```sh
+nix develop
+```
 
 ## Build
 Moonquakes is built with Zig.

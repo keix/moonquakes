@@ -3,7 +3,9 @@ const mq_mod = @import("moonquakes.zig");
 const Moonquakes = mq_mod.Moonquakes;
 
 pub fn main() !void {
-    const stdout = std.io.getStdOut().writer();
+    var stdout_writer = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_writer.interface;
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -32,7 +34,7 @@ pub fn main() !void {
         try stdout.print("Result: ", .{});
         switch (result) {
             .none => try stdout.print("nil\n", .{}),
-            .single => |val| try stdout.print("{}\n", .{val}),
+            .single => |val| try stdout.print("{any}\n", .{val}),
         }
     } else {
         try stdout.print("Usage: moonquakes <lua_file>\n", .{});

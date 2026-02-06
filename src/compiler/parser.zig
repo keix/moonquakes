@@ -131,22 +131,22 @@ pub const ProtoBuilder = struct {
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
-            .code = std.ArrayList(Instruction).init(allocator),
-            .booleans = std.ArrayList(bool).init(allocator),
-            .integers = std.ArrayList(i64).init(allocator),
-            .numbers = std.ArrayList(f64).init(allocator),
-            .strings = std.ArrayList([]const u8).init(allocator),
-            .native_ids = std.ArrayList(NativeFnId).init(allocator),
-            .const_refs = std.ArrayList(ConstRef).init(allocator),
-            .protos = std.ArrayList(*const RawProto).init(allocator),
+            .code = .{},
+            .booleans = .{},
+            .integers = .{},
+            .numbers = .{},
+            .strings = .{},
+            .native_ids = .{},
+            .const_refs = .{},
+            .protos = .{},
             .maxstacksize = 0,
             .next_reg = 0,
             .locals_top = 0,
             .allocator = allocator,
-            .functions = std.ArrayList(FunctionEntry).init(allocator),
-            .variables = std.ArrayList(VariableEntry).init(allocator),
-            .scope_starts = std.ArrayList(ScopeMark).init(allocator),
-            .upvalues = std.ArrayList(Upvaldesc).init(allocator),
+            .functions = .{},
+            .variables = .{},
+            .scope_starts = .{},
+            .upvalues = .{},
             .parent = parent,
         };
     }
@@ -163,18 +163,18 @@ pub const ProtoBuilder = struct {
             self.allocator.free(s);
         }
 
-        self.code.deinit();
-        self.booleans.deinit();
-        self.integers.deinit();
-        self.numbers.deinit();
-        self.strings.deinit();
-        self.native_ids.deinit();
-        self.const_refs.deinit();
-        self.protos.deinit();
-        self.functions.deinit();
-        self.variables.deinit();
-        self.scope_starts.deinit();
-        self.upvalues.deinit();
+        self.code.deinit(self.allocator);
+        self.booleans.deinit(self.allocator);
+        self.integers.deinit(self.allocator);
+        self.numbers.deinit(self.allocator);
+        self.strings.deinit(self.allocator);
+        self.native_ids.deinit(self.allocator);
+        self.const_refs.deinit(self.allocator);
+        self.protos.deinit(self.allocator);
+        self.functions.deinit(self.allocator);
+        self.variables.deinit(self.allocator);
+        self.scope_starts.deinit(self.allocator);
+        self.upvalues.deinit(self.allocator);
     }
 
     /// Allocate a temporary register (for expression evaluation)
@@ -199,7 +199,7 @@ pub const ProtoBuilder = struct {
 
     /// Enter a new scope (for blocks, functions, loops)
     pub fn enterScope(self: *ProtoBuilder) !void {
-        try self.scope_starts.append(.{
+        try self.scope_starts.append(self.allocator, .{
             .var_len = self.variables.items.len,
             .locals_top = self.locals_top,
         });
@@ -234,115 +234,115 @@ pub const ProtoBuilder = struct {
     // emit functions grouped together
     pub fn emit(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8) !void {
         const instr = Instruction.initABC(op, a, b, c);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitAdd(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.ADD, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitBAND(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BAND, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitBOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BOR, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitBXOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BXOR, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitBNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.BNOT, dst, src, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitSHL(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SHL, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitSHR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SHR, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
         const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.DIV, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitIDIV(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.IDIV, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.EQ, negate, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitLT(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.LT, negate, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitLE(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.LE, negate, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitFORPREP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORPREP, base_reg, jump_target);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitGETTABLE(self: *ProtoBuilder, dst: u8, table: u8, key: u8) !void {
         const instr = Instruction.initABC(.GETTABLE, dst, table, key);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
         const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit SETTABUP instruction: UpValue[A][K[B]] := R[C]
     pub fn emitSETTABUP(self: *ProtoBuilder, upval: u8, key_const: u32, src: u8) !void {
         const instr = Instruction.initABC(.SETTABUP, upval, @intCast(key_const), src);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
         const instr = Instruction.initsJ(.JMP, offset);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitLoadK(self: *ProtoBuilder, reg: u8, const_idx: u32) !void {
         const instr = Instruction.initABx(.LOADK, reg, @intCast(const_idx));
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(reg + 1);
     }
 
     /// Emit CLOSURE instruction: R[A] := closure(KPROTO[Bx])
     pub fn emitClosure(self: *ProtoBuilder, reg: u8, proto_idx: u32) !void {
         const instr = Instruction.initABx(.CLOSURE, reg, @intCast(proto_idx));
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(reg + 1);
     }
 
@@ -350,159 +350,159 @@ pub const ProtoBuilder = struct {
         // Use Lua 5.4 standard opcodes instead of LOADBOOL
         if (value and !skip) {
             const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
-            try self.code.append(instr);
+            try self.code.append(self.allocator, instr);
         } else if (!value and !skip) {
             const instr = Instruction.initABC(.LOADFALSE, dst, 0, 0);
-            try self.code.append(instr);
+            try self.code.append(self.allocator, instr);
         } else if (!value and skip) {
             const instr = Instruction.initABC(.LFALSESKIP, dst, 0, 0);
-            try self.code.append(instr);
+            try self.code.append(self.allocator, instr);
         } else {
             // value=true, skip=true: Load true and skip next instruction
             const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
-            try self.code.append(instr);
+            try self.code.append(self.allocator, instr);
             const skip_instr = Instruction.initsJ(.JMP, 1); // Skip exactly 1 instruction
-            try self.code.append(skip_instr);
+            try self.code.append(self.allocator, skip_instr);
         }
     }
 
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
         const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(dst + count);
     }
 
     pub fn emitMod(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MOD, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit GETUPVAL instruction: R[A] := UpValue[B]
     pub fn emitGETUPVAL(self: *ProtoBuilder, dst: u8, upval_idx: u8) !void {
         const instr = Instruction.initABC(.GETUPVAL, dst, upval_idx, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(dst + 1);
     }
 
     /// Emit SETUPVAL instruction: UpValue[B] := R[A]
     pub fn emitSETUPVAL(self: *ProtoBuilder, src: u8, upval_idx: u8) !void {
         const instr = Instruction.initABC(.SETUPVAL, src, upval_idx, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit NOT instruction: R[A] := not R[B]
     pub fn emitNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.NOT, dst, src, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit UNM instruction: R[A] := -R[B]
     pub fn emitUNM(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.UNM, dst, src, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit LEN instruction: R[A] := #R[B]
     pub fn emitLEN(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.LEN, dst, src, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit CONCAT instruction: R[A] := R[B] .. ... .. R[C]
     pub fn emitCONCAT(self: *ProtoBuilder, dst: u8, start: u8, end: u8) !void {
         const instr = Instruction.initABC(.CONCAT, dst, start, end);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(dst + 1);
     }
 
     /// Emit SETFIELD instruction: R[A][K[B]] := R[C]
     pub fn emitSETFIELD(self: *ProtoBuilder, table: u8, key_const: u32, src: u8) !void {
         const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit SETTABLE instruction: R[A][R[B]] := R[C]
     pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETTABLE, table, key, src);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
     pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETI, table, index, src);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
     pub fn emitGETFIELD(self: *ProtoBuilder, dst: u8, table: u8, key_const: u32) !void {
         const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         self.updateMaxStack(dst + 1);
     }
 
     pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MUL, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitPOW(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.POW, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitPatchableFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, 0); // placeholder
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         return @intCast(addr);
     }
 
     pub fn emitPatchableFORPREP(self: *ProtoBuilder, base_reg: u8) !u32 {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.FORPREP, base_reg, 0); // placeholder
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         return @intCast(addr);
     }
 
     pub fn emitPatchableJMP(self: *ProtoBuilder) !u32 {
         const addr = self.code.items.len;
         const instr = Instruction.initsJ(.JMP, 0); // placeholder
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
         return @intCast(addr);
     }
 
     pub fn emitReturn(self: *ProtoBuilder, reg: u8, count: u8) !void {
         // B = count + 1 (B=1 means 0 values, B=2 means 1 value, etc.)
         const instr = Instruction.initABC(.RETURN, reg, count + 1, 0);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitSub(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SUB, dst, left, right);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     /// Emit TESTSET instruction: if (R[B].toBoolean() == k) R[A] := R[B] else pc++
     pub fn emitTESTSET(self: *ProtoBuilder, dst: u8, src: u8, k: bool) !void {
         const instr = Instruction.initABCk(.TESTSET, dst, src, 0, k);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn emitTEST(self: *ProtoBuilder, reg: u8, condition: bool) !void {
         const k: u8 = if (condition) 1 else 0;
         const instr = Instruction.initABC(.TEST, reg, 0, k);
-        try self.code.append(instr);
+        try self.code.append(self.allocator, instr);
     }
 
     pub fn patchFORInstr(self: *ProtoBuilder, addr: u32, target: u32) void {
@@ -549,15 +549,15 @@ pub const ProtoBuilder = struct {
                 // Parse as hex float
                 const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
                 const idx: u16 = @intCast(self.numbers.items.len);
-                try self.numbers.append(value);
-                try self.const_refs.append(.{ .kind = .number, .index = idx });
+                try self.numbers.append(self.allocator, value);
+                try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             } else {
                 // Parse as hex integer
                 const value = std.fmt.parseInt(i64, hex_part, 16) catch return error.InvalidNumber;
                 const idx: u16 = @intCast(self.integers.items.len);
-                try self.integers.append(value);
-                try self.const_refs.append(.{ .kind = .integer, .index = idx });
+                try self.integers.append(self.allocator, value);
+                try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             }
         }
@@ -565,15 +565,15 @@ pub const ProtoBuilder = struct {
         // Try parsing as decimal integer first
         if (std.fmt.parseInt(i64, lexeme, 10)) |value| {
             const idx: u16 = @intCast(self.integers.items.len);
-            try self.integers.append(value);
-            try self.const_refs.append(.{ .kind = .integer, .index = idx });
+            try self.integers.append(self.allocator, value);
+            try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         } else |_| {
             // Try parsing as float
             const value = std.fmt.parseFloat(f64, lexeme) catch return error.InvalidNumber;
             const idx: u16 = @intCast(self.numbers.items.len);
-            try self.numbers.append(value);
-            try self.const_refs.append(.{ .kind = .number, .index = idx });
+            try self.numbers.append(self.allocator, value);
+            try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         }
     }
@@ -654,22 +654,22 @@ pub const ProtoBuilder = struct {
         // For now, simple duplication is sufficient; GC handles runtime interning.
         const idx: u16 = @intCast(self.strings.items.len);
         const duped = try self.allocator.dupe(u8, lexeme);
-        try self.strings.append(duped);
-        try self.const_refs.append(.{ .kind = .string, .index = idx });
+        try self.strings.append(self.allocator, duped);
+        try self.const_refs.append(self.allocator, .{ .kind = .string, .index = idx });
         return @intCast(self.const_refs.items.len - 1);
     }
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
         // Store native function ID (no GC allocation)
         const idx: u16 = @intCast(self.native_ids.items.len);
-        try self.native_ids.append(native_id);
-        try self.const_refs.append(.{ .kind = .native_fn, .index = idx });
+        try self.native_ids.append(self.allocator, native_id);
+        try self.const_refs.append(self.allocator, .{ .kind = .native_fn, .index = idx });
         return @intCast(self.const_refs.items.len - 1);
     }
 
     /// Add a nested function prototype for CLOSURE opcode
     pub fn addProto(self: *ProtoBuilder, proto: *const RawProto) !u32 {
-        try self.protos.append(proto);
+        try self.protos.append(self.allocator, proto);
         return @intCast(self.protos.items.len - 1);
     }
 
@@ -680,7 +680,7 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn addFunction(self: *ProtoBuilder, name: []const u8, proto: *RawProto) !void {
-        try self.functions.append(FunctionEntry{
+        try self.functions.append(self.allocator, FunctionEntry{
             .name = name,
             .proto = proto,
         });
@@ -701,7 +701,7 @@ pub const ProtoBuilder = struct {
 
     // Variable management methods
     pub fn addVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
-        try self.variables.append(.{ .name = name, .reg = reg });
+        try self.variables.append(self.allocator, .{ .name = name, .reg = reg });
     }
 
     pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
@@ -751,11 +751,11 @@ pub const ProtoBuilder = struct {
         switch (parent_loc) {
             .local => |reg| {
                 // Parent has it as a local - capture from parent's stack
-                try self.upvalues.append(.{ .instack = true, .idx = reg });
+                try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg });
             },
             .upvalue => |idx| {
                 // Parent has it as upvalue - capture from parent's upvalues
-                try self.upvalues.append(.{ .instack = false, .idx = idx });
+                try self.upvalues.append(self.allocator, .{ .instack = false, .idx = idx });
             },
         }
 
@@ -816,7 +816,7 @@ pub const Parser = struct {
             .lexer = lx,
             .proto = proto,
             .current = undefined,
-            .break_jumps = std.ArrayList(u32).init(proto.allocator),
+            .break_jumps = .{},
             .loop_depth = 0,
         };
         p.advance();
@@ -824,7 +824,7 @@ pub const Parser = struct {
     }
 
     pub fn deinit(self: *Parser) void {
-        self.break_jumps.deinit();
+        self.break_jumps.deinit(self.proto.allocator);
     }
 
     fn advance(self: *Parser) void {
@@ -1768,8 +1768,8 @@ pub const Parser = struct {
 
         // Handle elseif/else
         var current_false_jmp = false_jmp;
-        var else_jumps = std.ArrayList(u32).init(self.proto.allocator);
-        defer else_jumps.deinit();
+        var else_jumps: std.ArrayList(u32) = .{};
+        defer else_jumps.deinit(self.proto.allocator);
 
         // Handle elseif chains
         while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "elseif")) {
@@ -1811,7 +1811,7 @@ pub const Parser = struct {
 
             // Jump over remaining elseif/else when this condition was true
             const jump_to_end = try self.proto.emitPatchableJMP();
-            try else_jumps.append(jump_to_end);
+            try else_jumps.append(self.proto.allocator, jump_to_end);
         }
 
         // Handle final else if present
@@ -2094,7 +2094,7 @@ pub const Parser = struct {
 
         // Emit JMP to be patched later at end of loop
         const jmp_addr = try self.proto.emitPatchableJMP();
-        try self.break_jumps.append(jmp_addr);
+        try self.break_jumps.append(self.proto.allocator, jmp_addr);
     }
 
     fn parseStatements(self: *Parser) StatementError!void {
@@ -3073,7 +3073,7 @@ pub const Parser = struct {
 /// Supports: \n, \t, \r, \\, \", \'
 fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < input.len) {
@@ -3081,37 +3081,37 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
             const next = input[i + 1];
             switch (next) {
                 'n' => {
-                    try result.append('\n');
+                    try result.append(allocator, '\n');
                     i += 2;
                 },
                 't' => {
-                    try result.append('\t');
+                    try result.append(allocator, '\t');
                     i += 2;
                 },
                 'r' => {
-                    try result.append('\r');
+                    try result.append(allocator, '\r');
                     i += 2;
                 },
                 '\\' => {
-                    try result.append('\\');
+                    try result.append(allocator, '\\');
                     i += 2;
                 },
                 '"' => {
-                    try result.append('"');
+                    try result.append(allocator, '"');
                     i += 2;
                 },
                 '\'' => {
-                    try result.append('\'');
+                    try result.append(allocator, '\'');
                     i += 2;
                 },
                 else => {
                     // Unknown escape - keep as-is
-                    try result.append(input[i]);
+                    try result.append(allocator, input[i]);
                     i += 1;
                 },
             }
         } else {
-            try result.append(input[i]);
+            try result.append(allocator, input[i]);
             i += 1;
         }
     }

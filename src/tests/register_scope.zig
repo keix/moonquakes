@@ -22,28 +22,28 @@ fn compileAndGetMaxStack(allocator: std.mem.Allocator, source: []const u8) !u8 {
 /// Generate Lua code with N elseif branches
 /// Uses numeric comparisons that the parser supports
 fn generateElseifChain(allocator: std.mem.Allocator, n: usize) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
+    var buf: std.ArrayList(u8) = .{};
+    errdefer buf.deinit(allocator);
 
-    try buf.appendSlice("if 1 == 0 then return 0\n");
+    try buf.appendSlice(allocator, "if 1 == 0 then return 0\n");
     for (0..n) |i| {
-        try buf.writer().print("elseif {d} == {d} then return {d}\n", .{ i + 1, i + 1, i + 1 });
+        try buf.writer(allocator).print("elseif {d} == {d} then return {d}\n", .{ i + 1, i + 1, i + 1 });
     }
-    try buf.appendSlice("else return 999 end\n");
+    try buf.appendSlice(allocator, "else return 999 end\n");
 
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(allocator);
 }
 
 /// Generate Lua code with N sequential function calls
 fn generateSequentialCalls(allocator: std.mem.Allocator, n: usize) ![]const u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
+    var buf: std.ArrayList(u8) = .{};
+    errdefer buf.deinit(allocator);
 
     for (0..n) |i| {
-        try buf.writer().print("print({d})\n", .{i});
+        try buf.writer(allocator).print("print({d})\n", .{i});
     }
 
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(allocator);
 }
 
 test "register scope: elseif chain does not accumulate registers" {

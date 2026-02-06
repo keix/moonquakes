@@ -62,7 +62,8 @@ fn raiseError(vm: anytype, message: []const u8) !void {
     // 3. Integrate with VM error handling mechanism
 
     // For now, print error and return VM error
-    const stderr = std.io.getStdErr().writer();
+    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    const stderr = &stderr_writer.interface;
     try stderr.print("Lua error: {s}\n", .{message});
 
     // Return a VM error that will be caught by the Sugar Layer

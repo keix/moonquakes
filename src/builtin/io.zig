@@ -5,10 +5,11 @@ const TValue = @import("../runtime/value.zig").TValue;
 /// Corresponds to Lua manual chapter "Input and Output Facilities"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.8
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const stdout = std.io.getStdOut().writer();
+    var stdout_writer = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_writer.interface;
     if (nargs > 0) {
         const arg = &vm.stack[vm.base + func_reg + 1];
-        try stdout.print("{}", .{arg.*}); // No newline for io.write
+        try stdout.print("{any}", .{arg.*}); // No newline for io.write
     }
 
     // Set result (io.write returns file object, but we return nil for simplicity)

@@ -257,7 +257,8 @@ pub const VM = struct {
         defer if (error_message.len > 0) self.allocator.free(error_message);
 
         // Print the user-friendly error message
-        const stderr = std.io.getStdErr().writer();
+        var stderr_writer = std.fs.File.stderr().writer(&.{});
+        const stderr = &stderr_writer.interface;
         stderr.print("{s}\n", .{error_message}) catch {};
 
         // Propagate the original error for proper control flow
