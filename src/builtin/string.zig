@@ -6,7 +6,9 @@ const TValue = @import("../runtime/value.zig").TValue;
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.4
 fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
     // Handle integers that fit in i64 range and have no fractional part
-    if (n == @floor(n) and n >= std.math.minInt(i64) and n <= std.math.maxInt(i64)) {
+    const min_i64: f64 = @floatFromInt(std.math.minInt(i64));
+    const max_i64: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (n == @floor(n) and n >= min_i64 and n <= max_i64) {
         const int_val: i64 = @intFromFloat(n);
         return try std.fmt.allocPrint(allocator, "{d}", .{int_val});
     }

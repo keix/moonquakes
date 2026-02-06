@@ -6,7 +6,8 @@ const string = @import("string.zig");
 /// Corresponds to Lua manual chapter "Basic Functions"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.1
 pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const stdout = std.io.getStdOut().writer();
+    var stdout_writer = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_writer.interface;
 
     // Save original top to restore later
     const saved_top = vm.top;
