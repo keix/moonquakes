@@ -811,16 +811,19 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const new_base = vm.base + a;
                 const ret_base = vm.base + a;
 
+                // Shift arguments down by 1 slot (overwrite function value)
+                // Note: regions overlap, so copy forward (src > dst)
                 if (nargs > 0) {
-                    var i: u32 = 0;
-                    while (i < nargs) : (i += 1) {
+                    for (0..nargs) |i| {
                         vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
                     }
                 }
 
-                var i: u32 = nargs;
-                while (i < func_proto.numparams) : (i += 1) {
-                    vm.stack[new_base + i] = .nil;
+                // Fill remaining parameter slots with nil
+                if (nargs < func_proto.numparams) {
+                    for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                        slot.* = .nil;
+                    }
                 }
 
                 _ = try vm.pushCallInfo(func_proto, closure, new_base, ret_base, nresults);
@@ -857,28 +860,33 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (b == 0) {
                     return error.VariableReturnNotImplemented;
                 } else if (b == 1) {
+                    // No return values - fill expected slots with nil
                     if (nresults > 0) {
-                        var i: u16 = 0;
-                        while (i < nresults) : (i += 1) {
-                            vm.stack[dst_base + i] = .nil;
+                        const n: usize = @intCast(nresults);
+                        for (vm.stack[dst_base..][0..n]) |*slot| {
+                            slot.* = .nil;
                         }
                     }
                 } else {
-                    const ret_count = b - 1;
+                    const ret_count: u32 = b - 1;
 
                     if (nresults < 0) {
-                        var i: u16 = 0;
-                        while (i < ret_count) : (i += 1) {
+                        // Variable results - copy all return values
+                        // Note: regions may overlap, copy forward (src >= dst)
+                        for (0..ret_count) |i| {
                             vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
                         }
                         vm.top = dst_base + ret_count;
                     } else {
-                        var i: u16 = 0;
-                        while (i < nresults) : (i += 1) {
-                            if (i < ret_count) {
-                                vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                            } else {
-                                vm.stack[dst_base + i] = .nil;
+                        // Fixed results - copy available values, fill rest with nil
+                        const n: u32 = @intCast(nresults);
+                        const copy_count = @min(ret_count, n);
+                        for (0..copy_count) |i| {
+                            vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
+                        }
+                        if (n > copy_count) {
+                            for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
+                                slot.* = .nil;
                             }
                         }
                     }
@@ -908,10 +916,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.closeUpvalues(returning_ci.base);
                 vm.popCallInfo();
 
+                // Fill expected result slots with nil
                 if (nresults > 0) {
-                    var i: u16 = 0;
-                    while (i < nresults) : (i += 1) {
-                        vm.stack[dst_base + i] = .nil;
+                    const n: usize = @intCast(nresults);
+                    for (vm.stack[dst_base..][0..n]) |*slot| {
+                        slot.* = .nil;
                     }
                 }
 
@@ -934,12 +943,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (nresults < 0) {
                     vm.stack[dst_base] = vm.stack[returning_ci.base + a];
                     vm.top = dst_base + 1;
-                } else {
-                    if (nresults > 0) {
-                        vm.stack[dst_base] = vm.stack[returning_ci.base + a];
-                        var i: u16 = 1;
-                        while (i < nresults) : (i += 1) {
-                            vm.stack[dst_base + i] = .nil;
+                } else if (nresults > 0) {
+                    // Copy single return value, fill rest with nil
+                    vm.stack[dst_base] = vm.stack[returning_ci.base + a];
+                    if (nresults > 1) {
+                        const n: usize = @intCast(nresults - 1);
+                        for (vm.stack[dst_base + 1 ..][0..n]) |*slot| {
+                            slot.* = .nil;
                         }
                     }
                 }
@@ -1492,8 +1502,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
         return null; // Continue
     };
 
-    const index_key = try vm.gc.allocString("__index");
-    const index_mm = mt.get(index_key) orelse {
+    const index_mm = mt.get(vm.mm_keys.index) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null; // Continue
     };
@@ -1569,8 +1578,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         return null; // Continue
     };
 
-    const newindex_key = try vm.gc.allocString("__newindex");
-    const newindex_mm = mt.get(newindex_key) orelse {
+    const newindex_mm = mt.get(vm.mm_keys.newindex) orelse {
         // No __newindex, just set the value
         try table.set(key, value);
         return null; // Continue
@@ -1635,8 +1643,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
     const mt = table.metatable orelse return null;
 
-    const call_key = try vm.gc.allocString("__call");
-    const call_mm = mt.get(call_key) orelse return null;
+    const call_mm = mt.get(vm.mm_keys.call) orelse return null;
 
     // __call must be a function
     if (call_mm.asClosure()) |closure| {
@@ -1684,8 +1691,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
     const mt = table.metatable orelse return null;
 
-    const len_key = try vm.gc.allocString("__len");
-    const len_mm = mt.get(len_key) orelse return null;
+    const len_mm = mt.get(vm.mm_keys.len) orelse return null;
 
     // __len is a Lua function
     if (len_mm.asClosure()) |closure| {
@@ -1733,11 +1739,10 @@ fn canConcatPrimitive(val: TValue) bool {
 }
 
 /// Try to get __concat metamethod from a value
-fn getConcatMM(vm: *VM, val: TValue) !?TValue {
+fn getConcatMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    const concat_key = try vm.gc.allocString("__concat");
-    return mt.get(concat_key);
+    return mt.get(vm.mm_keys.concat);
 }
 
 /// Concat with __concat metamethod fallback
@@ -1745,7 +1750,7 @@ fn getConcatMM(vm: *VM, val: TValue) !?TValue {
 /// Returns null if neither has __concat (caller should handle error)
 fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?ExecuteResult {
     // Try left operand's __concat first, then right
-    const concat_mm = try getConcatMM(vm, left) orelse try getConcatMM(vm, right) orelse return null;
+    const concat_mm = getConcatMM(vm, left) orelse getConcatMM(vm, right) orelse return null;
 
     // __concat is a Lua function
     if (concat_mm.asClosure()) |closure| {
@@ -1790,11 +1795,10 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
 }
 
 /// Try to get __eq metamethod from a table
-fn getEqMM(vm: *VM, val: TValue) !?TValue {
+fn getEqMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    const eq_key = try vm.gc.allocString("__eq");
-    return mt.get(eq_key);
+    return mt.get(vm.mm_keys.eq);
 }
 
 /// Equality with __eq metamethod fallback
@@ -1811,8 +1815,8 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
     const right_table = right.asTable() orelse return null;
 
     // In Lua 5.4, __eq requires both operands have the same metamethod
-    const left_mm = try getEqMM(vm, left) orelse return null;
-    const right_mm = try getEqMM(vm, right);
+    const left_mm = getEqMM(vm, left) orelse return null;
+    const right_mm = getEqMM(vm, right);
 
     // Check if they have the same __eq (by identity)
     if (right_mm) |rmm| {
@@ -1850,11 +1854,10 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 }
 
 /// Try to get __lt metamethod from a table
-fn getLtMM(vm: *VM, val: TValue) !?TValue {
+fn getLtMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    const lt_key = try vm.gc.allocString("__lt");
-    return mt.get(lt_key);
+    return mt.get(vm.mm_keys.lt);
 }
 
 /// Less-than with __lt metamethod fallback
@@ -1866,7 +1869,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
     } else |_| {}
 
     // Try metamethod - check left first, then right
-    const lt_mm = try getLtMM(vm, left) orelse try getLtMM(vm, right) orelse return null;
+    const lt_mm = getLtMM(vm, left) orelse getLtMM(vm, right) orelse return null;
 
     // __lt is a native function - call synchronously
     if (lt_mm.isObject() and lt_mm.object.type == .native_closure) {
@@ -1895,11 +1898,10 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 }
 
 /// Try to get __le metamethod from a table
-fn getLeMM(vm: *VM, val: TValue) !?TValue {
+fn getLeMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    const le_key = try vm.gc.allocString("__le");
-    return mt.get(le_key);
+    return mt.get(vm.mm_keys.le);
 }
 
 /// Less-or-equal with __le metamethod fallback
@@ -1912,7 +1914,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
     } else |_| {}
 
     // Try __le metamethod first
-    if (try getLeMM(vm, left) orelse try getLeMM(vm, right)) |le_mm| {
+    if (getLeMM(vm, left) orelse getLeMM(vm, right)) |le_mm| {
         // __le is a native function
         if (le_mm.isObject() and le_mm.object.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, le_mm.object);
@@ -1936,7 +1938,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
     }
 
     // No __le, try using __lt: a <= b iff not (b < a)
-    if (try getLtMM(vm, right) orelse try getLtMM(vm, left)) |lt_mm| {
+    if (getLtMM(vm, right) orelse getLtMM(vm, left)) |lt_mm| {
         // __lt is a native function
         if (lt_mm.isObject() and lt_mm.object.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, lt_mm.object);

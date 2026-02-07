@@ -135,8 +135,7 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
             // Check for __metatable field (protects metatable from modification)
-            const metatable_key = try vm.gc.allocString("__metatable");
-            if (mt.get(metatable_key)) |protected| {
+            if (mt.get(vm.mm_keys.metatable)) |protected| {
                 result = protected;
             } else {
                 result = TValue.fromTable(mt);
@@ -165,8 +164,7 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
-        const metatable_key = try vm.gc.allocString("__metatable");
-        if (current_mt.get(metatable_key) != null) {
+        if (current_mt.get(vm.mm_keys.metatable) != null) {
             return error.ProtectedMetatable;
         }
     }
