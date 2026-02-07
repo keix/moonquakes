@@ -12,10 +12,9 @@ const Proto = @import("../../compiler/proto.zig").Proto;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 
-// TODO:
-// Small fixed threshold for development/testing.
-// This will be replaced by a growth-based policy later.
-const GC_THRESHOLD = 20 * 1024;
+// Initial GC threshold - collection runs when bytes_allocated exceeds this
+// After collection, threshold adjusts based on survival rate (gc_multiplier)
+const GC_THRESHOLD = 64 * 1024; // 64KB initial threshold
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
@@ -54,6 +53,10 @@ pub const GC = struct {
     gc_multiplier: f64 = 2.0, // Heap growth factor
     gc_min_threshold: usize = GC_THRESHOLD,
 
+    /// Counter to inhibit GC during sensitive operations (materialization, etc.)
+    /// When > 0, GC will not run automatically
+    gc_inhibit: u32 = 0,
+
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
@@ -62,7 +65,32 @@ pub const GC = struct {
             .bytes_allocated = 0,
             .next_gc = GC_THRESHOLD,
             .vm = null,
+            .gc_inhibit = 0,
         };
+    }
+
+    /// GC INHIBITION API
+    ///
+    /// Purpose: Temporarily prevent automatic GC collection during sensitive operations
+    /// where GC objects exist but are not yet reachable from VM roots.
+    ///
+    /// Usage: inhibitGC() / allowGC() must always be paired (use defer).
+    /// Nesting is supported via counter.
+    ///
+    /// Use cases:
+    /// - materialize.zig: Proto constants being built, not yet attached to Proto
+    ///
+    /// NOT a substitute for proper root marking - use only when objects
+    /// genuinely cannot be rooted yet (e.g., mid-construction).
+    pub fn inhibitGC(self: *GC) void {
+        self.gc_inhibit += 1;
+    }
+
+    /// Re-enable GC after inhibitGC. Decrements the inhibit counter.
+    pub fn allowGC(self: *GC) void {
+        if (self.gc_inhibit > 0) {
+            self.gc_inhibit -= 1;
+        }
     }
 
     /// Set VM reference for automatic GC triggering
@@ -84,13 +112,17 @@ pub const GC = struct {
         }
     }
 
+    // Debug: force GC on every allocation to expose marking bugs
+    // Enable temporarily to test GC correctness
+    const GC_STRESS_TEST = false;
+
     /// Allocate a new GC-managed object
     /// T must be a struct with a 'header: GCObject' field as first member
     pub fn allocObject(self: *GC, comptime T: type, extra_bytes: usize) !*T {
         const size = @sizeOf(T) + extra_bytes;
 
         // Check if GC should run before allocation
-        if (self.bytes_allocated + size > self.next_gc) {
+        if (GC_STRESS_TEST or self.bytes_allocated + size > self.next_gc) {
             self.tryCollect();
         }
 
@@ -103,10 +135,10 @@ pub const GC = struct {
         return ptr;
     }
 
-    /// Try to run GC if VM reference is available
+    /// Try to run GC if VM reference is available and not inhibited
     fn tryCollect(self: *GC) void {
-        // _ = self;
-        // TODO: Uncomment to enable automatic GC
+        // Don't run GC if inhibited (during materialization, etc.)
+        if (self.gc_inhibit > 0) return;
         if (self.vm) |vm_ptr| {
             const VM = @import("../../vm/vm.zig").VM;
             const vm: *VM = @ptrCast(@alignCast(vm_ptr));
@@ -249,7 +281,15 @@ pub const GC = struct {
     }
 
     /// Mark proto constants recursively (including nested protos)
-    fn markProto(self: *GC, proto: *const Proto) void {
+    ///
+    /// GC SAFETY: This function marks both proto.k (constants) AND proto.protos
+    /// (nested function prototypes). Nested protos contain their own constants
+    /// which must be marked, otherwise inner function literals become invalid.
+    ///
+    /// Called from:
+    /// - vm.collectGarbage(): marks base_ci and callstack frames
+    /// - markObject(.closure): marks closure.proto recursively
+    pub fn markProto(self: *GC, proto: *const Proto) void {
         for (proto.k) |value| {
             self.markValue(value);
         }

@@ -71,12 +71,14 @@ pub const CallInfo = struct {
         return inst;
     }
 
-    /// Validate PC is within function bounds
+    /// Validate PC is within function bounds (disabled in ReleaseFast)
     inline fn validatePC(self: *CallInfo) !void {
-        const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
-        const pc_index = pc_offset / @sizeOf(Instruction);
-        if (pc_index >= self.func.code.len) {
-            return error.PcOutOfRange;
+        if (std.debug.runtime_safety) {
+            const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
+            const pc_index = pc_offset / @sizeOf(Instruction);
+            if (pc_index >= self.func.code.len) {
+                return error.PcOutOfRange;
+            }
         }
     }
 };
@@ -132,45 +134,63 @@ pub const VM = struct {
         self.gc.deinit();
     }
 
-    /// Run garbage collection, marking all reachable objects from VM roots
+    /// GC SAFETY CONTRACT: VM Root Marking
+    ///
+    /// GC ROOTS - objects that keep other objects alive:
+    /// | Root                  | Description                                      |
+    /// |-----------------------|--------------------------------------------------|
+    /// | stack[0..top]         | VM stack - locals, temporaries, arguments        |
+    /// | base_ci               | Main chunk frame (separate from callstack[])     |
+    /// | callstack[0..size]    | Active call frames                               |
+    /// | globals               | Global environment table                         |
+    /// | open_upvalues         | Captured variables still on stack                |
+    ///
+    /// CRITICAL: base_ci is NOT in callstack[] - it's the main chunk's frame.
+    /// When inside a function call, base_ci still references the main proto which
+    /// contains nested function prototypes. If not marked, nested function constants
+    /// (strings, native closures) will be collected while still referenced.
+    ///
+    /// Uses markProto() (not markConstants()) to ensure nested protos are marked.
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
 
-        // Mark phase: mark all roots
+        // === Mark phase: traverse from roots ===
 
         // 1. Mark VM stack (active portion)
         self.gc.markStack(self.stack[0..self.top]);
 
-        // 2. Mark closures from call frames (GC will mark proto.k via ClosureObject)
-        //    For main chunk (no closure), mark proto.k directly
-        if (self.ci) |ci| {
-            if (ci.closure) |closure| {
-                self.gc.mark(&closure.header);
-            } else {
-                // Main chunk has no closure - mark its constants directly
-                self.gc.markConstants(ci.func.k);
-            }
+        // 2. Mark call frames
+        // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
+        // When inside a function call, base_ci still holds the main proto which
+        // contains nested function protos. These must be marked or their
+        // constants (strings, native closures) will be collected.
+        if (self.base_ci.closure) |closure| {
+            self.gc.mark(&closure.header);
+        } else {
+            // Main chunk: mark proto and all nested protos recursively
+            self.gc.markProto(self.base_ci.func);
         }
 
+        // Mark function call frames on the callstack
         for (self.callstack[0..self.callstack_size]) |frame| {
             if (frame.closure) |closure| {
                 self.gc.mark(&closure.header);
             } else {
-                self.gc.markConstants(frame.func.k);
+                self.gc.markProto(frame.func);
             }
         }
 
         // 3. Mark global environment
         self.gc.mark(&self.globals.header);
 
-        // 4. Mark open upvalues
+        // 4. Mark open upvalues (captured variables still pointing to stack)
         var upval = self.open_upvalues;
         while (upval) |uv| {
             self.gc.mark(&uv.header);
             upval = uv.next_open;
         }
 
-        // Sweep phase + threshold update
+        // === Sweep phase ===
         self.gc.collect();
 
         // Debug output (disabled in ReleaseFast)
@@ -311,6 +331,54 @@ pub const VM = struct {
         }
     }
 
+    /// Execute a metamethod synchronously and return its first result.
+    /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
+    /// Uses anyerror to break circular error set dependency with Mnemonics.do.
+    pub fn executeSyncMM(self: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
+        const proto = closure.proto;
+        const call_base = self.top;
+        const result_slot = call_base;
+
+        // Set up arguments
+        for (args, 0..) |arg, i| {
+            self.stack[call_base + i] = arg;
+        }
+
+        // Fill remaining params with nil
+        var i: u32 = @intCast(args.len);
+        while (i < proto.numparams) : (i += 1) {
+            self.stack[call_base + i] = .nil;
+        }
+
+        self.top = call_base + proto.maxstacksize;
+
+        // Save current call depth
+        const saved_depth = self.callstack_size;
+
+        // Push call info for metamethod
+        _ = try self.pushCallInfo(proto, closure, call_base, result_slot, 1);
+
+        // Execute until we return to saved depth
+        while (self.callstack_size > saved_depth) {
+            const ci = &self.callstack[self.callstack_size - 1];
+            const inst = ci.fetch() catch {
+                // End of function - handle return
+                self.base = ci.ret_base;
+                self.top = ci.ret_base + 1;
+                self.popCallInfo();
+                continue;
+            };
+            switch (try Mnemonics.do(self, inst)) {
+                .Continue => {},
+                .LoopContinue => {},
+                .ReturnVM => break,
+            }
+        }
+
+        // Return the result
+        return self.stack[result_slot];
+    }
+
     pub fn arithBinary(self: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         const a = inst.getA();
         const b = inst.getB();
@@ -405,6 +473,10 @@ pub const VM = struct {
     }
 
     pub fn ltOp(a: TValue, b: TValue) !bool {
+        // Fast path: integer comparison
+        if (a.isInteger() and b.isInteger()) {
+            return a.integer < b.integer;
+        }
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {
@@ -420,6 +492,10 @@ pub const VM = struct {
     }
 
     pub fn leOp(a: TValue, b: TValue) !bool {
+        // Fast path: integer comparison
+        if (a.isInteger() and b.isInteger()) {
+            return a.integer <= b.integer;
+        }
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {

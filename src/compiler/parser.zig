@@ -1194,7 +1194,12 @@ pub const Parser = struct {
                 }
                 self.advance();
             } else {
-                return error.UnsupportedIdentifier;
+                // Fall back to global lookup via GETTABUP
+                // This handles global tables like `table`, `string`, `io`, `_G`, etc.
+                base_reg = self.proto.allocTemp();
+                const name_const = try self.proto.addConstString(var_name);
+                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                self.advance();
             }
 
             // Handle field/index access and method calls: t.field, t[key], t:method(), or chained
@@ -2528,7 +2533,10 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(receiver_reg, idx),
             }
         } else {
-            return error.UnsupportedIdentifier;
+            // Fall back to global lookup via GETTABUP
+            receiver_reg = self.proto.allocTemp();
+            const name_const = try self.proto.addConstString(receiver_name);
+            try self.proto.emitGETTABUP(receiver_reg, 0, name_const);
         }
         self.advance(); // consume receiver name
 
@@ -2624,7 +2632,10 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
             }
         } else {
-            return error.UnsupportedIdentifier;
+            // Fall back to global lookup via GETTABUP
+            base_reg = self.proto.allocTemp();
+            const name_const = try self.proto.addConstString(base_name);
+            try self.proto.emitGETTABUP(base_reg, 0, name_const);
         }
         self.advance(); // consume base name
 
@@ -2710,6 +2721,16 @@ pub const Parser = struct {
                     // Could support more chaining here, but for now error
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Function call: t.field(args) - e.g., table.insert(t, v)
+                const field_const = try self.proto.addConstString(field_name);
+                const func_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(func_reg, base_reg, field_const);
+
+                // Parse arguments and emit call
+                const arg_count = try self.parseCallArgs(func_reg);
+                try self.proto.emitCall(func_reg, arg_count, 0);
+                return;
             } else {
                 // Unknown pattern after field access
                 return error.UnsupportedStatement;
