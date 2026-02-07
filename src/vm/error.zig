@@ -30,6 +30,7 @@ pub const VMError = error{
     // Table Operation Errors
     InvalidTableKey,
     InvalidTableOperation,
+    ProtectedMetatable,
 };
 
 /// Sugar Layer error categories
@@ -106,6 +107,10 @@ pub fn translateVMError(vm_error: VMError, allocator: std.mem.Allocator) !LuaErr
         error.InvalidTableOperation => LuaError{
             .kind = .table_error,
             .message = try allocator.dupe(u8, "attempt to index non-table value"),
+        },
+        error.ProtectedMetatable => LuaError{
+            .kind = .table_error,
+            .message = try allocator.dupe(u8, "cannot change a protected metatable"),
         },
     };
 }

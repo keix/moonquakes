@@ -9,6 +9,8 @@ const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
+const metamethod = @import("metamethod.zig");
+const MetaEvent = metamethod.MetaEvent;
 
 /// Result of executing a single instruction.
 /// Controls VM's main loop behavior.
@@ -25,7 +27,7 @@ pub const ExecuteResult = union(enum) {
 
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
-pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
+pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     const ci = vm.ci.?;
 
     switch (inst.getOpCode()) {
@@ -331,38 +333,31 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         // [MM_ARITH] Fast path: register add. Slow path: __add metamethod.
         .ADD => {
-            try vm.arithBinary(inst, .add);
-            return .Continue;
+            return try arithWithMM(vm, inst, .add, .add);
         },
         // [MM_ARITH] Fast path: register subtract. Slow path: __sub metamethod.
         .SUB => {
-            try vm.arithBinary(inst, .sub);
-            return .Continue;
+            return try arithWithMM(vm, inst, .sub, .sub);
         },
         // [MM_ARITH] Fast path: register multiply. Slow path: __mul metamethod.
         .MUL => {
-            try vm.arithBinary(inst, .mul);
-            return .Continue;
+            return try arithWithMM(vm, inst, .mul, .mul);
         },
         // [MM_ARITH] Fast path: register divide. Slow path: __div metamethod.
         .DIV => {
-            try vm.arithBinary(inst, .div);
-            return .Continue;
+            return try arithWithMM(vm, inst, .div, .div);
         },
         // [MM_ARITH] Fast path: register integer divide. Slow path: __idiv metamethod.
         .IDIV => {
-            try vm.arithBinary(inst, .idiv);
-            return .Continue;
+            return try arithWithMM(vm, inst, .idiv, .idiv);
         },
         // [MM_ARITH] Fast path: register modulo. Slow path: __mod metamethod.
         .MOD => {
-            try vm.arithBinary(inst, .mod);
-            return .Continue;
+            return try arithWithMM(vm, inst, .mod, .mod);
         },
         // [MM_ARITH] Fast path: register power. Slow path: __pow metamethod.
         .POW => {
-            try vm.arithBinary(inst, .pow);
-            return .Continue;
+            return try arithWithMM(vm, inst, .pow, .pow);
         },
         .BAND => {
             try vm.bitwiseBinary(inst, .band);
@@ -1186,9 +1181,162 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = TValue.fromClosure(closure);
             return .Continue;
         },
+        // Metamethod dispatch opcodes
+        // These are emitted after arithmetic operations for metamethod fallback
+        .MMBIN => {
+            // MMBIN A B C: metamethod for binary operation R[B] op R[C]
+            // A encodes the metamethod event (add, sub, mul, etc.)
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+
+            const vb = vm.stack[vm.base + b];
+            const vc = vm.stack[vm.base + c];
+
+            // Decode metamethod event from A
+            const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
+
+            // Try to get metamethod from either operand
+            const mm = try metamethod.getBinMetamethod(vb, vc, event, &vm.gc) orelse {
+                // No metamethod found - arithmetic error
+                return error.ArithmeticError;
+            };
+
+            // Call the metamethod: mm(vb, vc) -> result at b
+            // Set up call: function at temp, args at temp+1, temp+2
+            const temp = vm.top;
+            vm.stack[temp] = mm;
+            vm.stack[temp + 1] = vb;
+            vm.stack[temp + 2] = vc;
+            vm.top = temp + 3;
+
+            // If metamethod is a closure, push call frame
+            if (mm.asClosure()) |closure| {
+                _ = try vm.pushCallInfo(closure.proto, closure, temp, @intCast(vm.base + b), 1);
+                return .LoopContinue;
+            }
+
+            // For native closures, call directly
+            if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                // Result is at temp, move to b
+                vm.stack[vm.base + b] = vm.stack[temp];
+                vm.top = temp;
+                return .Continue;
+            }
+
+            return error.NotAFunction;
+        },
+        .MMBINI => {
+            // MMBINI A sB C k: metamethod for binary op with immediate
+            // TODO: Implement immediate metamethod dispatch
+            return error.UnknownOpcode;
+        },
+        .MMBINK => {
+            // MMBINK A B C k: metamethod for binary op with constant
+            // TODO: Implement constant metamethod dispatch
+            return error.UnknownOpcode;
+        },
         .EXTRAARG => {
             return error.UnknownOpcode;
         },
         else => return error.UnknownOpcode,
     }
+}
+
+/// Map instruction A field to MetaEvent for MMBIN
+fn mmEventFromOpcode(a: u8) ?MetaEvent {
+    return switch (a) {
+        6 => .add,
+        7 => .sub,
+        8 => .mul,
+        9 => .mod,
+        10 => .pow,
+        11 => .div,
+        12 => .idiv,
+        13 => .band,
+        14 => .bor,
+        15 => .bxor,
+        16 => .shl,
+        17 => .shr,
+        20 => .concat,
+        else => null,
+    };
+}
+
+/// Arithmetic with metamethod fallback
+/// Tries fast path first, then checks for metamethod
+fn arithWithMM(vm: *VM, inst: Instruction, comptime arith_op: VM.ArithOp, comptime event: MetaEvent) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = vm.stack[vm.base + b];
+    const vc = vm.stack[vm.base + c];
+
+    // Try fast path (numeric arithmetic)
+    if (canDoArith(vb, vc)) {
+        try vm.arithBinary(inst, arith_op);
+        return .Continue;
+    }
+
+    // Try metamethod
+    const mm = try metamethod.getBinMetamethod(vb, vc, event, &vm.gc) orelse {
+        return error.ArithmeticError;
+    };
+
+    // Call the metamethod
+    return try callBinMetamethod(vm, mm, vb, vc, a);
+}
+
+/// Check if both values can be used for arithmetic (fast path)
+fn canDoArith(a: TValue, b: TValue) bool {
+    return (a.isInteger() or a.isNumber()) and (b.isInteger() or b.isNumber());
+}
+
+/// Call a binary metamethod and store result
+fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg: u8) !ExecuteResult {
+    // Set up call: like CALL instruction
+    // func at temp, args at temp+1, temp+2
+    // But for call frame, we copy args to start at new_base
+    const temp = vm.top;
+
+    // If metamethod is a closure, push call frame
+    if (mm.asClosure()) |closure| {
+        const proto = closure.proto;
+        const new_base = temp;
+
+        // Set up parameters at new_base (like CALL does)
+        vm.stack[new_base] = arg1; // First parameter at R[0]
+        vm.stack[new_base + 1] = arg2; // Second parameter at R[1]
+
+        // Fill remaining parameters with nil if needed
+        var i: u32 = 2;
+        while (i < proto.numparams) : (i += 1) {
+            vm.stack[new_base + i] = .nil;
+        }
+
+        vm.top = new_base + proto.maxstacksize;
+
+        _ = try vm.pushCallInfo(proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        return .LoopContinue;
+    }
+
+    // For native closures, call directly
+    if (mm.isObject() and mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.object);
+        // Set up: function at temp, args at temp+1, temp+2
+        vm.stack[temp] = mm;
+        vm.stack[temp + 1] = arg1;
+        vm.stack[temp + 2] = arg2;
+        vm.top = temp + 3;
+
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+        // Result is at temp, move to result_reg
+        vm.stack[vm.base + result_reg] = vm.stack[temp];
+        vm.top = temp;
+        return .Continue;
+    }
+
+    return error.NotAFunction;
 }

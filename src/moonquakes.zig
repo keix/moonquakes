@@ -269,6 +269,7 @@ pub const Moonquakes = struct {
             error.NotAFunction => ErrorHandler.VMError.NotAFunction,
             error.InvalidTableKey => ErrorHandler.VMError.InvalidTableKey,
             error.InvalidTableOperation => ErrorHandler.VMError.InvalidTableOperation,
+            error.ProtectedMetatable => ErrorHandler.VMError.ProtectedMetatable,
             error.UnknownOpcode => ErrorHandler.VMError.UnknownOpcode,
             error.VariableReturnNotImplemented => ErrorHandler.VMError.VariableReturnNotImplemented,
             else => {

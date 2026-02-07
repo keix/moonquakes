@@ -124,23 +124,66 @@ pub fn nativeIpairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 }
 
 /// getmetatable(object) - Returns the metatable of the given object
+/// If object has a metatable with __metatable field, returns that value
+/// Otherwise returns the metatable, or nil if no metatable
 pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement getmetatable
-    // Returns the metatable of the given object or nil
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+
+    var result: TValue = .nil;
+    if (arg.asTable()) |table| {
+        if (table.metatable) |mt| {
+            // Check for __metatable field (protects metatable from modification)
+            const metatable_key = try vm.gc.allocString("__metatable");
+            if (mt.get(metatable_key)) |protected| {
+                result = protected;
+            } else {
+                result = TValue.fromTable(mt);
+            }
+        }
+    }
+    // TODO: Support metatables for strings (shared string metatable)
+
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = result;
+    }
 }
 
 /// setmetatable(table, metatable) - Sets the metatable for the given table
+/// Returns the table. Raises error if metatable has __metatable field (protected).
 pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement setmetatable
-    // Sets metatable and returns the table
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+    const mt_arg = vm.stack[vm.base + func_reg + 2];
+
+    const table = table_arg.asTable() orelse {
+        // setmetatable only works on tables
+        return error.InvalidTableOperation;
+    };
+
+    // Check if current metatable is protected
+    if (table.metatable) |current_mt| {
+        const metatable_key = try vm.gc.allocString("__metatable");
+        if (current_mt.get(metatable_key) != null) {
+            return error.ProtectedMetatable;
+        }
+    }
+
+    // Set the new metatable (nil clears it)
+    if (mt_arg.isNil()) {
+        table.metatable = null;
+    } else if (mt_arg.asTable()) |new_mt| {
+        table.metatable = new_mt;
+    } else {
+        return error.InvalidTableOperation;
+    }
+
+    // Return the table
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = table_arg;
+    }
 }
 
 /// rawget(table, index) - Gets the real value of table[index] without metamethods
