@@ -13,7 +13,23 @@ pub const MaterializeError = std.mem.Allocator.Error;
 
 /// Materialize a RawProto into a runtime Proto
 /// Converts unmaterialized constants (raw strings, native fn ids) into GC-managed TValues
+///
+/// GC SAFETY CONTRACT:
+/// Materialization creates GC objects (strings, native closures) stored in a
+/// temporary TValue array. This array is not yet attached to a Proto, and
+/// Proto is not yet reachable from any VM root.
+///
+/// GC INHIBIT REQUIRED because:
+/// - Objects exist but are unreachable from roots
+/// - GC would collect them mid-construction
+///
+/// Safe when:
+/// - Proto is fully constructed and returned to caller
+/// - Caller attaches Proto to VM structures (call frame, closure)
 pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) MaterializeError!*Proto {
+    gc.inhibitGC();
+    defer gc.allowGC();
+
     // Materialize constants
     const k = try materializeConstants(raw, gc, allocator);
 

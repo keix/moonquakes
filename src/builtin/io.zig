@@ -138,11 +138,31 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         return;
     };
 
-    // Create file handle table
-    const file_table = try vm.gc.allocTable();
+    // GC SAFETY CONTRACT:
+    // Native functions must protect allocated objects from GC.
+    // Objects in Zig local variables are NOT GC roots.
+    //
+    // REQUIRED PATTERN: allocate -> store in stack -> allocate next
+    //   1. Allocate object
+    //   2. Immediately store in VM stack slot (now a GC root)
+    //   3. Safe to allocate more - previous object is protected
+    //
+    // UNSAFE PATTERN (causes use-after-free):
+    //   const obj1 = try gc.allocTable();
+    //   const obj2 = try gc.allocString("key");  // GC may run here!
+    //   try obj1.set(...);  // obj1 might be freed
+    //
+    // Stack slot usage in this function:
+    //   func_reg:     file_table (result)
+    //   func_reg+1:   temp for intermediate allocations
+    //   func_reg+2-4: reserved for createFileMetatable
 
-    // Store output
+    const file_table = try vm.gc.allocTable();
+    vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+
+    // output_key must be protected before allocating output_str
     const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+    vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
     const output_str = try vm.gc.allocString(result.output);
     try file_table.set(output_key, TValue.fromString(output_str));
     vm.allocator.free(result.output);
@@ -155,12 +175,13 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
     try file_table.set(closed_key, .{ .boolean = false });
 
-    // Create metatable with file methods
-    const mt = try createFileMetatable(vm);
+    // Create metatable with file methods (use func_reg + 2 as temp slot)
+    const mt = try createFileMetatable(vm, func_reg + 2);
     file_table.metatable = mt;
 
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+    // Result already in stack at func_reg
+    if (nresults == 0) {
+        vm.stack[vm.base + func_reg] = .nil;
     }
 }
 
@@ -223,25 +244,42 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
 }
 
 /// Create metatable for file handles with read/close methods
-fn createFileMetatable(vm: anytype) !*TableObject {
+///
+/// GC SAFETY CONTRACT:
+/// Uses temp stack slots to protect intermediate allocations.
+/// Pattern: allocate -> store in stack[temp_slot+N] -> allocate next
+///
+/// Stack slot usage:
+///   temp_slot:   metatable (mt)
+///   temp_slot+1: index_table
+///   temp_slot+2: scratch for native closures
+fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
+    // Stack slot usage:
+    //   temp_slot:   metatable (mt)
+    //   temp_slot+1: index_table
+    //   temp_slot+2: scratch for native closures
+
     const mt = try vm.gc.allocTable();
+    vm.stack[vm.base + temp_slot] = TValue.fromTable(mt);
 
-    // Create __index table with methods
     const index_table = try vm.gc.allocTable();
+    vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(index_table);
 
-    // Add 'read' method
-    const read_key = try vm.gc.allocString("read");
-    const read_nc = try vm.gc.allocNativeClosure(.{ .id = .file_read });
-    try index_table.set(read_key, TValue.fromNativeClosure(read_nc));
-
-    // Add 'close' method
-    const close_key = try vm.gc.allocString("close");
-    const close_nc = try vm.gc.allocNativeClosure(.{ .id = .file_close });
-    try index_table.set(close_key, TValue.fromNativeClosure(close_nc));
-
-    // Set __index
+    // Both tables protected, safe to allocate strings
     const index_key = try vm.gc.allocString("__index");
     try mt.set(index_key, TValue.fromTable(index_table));
+
+    // Native closure must be protected before allocating its key string
+    const read_nc = try vm.gc.allocNativeClosure(.{ .id = .file_read });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(read_nc);
+    const read_key = try vm.gc.allocString("read");
+    try index_table.set(read_key, TValue.fromNativeClosure(read_nc));
+
+    // Reuse scratch slot for close method
+    const close_nc = try vm.gc.allocNativeClosure(.{ .id = .file_close });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(close_nc);
+    const close_key = try vm.gc.allocString("close");
+    try index_table.set(close_key, TValue.fromNativeClosure(close_nc));
 
     return mt;
 }
@@ -413,15 +451,15 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         const line = output[0..end];
         const line_str = try vm.gc.allocString(line);
-
-        // Update remaining output
-        const remaining = if (end < output.len) output[end + 1 ..] else "";
-        const remaining_str = try vm.gc.allocString(remaining);
-        try file_table.set(output_key, TValue.fromString(remaining_str));
-
+        // Store in stack immediately to protect from GC
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
         }
+
+        // Now safe to allocate remaining
+        const remaining = if (end < output.len) output[end + 1 ..] else "";
+        const remaining_str = try vm.gc.allocString(remaining);
+        try file_table.set(output_key, TValue.fromString(remaining_str));
     } else if (std.mem.eql(u8, format, "*L") or std.mem.eql(u8, format, "L")) {
         // Read line (with newline)
         if (output.len == 0) {
@@ -436,15 +474,15 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         const line = output[0..end];
         const line_str = try vm.gc.allocString(line);
-
-        // Update remaining output
-        const remaining = output[end..];
-        const remaining_str = try vm.gc.allocString(remaining);
-        try file_table.set(output_key, TValue.fromString(remaining_str));
-
+        // Store in stack immediately to protect from GC
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
         }
+
+        // Now safe to allocate remaining
+        const remaining = output[end..];
+        const remaining_str = try vm.gc.allocString(remaining);
+        try file_table.set(output_key, TValue.fromString(remaining_str));
     } else {
         // Unknown format, return nil
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;

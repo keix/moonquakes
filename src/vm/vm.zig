@@ -134,45 +134,63 @@ pub const VM = struct {
         self.gc.deinit();
     }
 
-    /// Run garbage collection, marking all reachable objects from VM roots
+    /// GC SAFETY CONTRACT: VM Root Marking
+    ///
+    /// GC ROOTS - objects that keep other objects alive:
+    /// | Root                  | Description                                      |
+    /// |-----------------------|--------------------------------------------------|
+    /// | stack[0..top]         | VM stack - locals, temporaries, arguments        |
+    /// | base_ci               | Main chunk frame (separate from callstack[])     |
+    /// | callstack[0..size]    | Active call frames                               |
+    /// | globals               | Global environment table                         |
+    /// | open_upvalues         | Captured variables still on stack                |
+    ///
+    /// CRITICAL: base_ci is NOT in callstack[] - it's the main chunk's frame.
+    /// When inside a function call, base_ci still references the main proto which
+    /// contains nested function prototypes. If not marked, nested function constants
+    /// (strings, native closures) will be collected while still referenced.
+    ///
+    /// Uses markProto() (not markConstants()) to ensure nested protos are marked.
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
 
-        // Mark phase: mark all roots
+        // === Mark phase: traverse from roots ===
 
         // 1. Mark VM stack (active portion)
         self.gc.markStack(self.stack[0..self.top]);
 
-        // 2. Mark closures from call frames (GC will mark proto.k via ClosureObject)
-        //    For main chunk (no closure), mark proto.k directly
-        if (self.ci) |ci| {
-            if (ci.closure) |closure| {
-                self.gc.mark(&closure.header);
-            } else {
-                // Main chunk has no closure - mark its constants directly
-                self.gc.markConstants(ci.func.k);
-            }
+        // 2. Mark call frames
+        // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
+        // When inside a function call, base_ci still holds the main proto which
+        // contains nested function protos. These must be marked or their
+        // constants (strings, native closures) will be collected.
+        if (self.base_ci.closure) |closure| {
+            self.gc.mark(&closure.header);
+        } else {
+            // Main chunk: mark proto and all nested protos recursively
+            self.gc.markProto(self.base_ci.func);
         }
 
+        // Mark function call frames on the callstack
         for (self.callstack[0..self.callstack_size]) |frame| {
             if (frame.closure) |closure| {
                 self.gc.mark(&closure.header);
             } else {
-                self.gc.markConstants(frame.func.k);
+                self.gc.markProto(frame.func);
             }
         }
 
         // 3. Mark global environment
         self.gc.mark(&self.globals.header);
 
-        // 4. Mark open upvalues
+        // 4. Mark open upvalues (captured variables still pointing to stack)
         var upval = self.open_upvalues;
         while (upval) |uv| {
             self.gc.mark(&uv.header);
             upval = uv.next_open;
         }
 
-        // Sweep phase + threshold update
+        // === Sweep phase ===
         self.gc.collect();
 
         // Debug output (disabled in ReleaseFast)
