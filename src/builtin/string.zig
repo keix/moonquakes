@@ -4,38 +4,39 @@ const TValue = @import("../runtime/value.zig").TValue;
 /// Lua 5.4 String Library
 /// Corresponds to Lua manual chapter "String Manipulation"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.4
-fn formatNumber(allocator: std.mem.Allocator, n: f64) ![]const u8 {
+
+/// Format number to string using stack buffer (no allocation)
+fn formatNumber(buf: []u8, n: f64) []const u8 {
     // Handle integers that fit in i64 range and have no fractional part
     const min_i64: f64 = @floatFromInt(std.math.minInt(i64));
     const max_i64: f64 = @floatFromInt(std.math.maxInt(i64));
     if (n == @floor(n) and n >= min_i64 and n <= max_i64) {
         const int_val: i64 = @intFromFloat(n);
-        return try std.fmt.allocPrint(allocator, "{d}", .{int_val});
+        return std.fmt.bufPrint(buf, "{d}", .{int_val}) catch buf[0..0];
     }
     // Handle floating point numbers
-    return try std.fmt.allocPrint(allocator, "{}", .{n});
+    return std.fmt.bufPrint(buf, "{}", .{n}) catch buf[0..0];
 }
 
-fn formatInteger(allocator: std.mem.Allocator, i: i64) ![]const u8 {
-    return try std.fmt.allocPrint(allocator, "{d}", .{i});
+/// Format integer to string using stack buffer (no allocation)
+fn formatInteger(buf: []u8, i: i64) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}", .{i}) catch buf[0..0];
 }
 
 pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const arg = if (nargs > 0) &vm.stack[vm.base + func_reg + 1] else null;
 
-    // Use GC for string allocation
-    const allocator = vm.allocator;
+    // Stack buffer for number formatting (64 bytes covers i64 range and f64)
+    var buf: [64]u8 = undefined;
 
     const result = if (arg) |v| blk: {
         break :blk switch (v.*) {
             .number => |n| ret: {
-                const formatted = try formatNumber(allocator, n);
-                defer allocator.free(formatted);
+                const formatted = formatNumber(&buf, n);
                 break :ret TValue.fromString(try vm.gc.allocString(formatted));
             },
             .integer => |i| ret: {
-                const formatted = try formatInteger(allocator, i);
-                defer allocator.free(formatted);
+                const formatted = formatInteger(&buf, i);
                 break :ret TValue.fromString(try vm.gc.allocString(formatted));
             },
             .nil => TValue.fromString(try vm.gc.allocString("nil")),
