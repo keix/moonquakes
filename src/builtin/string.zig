@@ -67,12 +67,53 @@ pub fn nativeStringLen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
 /// string.sub(s, i [, j]) - Returns substring of s from i to j
 pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.sub
-    // Negative indices count from end of string
+    if (nargs < 2) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get string
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+    const len: i64 = @intCast(str.len);
+
+    // Get i (1-based, can be negative)
+    const i_arg = vm.stack[vm.base + func_reg + 2];
+    var i: i64 = i_arg.toInteger() orelse 1;
+
+    // Get j (optional, defaults to -1 meaning end of string)
+    var j: i64 = -1;
+    if (nargs > 2) {
+        const j_arg = vm.stack[vm.base + func_reg + 3];
+        j = j_arg.toInteger() orelse -1;
+    }
+
+    // Handle negative indices (count from end)
+    if (i < 0) i = len + i + 1;
+    if (j < 0) j = len + j + 1;
+
+    // Clamp to valid range
+    if (i < 1) i = 1;
+    if (j > len) j = len;
+
+    // Return empty string if range is invalid
+    if (i > j) {
+        const empty_str = try vm.gc.allocString("");
+        vm.stack[vm.base + func_reg] = TValue.fromString(empty_str);
+        return;
+    }
+
+    // Convert to 0-based indices
+    const start: usize = @intCast(i - 1);
+    const end: usize = @intCast(j);
+
+    // Create substring
+    const result = try vm.gc.allocString(str[start..end]);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.upper(s) - Returns copy of s with all lowercase letters changed to uppercase
@@ -142,14 +183,392 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 }
 
 /// string.match(s, pattern [, init]) - Looks for first match of pattern in string s
+/// Returns captured strings or whole match if no captures
+/// Supports: literal chars, [set], [^set], ., %a, %d, %s, %w, *, +, ?, -, (), ^, $
 pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.match
-    // Returns captured strings or whole match
+    if (nargs < 2) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get string
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Get pattern
+    const pat_arg = vm.stack[vm.base + func_reg + 2];
+    const pat_obj = pat_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pattern = pat_obj.asSlice();
+
+    // Get init position (optional, 1-based)
+    var init: usize = 0;
+    if (nargs > 2) {
+        const init_arg = vm.stack[vm.base + func_reg + 3];
+        if (init_arg.toInteger()) |i| {
+            if (i > 0) init = @intCast(i - 1);
+        }
+    }
+
+    // Create pattern matcher
+    var matcher = PatternMatcher.init(pattern, str, init);
+
+    // Try to match at each position
+    var match_start: usize = init;
+    while (match_start <= str.len) : (match_start += 1) {
+        matcher.reset(match_start);
+        if (matcher.match()) {
+            // Match found - return captures or whole match
+            if (matcher.capture_count > 0) {
+                // Return all captures (Lua returns all captures as multiple values)
+                // Note: Multiple return values may not be fully supported by parser/VM yet
+                var i: u32 = 0;
+                while (i < matcher.capture_count) : (i += 1) {
+                    const cap = matcher.captures[i];
+                    const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                    vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                }
+                return;
+            } else {
+                // Return whole match
+                if (nresults > 0) {
+                    const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+                    vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
+                }
+                return;
+            }
+        }
+
+        // If pattern starts with ^, only try at start
+        if (pattern.len > 0 and pattern[0] == '^') break;
+    }
+
+    // No match found
+    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
 }
+
+/// Lua pattern matcher
+const PatternMatcher = struct {
+    pattern: []const u8,
+    str: []const u8,
+    pat_pos: usize,
+    str_pos: usize,
+    match_start: usize,
+    match_end: usize,
+    captures: [32]Capture,
+    capture_count: u32,
+    capture_stack: [32]usize, // For tracking open captures
+    capture_stack_top: u32,
+
+    const Capture = struct {
+        start: usize,
+        end: usize,
+    };
+
+    fn init(pattern: []const u8, str: []const u8, start: usize) PatternMatcher {
+        return .{
+            .pattern = pattern,
+            .str = str,
+            .pat_pos = 0,
+            .str_pos = start,
+            .match_start = start,
+            .match_end = start,
+            .captures = undefined,
+            .capture_count = 0,
+            .capture_stack = undefined,
+            .capture_stack_top = 0,
+        };
+    }
+
+    fn reset(self: *PatternMatcher, start: usize) void {
+        self.pat_pos = 0;
+        self.str_pos = start;
+        self.match_start = start;
+        self.match_end = start;
+        self.capture_count = 0;
+        self.capture_stack_top = 0;
+    }
+
+    fn match(self: *PatternMatcher) bool {
+        // Skip ^ anchor if present
+        if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == '^') {
+            self.pat_pos += 1;
+        }
+
+        return self.matchPattern();
+    }
+
+    fn matchPattern(self: *PatternMatcher) bool {
+        while (self.pat_pos < self.pattern.len) {
+            const c = self.pattern[self.pat_pos];
+
+            // End anchor
+            if (c == '$' and self.pat_pos + 1 == self.pattern.len) {
+                self.match_end = self.str_pos;
+                return self.str_pos == self.str.len;
+            }
+
+            // Capture start
+            if (c == '(') {
+                self.pat_pos += 1;
+                if (self.capture_stack_top < 32) {
+                    self.capture_stack[self.capture_stack_top] = self.str_pos;
+                    self.capture_stack_top += 1;
+                }
+                continue;
+            }
+
+            // Capture end
+            if (c == ')') {
+                self.pat_pos += 1;
+                if (self.capture_stack_top > 0 and self.capture_count < 32) {
+                    self.capture_stack_top -= 1;
+                    self.captures[self.capture_count] = .{
+                        .start = self.capture_stack[self.capture_stack_top],
+                        .end = self.str_pos,
+                    };
+                    self.capture_count += 1;
+                }
+                continue;
+            }
+
+            // Get pattern item (char class + optional quantifier)
+            const item = self.getPatternItem();
+            const quantifier = self.getQuantifier();
+
+            // Match based on quantifier
+            switch (quantifier) {
+                .none => {
+                    if (!self.matchItem(item)) return false;
+                },
+                .star => {
+                    // Greedy: match as many as possible
+                    const saved_str_pos = self.str_pos;
+                    var count: usize = 0;
+                    while (self.matchItem(item)) : (count += 1) {}
+                    // Backtrack until rest of pattern matches
+                    while (count > 0) : (count -= 1) {
+                        const saved_pat = self.pat_pos;
+                        if (self.matchPattern()) return true;
+                        self.pat_pos = saved_pat;
+                        self.str_pos -= 1;
+                    }
+                    self.str_pos = saved_str_pos;
+                    // Try with zero matches
+                    if (self.matchPattern()) return true;
+                    return false;
+                },
+                .plus => {
+                    // At least one match required
+                    if (!self.matchItem(item)) return false;
+                    // Then greedy like star
+                    var count: usize = 1;
+                    while (self.matchItem(item)) : (count += 1) {}
+                    // Backtrack
+                    while (count > 1) : (count -= 1) {
+                        const saved_pat = self.pat_pos;
+                        if (self.matchPattern()) return true;
+                        self.pat_pos = saved_pat;
+                        self.str_pos -= 1;
+                    }
+                    return self.matchPattern();
+                },
+                .question => {
+                    // Try with one match first
+                    if (self.matchItem(item)) {
+                        const saved_pat = self.pat_pos;
+                        const saved_str = self.str_pos;
+                        if (self.matchPattern()) return true;
+                        self.pat_pos = saved_pat;
+                        self.str_pos = saved_str - 1;
+                    }
+                    return self.matchPattern();
+                },
+                .minus => {
+                    // Non-greedy: try zero matches first
+                    const saved_pat = self.pat_pos;
+                    const saved_str = self.str_pos;
+                    if (self.matchPattern()) return true;
+                    self.pat_pos = saved_pat;
+                    self.str_pos = saved_str;
+                    // Then try one match and recurse
+                    while (self.matchItem(item)) {
+                        const sp = self.pat_pos;
+                        if (self.matchPattern()) return true;
+                        self.pat_pos = sp;
+                    }
+                    return false;
+                },
+            }
+        }
+
+        self.match_end = self.str_pos;
+        return true;
+    }
+
+    const PatternItem = union(enum) {
+        literal: u8,
+        any, // .
+        char_class: struct { pattern: []const u8, negated: bool },
+        lua_class: u8, // %a, %d, etc.
+        lua_class_neg: u8, // %A, %D, etc.
+    };
+
+    const Quantifier = enum { none, star, plus, question, minus };
+
+    fn getPatternItem(self: *PatternMatcher) PatternItem {
+        const c = self.pattern[self.pat_pos];
+        self.pat_pos += 1;
+
+        if (c == '.') {
+            return .any;
+        }
+
+        if (c == '%' and self.pat_pos < self.pattern.len) {
+            const next = self.pattern[self.pat_pos];
+            self.pat_pos += 1;
+            if (next >= 'A' and next <= 'Z') {
+                return .{ .lua_class_neg = next };
+            } else if (next >= 'a' and next <= 'z') {
+                return .{ .lua_class = next };
+            } else {
+                // Escaped literal
+                return .{ .literal = next };
+            }
+        }
+
+        if (c == '[') {
+            const start = self.pat_pos;
+            var negated = false;
+            if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == '^') {
+                negated = true;
+                self.pat_pos += 1;
+            }
+            // Find closing ]
+            while (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] != ']') {
+                if (self.pattern[self.pat_pos] == '%' and self.pat_pos + 1 < self.pattern.len) {
+                    self.pat_pos += 2;
+                } else {
+                    self.pat_pos += 1;
+                }
+            }
+            const class_end = self.pat_pos;
+            if (self.pat_pos < self.pattern.len) self.pat_pos += 1; // Skip ]
+            return .{ .char_class = .{
+                .pattern = self.pattern[start..class_end],
+                .negated = negated,
+            } };
+        }
+
+        return .{ .literal = c };
+    }
+
+    fn getQuantifier(self: *PatternMatcher) Quantifier {
+        if (self.pat_pos >= self.pattern.len) return .none;
+        const c = self.pattern[self.pat_pos];
+        switch (c) {
+            '*' => {
+                self.pat_pos += 1;
+                return .star;
+            },
+            '+' => {
+                self.pat_pos += 1;
+                return .plus;
+            },
+            '?' => {
+                self.pat_pos += 1;
+                return .question;
+            },
+            '-' => {
+                self.pat_pos += 1;
+                return .minus;
+            },
+            else => return .none,
+        }
+    }
+
+    fn matchItem(self: *PatternMatcher, item: PatternItem) bool {
+        if (self.str_pos >= self.str.len) return false;
+        const c = self.str[self.str_pos];
+
+        const matches = switch (item) {
+            .literal => |lit| c == lit,
+            .any => true,
+            .lua_class => |class| matchLuaClass(c, class),
+            .lua_class_neg => |class| !matchLuaClass(c, std.ascii.toLower(class)),
+            .char_class => |cc| blk: {
+                const in_class = matchCharClass(c, cc.pattern);
+                break :blk if (cc.negated) !in_class else in_class;
+            },
+        };
+
+        if (matches) {
+            self.str_pos += 1;
+            return true;
+        }
+        return false;
+    }
+
+    fn matchLuaClass(c: u8, class: u8) bool {
+        return switch (class) {
+            'a' => std.ascii.isAlphabetic(c),
+            'd' => std.ascii.isDigit(c),
+            's' => std.ascii.isWhitespace(c),
+            'w' => std.ascii.isAlphanumeric(c),
+            'l' => std.ascii.isLower(c),
+            'u' => std.ascii.isUpper(c),
+            'p' => isPunctuation(c),
+            'c' => std.ascii.isControl(c),
+            'x' => std.ascii.isHex(c),
+            'z' => c == 0,
+            else => c == class, // Escaped literal
+        };
+    }
+
+    fn isPunctuation(c: u8) bool {
+        return (c >= '!' and c <= '/') or
+            (c >= ':' and c <= '@') or
+            (c >= '[' and c <= '`') or
+            (c >= '{' and c <= '~');
+    }
+
+    fn matchCharClass(c: u8, pattern: []const u8) bool {
+        var i: usize = 0;
+        // Skip ^ if present (handled by caller)
+        if (i < pattern.len and pattern[i] == '^') i += 1;
+
+        while (i < pattern.len) {
+            if (pattern[i] == '%' and i + 1 < pattern.len) {
+                // Lua class in character class
+                const class = pattern[i + 1];
+                if (class >= 'a' and class <= 'z') {
+                    if (matchLuaClass(c, class)) return true;
+                } else if (class >= 'A' and class <= 'Z') {
+                    if (!matchLuaClass(c, std.ascii.toLower(class))) return true;
+                } else {
+                    // Escaped literal
+                    if (c == class) return true;
+                }
+                i += 2;
+            } else if (i + 2 < pattern.len and pattern[i + 1] == '-' and pattern[i + 2] != ']') {
+                // Range: a-z
+                if (c >= pattern[i] and c <= pattern[i + 2]) return true;
+                i += 3;
+            } else {
+                // Literal
+                if (c == pattern[i]) return true;
+                i += 1;
+            }
+        }
+        return false;
+    }
+};
 
 /// string.gmatch(s, pattern) - Returns iterator for all matches of pattern in string s
 pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {

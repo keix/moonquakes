@@ -15,7 +15,7 @@ const TValue = @import("../value.zig").TValue;
 // TODO:
 // Small fixed threshold for development/testing.
 // This will be replaced by a growth-based policy later.
-const GC_THRESHOLD = 20 * 1024;
+const GC_THRESHOLD = 1024 * 1024; // 1MB
 
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
