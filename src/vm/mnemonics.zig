@@ -13,15 +13,9 @@ const metamethod = @import("metamethod.zig");
 const MetaEvent = metamethod.MetaEvent;
 
 /// Result of executing a single instruction.
-/// Controls VM's main loop behavior.
 pub const ExecuteResult = union(enum) {
-    /// Normal instruction completed. Same frame, proceed to next.
     Continue,
-
-    /// Frame changed (CALL pushed, RETURN popped). Restart loop with new ci.
     LoopContinue,
-
-    /// Main function returned. Exit VM with this value.
     ReturnVM: VM.ReturnValue,
 };
 
