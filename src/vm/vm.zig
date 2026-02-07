@@ -313,6 +313,54 @@ pub const VM = struct {
         }
     }
 
+    /// Execute a metamethod synchronously and return its first result.
+    /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
+    /// Uses anyerror to break circular error set dependency with Mnemonics.do.
+    pub fn executeSyncMM(self: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
+        const proto = closure.proto;
+        const call_base = self.top;
+        const result_slot = call_base;
+
+        // Set up arguments
+        for (args, 0..) |arg, i| {
+            self.stack[call_base + i] = arg;
+        }
+
+        // Fill remaining params with nil
+        var i: u32 = @intCast(args.len);
+        while (i < proto.numparams) : (i += 1) {
+            self.stack[call_base + i] = .nil;
+        }
+
+        self.top = call_base + proto.maxstacksize;
+
+        // Save current call depth
+        const saved_depth = self.callstack_size;
+
+        // Push call info for metamethod
+        _ = try self.pushCallInfo(proto, closure, call_base, result_slot, 1);
+
+        // Execute until we return to saved depth
+        while (self.callstack_size > saved_depth) {
+            const ci = &self.callstack[self.callstack_size - 1];
+            const inst = ci.fetch() catch {
+                // End of function - handle return
+                self.base = ci.ret_base;
+                self.top = ci.ret_base + 1;
+                self.popCallInfo();
+                continue;
+            };
+            switch (try Mnemonics.do(self, inst)) {
+                .Continue => {},
+                .LoopContinue => {},
+                .ReturnVM => break,
+            }
+        }
+
+        // Return the result
+        return self.stack[result_slot];
+    }
+
     pub fn arithBinary(self: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         const a = inst.getA();
         const b = inst.getB();
