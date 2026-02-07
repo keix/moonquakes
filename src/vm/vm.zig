@@ -13,6 +13,7 @@ const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
+const Mnemonics = @import("mnemonics.zig");
 const ErrorHandler = @import("error.zig");
 
 // CallInfo represents a function call in the call stack
