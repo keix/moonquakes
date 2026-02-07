@@ -624,8 +624,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = vm.stack[vm.base + c];
 
-            // Try metamethod first, fall back to primitive equality
-            const is_true = try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+            // Fast path: neither is a table, no metamethod possible
+            const is_true = if (left.asTable() == null and right.asTable() == null)
+                VM.eqOp(left, right)
+            else
+                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -640,8 +643,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = vm.stack[vm.base + c];
 
-            // Try metamethod, fall back to primitive comparison
-            const is_true = try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: both are numbers, no metamethod possible
+            const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
+                try VM.ltOp(left, right)
+            else
+                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -656,8 +662,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = vm.stack[vm.base + c];
 
-            // Try metamethod, fall back to primitive comparison
-            const is_true = try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: both are numbers, no metamethod possible
+            const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
+                try VM.leOp(left, right)
+            else
+                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -1157,8 +1166,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = ci.func.k[c];
 
-            // Try metamethod first, fall back to primitive equality
-            const is_true = try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+            // Fast path: left is not a table (constant right can't be a table)
+            const is_true = if (left.asTable() == null)
+                VM.eqOp(left, right)
+            else
+                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1174,9 +1186,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = TValue{ .integer = @as(i64, imm) };
 
-            // Try metamethod first, fall back to primitive equality
-            // (metamethod won't apply for integer right operand, but check for consistency)
-            const is_true = try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+            // Fast path: left is not a table (immediate right is always integer)
+            const is_true = if (left.asTable() == null)
+                VM.eqOp(left, right)
+            else
+                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1192,8 +1206,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = TValue{ .integer = @as(i64, imm) };
 
-            // Try metamethod, fall back to primitive comparison
-            const is_true = try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: left is a number
+            const is_true = if (left.isInteger() or left.isNumber())
+                try VM.ltOp(left, right)
+            else
+                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1209,8 +1226,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = TValue{ .integer = @as(i64, imm) };
 
-            // Try metamethod, fall back to primitive comparison
-            const is_true = try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: left is a number
+            const is_true = if (left.isInteger() or left.isNumber())
+                try VM.leOp(left, right)
+            else
+                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1226,8 +1246,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = TValue{ .integer = @as(i64, imm) };
             const right = vm.stack[vm.base + b];
 
-            // GTI is imm < R[B], so we pass (imm, R[B]) to lt
-            const is_true = try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: right is a number (GTI is imm < R[B])
+            const is_true = if (right.isInteger() or right.isNumber())
+                try VM.ltOp(left, right)
+            else
+                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1243,8 +1266,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = TValue{ .integer = @as(i64, imm) };
             const right = vm.stack[vm.base + b];
 
-            // GEI is imm >= R[B], i.e., imm <= R[B] reversed, so we pass (imm, R[B])
-            const is_true = try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+            // Fast path: right is a number (GEI is imm <= R[B])
+            const is_true = if (right.isInteger() or right.isNumber())
+                try VM.leOp(left, right)
+            else
+                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
