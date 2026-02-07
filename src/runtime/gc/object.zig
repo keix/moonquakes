@@ -114,6 +114,8 @@ pub const TableObject = struct {
     header: GCObject,
     hash_part: HashMap,
     allocator: std.mem.Allocator,
+    /// Metatable for metamethod dispatch (null if no metatable)
+    metatable: ?*TableObject,
 
     /// Get a value by StringObject key
     pub fn get(self: *const TableObject, key: *const StringObject) ?TValue {

@@ -149,6 +149,7 @@ pub const GC = struct {
         obj.header = GCObject.init(.table, self.objects);
         obj.hash_part = TableObject.HashMap.init(self.allocator);
         obj.allocator = self.allocator;
+        obj.metatable = null; // No metatable by default
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -270,6 +271,10 @@ pub const GC = struct {
             },
             .table => {
                 const table: *TableObject = @fieldParentPtr("header", obj);
+                // Mark metatable if present
+                if (table.metatable) |mt| {
+                    markObject(self, &mt.header);
+                }
                 // Mark all keys and values in the hash part
                 var iter = table.hash_part.iterator();
                 while (iter.next()) |entry| {

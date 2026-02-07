@@ -1,5 +1,5 @@
 -- FizzBuzz target (will need parser extension)
-for i = 1, 100 do
+for i = 1, 10000 do
   if i % 15 == 0 then
     print("FizzBuzz")
   elseif i % 3 == 0 then  

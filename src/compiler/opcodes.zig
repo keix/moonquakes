@@ -183,42 +183,42 @@ pub const Instruction = packed struct(u32) {
         return @bitCast(inst_value);
     }
 
-    pub fn getOpCode(self: Instruction) OpCode {
+    pub inline fn getOpCode(self: Instruction) OpCode {
         return @enumFromInt(self.op);
     }
 
-    pub fn getA(self: Instruction) u8 {
+    pub inline fn getA(self: Instruction) u8 {
         return self.a;
     }
 
-    pub fn getB(self: Instruction) u8 {
+    pub inline fn getB(self: Instruction) u8 {
         return self.b;
     }
 
-    pub fn getC(self: Instruction) u8 {
+    pub inline fn getC(self: Instruction) u8 {
         return self.c;
     }
 
-    pub fn getk(self: Instruction) bool {
+    pub inline fn getk(self: Instruction) bool {
         return self.k;
     }
 
-    pub fn getBx(self: Instruction) u17 {
+    pub inline fn getBx(self: Instruction) u17 {
         const raw: u32 = @bitCast(self);
         return @intCast((raw >> InstructionFormat.POS_Bx) & InstructionFormat.MAXARG_Bx);
     }
 
-    pub fn getSBx(self: Instruction) i17 {
+    pub inline fn getSBx(self: Instruction) i17 {
         const bx_val = @as(i32, self.getBx());
         return @as(i17, @intCast(bx_val - @as(i32, InstructionFormat.OFFSET_sBx)));
     }
 
-    pub fn getAx(self: Instruction) u25 {
+    pub inline fn getAx(self: Instruction) u25 {
         const raw: u32 = @bitCast(self);
         return @intCast((raw >> InstructionFormat.POS_Ax) & InstructionFormat.MAXARG_Ax);
     }
 
-    pub fn getsJ(self: Instruction) i25 {
+    pub inline fn getsJ(self: Instruction) i25 {
         const raw: u32 = @bitCast(self);
         const j = (raw >> InstructionFormat.POS_sJ) & InstructionFormat.MAXARG_sJ;
         return @as(i25, @intCast(@as(i26, @intCast(j)) - @as(i26, InstructionFormat.OFFSET_sJ)));

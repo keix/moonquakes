@@ -2353,20 +2353,13 @@ pub const Parser = struct {
             return;
         }
 
-        // Map function name to native function ID
-        const func_id = if (std.mem.eql(u8, func_name, "print"))
-            NativeFnId.print
-        else if (std.mem.eql(u8, func_name, "tostring"))
-            NativeFnId.tostring
-        else
-            return error.UnsupportedFunction;
-
+        // Fall back to global lookup via GETTABUP for any unresolved function
+        // This handles builtin functions like assert, setmetatable, getmetatable, etc.
         self.advance(); // consume function name
 
-        // Load function constant
         const func_reg = self.proto.allocTemp();
-        const func_const_idx = try self.proto.addNativeFunc(func_id);
-        try self.proto.emitLoadK(func_reg, func_const_idx);
+        const name_const = try self.proto.addConstString(func_name);
+        try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
@@ -2407,20 +2400,13 @@ pub const Parser = struct {
             return func_reg;
         }
 
-        // Map function name to native function ID
-        const func_id = if (std.mem.eql(u8, func_name, "tostring"))
-            NativeFnId.tostring
-        else if (std.mem.eql(u8, func_name, "print"))
-            NativeFnId.print
-        else
-            return error.UnsupportedFunction;
-
+        // Fall back to global lookup via GETTABUP for any unresolved function
+        // This handles builtin functions like assert, setmetatable, getmetatable, etc.
         self.advance(); // consume function name
 
-        // Load function constant
         const func_reg = self.proto.allocTemp();
-        const func_const_idx = try self.proto.addNativeFunc(func_id);
-        try self.proto.emitLoadK(func_reg, func_const_idx);
+        const name_const = try self.proto.addConstString(func_name);
+        try self.proto.emitGETTABUP(func_reg, 0, name_const);
 
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
