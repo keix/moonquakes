@@ -71,12 +71,14 @@ pub const CallInfo = struct {
         return inst;
     }
 
-    /// Validate PC is within function bounds
+    /// Validate PC is within function bounds (disabled in ReleaseFast)
     inline fn validatePC(self: *CallInfo) !void {
-        const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
-        const pc_index = pc_offset / @sizeOf(Instruction);
-        if (pc_index >= self.func.code.len) {
-            return error.PcOutOfRange;
+        if (std.debug.runtime_safety) {
+            const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
+            const pc_index = pc_offset / @sizeOf(Instruction);
+            if (pc_index >= self.func.code.len) {
+                return error.PcOutOfRange;
+            }
         }
     }
 };
@@ -405,6 +407,10 @@ pub const VM = struct {
     }
 
     pub fn ltOp(a: TValue, b: TValue) !bool {
+        // Fast path: integer comparison
+        if (a.isInteger() and b.isInteger()) {
+            return a.integer < b.integer;
+        }
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {
@@ -420,6 +426,10 @@ pub const VM = struct {
     }
 
     pub fn leOp(a: TValue, b: TValue) !bool {
+        // Fast path: integer comparison
+        if (a.isInteger() and b.isInteger()) {
+            return a.integer <= b.integer;
+        }
         const na = a.toNumber();
         const nb = b.toNumber();
         if (na != null and nb != null) {
