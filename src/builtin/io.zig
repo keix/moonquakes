@@ -6,7 +6,6 @@ const TableObject = object.TableObject;
 /// Lua 5.4 Input and Output Library
 /// Corresponds to Lua manual chapter "Input and Output Facilities"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.8
-
 /// Keys for file handle table fields
 const FILE_OUTPUT_KEY = "_output";
 const FILE_EXITCODE_KEY = "_exitcode";

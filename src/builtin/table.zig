@@ -6,7 +6,6 @@ const TableObject = object.TableObject;
 /// Lua 5.4 Table Library
 /// Corresponds to Lua manual chapter "Table Manipulation"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.6
-
 /// Helper: Get the length of a table (count sequential integer keys from 1)
 fn getTableLength(table: *TableObject, vm: anytype) i64 {
     var len: i64 = 0;
