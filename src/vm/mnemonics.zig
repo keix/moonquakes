@@ -85,6 +85,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_ARITH] Fast path: integer add with immediate. Slow path: __add metamethod.
         .ADDI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -147,6 +148,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .integer = std.math.shr(i64, value, @as(u6, @intCast(shift))) };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: add with constant. Slow path: __add metamethod.
         .ADDK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -163,6 +165,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_ARITH] Fast path: subtract with constant. Slow path: __sub metamethod.
         .SUBK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -179,6 +182,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_ARITH] Fast path: multiply with constant. Slow path: __mul metamethod.
         .MULK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -195,6 +199,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_ARITH] Fast path: divide with constant. Slow path: __div metamethod.
         .DIVK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -208,6 +213,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .number = nb / nc };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: integer divide with constant. Slow path: __idiv metamethod.
         .IDIVK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -221,6 +227,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .number = VM.luaFloorDiv(nb, nc) };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: modulo with constant. Slow path: __mod metamethod.
         .MODK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -234,6 +241,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .number = VM.luaMod(nb, nc) };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: power with constant. Slow path: __pow metamethod.
         .POWK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -321,30 +329,37 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .integer = ib ^ ic };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register add. Slow path: __add metamethod.
         .ADD => {
             try vm.arithBinary(inst, .add);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register subtract. Slow path: __sub metamethod.
         .SUB => {
             try vm.arithBinary(inst, .sub);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register multiply. Slow path: __mul metamethod.
         .MUL => {
             try vm.arithBinary(inst, .mul);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register divide. Slow path: __div metamethod.
         .DIV => {
             try vm.arithBinary(inst, .div);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register integer divide. Slow path: __idiv metamethod.
         .IDIV => {
             try vm.arithBinary(inst, .idiv);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register modulo. Slow path: __mod metamethod.
         .MOD => {
             try vm.arithBinary(inst, .mod);
             return .Continue;
         },
+        // [MM_ARITH] Fast path: register power. Slow path: __pow metamethod.
         .POW => {
             try vm.arithBinary(inst, .pow);
             return .Continue;
@@ -429,6 +444,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = .{ .integer = result };
             return .Continue;
         },
+        // [MM_ARITH] Fast path: unary minus. Slow path: __unm metamethod.
         .UNM => {
             const a = inst.getA();
             const b = inst.getB();
@@ -470,6 +486,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LEN] Fast path: string/table length. Slow path: __len metamethod.
         .LEN => {
             const a = inst.getA();
             const b = inst.getB();
@@ -492,6 +509,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_CONCAT] Fast path: string/number concat. Slow path: __concat metamethod.
         .CONCAT => {
             const a = inst.getA();
             const b = inst.getB();
@@ -546,6 +564,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = TValue.fromString(result_str);
             return .Continue;
         },
+        // [MM_EQ] Fast path: primitive equality. Slow path: __eq metamethod.
         .EQ => {
             const negate = inst.getA();
             const b = inst.getB();
@@ -556,6 +575,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LT] Fast path: numeric less-than. Slow path: __lt metamethod.
         .LT => {
             const negate = inst.getA();
             const b = inst.getB();
@@ -569,6 +589,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LE] Fast path: numeric less-or-equal. Slow path: __le metamethod.
         .LE => {
             const negate = inst.getA();
             const b = inst.getB();
@@ -686,6 +707,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_CALL] Fast path: closure/native call. Slow path: __call metamethod.
         .CALL => {
             const a = inst.getA();
             const b = inst.getB();
@@ -841,6 +863,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
+        // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
         .GETTABUP => {
             const a = inst.getA();
             const b = inst.getB();
@@ -856,6 +879,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_NEWINDEX] Fast path: upvalue table write. Slow path: __newindex metamethod.
         .SETTABUP => {
             const a = inst.getA();
             const b = inst.getB();
@@ -895,6 +919,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_INDEX] Fast path: table read by key. Slow path: __index metamethod.
         .GETTABLE => {
             const a = inst.getA();
             const b = inst.getB();
@@ -922,6 +947,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_NEWINDEX] Fast path: table write by key. Slow path: __newindex metamethod.
         .SETTABLE => {
             const a = inst.getA();
             const b = inst.getB();
@@ -948,6 +974,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_INDEX] Fast path: table read by integer index. Slow path: __index metamethod.
         .GETI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -967,6 +994,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_NEWINDEX] Fast path: table write by integer index. Slow path: __newindex metamethod.
         .SETI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -986,6 +1014,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_INDEX] Fast path: table read by field. Slow path: __index metamethod.
         .GETFIELD => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1005,6 +1034,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_NEWINDEX] Fast path: table write by field. Slow path: __newindex metamethod.
         .SETFIELD => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1030,6 +1060,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = TValue.fromTable(table);
             return .Continue;
         },
+        // [MM_EQ] Fast path: equality with constant. Slow path: __eq metamethod.
         .EQK => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1040,6 +1071,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_EQ] Fast path: equality with immediate. Slow path: __eq metamethod.
         .EQI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1052,6 +1084,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LT] Fast path: less-than with immediate. Slow path: __lt metamethod.
         .LTI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1067,6 +1100,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LE] Fast path: less-or-equal with immediate. Slow path: __le metamethod.
         .LEI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1082,6 +1116,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LT] Fast path: greater-than with immediate. Slow path: __lt metamethod (reversed).
         .GTI => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1097,6 +1132,7 @@ pub fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             return .Continue;
         },
+        // [MM_LE] Fast path: greater-or-equal with immediate. Slow path: __le metamethod (reversed).
         .GEI => {
             const a = inst.getA();
             const b = inst.getB();
