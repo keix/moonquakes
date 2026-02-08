@@ -218,7 +218,13 @@ pub const VM = struct {
         // === Mark phase: traverse from roots ===
 
         // 1. Mark VM stack (active portion)
-        self.gc.markStack(self.stack[0..self.top]);
+        // Use the current frame's maxstacksize to ensure all registers are marked,
+        // even if vm.top was lowered after a call returned
+        const stack_end = if (self.ci) |ci|
+            self.base + ci.func.maxstacksize
+        else
+            self.top;
+        self.gc.markStack(self.stack[0..stack_end]);
 
         // 2. Mark call frames
         // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
@@ -255,6 +261,7 @@ pub const VM = struct {
         self.gc.collect();
 
         // Debug output (disabled in ReleaseFast)
+        // TODO: Consider making this configurable via runtime flag or environment variable
         if (@import("builtin").mode != .ReleaseFast) {
             std.log.info("GC: {} -> {} bytes, next at {}", .{ before, self.gc.bytes_allocated, self.gc.next_gc });
         }

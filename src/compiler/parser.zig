@@ -446,18 +446,28 @@ pub const ProtoBuilder = struct {
     pub fn emitSETFIELD(self: *ProtoBuilder, table: u8, key_const: u32, src: u8) !void {
         const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit SETTABLE instruction: R[A][R[B]] := R[C]
     pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETTABLE, table, key, src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(key + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
     pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETI, table, index, src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
