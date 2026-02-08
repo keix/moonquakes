@@ -128,6 +128,8 @@ pub const ProtoBuilder = struct {
     scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
+    // Constant deduplication maps (string content -> const_refs index)
+    string_constants: std.StringHashMap(u32),
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
@@ -148,6 +150,7 @@ pub const ProtoBuilder = struct {
             .scope_starts = .{},
             .upvalues = .{},
             .parent = parent,
+            .string_constants = std.StringHashMap(u32).init(allocator),
         };
     }
 
@@ -175,6 +178,7 @@ pub const ProtoBuilder = struct {
         self.variables.deinit(self.allocator);
         self.scope_starts.deinit(self.allocator);
         self.upvalues.deinit(self.allocator);
+        self.string_constants.deinit();
     }
 
     /// Allocate a temporary register (for expression evaluation)
@@ -657,18 +661,21 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn addConstString(self: *ProtoBuilder, lexeme: []const u8) !u32 {
-        // Store raw string data (no GC allocation)
-        // TODO: String deduplication strategy
-        // - Currently: Each string is duplicated independently (no dedup within RawProto)
-        // - Future consideration: Intern strings at materialize time via GC.allocString?
-        //   GC.allocString already interns, so duplicates in RawProto will merge at runtime.
-        // - Alternative: Dedup at compile time using a hash map in ProtoBuilder
-        // For now, simple duplication is sufficient; GC handles runtime interning.
-        const idx: u16 = @intCast(self.strings.items.len);
+        // Check for existing constant (compile-time deduplication)
+        if (self.string_constants.get(lexeme)) |existing_idx| {
+            return existing_idx;
+        }
+
+        // Add new constant
+        const str_idx: u16 = @intCast(self.strings.items.len);
         const duped = try self.allocator.dupe(u8, lexeme);
         try self.strings.append(self.allocator, duped);
-        try self.const_refs.append(self.allocator, .{ .kind = .string, .index = idx });
-        return @intCast(self.const_refs.items.len - 1);
+        try self.const_refs.append(self.allocator, .{ .kind = .string, .index = str_idx });
+        const const_idx: u32 = @intCast(self.const_refs.items.len - 1);
+
+        // Cache for future lookups (use duped string as key for stable reference)
+        try self.string_constants.put(duped, const_idx);
+        return const_idx;
     }
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
@@ -993,8 +1000,15 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
             // Get the base table
             var table_reg: u8 = undefined;
-            if (self.proto.findVariable(name)) |local_reg| {
-                table_reg = local_reg;
+            if (try self.proto.resolveVariable(name)) |loc| {
+                switch (loc) {
+                    .local => |reg| table_reg = reg,
+                    .upvalue => |idx| {
+                        // Upvalue: load table into temp register first
+                        table_reg = self.proto.allocTemp();
+                        try self.proto.emitGETUPVAL(table_reg, idx);
+                    },
+                }
             } else {
                 // Global variable: load from _ENV
                 table_reg = self.proto.allocTemp();
@@ -1062,8 +1076,15 @@ pub const Parser = struct {
         } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
             // Index assignment: t[key] = expr
             var table_reg: u8 = undefined;
-            if (self.proto.findVariable(name)) |local_reg| {
-                table_reg = local_reg;
+            if (try self.proto.resolveVariable(name)) |loc| {
+                switch (loc) {
+                    .local => |reg| table_reg = reg,
+                    .upvalue => |idx| {
+                        // Upvalue: load table into temp register first
+                        table_reg = self.proto.allocTemp();
+                        try self.proto.emitGETUPVAL(table_reg, idx);
+                    },
+                }
             } else {
                 // Global variable: load from _ENV
                 table_reg = self.proto.allocTemp();
