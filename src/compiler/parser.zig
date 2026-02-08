@@ -446,18 +446,28 @@ pub const ProtoBuilder = struct {
     pub fn emitSETFIELD(self: *ProtoBuilder, table: u8, key_const: u32, src: u8) !void {
         const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit SETTABLE instruction: R[A][R[B]] := R[C]
     pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETTABLE, table, key, src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(key + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
     pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETI, table, index, src);
         try self.code.append(self.allocator, instr);
+        // Update maxstacksize to include all referenced registers
+        self.updateMaxStack(table + 1);
+        self.updateMaxStack(src + 1);
     }
 
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
@@ -913,6 +923,9 @@ pub const Parser = struct {
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ",")) {
+                    // Multiple assignment: a, b, c = expr, expr, ...
+                    try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
                     // Check for chained method call: t.a:method() or field assignment
                     try self.parseFieldAccessOrMethodCall();
@@ -1128,6 +1141,136 @@ pub const Parser = struct {
             } else {
                 // Global variable: SETTABUP (_ENV[name] = value)
                 const name_const = try self.proto.addConstString(name);
+                try self.proto.emitSETTABUP(0, name_const, value_reg);
+            }
+        }
+    }
+
+    /// Parse multiple assignment: a, b, c = expr, expr, ...
+    /// Handles both local and global variables, and multiple return values from function calls
+    fn parseMultipleAssignment(self: *Parser) ParseError!void {
+        // Collect all variable names
+        var var_names: [256][]const u8 = undefined;
+        var var_count: u8 = 0;
+
+        // First identifier (already at current token)
+        var_names[var_count] = self.current.lexeme;
+        var_count += 1;
+        self.advance(); // consume first identifier
+
+        // Parse remaining identifiers after commas
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            var_names[var_count] = self.current.lexeme;
+            var_count += 1;
+            self.advance();
+        }
+
+        // Expect '='
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+            return error.ExpectedEquals;
+        }
+        self.advance(); // consume '='
+
+        // Allocate temp registers for all values
+        const first_temp = self.proto.allocTemp();
+        var i: u8 = 1;
+        while (i < var_count) : (i += 1) {
+            _ = self.proto.allocTemp();
+        }
+
+        // Parse expressions
+        var expr_count: u8 = 0;
+        var expr_reg = try self.parseExpr();
+
+        // Move first expression to first temp
+        if (expr_reg != first_temp) {
+            try self.proto.emitMOVE(first_temp, expr_reg);
+        }
+        expr_count += 1;
+
+        // Parse remaining expressions
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            expr_reg = try self.parseExpr();
+
+            if (expr_count < var_count) {
+                const target_reg = first_temp + expr_count;
+                if (expr_reg != target_reg) {
+                    try self.proto.emitMOVE(target_reg, expr_reg);
+                }
+            }
+            expr_count += 1;
+        }
+
+        // Handle multiple return values from single function call
+        var handled_multi_return = false;
+        if (expr_count == 1 and var_count > 1) {
+            if (self.proto.code.items.len > 0) {
+                var call_idx: ?usize = null;
+                var call_func_reg: u8 = 0;
+                const last_idx = self.proto.code.items.len - 1;
+                const last_inst = self.proto.code.items[last_idx];
+
+                if (last_inst.getOpCode() == .CALL) {
+                    call_idx = last_idx;
+                    call_func_reg = last_inst.a;
+                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                    const prev_inst = self.proto.code.items[last_idx - 1];
+                    if (prev_inst.getOpCode() == .CALL) {
+                        call_idx = last_idx - 1;
+                        call_func_reg = prev_inst.a;
+                        // Remove the single MOVE
+                        _ = self.proto.code.pop();
+                    }
+                }
+
+                if (call_idx) |idx| {
+                    // Adjust CALL to return var_count results
+                    self.proto.code.items[idx].c = var_count + 1;
+
+                    // Move results from call_func_reg to first_temp...
+                    var vi: u8 = 0;
+                    while (vi < var_count) : (vi += 1) {
+                        const src = call_func_reg + vi;
+                        const dst = first_temp + vi;
+                        if (src != dst) {
+                            try self.proto.emitMOVE(dst, src);
+                        }
+                    }
+                    handled_multi_return = true;
+                }
+            }
+        }
+
+        // Fill remaining temps with nil if fewer values
+        if (expr_count < var_count and !handled_multi_return) {
+            const nil_start = first_temp + expr_count;
+            const nil_count = var_count - expr_count;
+            try self.proto.emitLOADNIL(nil_start, nil_count);
+        }
+
+        // Now assign from temps to actual variables
+        i = 0;
+        while (i < var_count) : (i += 1) {
+            const var_name = var_names[i];
+            const value_reg = first_temp + i;
+
+            if (try self.proto.resolveVariable(var_name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| {
+                        if (local_reg != value_reg) {
+                            try self.proto.emitMOVE(local_reg, value_reg);
+                        }
+                    },
+                    .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
+                }
+            } else {
+                // Global variable
+                const name_const = try self.proto.addConstString(var_name);
                 try self.proto.emitSETTABUP(0, name_const, value_reg);
             }
         }
@@ -2182,6 +2325,9 @@ pub const Parser = struct {
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
+                } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ",")) {
+                    // Multiple assignment: a, b, c = expr, expr, ...
+                    try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
                     // Check for chained method call: t.a:method() or field assignment
                     try self.parseFieldAccessOrMethodCall();

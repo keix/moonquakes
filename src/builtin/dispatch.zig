@@ -97,8 +97,9 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     try registerNative(globals, gc, "dofile", .dofile);
     try registerNative(globals, gc, "warn", .warn);
 
-    // Note: _G and _VERSION are typically set to globals itself and a version string
-    try registerNative(globals, gc, "_G", .lua_G);
+    // _G is a self-reference to the globals table itself
+    try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
+    // _VERSION is a version string
     try registerNative(globals, gc, "_VERSION", .lua_VERSION);
 }
 

@@ -340,7 +340,7 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     const result: TValue = if (gc_options.get(opt)) |option| switch (option) {
         .collect => blk: {
-            vm.gc.forceGC();
+            vm.collectGarbage();
             break :blk TValue{ .nil = {} };
         },
         .stop => TValue{ .nil = {} }, // TODO
@@ -351,7 +351,7 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             break :blk TValue{ .number = kb };
         },
         .step => blk: {
-            vm.gc.forceGC();
+            vm.collectGarbage();
             break :blk TValue{ .boolean = true };
         },
         .isrunning => TValue{ .boolean = true },
