@@ -790,8 +790,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const obj = func_val.object;
                 if (obj.type == .native_closure) {
                     const nc = object.getObject(NativeClosureObject, obj);
-                    const nargs: u32 = if (b > 0) b - 1 else 0;
+                    const nargs: u32 = if (b > 0) b - 1 else blk: {
+                        const arg_start = vm.base + a + 1;
+                        break :blk vm.top - arg_start;
+                    };
                     const nresults: u32 = if (c > 0) c - 1 else 0;
+                    // Ensure vm.top is past all arguments so native functions can use temp registers safely
+                    vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);
                     return .LoopContinue;
                 }
@@ -889,6 +894,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 slot.* = .nil;
                             }
                         }
+                        // Update vm.top to reflect actual stack usage after return
+                        vm.top = dst_base + n;
                     }
                 }
 

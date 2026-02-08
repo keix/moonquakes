@@ -272,10 +272,22 @@ pub const ProtoBuilder = struct {
         try self.code.append(self.allocator, instr);
     }
 
+    /// Emit CALL instruction. B = nargs + 1, C = nresults + 1
     pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
         const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
         try self.code.append(self.allocator, instr);
     }
+
+    /// Emit CALL with variable args (B=0) or variable results (C=0)
+    /// Use VARARG_SENTINEL (255) for nargs or nresults to indicate variable
+    pub fn emitCallVararg(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
+        const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
+        const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
+        const instr = Instruction.initABC(.CALL, func_reg, b, c);
+        try self.code.append(self.allocator, instr);
+    }
+
+    pub const VARARG_SENTINEL: u8 = 255;
 
     pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.DIV, dst, left, right);
@@ -1228,7 +1240,7 @@ pub const Parser = struct {
                         // The field value is a function, call it
                         const func_reg = base_reg;
                         const arg_count = try self.parseCallArgs(func_reg);
-                        try self.proto.emitCall(func_reg, arg_count, 1);
+                        try self.proto.emitCallVararg(func_reg, arg_count, 1);
                         base_reg = func_reg; // Result is in func_reg
                     }
                 } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
@@ -1249,7 +1261,7 @@ pub const Parser = struct {
                     if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
                         const func_reg = base_reg;
                         const arg_count = try self.parseCallArgs(func_reg);
-                        try self.proto.emitCall(func_reg, arg_count, 1);
+                        try self.proto.emitCallVararg(func_reg, arg_count, 1);
                         base_reg = func_reg; // Result is in func_reg
                     }
                 } else {
@@ -2381,7 +2393,7 @@ pub const Parser = struct {
             const arg_count = try self.parseCallArgs(func_reg);
 
             // Emit CALL instruction (0 results for statements)
-            try self.proto.emitCall(func_reg, arg_count, 0);
+            try self.proto.emitCallVararg(func_reg, arg_count, 0);
             return;
         }
 
@@ -2397,7 +2409,7 @@ pub const Parser = struct {
             // Parse arguments (handles both parens and no-parens styles)
             const arg_count = try self.parseCallArgs(func_reg);
 
-            try self.proto.emitCall(func_reg, arg_count, 0);
+            try self.proto.emitCallVararg(func_reg, arg_count, 0);
             return;
         }
 
@@ -2413,7 +2425,7 @@ pub const Parser = struct {
         const arg_count = try self.parseCallArgs(func_reg);
 
         // Emit CALL instruction (0 results for statements)
-        try self.proto.emitCall(func_reg, arg_count, 0);
+        try self.proto.emitCallVararg(func_reg, arg_count, 0);
     }
 
     fn parseFunctionCallExpr(self: *Parser) ParseError!u8 {
@@ -2441,8 +2453,8 @@ pub const Parser = struct {
             // Parse arguments (handles both parens and no-parens styles)
             const arg_count = try self.parseCallArgs(func_reg);
 
-            // Emit CALL instruction (1 result)
-            try self.proto.emitCall(func_reg, arg_count, 1);
+            // Emit CALL instruction (1 result, or variable args if last arg was multi-return call)
+            try self.proto.emitCallVararg(func_reg, arg_count, 1);
 
             // Return the register where the result is stored
             return func_reg;
@@ -2459,8 +2471,8 @@ pub const Parser = struct {
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
 
-        // Emit CALL instruction (1 result)
-        try self.proto.emitCall(func_reg, arg_count, 1);
+        // Emit CALL instruction (1 result, or variable args if last arg was multi-return call)
+        try self.proto.emitCallVararg(func_reg, arg_count, 1);
 
         // Return the register where the result is stored
         return func_reg;
@@ -2477,8 +2489,8 @@ pub const Parser = struct {
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
 
-        // Emit CALL instruction (1 result)
-        try self.proto.emitCall(func_reg, arg_count, 1);
+        // Emit CALL instruction (1 result, or variable args if last arg was multi-return call)
+        try self.proto.emitCallVararg(func_reg, arg_count, 1);
 
         return func_reg;
     }
@@ -2494,8 +2506,8 @@ pub const Parser = struct {
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
 
-        // Emit CALL instruction (1 result)
-        try self.proto.emitCall(func_reg, arg_count, 1);
+        // Emit CALL instruction (1 result, or variable args if last arg was multi-return call)
+        try self.proto.emitCallVararg(func_reg, arg_count, 1);
 
         return func_reg;
     }
@@ -2511,9 +2523,11 @@ pub const Parser = struct {
     }
 
     /// Parse function call arguments, handling both parenthesized and no-parens styles.
-    /// Returns the argument count. func_reg should already be allocated.
+    /// Returns the argument count (0 means variable - use vm.top).
+    /// func_reg should already be allocated.
     fn parseCallArgs(self: *Parser, func_reg: u8) ParseError!u8 {
         var arg_count: u8 = 0;
+        var last_was_call = false;
 
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
@@ -2534,20 +2548,28 @@ pub const Parser = struct {
         // Parse arguments
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             // Parse first argument
+            const code_len_before = self.proto.code.items.len;
             const arg_reg = try self.parseExpr();
             if (arg_reg != func_reg + 1) {
                 try self.proto.emitMOVE(func_reg + 1, arg_reg);
             }
             arg_count = 1;
+            // Check if this argument resulted in a CALL instruction
+            last_was_call = self.proto.code.items.len > code_len_before and
+                self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
 
             // Parse additional arguments
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+                const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
                 arg_count += 1;
                 if (next_arg != func_reg + arg_count) {
                     try self.proto.emitMOVE(func_reg + arg_count, next_arg);
                 }
+                // Check if this (last) argument resulted in a CALL instruction
+                last_was_call = self.proto.code.items.len > code_len_before2 and
+                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
             }
         }
 
@@ -2556,6 +2578,22 @@ pub const Parser = struct {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
+
+        // If the last argument was a function call, modify it to return all values
+        // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
+        if (last_was_call and self.proto.code.items.len > 0) {
+            // Find the CALL instruction (might be last, or before a MOVE)
+            var call_idx = self.proto.code.items.len - 1;
+            if (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
+                call_idx -= 1;
+            }
+            if (self.proto.code.items[call_idx].getOpCode() == .CALL) {
+                // Change C to 0 (variable returns)
+                self.proto.code.items[call_idx].c = 0;
+                // Return VARARG_SENTINEL to indicate variable argument count
+                return ProtoBuilder.VARARG_SENTINEL;
+            }
+        }
 
         return arg_count;
     }
@@ -2772,7 +2810,7 @@ pub const Parser = struct {
 
                 // Parse arguments and emit call
                 const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCall(func_reg, arg_count, 0);
+                try self.proto.emitCallVararg(func_reg, arg_count, 0);
                 return;
             } else {
                 // Unknown pattern after field access
