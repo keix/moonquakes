@@ -2239,8 +2239,51 @@ pub const Parser = struct {
                 expr_count += 1;
             }
 
+            // Handle multiple return values: if single expression assigns to multiple vars,
+            // adjust the last CALL instruction's nresults to match var_count
+            var handled_multi_return = false;
+            if (expr_count == 1 and var_count > 1) {
+                // Find the CALL instruction (may be last or before a MOVE)
+                if (self.proto.code.items.len > 0) {
+                    var call_idx: ?usize = null;
+                    var call_func_reg: u8 = 0;
+                    const last_idx = self.proto.code.items.len - 1;
+                    const last_inst = self.proto.code.items[last_idx];
+
+                    if (last_inst.getOpCode() == .CALL) {
+                        call_idx = last_idx;
+                        call_func_reg = last_inst.a;
+                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                        const prev_inst = self.proto.code.items[last_idx - 1];
+                        if (prev_inst.getOpCode() == .CALL) {
+                            call_idx = last_idx - 1;
+                            call_func_reg = prev_inst.a;
+                            // Remove the single MOVE - we'll emit multiple MOVEs below
+                            _ = self.proto.code.pop();
+                        }
+                    }
+
+                    if (call_idx) |idx| {
+                        // Adjust CALL to return var_count results
+                        self.proto.code.items[idx].c = var_count + 1;
+
+                        // Emit MOVEs to copy results from call_func_reg to first_reg...
+                        var vi: u8 = 0;
+                        while (vi < var_count) : (vi += 1) {
+                            const src = call_func_reg + vi;
+                            const dst = first_reg + vi;
+                            if (src != dst) {
+                                try self.proto.emitMOVE(dst, src);
+                            }
+                        }
+                        handled_multi_return = true;
+                    }
+                }
+            }
+
             // Fill remaining variables with nil if fewer values
-            if (expr_count < var_count) {
+            // (only if we didn't handle multiple returns from a function call)
+            if (expr_count < var_count and !handled_multi_return) {
                 const nil_start = first_reg + expr_count;
                 const nil_count = var_count - expr_count;
                 try self.proto.emitLOADNIL(nil_start, nil_count);

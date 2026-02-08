@@ -4,7 +4,6 @@ const TValue = @import("../runtime/value.zig").TValue;
 /// Lua 5.4 String Library
 /// Corresponds to Lua manual chapter "String Manipulation"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.4
-
 /// Format number to string using stack buffer (no allocation)
 fn formatNumber(buf: []u8, n: f64) []const u8 {
     // Handle integers that fit in i64 range and have no fractional part

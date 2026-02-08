@@ -28,17 +28,3 @@ scripts/
 └── table/               # Table operations (4 files)
 ```
 
-Total: 138 test scripts
-
-## Usage
-
-```sh
-zig build -Doptimize=ReleaseFast run -- basics/print_42.lua
-zig build -Doptimize=ReleaseFast run -- fizzbuzz/fizzbuzz.lua
-```
-
-## Running All Tests
-
-```sh
-zig build -Doptimize=ReleaseFast run -- invoke-sctipt.lua
-```
