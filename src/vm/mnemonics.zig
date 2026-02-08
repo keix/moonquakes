@@ -525,12 +525,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return result;
                 }
                 // Default: count sequential integer keys from 1
+                // Stop at first nil or missing key (Lua sequence semantics)
                 var len: i64 = 0;
                 var key_buffer: [32]u8 = undefined;
                 while (true) {
                     const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
                     const key = vm.gc.allocString(key_slice) catch break;
-                    if (table.get(key) == null) break;
+                    const val = table.get(key) orelse break;
+                    if (val == .nil) break;
                     len += 1;
                 }
                 vm.stack[vm.base + a] = .{ .integer = len };

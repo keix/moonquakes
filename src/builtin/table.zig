@@ -13,7 +13,9 @@ fn getTableLength(table: *TableObject, vm: anytype) i64 {
     while (true) {
         const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
         const key = vm.gc.allocString(key_slice) catch break;
-        if (table.get(key) == null) break;
+        const val = table.get(key) orelse break;
+        // Also check if value is nil (key exists but value is nil)
+        if (val == .nil) break;
         len += 1;
     }
     return len;
