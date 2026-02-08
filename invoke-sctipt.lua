@@ -2,7 +2,7 @@ local passed = 0
 local failed = 0
 
 local function run(file)
-    local cmd = string.format('../zig-out/bin/moonquakes "%s"', file)
+    local cmd = string.format('./zig-out/bin/moonquakes "%s"', file)
     local p = io.popen(cmd .. ' 2>&1')
     local output = p:read('*a')
     local ok = p:close()
@@ -19,7 +19,7 @@ local function run(file)
 end
 
 -- Get all test files (exclude this script itself)
-local p = io.popen('find . -name "*.lua" -type f ! -name "invoke-sctipt.lua" | sort')
+local p = io.popen('find scripts -name "*.lua" -type f ! -name "invoke-sctipt.lua" | sort')
 local file_list = p:read('*a')
 p:close()
 
