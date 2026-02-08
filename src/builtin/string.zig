@@ -57,12 +57,15 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
 /// string.len(s) - Returns the length of string s
 pub fn nativeStringLen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.len
-    // Returns number of bytes in string (not UTF-8 characters)
+    if (nresults == 0) return;
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+    if (arg.asString()) |s| {
+        vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+    } else {
+        vm.stack[vm.base + func_reg] = .nil;
+    }
 }
 
 /// string.sub(s, i [, j]) - Returns substring of s from i to j
@@ -118,58 +121,223 @@ pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
 /// string.upper(s) - Returns copy of s with all lowercase letters changed to uppercase
 pub fn nativeStringUpper(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.upper
+    if (nresults == 0) return;
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Allocate buffer for uppercase string
+    const buf = try vm.allocator.alloc(u8, str.len);
+    defer vm.allocator.free(buf);
+
+    for (str, 0..) |c, i| {
+        buf[i] = std.ascii.toUpper(c);
+    }
+
+    const result = try vm.gc.allocString(buf);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.lower(s) - Returns copy of s with all uppercase letters changed to lowercase
 pub fn nativeStringLower(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.lower
+    if (nresults == 0) return;
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Allocate buffer for lowercase string
+    const buf = try vm.allocator.alloc(u8, str.len);
+    defer vm.allocator.free(buf);
+
+    for (str, 0..) |c, i| {
+        buf[i] = std.ascii.toLower(c);
+    }
+
+    const result = try vm.gc.allocString(buf);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.byte(s [, i [, j]]) - Returns internal numeric codes of characters in string
 pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.byte
-    // Returns byte values at positions i to j (default i=1, j=i)
+    if (nresults == 0) return;
+
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+    const len: i64 = @intCast(str.len);
+
+    if (len == 0) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get i (1-based, default 1)
+    var i: i64 = 1;
+    if (nargs > 1) {
+        const i_arg = vm.stack[vm.base + func_reg + 2];
+        i = i_arg.toInteger() orelse 1;
+    }
+
+    // Get j (default i)
+    var j: i64 = i;
+    if (nargs > 2) {
+        const j_arg = vm.stack[vm.base + func_reg + 3];
+        j = j_arg.toInteger() orelse i;
+    }
+
+    // Handle negative indices
+    if (i < 0) i = len + i + 1;
+    if (j < 0) j = len + j + 1;
+
+    // Clamp to valid range
+    if (i < 1) i = 1;
+    if (j > len) j = len;
+
+    if (i > j or i > len) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Return byte values
+    const start: usize = @intCast(i - 1);
+    const end: usize = @intCast(j);
+    var result_count: u32 = 0;
+
+    for (start..end) |idx| {
+        if (result_count >= nresults) break;
+        vm.stack[vm.base + func_reg + result_count] = .{ .integer = str[idx] };
+        result_count += 1;
+    }
 }
 
 /// string.char(...) - Returns string with characters having given numeric codes
 pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.char
-    // Takes numeric codes and returns corresponding string
+    if (nresults == 0) return;
+
+    if (nargs == 0) {
+        const result = try vm.gc.allocString("");
+        vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        return;
+    }
+
+    // Allocate buffer for characters
+    const buf = try vm.allocator.alloc(u8, nargs);
+    defer vm.allocator.free(buf);
+
+    var i: u32 = 0;
+    while (i < nargs) : (i += 1) {
+        const arg = vm.stack[vm.base + func_reg + 1 + i];
+        const code = arg.toInteger() orelse 0;
+        if (code >= 0 and code <= 255) {
+            buf[i] = @intCast(@as(u64, @bitCast(code)));
+        } else {
+            buf[i] = 0;
+        }
+    }
+
+    const result = try vm.gc.allocString(buf);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.rep(s, n [, sep]) - Returns string that is concatenation of n copies of s separated by sep
 pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.rep
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    const n_arg = vm.stack[vm.base + func_reg + 2];
+    const n = n_arg.toInteger() orelse 0;
+
+    if (n <= 0) {
+        const result = try vm.gc.allocString("");
+        vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        return;
+    }
+
+    // Get separator (optional, default empty)
+    var sep: []const u8 = "";
+    if (nargs > 2) {
+        const sep_arg = vm.stack[vm.base + func_reg + 3];
+        if (sep_arg.asString()) |s| {
+            sep = s.asSlice();
+        }
+    }
+
+    const count: usize = @intCast(n);
+
+    // Calculate result size
+    const result_len = str.len * count + sep.len * (count - 1);
+
+    // Allocate buffer
+    const buf = try vm.allocator.alloc(u8, result_len);
+    defer vm.allocator.free(buf);
+
+    // Build result
+    var pos: usize = 0;
+    for (0..count) |i| {
+        if (i > 0 and sep.len > 0) {
+            @memcpy(buf[pos..][0..sep.len], sep);
+            pos += sep.len;
+        }
+        @memcpy(buf[pos..][0..str.len], str);
+        pos += str.len;
+    }
+
+    const result = try vm.gc.allocString(buf);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.reverse(s) - Returns string that is the reverse of s
 pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.reverse
+    if (nresults == 0) return;
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    if (str.len == 0) {
+        const result = try vm.gc.allocString("");
+        vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        return;
+    }
+
+    // Allocate buffer for reversed string
+    const buf = try vm.allocator.alloc(u8, str.len);
+    defer vm.allocator.free(buf);
+
+    for (str, 0..) |c, i| {
+        buf[str.len - 1 - i] = c;
+    }
+
+    const result = try vm.gc.allocString(buf);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Looks for first match of pattern in string s
