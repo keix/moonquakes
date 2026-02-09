@@ -144,23 +144,99 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pairs(t) - Returns three values for iterating over table
+/// Returns: next function, table, nil
 pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement pairs
-    // Returns next, t, nil for generic for loop
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Return next function
+    const next_nc = try vm.gc.allocNativeClosure(.{ .id = .next });
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(next_nc);
+
+    // Return the table
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = table_arg;
+    }
+
+    // Return nil as initial key
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = .nil;
+    }
 }
 
 /// ipairs(t) - Returns three values for iterating over array part of table
+/// Returns iterator function, table, and 0 (initial index)
 pub fn nativeIpairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement ipairs
-    // Returns iterator for integer indices 1, 2, 3, ...
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Return ipairs_iterator function
+    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .ipairs_iterator });
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+
+    // Return the table
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = table_arg;
+    }
+
+    // Return 0 as initial index
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = .{ .integer = 0 };
+    }
+}
+
+/// ipairs iterator - Returns (index+1, t[index+1]) or nil when done
+pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+    const index_arg = vm.stack[vm.base + func_reg + 2];
+
+    const table = table_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    const current_index = index_arg.toInteger() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    const next_index = current_index + 1;
+
+    // Convert integer index to string key (tables store integer keys as strings)
+    var key_buffer: [32]u8 = undefined;
+    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{next_index}) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const key = try vm.gc.allocString(key_slice);
+    const value = table.get(key);
+
+    if (value == null or value.?.isNil()) {
+        // No more elements
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Return index and value
+    vm.stack[vm.base + func_reg] = .{ .integer = next_index };
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = value.?;
+    }
 }
 
 /// getmetatable(object) - Returns the metatable of the given object

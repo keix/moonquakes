@@ -330,6 +330,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .next => try global.nativeNext(vm, func_reg, nargs, nresults),
         .pairs => try global.nativePairs(vm, func_reg, nargs, nresults),
         .ipairs => try global.nativeIpairs(vm, func_reg, nargs, nresults),
+        .ipairs_iterator => try global.nativeIpairsIterator(vm, func_reg, nargs, nresults),
         .getmetatable => try global.nativeGetmetatable(vm, func_reg, nargs, nresults),
         .setmetatable => try global.nativeSetmetatable(vm, func_reg, nargs, nresults),
         .rawget => try global.nativeRawget(vm, func_reg, nargs, nresults),
