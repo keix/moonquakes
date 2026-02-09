@@ -62,6 +62,8 @@ const ParseError = error{
     ExpectedUntil,
     BreakOutsideLoop,
     ExpectedColon,
+    ExpectedIn,
+    TooManyLoopVariables,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -501,6 +503,28 @@ pub const ProtoBuilder = struct {
         return @intCast(addr);
     }
 
+    /// Generic for loop: TFORPREP A sBx - jump to TFORCALL
+    pub fn emitPatchableTFORPREP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.TFORPREP, base_reg, 0); // placeholder
+        try self.code.append(self.allocator, instr);
+        return @intCast(addr);
+    }
+
+    /// Generic for loop: TFORCALL A C - call iterator, C = number of loop variables
+    pub fn emitTFORCALL(self: *ProtoBuilder, base_reg: u8, nvars: u8) !void {
+        const instr = Instruction.initABC(.TFORCALL, base_reg, 0, nvars);
+        try self.code.append(self.allocator, instr);
+    }
+
+    /// Generic for loop: TFORLOOP A sBx - check and loop
+    pub fn emitPatchableTFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
+        const addr = self.code.items.len;
+        const instr = Instruction.initAsBx(.TFORLOOP, base_reg, 0); // placeholder
+        try self.code.append(self.allocator, instr);
+        return @intCast(addr);
+    }
+
     pub fn emitPatchableJMP(self: *ProtoBuilder) !u32 {
         const addr = self.code.items.len;
         const instr = Instruction.initsJ(.JMP, 0); // placeholder
@@ -554,6 +578,16 @@ pub const ProtoBuilder = struct {
 
         const offset: i25 = @intCast(offset_i32);
         self.code.items[addr] = Instruction.initsJ(.JMP, offset);
+    }
+
+    /// Patch the C field (number of results) of a CALL instruction
+    /// C=0 means variable results, C=n+1 means n results
+    pub fn patchCallResults(self: *ProtoBuilder, addr: u32, nresults: u8) void {
+        const existing = self.code.items[addr];
+        // Recreate instruction with new C value
+        const new_c: u8 = nresults + 1; // C encoding: 0 = vararg, n+1 = n results
+        const new_instr = Instruction.initABC(existing.getOpCode(), existing.getA(), existing.getB(), new_c);
+        self.code.items[addr] = new_instr;
     }
 
     // add functions grouped together
@@ -1797,6 +1831,7 @@ pub const Parser = struct {
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "==") or
                 std.mem.eql(u8, self.current.lexeme, "!=") or
+                std.mem.eql(u8, self.current.lexeme, "~=") or
                 std.mem.eql(u8, self.current.lexeme, "<") or
                 std.mem.eql(u8, self.current.lexeme, "<=") or
                 std.mem.eql(u8, self.current.lexeme, ">") or
@@ -1812,8 +1847,8 @@ pub const Parser = struct {
                 try self.proto.emitEQ(left, right, 0); // skip if equal (negate=0)
                 try self.proto.emitLOADBOOL(dst, false, true); // not equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // equal: true
-            } else if (std.mem.eql(u8, op, "!=")) {
-                // For !=: if not equal then set true, else set false
+            } else if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "~=")) {
+                // For != or ~=: if not equal then set true, else set false
                 try self.proto.emitEQ(left, right, 1); // skip if NOT equal (negate=1)
                 try self.proto.emitLOADBOOL(dst, false, true); // equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // not equal: true
@@ -2047,17 +2082,30 @@ pub const Parser = struct {
         self.loop_depth += 1;
         const break_count = self.break_jumps.items.len;
 
-        // Expect variable name
+        // Expect first variable name
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
         }
-        const loop_var_name = self.current.lexeme;
+        const first_var_name = self.current.lexeme;
         self.advance(); // consume identifier
 
-        // Expect '='
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+        // Check what follows to determine loop type
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+            // Numeric for loop: for var = start, limit[, step] do ... end
+            try self.parseNumericFor(first_var_name, break_count);
+        } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) or
+            (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "in")))
+        {
+            // Generic for loop: for var1[, var2, ...] in explist do ... end
+            try self.parseGenericFor(first_var_name, break_count);
+        } else {
             return error.ExpectedEquals;
         }
+
+        self.loop_depth -= 1;
+    }
+
+    fn parseNumericFor(self: *Parser, loop_var_name: []const u8, break_count: usize) ParseError!void {
         self.advance(); // consume '='
 
         // Parse initial value
@@ -2151,8 +2199,135 @@ pub const Parser = struct {
             self.proto.patchJMP(jmp, end_addr);
         }
         self.break_jumps.shrinkRetainingCapacity(break_count);
+    }
 
-        self.loop_depth -= 1;
+    /// Generic for loop: for var1[, var2, ...] in explist do ... end
+    /// Register layout:
+    ///   R(A): iterator function
+    ///   R(A+1): state
+    ///   R(A+2): control variable
+    ///   R(A+3), R(A+4), ...: loop variables (var1, var2, ...)
+    fn parseGenericFor(self: *Parser, first_var_name: []const u8, break_count: usize) ParseError!void {
+        // Collect loop variable names
+        var var_names: [8][]const u8 = undefined;
+        var var_count: u8 = 1;
+        var_names[0] = first_var_name;
+
+        // Parse additional variable names (comma-separated)
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            if (var_count >= 8) {
+                return error.TooManyLoopVariables;
+            }
+            var_names[var_count] = self.current.lexeme;
+            var_count += 1;
+            self.advance(); // consume identifier
+        }
+
+        // Expect 'in'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "in"))) {
+            return error.ExpectedIn;
+        }
+        self.advance(); // consume 'in'
+
+        // Allocate base register for iterator state
+        const base_reg = self.proto.allocTemp();
+        _ = self.proto.allocTemp(); // state
+        _ = self.proto.allocTemp(); // control
+
+        // Record code position before parsing expression
+        const code_before = self.proto.code.items.len;
+
+        // Parse iterator expression (e.g., pairs(t) or ipairs(t))
+        // The expression should return: iterator function, state, initial control value
+        const expr_reg = try self.parseExpr();
+
+        // Check if last instruction was a CALL and patch it to return 3 values
+        if (self.proto.code.items.len > code_before) {
+            const last_idx = self.proto.code.items.len - 1;
+            const last_instr = self.proto.code.items[last_idx];
+            if (last_instr.getOpCode() == .CALL) {
+                // Patch to return 3 values (iterator, state, control)
+                self.proto.patchCallResults(@intCast(last_idx), 3);
+            }
+        }
+
+        // Move iterator results to proper positions
+        // The call should have put results at expr_reg, expr_reg+1, expr_reg+2
+        if (expr_reg != base_reg) {
+            try self.proto.emitMOVE(base_reg, expr_reg);
+            try self.proto.emitMOVE(base_reg + 1, expr_reg + 1);
+            try self.proto.emitMOVE(base_reg + 2, expr_reg + 2);
+        }
+
+        // Expect 'do'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
+            return error.ExpectedDo;
+        }
+        self.advance(); // consume 'do'
+
+        // TFORPREP: jump to TFORCALL
+        const tforprep_addr = try self.proto.emitPatchableTFORPREP(base_reg);
+
+        // Loop body starts here
+        const loop_start = @as(u32, @intCast(self.proto.code.items.len));
+
+        // Save locals_top and variables
+        const saved_locals_top = self.proto.locals_top;
+        const saved_var_len = self.proto.variables.items.len;
+
+        // Set next_reg past the control registers and loop variables
+        // Generic for uses: base(iter), base+1(state), base+2(control), base+3..(vars)
+        const GENERIC_FOR_BASE_REGS: u8 = 3; // iter, state, control
+        self.proto.next_reg = base_reg + GENERIC_FOR_BASE_REGS + var_count;
+        self.proto.locals_top = base_reg + GENERIC_FOR_BASE_REGS + var_count;
+
+        // Register loop variables (at base_reg + 3, base_reg + 4, ...)
+        var i: u8 = 0;
+        while (i < var_count) : (i += 1) {
+            try self.proto.addVariable(var_names[i], base_reg + GENERIC_FOR_BASE_REGS + i);
+        }
+
+        // Mark for loop body
+        const loop_body_mark = self.proto.markTemps();
+
+        // Parse loop body
+        try self.parseStatements();
+
+        // Release temporaries and variables
+        self.proto.resetTemps(loop_body_mark);
+        self.proto.variables.shrinkRetainingCapacity(saved_var_len);
+        self.proto.locals_top = saved_locals_top;
+        self.proto.next_reg = saved_locals_top;
+
+        // Expect 'end'
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        self.advance(); // consume 'end'
+
+        // TFORCALL: call iterator and store results
+        const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
+        try self.proto.emitTFORCALL(base_reg, var_count);
+
+        // TFORLOOP: check first result and loop back
+        const tforloop_addr = try self.proto.emitPatchableTFORLOOP(base_reg);
+
+        // Patch TFORPREP to jump to TFORCALL
+        self.proto.patchFORInstr(tforprep_addr, tforcall_addr);
+
+        // Patch TFORLOOP to jump back to loop start
+        self.proto.patchFORInstr(tforloop_addr, loop_start);
+
+        // Patch all break jumps to after the loop
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        for (self.break_jumps.items[break_count..]) |jmp| {
+            self.proto.patchJMP(jmp, end_addr);
+        }
+        self.break_jumps.shrinkRetainingCapacity(break_count);
     }
 
     fn parseWhile(self: *Parser) ParseError!void {

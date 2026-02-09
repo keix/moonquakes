@@ -645,9 +645,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = vm.stack[vm.base + c];
 
-            // Fast path: both are numbers, no metamethod possible
+            // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
                 try VM.ltOp(left, right)
+            // Fast path: both are strings - lexicographic comparison
+            else if (left.asString() != null and right.asString() != null) blk: {
+                const left_str = left.asString().?.asSlice();
+                const right_str = right.asString().?.asSlice();
+                break :blk std.mem.order(u8, left_str, right_str) == .lt;
+            }
+            // Slow path: try metamethod
             else
                 try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -664,9 +671,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const left = vm.stack[vm.base + b];
             const right = vm.stack[vm.base + c];
 
-            // Fast path: both are numbers, no metamethod possible
+            // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
                 try VM.leOp(left, right)
+            // Fast path: both are strings - lexicographic comparison
+            else if (left.asString() != null and right.asString() != null) blk: {
+                const left_str = left.asString().?.asSlice();
+                const right_str = right.asString().?.asSlice();
+                const order = std.mem.order(u8, left_str, right_str);
+                break :blk order == .lt or order == .eq;
+            }
+            // Slow path: try metamethod
             else
                 try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -777,6 +792,81 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
                 }
             }
+            return .Continue;
+        },
+        // Generic for loop: TFORPREP A sBx - jump forward to TFORCALL/TFORLOOP
+        .TFORPREP => {
+            const sbx = inst.getSBx();
+            try ci.jumpRel(sbx);
+            return .Continue;
+        },
+        // Generic for loop: TFORCALL A C - call iterator R(A)(R(A+1), R(A+2)), store C results at R(A+3)...
+        .TFORCALL => {
+            const a = inst.getA();
+            const c = inst.getC();
+
+            const func_val = vm.stack[vm.base + a];
+            const state_val = vm.stack[vm.base + a + 1];
+            const control_val = vm.stack[vm.base + a + 2];
+
+            // Set up call at R(A+3): copy function and args
+            // Layout: R(A+3)=func, R(A+4)=state, R(A+5)=control, results go to R(A+3)...
+            const call_reg: u8 = @intCast(a + 3);
+            vm.stack[vm.base + call_reg] = func_val;
+            vm.stack[vm.base + call_reg + 1] = state_val;
+            vm.stack[vm.base + call_reg + 2] = control_val;
+
+            const nresults: u32 = if (c > 0) c else 1;
+
+            // Handle native closure
+            if (func_val.isObject()) {
+                const obj = func_val.object;
+                if (obj.type == .native_closure) {
+                    const nc = object.getObject(NativeClosureObject, obj);
+                    vm.top = vm.base + call_reg + 3; // func + 2 args
+                    try vm.callNative(nc.func.id, call_reg, 2, nresults);
+                    return .Continue;
+                }
+            }
+
+            // Handle Lua closure
+            if (func_val.asClosure()) |closure| {
+                const func_proto = closure.proto;
+                const new_base = vm.base + call_reg;
+
+                // Shift arguments: state and control move down
+                vm.stack[new_base] = state_val;
+                vm.stack[new_base + 1] = control_val;
+
+                // Fill remaining params with nil if needed
+                if (2 < func_proto.numparams) {
+                    for (vm.stack[new_base + 2 ..][0 .. func_proto.numparams - 2]) |*slot| {
+                        slot.* = .nil;
+                    }
+                }
+
+                const nres: i16 = @intCast(nresults);
+                _ = try vm.pushCallInfo(func_proto, closure, new_base, new_base, nres);
+                vm.top = new_base + func_proto.maxstacksize;
+                return .LoopContinue;
+            }
+
+            return error.NotAFunction;
+        },
+        // Generic for loop: TFORLOOP A sBx - if R(A+3) != nil, R(A+2) = R(A+3), jump back
+        .TFORLOOP => {
+            const a = inst.getA();
+            const sbx = inst.getSBx();
+
+            const first_var = vm.stack[vm.base + a + 3];
+
+            if (!first_var.isNil()) {
+                // Update control variable
+                vm.stack[vm.base + a + 2] = first_var;
+                // Jump back to loop body
+                try ci.jumpRel(sbx);
+            }
+            // Otherwise fall through (loop ends)
             return .Continue;
         },
         // [MM_CALL] Fast path: closure/native call. Slow path: __call metamethod.

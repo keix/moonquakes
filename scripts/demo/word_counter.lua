@@ -1,5 +1,5 @@
 -- Word Frequency Counter Demo
--- Demonstrates: pairs, ipairs, next, string manipulation
+-- Demonstrates: for...in pairs/ipairs, table manipulation
 
 -- Sample text to analyze
 local text = [[
@@ -44,16 +44,12 @@ end
 local function count_frequencies(words)
     local freq = {}
 
-    -- Use ipairs to iterate over the word array
-    local iter, tbl, idx = ipairs(words)
-    local i, word = iter(tbl, idx)
-    while i do
+    for i, word in ipairs(words) do
         if freq[word] then
             freq[word] = freq[word] + 1
         else
             freq[word] = 1
         end
-        i, word = iter(tbl, i)
     end
 
     return freq
@@ -65,36 +61,28 @@ local function top_words(freq, n)
     local words = {}
     local count = 0
 
-    -- Use pairs to iterate over the frequency table
-    local iter, tbl, k = pairs(freq)
-    local word, cnt = iter(tbl, k)
-    while word do
+    for word, cnt in pairs(freq) do
         count = count + 1
         words[count] = {word = word, count = cnt}
-        word, cnt = iter(tbl, word)
     end
 
     -- Simple bubble sort (descending by count)
-    local i = 1
-    while i <= count do
-        local j = i + 1
-        while j <= count do
+    for i = 1, count do
+        for j = i + 1, count do
             if words[j].count > words[i].count then
                 local tmp = words[i]
                 words[i] = words[j]
                 words[j] = tmp
             end
-            j = j + 1
         end
-        i = i + 1
     end
 
     -- Return top N
     local result = {}
-    i = 1
-    while i <= n and i <= count do
-        result[i] = words[i]
-        i = i + 1
+    for i = 1, n do
+        if i <= count then
+            result[i] = words[i]
+        end
     end
 
     return result
@@ -109,12 +97,10 @@ print("Total words: " .. #words)
 
 local freq = count_frequencies(words)
 
--- Count unique words using next
+-- Count unique words
 local unique = 0
-local k = next(freq, nil)
-while k do
+for k in pairs(freq) do
     unique = unique + 1
-    k = next(freq, k)
 end
 print("Unique words: " .. unique)
 print("")
@@ -123,21 +109,14 @@ print("Top 5 most frequent words:")
 print("--------------------------")
 local top = top_words(freq, 5)
 
-local iter, tbl, idx = ipairs(top)
-local i, item = iter(tbl, idx)
-while i do
+for i, item in ipairs(top) do
     print(i .. ". " .. item.word .. ": " .. item.count)
-    i, item = iter(tbl, i)
 end
 
 print("")
 print("All word frequencies:")
 print("--------------------")
 
--- Display all frequencies using pairs
-local iter2, tbl2, k2 = pairs(freq)
-local word, cnt = iter2(tbl2, k2)
-while word do
+for word, cnt in pairs(freq) do
     print("  " .. word .. ": " .. cnt)
-    word, cnt = iter2(tbl2, word)
 end
