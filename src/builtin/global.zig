@@ -95,12 +95,52 @@ pub fn nativeXpcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// next(table [, index]) - Allows traversal of all fields of a table
 pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement next
-    // Returns the next index of the table and its associated value
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+    const table = table_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Get optional index (nil means start from beginning)
+    const index_arg = if (nargs >= 2) vm.stack[vm.base + func_reg + 2] else TValue.nil;
+
+    // Iterate through hash_part
+    var iter = table.hash_part.iterator();
+    var found_current = index_arg.isNil();
+
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+
+        if (found_current) {
+            // Return this key-value pair
+            vm.stack[vm.base + func_reg] = TValue.fromString(@constCast(key));
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = value;
+            }
+            return;
+        }
+
+        // Check if this is the current key
+        if (index_arg.asString()) |index_str| {
+            if (key == index_str) {
+                found_current = true;
+            }
+        }
+    }
+
+    // No more entries
+    vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = .nil;
+    }
 }
 
 /// pairs(t) - Returns three values for iterating over table
@@ -287,12 +327,68 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// tonumber(e [, base]) - Tries to convert argument to a number
 pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement tonumber
-    // Converts string to number, optionally with specified base (2-36)
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+
+    // If already a number, return it
+    if (arg == .integer) {
+        vm.stack[vm.base + func_reg] = arg;
+        return;
+    }
+    if (arg == .number) {
+        vm.stack[vm.base + func_reg] = arg;
+        return;
+    }
+
+    // Try to convert string to number
+    if (arg.asString()) |str_obj| {
+        const str = str_obj.asSlice();
+
+        // Get optional base (default 10)
+        var base: u8 = 10;
+        if (nargs >= 2) {
+            const base_arg = vm.stack[vm.base + func_reg + 2];
+            if (base_arg.toInteger()) |b| {
+                if (b >= 2 and b <= 36) {
+                    base = @intCast(b);
+                } else {
+                    vm.stack[vm.base + func_reg] = .nil;
+                    return;
+                }
+            }
+        }
+
+        // Try parsing as integer with base
+        if (base == 10) {
+            // Try float first for base 10
+            if (std.fmt.parseFloat(f64, str)) |n| {
+                // Check if it's an integer
+                if (n == @floor(n) and n >= @as(f64, @floatFromInt(std.math.minInt(i64))) and n <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                    vm.stack[vm.base + func_reg] = .{ .integer = @intFromFloat(n) };
+                } else {
+                    vm.stack[vm.base + func_reg] = .{ .number = n };
+                }
+                return;
+            } else |_| {}
+        }
+
+        // Try integer parsing with specified base
+        if (std.fmt.parseInt(i64, str, base)) |i| {
+            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            return;
+        } else |_| {}
+
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    vm.stack[vm.base + func_reg] = .nil;
 }
 
 /// rawequal(v1, v2) - Checks whether v1 is equal to v2 without invoking metamethods
@@ -346,12 +442,31 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// warn(msg1, ...) - Emits a warning with a message (Lua 5.4 feature)
 pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
     _ = nresults;
-    // TODO: Implement warn
-    // Emits warning message (can be controlled with @on/@off)
+
+    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    const stderr = &stderr_writer.interface;
+
+    try stderr.writeAll("Lua warning: ");
+
+    var i: u32 = 0;
+    while (i < nargs) : (i += 1) {
+        const arg = vm.stack[vm.base + func_reg + 1 + i];
+
+        if (arg.asString()) |str_obj| {
+            try stderr.writeAll(str_obj.asSlice());
+        } else if (arg == .integer) {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.integer}) catch "";
+            try stderr.writeAll(s);
+        } else if (arg == .number) {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.number}) catch "";
+            try stderr.writeAll(s);
+        }
+    }
+
+    try stderr.writeAll("\n");
 }
 
 /// _G - A global variable holding the global environment
