@@ -61,12 +61,12 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
 /// io.flush() - Saves any written data to default output file
 pub fn nativeIoFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement io.flush
-    // Flushes default output file
+    // stdout is unbuffered in Zig, so flush is a no-op
+    // but we return true for compatibility
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    }
 }
 
 /// io.input([file]) - Sets default input file when called with a file name or handle
@@ -381,13 +381,34 @@ pub fn nativeIoTmpfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 }
 
 /// io.type(obj) - Checks whether obj is a valid file handle
+/// Returns "file", "closed file", or nil
 pub fn nativeIoType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement io.type
-    // Returns "file", "closed file", or nil
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if it has _closed field (our file handle marker)
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            const result = try vm.gc.allocString("closed file");
+            vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        } else {
+            const result = try vm.gc.allocString("file");
+            vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        }
+    } else {
+        vm.stack[vm.base + func_reg] = .nil;
+    }
 }
 
 // File handle methods (these would be implemented when userdata/file handles are added)

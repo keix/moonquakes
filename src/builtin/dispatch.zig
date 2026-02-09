@@ -99,8 +99,9 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
 
     // _G is a self-reference to the globals table itself
     try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
-    // _VERSION is a version string
-    try registerNative(globals, gc, "_VERSION", .lua_VERSION);
+    // _VERSION is a version string constant
+    const version_str = try gc.allocString("Moonquakes 0.1.0");
+    try setStringKey(globals, gc, "_VERSION", TValue.fromString(version_str));
 }
 
 /// String Library: string.len, string.sub, etc. (skeleton implementations)

@@ -186,32 +186,93 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
 /// rawget(table, index) - Gets the real value of table[index] without metamethods
 pub fn nativeRawget(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement rawget
-    // Bypasses __index metamethod
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+    const key_arg = vm.stack[vm.base + func_reg + 2];
+
+    const table = table_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Direct table access without metamethods
+    // Currently only supports string keys
+    const key = key_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    vm.stack[vm.base + func_reg] = table.get(key) orelse .nil;
 }
 
 /// rawset(table, index, value) - Sets the real value of table[index] without metamethods
 pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement rawset
-    // Bypasses __newindex metamethod
+    if (nargs < 3) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const table_arg = vm.stack[vm.base + func_reg + 1];
+    const key_arg = vm.stack[vm.base + func_reg + 2];
+    const value_arg = vm.stack[vm.base + func_reg + 3];
+
+    const table = table_arg.asTable() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Direct table set without metamethods
+    // Currently only supports string keys
+    const key = key_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    try table.set(key, value_arg);
+
+    // Return the table
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = table_arg;
+    }
 }
 
 /// rawlen(v) - Returns the length of object v without metamethods
 pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement rawlen
-    // Bypasses __len metamethod
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+        return;
+    }
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+
+    // String length
+    if (arg.asString()) |s| {
+        vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+        return;
+    }
+
+    // Table length: count sequential integer keys from 1
+    if (arg.asTable()) |table| {
+        var len: i64 = 0;
+        var key_buffer: [32]u8 = undefined;
+        while (true) {
+            const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
+            const key = vm.gc.allocString(key_slice) catch break;
+            const val = table.get(key) orelse break;
+            if (val == .nil) break;
+            len += 1;
+        }
+        vm.stack[vm.base + func_reg] = .{ .integer = len };
+        return;
+    }
+
+    vm.stack[vm.base + func_reg] = .{ .integer = 0 };
 }
 
 /// select(index, ...) - Returns all arguments after argument number index
@@ -236,12 +297,18 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
 /// rawequal(v1, v2) - Checks whether v1 is equal to v2 without invoking metamethods
 pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement rawequal
-    // Returns true if v1 and v2 are primitively equal (without __eq metamethod)
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        return;
+    }
+
+    const v1 = vm.stack[vm.base + func_reg + 1];
+    const v2 = vm.stack[vm.base + func_reg + 2];
+
+    // Use primitive equality (no metamethods)
+    vm.stack[vm.base + func_reg] = .{ .boolean = v1.eql(v2) };
 }
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Loads a chunk
@@ -300,13 +367,11 @@ pub fn nativeG(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
 /// _VERSION - A global variable containing the running Lua version string
 pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement _VERSION
-    // Returns version string like "Lua 5.4" (or "Moonquakes 0.1")
-    // Note: This could be implemented as a constant rather than a function
+    if (nresults == 0) return;
+
+    const version_str = try vm.gc.allocString("Lua 5.4");
+    vm.stack[vm.base + func_reg] = TValue.fromString(version_str);
 }
 
 /// collectgarbage([opt [, arg]]) - Controls garbage collection

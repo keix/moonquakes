@@ -802,6 +802,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);
+                    // Adjust vm.top to reflect actual results when C=0 (variable returns)
+                    if (c == 0) {
+                        vm.top = vm.base + a + nresults;
+                    }
                     return .LoopContinue;
                 }
             }
