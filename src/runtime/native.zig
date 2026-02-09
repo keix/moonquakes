@@ -15,6 +15,7 @@ pub const NativeFnId = enum(u8) {
     next,
     pairs,
     ipairs,
+    ipairs_iterator,
     getmetatable,
     setmetatable,
     rawget,
