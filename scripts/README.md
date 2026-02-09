@@ -20,13 +20,14 @@ scripts/
 │   ├── io/              #   I/O functions
 │   ├── local/           #   Local functions and closures
 │   └── os/              #   OS functions
-├── globals/             # Global environment (1 file)
-├── io/                  # I/O library (11 files)
+├── globals/             # Global environment (3 files)
+├── io/                  # I/O library (13 files)
 ├── locals/              # Local variables (1 file)
 ├── logical/             # Logical operators (6 files)
 ├── math/                # Math library (10 files)
 ├── metatable/           # Metatables and metamethods (19 files)
 ├── operators/           # Special operators (5 files)
+├── os/                  # OS library (1 file)
 ├── string/              # String operations (18 files)
 └── table/               # Table operations (9 files)
 ```
