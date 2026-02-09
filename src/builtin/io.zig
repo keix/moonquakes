@@ -90,13 +90,90 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 }
 
 /// io.open(filename [, mode]) - Opens a file in specified mode
+/// Returns file handle or nil, errmsg on error
+/// Currently supports "r" mode (read) - reads entire file into memory
 pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement io.open
-    // Returns file handle or nil on error
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get filename
+    const filename_arg = vm.stack[vm.base + func_reg + 1];
+    const filename_obj = filename_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const filename = filename_obj.asSlice();
+
+    // Get mode (optional, default "r")
+    var mode: []const u8 = "r";
+    if (nargs >= 2) {
+        const mode_arg = vm.stack[vm.base + func_reg + 2];
+        if (mode_arg.asString()) |m| {
+            mode = m.asSlice();
+        }
+    }
+
+    // Currently only support read mode
+    if (mode.len == 0 or mode[0] != 'r') {
+        // TODO: implement write modes
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("unsupported mode");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    // Open and read the file
+    const file = std.fs.cwd().openFile(filename, .{}) catch {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("cannot open file");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer file.close();
+
+    // Read entire file content
+    const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("cannot read file");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer vm.allocator.free(content);
+
+    // Create file handle table
+    const file_table = try vm.gc.allocTable();
+    vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+
+    // Store file content
+    const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+    vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
+    const output_str = try vm.gc.allocString(content);
+    try file_table.set(output_key, TValue.fromString(output_str));
+
+    // Store closed flag
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    try file_table.set(closed_key, .{ .boolean = false });
+
+    // Store exit code (0 for regular files)
+    const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
+    try file_table.set(exitcode_key, .{ .integer = 0 });
+
+    // Create metatable with file methods
+    const mt = try createFileMetatable(vm, func_reg + 2);
+    file_table.metatable = mt;
+
+    // Result already in stack at func_reg
+    if (nresults == 0) {
+        vm.stack[vm.base + func_reg] = .nil;
+    }
 }
 
 /// io.output([file]) - Sets default output file when called with a file name or handle

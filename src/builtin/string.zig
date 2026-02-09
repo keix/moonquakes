@@ -341,13 +341,69 @@ pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 }
 
 /// string.find(s, pattern [, init [, plain]]) - Looks for first match of pattern in string s
+/// Returns start and end indices (1-based) or nil if not found
+/// Currently only supports plain text search (no pattern matching)
 pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.find
-    // Returns start/end indices or nil if not found
+    if (nargs < 2) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get string
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Get pattern
+    const pattern_arg = vm.stack[vm.base + func_reg + 2];
+    const pattern_obj = pattern_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pattern = pattern_obj.asSlice();
+
+    // Get optional init position (default 1)
+    var init: usize = 0;
+    if (nargs >= 3) {
+        const init_arg = vm.stack[vm.base + func_reg + 3];
+        const i = init_arg.toInteger() orelse 1;
+        if (i < 0) {
+            // Negative index: count from end
+            const abs_i: usize = @intCast(-i);
+            if (abs_i <= str.len) {
+                init = str.len - abs_i;
+            }
+        } else if (i > 0) {
+            init = @intCast(i - 1); // Convert to 0-based
+        }
+    }
+
+    // Clamp init to string length
+    if (init > str.len) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Search for pattern (plain text search)
+    if (std.mem.indexOf(u8, str[init..], pattern)) |pos| {
+        const start: i64 = @intCast(init + pos + 1); // 1-based
+        const end_pos: i64 = start + @as(i64, @intCast(pattern.len)) - 1;
+
+        // Return start and end positions
+        vm.stack[vm.base + func_reg] = .{ .integer = start };
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+        }
+    } else {
+        // Not found
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = .nil;
+        }
+    }
 }
 
 /// string.match(s, pattern [, init]) - Looks for first match of pattern in string s
