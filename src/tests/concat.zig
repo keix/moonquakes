@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -40,7 +41,7 @@ test "concat: \"hello\" .. \"world\" = \"helloworld\"" {
     defer vm.deinit();
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     try utils.expectResultAndState(result, TValue{ .string = "helloworld" }, &vm, 0, 3);
@@ -84,7 +85,7 @@ test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
     vm.stack[4] = TValue{ .boolean = true };
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 5);
 
     try utils.expectResultAndState(result, TValue{ .string = "helloworld" }, &vm, 0, 5);
@@ -127,7 +128,7 @@ test "concat: \"number: \" .. 42 = \"number: 42\"" {
     defer vm.deinit();
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     try expectSingleResult(result, TValue{ .string = "number: 42" });
@@ -172,7 +173,7 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
     vm.stack[5] = TValue{ .number = 9.99 };
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 6);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 6);
 
     try utils.expectResultAndState(result, TValue{ .string = "123" }, &vm, 0, 6);
@@ -216,7 +217,7 @@ test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
     defer vm.deinit();
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     try expectSingleResult(result, TValue{ .string = "3.14 is pi" });
@@ -254,7 +255,7 @@ test "concat: empty concatenation (single string)" {
     defer vm.deinit();
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 2);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 2);
 
     try utils.expectResultAndState(result, TValue{ .string = "alone" }, &vm, 0, 2);

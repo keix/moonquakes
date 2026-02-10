@@ -12,13 +12,9 @@ const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
 
-// Execution ABI: CallInfo (frame), ReturnValue (result)
+// Execution ABI: CallInfo (frame)
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
-const ReturnValue = execution.ReturnValue;
-
-// Mnemonics is imported internally for execute(), not re-exported to avoid circular dependency
-const Mnemonics = @import("mnemonics.zig");
 
 /// Pre-allocated metamethod key strings for fast lookup
 /// These are allocated once at VM startup and never collected
@@ -273,11 +269,5 @@ pub const VM = struct {
     pub inline fn reserveSlots(self: *VM, func_reg: u32, count: u32) void {
         const needed = self.base + func_reg + count;
         if (self.top < needed) self.top = needed;
-    }
-
-    /// Execute bytecode starting from the given proto.
-    /// Delegates to Mnemonics.execute() which contains all execution logic.
-    pub fn execute(self: *VM, proto: *const Proto) !ReturnValue {
-        return Mnemonics.execute(self, proto);
     }
 };

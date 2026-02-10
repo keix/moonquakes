@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const test_utils = @import("test_utils.zig");
+const Mnemonics = @import("../vm/mnemonics.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -32,7 +33,7 @@ test "LOADKX with EXTRAARG loads large constant index" {
         .maxstacksize = 10,
     };
 
-    _ = try vm.execute(&proto);
+    _ = try Mnemonics.execute(&vm, &proto);
 
     // Verify R[0] contains the constant value from index 5
     try test_utils.expectRegister(&vm, 0, .{ .integer = 42 });
@@ -62,7 +63,7 @@ test "GETI with nil table returns error" {
     };
 
     // Should return InvalidTableOperation since R[0] is nil
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
     try testing.expect(std.meta.isError(result));
     // Note: We can't test specific error type without proper error handling
 }
@@ -94,7 +95,7 @@ test "GETFIELD with nil table returns error" {
     };
 
     // Should return InvalidTableOperation since R[0] is nil
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
     try testing.expect(std.meta.isError(result));
 }
 
@@ -138,7 +139,7 @@ test "Multiple LOADKX operations" {
         .maxstacksize = 10,
     };
 
-    _ = try vm.execute(&proto);
+    _ = try Mnemonics.execute(&vm, &proto);
 
     // Verify all loaded values
     try test_utils.expectRegisters(&vm, 0, &[_]TValue{

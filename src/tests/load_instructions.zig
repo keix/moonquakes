@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -38,7 +39,7 @@ test "LOADI: load signed immediate integer" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -59,7 +60,7 @@ test "LOADI: load negative signed immediate" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = -100 });
 }
@@ -80,7 +81,7 @@ test "LOADF: load signed immediate as float" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .number = 42.0 });
 }
@@ -101,7 +102,7 @@ test "LOADFALSE: load false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -122,7 +123,7 @@ test "LOADTRUE: load true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -144,7 +145,7 @@ test "LFALSESKIP: load false and skip" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -170,7 +171,7 @@ test "LOADNIL: single register" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue.nil);
 }
@@ -200,7 +201,7 @@ test "LOADNIL: multiple registers" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     const expected = [_]TValue{ .nil, .nil, .nil };
     try expectMultipleResults(result, &expected);
@@ -229,7 +230,7 @@ test "LOADNIL: range in middle of stack" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },

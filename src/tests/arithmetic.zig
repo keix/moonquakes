@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -51,7 +52,7 @@ test "arithmetic: 10 - 3 * 2 = 4" {
     // Capture initial state
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // Update final state
     trace.updateFinal(&vm, 5);
@@ -100,7 +101,7 @@ test "arithmetic: 10 / 3 with side effect verification" {
     vm.stack[5] = TValue{ .number = 3.14 };
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 6);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 6);
 
     // Verify result
@@ -150,7 +151,7 @@ test "arithmetic: 10 // 3 = 3" {
     // Added: Stack and register verification
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     trace.updateFinal(&vm, 3);
 
@@ -192,7 +193,7 @@ test "arithmetic: 10 % 3 = 1" {
 
     // Added: ExecutionTrace for state tracking
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     // Existing verification
@@ -234,7 +235,7 @@ test "arithmetic: 2 ^ 3 = 8 (power operation)" {
     defer vm.deinit();
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     try expectSingleResult(result, TValue{ .number = 8.0 });
@@ -270,7 +271,7 @@ test "arithmetic: 5 ^ 2 with integer inputs" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
 }

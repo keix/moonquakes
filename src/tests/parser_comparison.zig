@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
@@ -30,7 +31,7 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !ReturnValu
 
     const proto = try materialize(&raw_proto, &vm.gc, allocator);
 
-    return vm.execute(proto);
+    return Mnemonics.execute(&vm, proto);
 }
 
 fn testParserExpression(source: []const u8, expected: TValue) !void {

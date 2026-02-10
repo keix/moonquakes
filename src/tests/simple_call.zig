@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
 const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
@@ -41,7 +42,7 @@ test "closure constant loading" {
         .maxstacksize = 1,
     };
 
-    const result = try vm.execute(&main_proto);
+    const result = try Mnemonics.execute(&vm, &main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue.fromClosure(func_closure));
 }
@@ -91,7 +92,7 @@ test "simple function call without arguments" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&main_proto);
+    const result = try Mnemonics.execute(&vm, &main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
 }
@@ -139,7 +140,7 @@ test "function call with arguments" {
         .maxstacksize = 3,
     };
 
-    const result = try vm.execute(&main_proto);
+    const result = try Mnemonics.execute(&vm, &main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
 }

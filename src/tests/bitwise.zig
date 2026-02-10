@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
@@ -39,7 +40,7 @@ test "BNOT: basic integer negation" {
     // Capture initial state
     var trace = utils.ExecutionTrace.captureInitial(&vm, 4);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // Update final state
     trace.updateFinal(&vm, 4);
@@ -84,7 +85,7 @@ test "BNOT: float to integer conversion" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = ~@as(i64, 42) });
 }
@@ -110,7 +111,7 @@ test "BNOT: float with fractional part should error" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try testing.expectError(error.ArithmeticError, result);
 }
@@ -143,7 +144,7 @@ test "BAND: basic integer AND" {
 
     // Execute with state tracking
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     // Verify result and VM state
@@ -181,7 +182,7 @@ test "BAND: mixed integer and float" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 }); // 255 & 15 = 15
 }
@@ -211,7 +212,7 @@ test "BOR: basic integer OR" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b1111 }); // 12 | 3 = 15
 }
@@ -241,7 +242,7 @@ test "BXOR: basic integer XOR" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b0101 }); // 15 ^ 10 = 5
 }
@@ -275,7 +276,7 @@ test "BANDK: AND with constant and side effect verification" {
     vm.stack[2] = TValue{ .integer = 999 };
     vm.stack[3] = TValue{ .boolean = true };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xF0 }); // 255 & 0xF0 = 240
 
@@ -310,7 +311,7 @@ test "BORK: OR with constant" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xFF }); // 0x0F | 0xF0 = 0xFF
 }
@@ -337,7 +338,7 @@ test "BXORK: XOR with constant" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xAA }); // 0xFF ^ 0x55 = 0xAA
 }
@@ -370,7 +371,7 @@ test "SHL: shift left basic" {
 
     // Execute and track state
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 3);
 
     // Verify result
@@ -405,7 +406,7 @@ test "SHL: negative shift (becomes right shift)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 32 >> 3 = 4
 }
@@ -433,7 +434,7 @@ test "SHR: shift right basic" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 16 >> 2 = 4
 }
@@ -461,7 +462,7 @@ test "SHR: arithmetic shift with negative number" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = -4 }); // -16 >> 2 = -4 (sign preserved)
 }
@@ -489,7 +490,7 @@ test "SHLI: shift left immediate" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 24 }); // 3 << 3 = 24
 }
@@ -515,7 +516,7 @@ test "SHRI: shift right immediate" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 64 >> 4 = 4
 }
@@ -557,7 +558,7 @@ test "Bitwise: complex expression with state tracking" {
 
     // Capture execution state
     var trace = utils.ExecutionTrace.captureInitial(&vm, 8);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 8);
 
     // Calculate expected: (0xFF & 0x0F) | ((~0x55) ^ 0xAA)
@@ -602,7 +603,7 @@ test "Bitwise operations with non-integer values should error" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try testing.expectError(error.ArithmeticError, result);
 }

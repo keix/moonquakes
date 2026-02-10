@@ -5,6 +5,7 @@ const parser = @import("../compiler/parser.zig");
 const materialize = @import("../compiler/materialize.zig").materialize;
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const test_utils = @import("test_utils.zig");
 
@@ -19,7 +20,7 @@ fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !R
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
     const proto = try materialize(&raw_proto, &vm.gc, allocator);
 
-    return vm.execute(proto);
+    return Mnemonics.execute(vm, proto);
 }
 
 // =============================================================================

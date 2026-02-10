@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const proto_mod = @import("../compiler/proto.zig");
 const Proto = proto_mod.Proto;
 const Upvaldesc = proto_mod.Upvaldesc;
@@ -36,7 +37,7 @@ test "CLOSE opcode - no-op behavior" {
 
     const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
@@ -76,7 +77,7 @@ test "TBC opcode - no-op behavior" {
 
     const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
@@ -113,7 +114,7 @@ test "SETUPVAL opcode - no-op behavior" {
 
     const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
@@ -155,7 +156,7 @@ test "SETTABUP opcode - global variable assignment" {
         .maxstacksize = 3,
     };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify the global variable was set
@@ -199,7 +200,7 @@ test "SETTABUP opcode - multiple global assignments" {
         .maxstacksize = 3,
     };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify all global variables were set correctly
@@ -239,7 +240,7 @@ test "SETTABUP opcode - invalid key type" {
     };
 
     // Should fail with InvalidTableKey error
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
     try testing.expectError(error.InvalidTableKey, result);
 }
 
@@ -275,7 +276,7 @@ test "All new opcodes - integration test" {
         .maxstacksize = 3,
     };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Only SETTABUP should have side effects
@@ -320,7 +321,7 @@ test "CLOSURE opcode - create closure without upvalues" {
         .maxstacksize = 1,
     };
 
-    const result = try vm.execute(&parent_proto);
+    const result = try Mnemonics.execute(&vm, &parent_proto);
 
     // Should return a closure
     switch (result) {
@@ -380,7 +381,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&parent_proto);
+    const result = try Mnemonics.execute(&vm, &parent_proto);
 
     // Should return a closure with one upvalue
     switch (result) {
@@ -445,7 +446,7 @@ test "CLOSE opcode - closes open upvalues" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&parent_proto);
+    const result = try Mnemonics.execute(&vm, &parent_proto);
 
     switch (result) {
         .single => |val| {
@@ -515,7 +516,7 @@ test "GETUPVAL and SETUPVAL with closure" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&parent_proto);
+    const result = try Mnemonics.execute(&vm, &parent_proto);
 
     switch (result) {
         .single => |val| {

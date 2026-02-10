@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -49,7 +50,7 @@ test "comparison: 5 == 5 = true" {
     // However, this test is complex so we verify manually
     var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     trace.updateFinal(&vm, 3);
 
@@ -94,7 +95,7 @@ test "comparison: 5 == 3 = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -128,7 +129,7 @@ test "comparison: 3 < 5 = true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -161,7 +162,7 @@ test "comparison: 5 < 3 = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -194,7 +195,7 @@ test "comparison: 3 <= 5 = true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -227,7 +228,7 @@ test "comparison: 5 <= 5 = true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -260,7 +261,7 @@ test "comparison: mixed types 3 < 3.5 = true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -293,7 +294,7 @@ test "comparison: different types nil == false = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -326,7 +327,7 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // In Lua 5.3+, 1 == 1.0 is true
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -360,7 +361,7 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // 42 != 42.5, so should return false
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -394,7 +395,7 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // -100 == -100.0 should be true in Lua 5.3+
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -449,7 +450,7 @@ test "comparison: LT with side effect verification" {
     vm.stack[3] = .nil;
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 4);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 4);
 
     // Verify registers

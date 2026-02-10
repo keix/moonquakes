@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -36,7 +37,7 @@ test "control flow: JMP forward" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
@@ -68,7 +69,7 @@ test "control flow: JMP 0 goes to next instruction" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
@@ -95,7 +96,7 @@ test "control flow: JMP out of bounds should error" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try testing.expectError(error.PcOutOfRange, result);
 }
@@ -130,7 +131,7 @@ test "control flow: JMP backward (real loop)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 }
@@ -160,7 +161,7 @@ test "control flow: TEST with true value" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -190,7 +191,7 @@ test "control flow: TEST with false value" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -220,7 +221,7 @@ test "control flow: TEST with k=true (inverted)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -249,7 +250,7 @@ test "control flow: TESTSET with true value" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // TESTSET should not have copied, R1 is replaced with 99 again
     try expectSingleResult(result, TValue{ .integer = 99 });
@@ -290,7 +291,7 @@ test "control flow: if-then-else simulation" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 100 });
 }

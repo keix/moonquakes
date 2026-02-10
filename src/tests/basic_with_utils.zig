@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
@@ -35,7 +36,7 @@ test "MOVE with stack verification" {
     const trace = utils.ExecutionTrace.captureInitial(&vm, 2);
 
     // Execute
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // Update final state
     var final_trace = trace;
@@ -190,7 +191,7 @@ test "FORPREP/FORLOOP with state tracking" {
     const initial_loop = utils.ForLoopTrace.capture(&vm, 0);
     _ = initial_loop;
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // Capture final loop state
     const final_loop = utils.ForLoopTrace.capture(&vm, 0);

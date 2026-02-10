@@ -4,6 +4,7 @@ const proto_mod = @import("compiler/proto.zig");
 const Proto = proto_mod.Proto;
 const RawProto = proto_mod.RawProto;
 const VM = @import("vm/vm.zig").VM;
+const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
 const lexer = @import("compiler/lexer.zig");
 const parser = @import("compiler/parser.zig");
@@ -68,7 +69,7 @@ pub const Moonquakes = struct {
         defer vm.deinit();
 
         // Execute with Sugar Layer error translation
-        return vm.execute(proto) catch |err| {
+        return Mnemonics.execute(&vm, proto) catch |err| {
             // Translate VM errors to user-friendly messages using Sugar Layer
             const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
                 error.OutOfMemory => "out of memory during error translation",
@@ -108,7 +109,7 @@ pub const Moonquakes = struct {
         defer freeProto(self.allocator, proto);
 
         // Phase 3: Execute
-        const result = vm.execute(proto) catch |err| {
+        const result = Mnemonics.execute(&vm, proto) catch |err| {
             const translated_error = self.translateVMError(err) catch |trans_err| switch (trans_err) {
                 error.OutOfMemory => "out of memory during error translation",
             };
