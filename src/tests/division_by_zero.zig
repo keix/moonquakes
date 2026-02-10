@@ -4,10 +4,11 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
-fn expectError(result: anyerror!VM.ReturnValue, expected_error: anyerror) !void {
+fn expectError(result: anyerror!ReturnValue, expected_error: anyerror) !void {
     if (result) |_| {
         return error.TestExpectedError;
     } else |err| {

@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -181,7 +182,7 @@ pub const InstructionTest = struct {
         };
     }
 
-    pub fn execute(self: *InstructionTest) !VM.ReturnValue {
+    pub fn execute(self: *InstructionTest) !ReturnValue {
         return self.vm.execute(self.proto);
     }
 
@@ -392,24 +393,24 @@ pub fn testArithmeticOp(vm: *VM, inst: Instruction, a_val: TValue, b_val: TValue
 
 /// Test utilities for RETURN instruction
 pub const ReturnTest = struct {
-    pub fn expectNone(result: VM.ReturnValue) !void {
+    pub fn expectNone(result: ReturnValue) !void {
         try testing.expect(result == .none);
     }
 
-    pub fn expectSingle(result: VM.ReturnValue, expected: TValue) !void {
+    pub fn expectSingle(result: ReturnValue, expected: TValue) !void {
         try testing.expect(result == .single);
         try testing.expect(result.single.eql(expected));
     }
 
     /// Compare single result with string content (for parser tests)
-    pub fn expectSingleString(result: VM.ReturnValue, expected_str: []const u8) !void {
+    pub fn expectSingleString(result: ReturnValue, expected_str: []const u8) !void {
         try testing.expect(result == .single);
         try testing.expect(result.single.isString());
         const actual_str = result.single.string.asSlice();
         try testing.expectEqualStrings(expected_str, actual_str);
     }
 
-    pub fn expectMultiple(result: VM.ReturnValue, expected: []const TValue) !void {
+    pub fn expectMultiple(result: ReturnValue, expected: []const TValue) !void {
         try testing.expect(result == .multiple);
         try testing.expectEqual(expected.len, result.multiple.len);
         for (expected, result.multiple) |exp, act| {
@@ -441,7 +442,7 @@ pub fn expectRegistersUnchanged(trace: *const ExecutionTrace, total: u8, except:
 }
 
 /// Combined result and state verification
-pub fn expectResultAndState(result: VM.ReturnValue, expected: TValue, vm: *const VM, expected_base: usize, expected_top: usize) !void {
+pub fn expectResultAndState(result: ReturnValue, expected: TValue, vm: *const VM, expected_base: usize, expected_top: usize) !void {
     try ReturnTest.expectSingle(result, expected);
     try expectVMState(vm, expected_base, expected_top);
 }

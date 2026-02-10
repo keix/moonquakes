@@ -1,7 +1,8 @@
 const std = @import("std");
-const vm_mod = @import("../vm/vm.zig");
-const VM = vm_mod.VM;
-const CallInfo = vm_mod.CallInfo;
+const VM = @import("../vm/vm.zig").VM;
+const execution = @import("../vm/execution.zig");
+const CallInfo = execution.CallInfo;
+const ReturnValue = execution.ReturnValue;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
@@ -60,7 +61,7 @@ pub const VMExt = struct {
         return vm_ext;
     }
 
-    pub fn executeWithFunctions(self: *VMExt, proto: *const Proto, functions: []const FunctionMapping) !VM.ReturnValue {
+    pub fn executeWithFunctions(self: *VMExt, proto: *const Proto, functions: []const FunctionMapping) !ReturnValue {
         // Set up function values in extended stack globally
         // In a real implementation, functions would be stored as closures or in a global table
         for (functions) |f| {
@@ -89,7 +90,7 @@ pub const VMExt = struct {
         return self.executeLoop();
     }
 
-    fn executeLoop(self: *VMExt) !VM.ReturnValue {
+    fn executeLoop(self: *VMExt) !ReturnValue {
         while (true) {
             var ci = self.base_vm.ci.?;
             const inst = ci.pc[0];

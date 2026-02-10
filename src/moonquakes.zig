@@ -4,6 +4,7 @@ const proto_mod = @import("compiler/proto.zig");
 const Proto = proto_mod.Proto;
 const RawProto = proto_mod.RawProto;
 const VM = @import("vm/vm.zig").VM;
+const ReturnValue = @import("vm/execution.zig").ReturnValue;
 const lexer = @import("compiler/lexer.zig");
 const parser = @import("compiler/parser.zig");
 const materialize = @import("compiler/materialize.zig").materialize;
@@ -62,7 +63,7 @@ pub const Moonquakes = struct {
     }
 
     /// Execute compiled bytecode
-    pub fn run(self: *Moonquakes, proto: *const Proto) !VM.ReturnValue {
+    pub fn run(self: *Moonquakes, proto: *const Proto) !ReturnValue {
         var vm = try VM.init(self.allocator);
         defer vm.deinit();
 
@@ -170,7 +171,7 @@ pub const Moonquakes = struct {
     }
 
     /// Convert VM ReturnValue to OwnedReturnValue (copies GC-managed data)
-    fn toOwnedReturnValue(self: *Moonquakes, result: VM.ReturnValue) !OwnedReturnValue {
+    fn toOwnedReturnValue(self: *Moonquakes, result: ReturnValue) !OwnedReturnValue {
         return switch (result) {
             .none => .none,
             .single => |val| .{ .single = try self.toOwnedValue(val) },

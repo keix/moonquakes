@@ -15,9 +15,9 @@ const ErrorHandler = @import("error.zig");
 
 // Execution ABI: CallInfo (frame), ReturnValue (result)
 const execution = @import("execution.zig");
-pub const CallInfo = execution.CallInfo;
-pub const ReturnValue = execution.ReturnValue;
-pub const ExecuteResult = execution.ExecuteResult;
+const CallInfo = execution.CallInfo;
+const ReturnValue = execution.ReturnValue;
+const ExecuteResult = execution.ExecuteResult;
 
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
