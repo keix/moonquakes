@@ -65,9 +65,10 @@ pub const NativeFnId = enum(u8) {
     string_unpack,
     string_packsize,
 
-    // UTF8 Library (builtin/utf8.zig) - skeleton functions
+    // UTF8 Library (builtin/utf8.zig)
     utf8_char,
     utf8_codes,
+    utf8_codes_iterator,
     utf8_codepoint,
     utf8_len,
     utf8_offset,

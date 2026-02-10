@@ -455,6 +455,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         // UTF-8 Library (skeleton implementations)
         .utf8_char => try utf8.nativeUtf8Char(vm, func_reg, nargs, nresults),
         .utf8_codes => try utf8.nativeUtf8Codes(vm, func_reg, nargs, nresults),
+        .utf8_codes_iterator => try utf8.nativeUtf8CodesIterator(vm, func_reg, nargs, nresults),
         .utf8_codepoint => try utf8.nativeUtf8Codepoint(vm, func_reg, nargs, nresults),
         .utf8_len => try utf8.nativeUtf8Len(vm, func_reg, nargs, nresults),
         .utf8_offset => try utf8.nativeUtf8Offset(vm, func_reg, nargs, nresults),

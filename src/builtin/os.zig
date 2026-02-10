@@ -91,22 +91,121 @@ pub fn nativeOsGetenv(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
 /// os.remove(filename) - Deletes the file (or empty directory) with the given name
 pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement os.remove
-    // Returns true on success, nil and error message on failure
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = try vm.gc.allocString("bad argument #1 to 'remove' (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    }
+
+    const filename_arg = vm.stack[vm.base + func_reg + 1];
+    const filename_obj = filename_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = try vm.gc.allocString("bad argument #1 to 'remove' (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    };
+    const filename = filename_obj.asSlice();
+
+    // Try to delete as file first, then as directory
+    const cwd = std.fs.cwd();
+    cwd.deleteFile(filename) catch |file_err| {
+        // If file deletion fails due to IsDir, try as directory
+        if (file_err == error.IsDir) {
+            cwd.deleteDir(filename) catch |dir_err| {
+                vm.stack[vm.base + func_reg] = .nil;
+                if (nresults >= 2) {
+                    const err_msg = switch (dir_err) {
+                        error.FileNotFound => try vm.gc.allocString("No such file or directory"),
+                        error.AccessDenied => try vm.gc.allocString("Permission denied"),
+                        error.DirNotEmpty => try vm.gc.allocString("Directory not empty"),
+                        else => try vm.gc.allocString("Unknown error"),
+                    };
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+                }
+                return;
+            };
+            vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            return;
+        }
+        // File deletion failed for other reason
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = switch (file_err) {
+                error.FileNotFound => try vm.gc.allocString("No such file or directory"),
+                error.AccessDenied => try vm.gc.allocString("Permission denied"),
+                else => try vm.gc.allocString("Unknown error"),
+            };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    };
+
+    vm.stack[vm.base + func_reg] = .{ .boolean = true };
 }
 
 /// os.rename(oldname, newname) - Renames file or directory from oldname to newname
 pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement os.rename
-    // Returns true on success, nil and error message on failure
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const msg = if (nargs < 1)
+                "bad argument #1 to 'rename' (string expected)"
+            else
+                "bad argument #2 to 'rename' (string expected)";
+            const err_msg = try vm.gc.allocString(msg);
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    }
+
+    const oldname_arg = vm.stack[vm.base + func_reg + 1];
+    const oldname_obj = oldname_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = try vm.gc.allocString("bad argument #1 to 'rename' (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    };
+
+    const newname_arg = vm.stack[vm.base + func_reg + 2];
+    const newname_obj = newname_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = try vm.gc.allocString("bad argument #2 to 'rename' (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    };
+
+    const oldname = oldname_obj.asSlice();
+    const newname = newname_obj.asSlice();
+
+    const cwd = std.fs.cwd();
+    cwd.rename(oldname, newname) catch |err| {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults >= 2) {
+            const err_msg = switch (err) {
+                error.FileNotFound => try vm.gc.allocString("No such file or directory"),
+                error.AccessDenied => try vm.gc.allocString("Permission denied"),
+                error.PathAlreadyExists => try vm.gc.allocString("File exists"),
+                else => try vm.gc.allocString("Unknown error"),
+            };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
+        }
+        return;
+    };
+
+    vm.stack[vm.base + func_reg] = .{ .boolean = true };
 }
 
 /// os.setlocale(locale [, category]) - Sets the current locale of the program
@@ -131,10 +230,21 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// os.tmpname() - Returns a string with a file name that can be used for a temporary file
 pub fn nativeOsTmpname(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement os.tmpname
-    // Should return unique temporary filename
+    if (nresults == 0) return;
+
+    // Generate unique filename using timestamp and random value
+    const timestamp: u64 = @intCast(std.time.nanoTimestamp());
+    var prng = std.Random.DefaultPrng.init(timestamp);
+    const random = prng.random();
+    const rand_val = random.int(u32);
+
+    var buf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&buf, "/tmp/lua_{x}_{x}", .{ timestamp, rand_val }) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    const result = try vm.gc.allocString(name);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
