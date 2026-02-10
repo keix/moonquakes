@@ -1,6 +1,8 @@
 const std = @import("std");
 const testing = std.testing;
-const VM = @import("../vm/vm.zig").VM;
+const vm_mod = @import("../vm/vm.zig");
+const VM = vm_mod.VM;
+const Mnemonics = vm_mod.Mnemonics;
 const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
@@ -123,7 +125,7 @@ test "VM call stack push and pop" {
     vm.base = 0;
 
     // Test pushing a new call info (null closure since we're testing with bare Proto)
-    const new_ci = try vm.pushCallInfo(&proto2, null, 4, 4, 1);
+    const new_ci = try Mnemonics.pushCallInfo(&vm, &proto2, null, 4, 4, 1);
     try std.testing.expect(vm.ci == new_ci);
     try std.testing.expect(vm.base == 4);
     try std.testing.expect(vm.callstack_size == 1);
@@ -139,7 +141,7 @@ test "VM call stack push and pop" {
     // Test popping call info
     const old_base = vm.base;
     const old_ci = vm.ci;
-    vm.popCallInfo();
+    Mnemonics.popCallInfo(&vm);
 
     // Verify state after pop
     try std.testing.expect(vm.ci == &vm.base_ci);
@@ -182,11 +184,11 @@ test "VM call stack overflow" {
     // Push frames until we hit the limit
     var i: usize = 0;
     while (i < vm.callstack.len) : (i += 1) {
-        _ = try vm.pushCallInfo(&dummy_proto, null, @intCast(i * 4), @intCast(i * 4), 1);
+        _ = try Mnemonics.pushCallInfo(&vm, &dummy_proto, null, @intCast(i * 4), @intCast(i * 4), 1);
     }
 
     // Next push should fail
-    try std.testing.expectError(error.CallStackOverflow, vm.pushCallInfo(&dummy_proto, null, 100, 100, 1));
+    try std.testing.expectError(error.CallStackOverflow, Mnemonics.pushCallInfo(&vm, &dummy_proto, null, 100, 100, 1));
 }
 
 test "nested function call with register tracking" {

@@ -1,6 +1,8 @@
 const std = @import("std");
-const VM = @import("../vm/vm.zig").VM;
-const CallInfo = @import("../vm/vm.zig").CallInfo;
+const vm_mod = @import("../vm/vm.zig");
+const VM = vm_mod.VM;
+const CallInfo = vm_mod.CallInfo;
+const Mnemonics = vm_mod.Mnemonics;
 const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
@@ -158,7 +160,7 @@ pub const VMExt = struct {
                     }
 
                     // Push new call info
-                    _ = try self.base_vm.pushCallInfo(func, new_base, new_base, nresults);
+                    _ = try Mnemonics.pushCallInfo(&self.base_vm, func, null, new_base, new_base, nresults);
                 },
                 .RETURN => {
                     const b = inst.getB();
@@ -171,7 +173,7 @@ pub const VMExt = struct {
                         const calling_base = returning_ci.base;
 
                         // Pop the call info
-                        self.base_vm.popCallInfo();
+                        Mnemonics.popCallInfo(&self.base_vm);
 
                         // Now handle copying results back
                         if (b == 1) {

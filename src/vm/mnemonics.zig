@@ -3,21 +3,337 @@ const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 const CallInfo = vm_mod.CallInfo;
 const TValue = @import("../runtime/value.zig").TValue;
+const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
+const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const metamethod = @import("metamethod.zig");
 const MetaEvent = metamethod.MetaEvent;
+const builtin = @import("../builtin/dispatch.zig");
+const ErrorHandler = @import("error.zig");
+
+// ============================================================================
+// Return Value Types
+// ============================================================================
+
+pub const ReturnValue = union(enum) {
+    none,
+    single: TValue,
+    multiple: []TValue,
+};
 
 /// Result of executing a single instruction.
 pub const ExecuteResult = union(enum) {
     Continue,
     LoopContinue,
-    ReturnVM: VM.ReturnValue,
+    ReturnVM: ReturnValue,
 };
+
+// ============================================================================
+// Arithmetic Operations
+// ============================================================================
+
+pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
+pub const BitwiseOp = enum { band, bor, bxor };
+
+pub fn luaFloorDiv(a: f64, b: f64) f64 {
+    return @floor(a / b);
+}
+
+pub fn luaMod(a: f64, b: f64) f64 {
+    return a - luaFloorDiv(a, b) * b;
+}
+
+pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = &vm.stack[vm.base + b];
+    const vc = &vm.stack[vm.base + c];
+
+    // Try integer arithmetic first for add, sub, mul
+    if (tag == .add or tag == .sub or tag == .mul) {
+        if (vb.isInteger() and vc.isInteger()) {
+            const ib = vb.integer;
+            const ic = vc.integer;
+            const res = switch (tag) {
+                .add => ib + ic,
+                .sub => ib - ic,
+                .mul => ib * ic,
+                else => unreachable,
+            };
+            vm.stack[vm.base + a] = .{ .integer = res };
+            return;
+        }
+    }
+
+    // Fall back to floating point
+    const nb = vb.toNumber() orelse return error.ArithmeticError;
+    const nc = vc.toNumber() orelse return error.ArithmeticError;
+
+    // Check for division by zero
+    if ((tag == .div or tag == .idiv or tag == .mod) and nc == 0) {
+        return error.ArithmeticError;
+    }
+
+    const res = switch (tag) {
+        .add => nb + nc,
+        .sub => nb - nc,
+        .mul => nb * nc,
+        .div => nb / nc,
+        .idiv => luaFloorDiv(nb, nc),
+        .mod => luaMod(nb, nc),
+        .pow => std.math.pow(f64, nb, nc),
+    };
+
+    vm.stack[vm.base + a] = .{ .number = res };
+}
+
+pub fn bitwiseBinary(vm: *VM, inst: Instruction, comptime tag: BitwiseOp) !void {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = &vm.stack[vm.base + b];
+    const vc = &vm.stack[vm.base + c];
+
+    const ib = try toIntForBitwise(vb);
+    const ic = try toIntForBitwise(vc);
+
+    const res = switch (tag) {
+        .band => ib & ic,
+        .bor => ib | ic,
+        .bxor => ib ^ ic,
+    };
+
+    vm.stack[vm.base + a] = .{ .integer = res };
+}
+
+fn toIntForBitwise(v: *const TValue) !i64 {
+    if (v.isInteger()) {
+        return v.integer;
+    } else if (v.toNumber()) |n| {
+        if (@floor(n) == n) {
+            return @as(i64, @intFromFloat(n));
+        }
+    }
+    return error.ArithmeticError;
+}
+
+// ============================================================================
+// Comparison Operations
+// ============================================================================
+
+pub fn eqOp(a: TValue, b: TValue) bool {
+    return a.eql(b);
+}
+
+pub fn ltOp(a: TValue, b: TValue) !bool {
+    if (a.isInteger() and b.isInteger()) {
+        return a.integer < b.integer;
+    }
+    const na = a.toNumber();
+    const nb = b.toNumber();
+    if (na != null and nb != null) {
+        if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
+            return false;
+        }
+        return na.? < nb.?;
+    }
+    return error.OrderComparisonError;
+}
+
+pub fn leOp(a: TValue, b: TValue) !bool {
+    if (a.isInteger() and b.isInteger()) {
+        return a.integer <= b.integer;
+    }
+    const na = a.toNumber();
+    const nb = b.toNumber();
+    if (na != null and nb != null) {
+        if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
+            return false;
+        }
+        return na.? <= nb.?;
+    }
+    return error.OrderComparisonError;
+}
+
+// ============================================================================
+// Call Stack Management
+// ============================================================================
+
+pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+    if (vm.callstack_size >= vm.callstack.len) {
+        return error.CallStackOverflow;
+    }
+
+    const new_ci = &vm.callstack[vm.callstack_size];
+    new_ci.* = CallInfo{
+        .func = func,
+        .closure = closure,
+        .pc = func.code.ptr,
+        .savedpc = null,
+        .base = base,
+        .ret_base = ret_base,
+        .nresults = nresults,
+        .previous = vm.ci,
+    };
+
+    vm.callstack_size += 1;
+    vm.ci = new_ci;
+    vm.base = base;
+
+    return new_ci;
+}
+
+pub fn popCallInfo(vm: *VM) void {
+    if (vm.ci) |ci| {
+        if (ci.previous) |prev| {
+            vm.ci = prev;
+            vm.base = prev.base;
+            if (vm.callstack_size > 0) {
+                vm.callstack_size -= 1;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Metamethod Execution
+// ============================================================================
+
+/// Execute a metamethod synchronously and return its first result.
+/// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
+pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
+    const proto = closure.proto;
+    const call_base = vm.top;
+    const result_slot = call_base;
+
+    // Set up arguments
+    for (args, 0..) |arg, i| {
+        vm.stack[call_base + i] = arg;
+    }
+
+    // Fill remaining params with nil
+    var i: u32 = @intCast(args.len);
+    while (i < proto.numparams) : (i += 1) {
+        vm.stack[call_base + i] = .nil;
+    }
+
+    vm.top = call_base + proto.maxstacksize;
+
+    // Save current call depth
+    const saved_depth = vm.callstack_size;
+
+    // Push call info for metamethod
+    _ = try pushCallInfo(vm, proto, closure, call_base, result_slot, 1);
+
+    // Execute until we return to saved depth
+    while (vm.callstack_size > saved_depth) {
+        const ci = &vm.callstack[vm.callstack_size - 1];
+        const inst = ci.fetch() catch {
+            vm.base = ci.ret_base;
+            vm.top = ci.ret_base + 1;
+            popCallInfo(vm);
+            continue;
+        };
+        switch (try do(vm, inst)) {
+            .Continue => {},
+            .LoopContinue => {},
+            .ReturnVM => break,
+        }
+    }
+
+    return vm.stack[result_slot];
+}
+
+// ============================================================================
+// Main Execution Loop
+// ============================================================================
+
+fn setupMainFrame(vm: *VM, proto: *const Proto) void {
+    vm.base_ci = CallInfo{
+        .func = proto,
+        .closure = null,
+        .pc = proto.code.ptr,
+        .savedpc = null,
+        .base = 0,
+        .ret_base = 0,
+        .nresults = -1,
+        .previous = null,
+    };
+    vm.ci = &vm.base_ci;
+    vm.base = 0;
+    vm.top = proto.maxstacksize;
+}
+
+/// Find the nearest protected frame and handle the error.
+/// Returns true if error was handled by a protected frame, false otherwise.
+fn handleProtectedError(vm: *VM, err: anyerror) bool {
+    var current = vm.ci;
+    while (current) |ci| {
+        if (ci.is_protected) {
+            const ret_base = ci.ret_base;
+            const close_base = ci.base;
+            const target_ci = ci.previous;
+
+            vm.closeUpvalues(close_base);
+
+            while (vm.ci != null and vm.ci != target_ci) {
+                popCallInfo(vm);
+            }
+
+            vm.stack[ret_base] = .{ .boolean = false };
+            vm.stack[ret_base + 1] = .nil;
+            vm.top = ret_base + 2;
+
+            if (vm.lua_error_msg) |msg| {
+                vm.stack[ret_base + 1] = TValue.fromString(msg);
+                vm.lua_error_msg = null;
+            } else {
+                const err_str = vm.gc.allocString(@errorName(err)) catch {
+                    return true;
+                };
+                vm.stack[ret_base + 1] = TValue.fromString(err_str);
+            }
+
+            return true;
+        }
+        current = ci.previous;
+    }
+
+    return false;
+}
+
+/// Main VM execution loop.
+/// Executes instructions until RETURN from main chunk.
+pub fn execute(vm: *VM, proto: *const Proto) !ReturnValue {
+    vm.gc.setVM(vm);
+
+    setupMainFrame(vm, proto);
+
+    while (true) {
+        const ci = vm.ci.?;
+        const inst = ci.fetch() catch |err| {
+            if (handleProtectedError(vm, err)) continue;
+            return err;
+        };
+
+        const result = do(vm, inst) catch |err| {
+            if (handleProtectedError(vm, err)) continue;
+            return err;
+        };
+
+        switch (result) {
+            .Continue => {},
+            .LoopContinue => continue,
+            .ReturnVM => |ret| return ret,
+        }
+    }
+}
 
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
@@ -224,7 +540,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const nb = vb.toNumber() orelse return error.ArithmeticError;
             const nc = vc.toNumber() orelse return error.ArithmeticError;
             if (nc == 0) return error.ArithmeticError;
-            vm.stack[vm.base + a] = .{ .number = VM.luaFloorDiv(nb, nc) };
+            vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb, nc) };
             return .Continue;
         },
         // [MM_ARITH] Fast path: modulo with constant. Slow path: __mod metamethod.
@@ -238,7 +554,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const nb = vb.toNumber() orelse return error.ArithmeticError;
             const nc = vc.toNumber() orelse return error.ArithmeticError;
             if (nc == 0) return error.ArithmeticError;
-            vm.stack[vm.base + a] = .{ .number = VM.luaMod(nb, nc) };
+            vm.stack[vm.base + a] = .{ .number = luaMod(nb, nc) };
             return .Continue;
         },
         // [MM_ARITH] Fast path: power with constant. Slow path: __pow metamethod.
@@ -355,7 +671,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             return try dispatchArithMM(vm, inst, .pow, .pow);
         },
         .BAND => {
-            vm.bitwiseBinary(inst, .band) catch {
+            bitwiseBinary(vm, inst, .band) catch {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
@@ -367,7 +683,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             return .Continue;
         },
         .BOR => {
-            vm.bitwiseBinary(inst, .bor) catch {
+            bitwiseBinary(vm, inst, .bor) catch {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
@@ -379,7 +695,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             return .Continue;
         },
         .BXOR => {
-            vm.bitwiseBinary(inst, .bxor) catch {
+            bitwiseBinary(vm, inst, .bxor) catch {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
@@ -628,9 +944,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: neither is a table, no metamethod possible
             const is_true = if (left.asTable() == null and right.asTable() == null)
-                VM.eqOp(left, right)
+                eqOp(left, right)
             else
-                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -647,7 +963,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
-                try VM.ltOp(left, right)
+                try ltOp(left, right)
                 // Fast path: both are strings - lexicographic comparison
             else if (left.asString() != null and right.asString() != null) blk: {
                 const left_str = left.asString().?.asSlice();
@@ -672,7 +988,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
-                try VM.leOp(left, right)
+                try leOp(left, right)
                 // Fast path: both are strings - lexicographic comparison
             else if (left.asString() != null and right.asString() != null) blk: {
                 const left_str = left.asString().?.asSlice();
@@ -844,7 +1160,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 const nres: i16 = @intCast(nresults);
-                _ = try vm.pushCallInfo(func_proto, closure, new_base, new_base, nres);
+                _ = try pushCallInfo(vm, func_proto, closure, new_base, new_base, nres);
                 vm.top = new_base + func_proto.maxstacksize;
                 return .LoopContinue;
             }
@@ -927,7 +1243,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                _ = try vm.pushCallInfo(func_proto, closure, new_base, ret_base, nresults);
+                _ = try pushCallInfo(vm, func_proto, closure, new_base, ret_base, nresults);
 
                 vm.top = new_base + func_proto.maxstacksize;
                 return .LoopContinue;
@@ -957,7 +1273,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
-                vm.popCallInfo();
+                popCallInfo(vm);
 
                 // Protected frame: prepend true and shift results by 1
                 if (is_protected) {
@@ -1038,7 +1354,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
-                vm.popCallInfo();
+                popCallInfo(vm);
 
                 // Protected frame: return (true) with no additional values
                 if (is_protected) {
@@ -1070,7 +1386,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
-                vm.popCallInfo();
+                popCallInfo(vm);
 
                 // Protected frame: return (true, value)
                 if (is_protected) {
@@ -1318,9 +1634,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: left is not a table (constant right can't be a table)
             const is_true = if (left.asTable() == null)
-                VM.eqOp(left, right)
+                eqOp(left, right)
             else
-                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1338,9 +1654,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: left is not a table (immediate right is always integer)
             const is_true = if (left.asTable() == null)
-                VM.eqOp(left, right)
+                eqOp(left, right)
             else
-                try dispatchEqMM(vm, left, right) orelse VM.eqOp(left, right);
+                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -1358,7 +1674,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
-                try VM.ltOp(left, right)
+                try ltOp(left, right)
             else
                 try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -1378,7 +1694,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
-                try VM.leOp(left, right)
+                try leOp(left, right)
             else
                 try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -1398,7 +1714,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: right is a number (GTI is imm < R[B])
             const is_true = if (right.isInteger() or right.isNumber())
-                try VM.ltOp(left, right)
+                try ltOp(left, right)
             else
                 try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -1418,7 +1734,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Fast path: right is a number (GEI is imm <= R[B])
             const is_true = if (right.isInteger() or right.isNumber())
-                try VM.leOp(left, right)
+                try leOp(left, right)
             else
                 try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
@@ -1496,7 +1812,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // If metamethod is a closure, push call frame
             if (mm.asClosure()) |closure| {
-                _ = try vm.pushCallInfo(closure.proto, closure, temp, @intCast(vm.base + b), 1);
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + b), 1);
                 return .LoopContinue;
             }
 
@@ -1599,7 +1915,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 // Push a protected call frame
                 const pcall_nresults: i16 = @intCast(nresults);
-                const new_ci = try vm.pushCallInfo(func_proto, closure, call_base, vm.base + a, pcall_nresults);
+                const new_ci = try pushCallInfo(vm, func_proto, closure, call_base, vm.base + a, pcall_nresults);
                 new_ci.is_protected = true;
 
                 vm.top = call_base + func_proto.maxstacksize;
@@ -1639,7 +1955,7 @@ fn mmEventFromOpcode(a: u8) ?MetaEvent {
 
 /// Arithmetic with metamethod fallback
 /// Tries fast path first, then checks for metamethod
-fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: VM.ArithOp, comptime event: MetaEvent) !ExecuteResult {
+fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, comptime event: MetaEvent) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1648,7 +1964,7 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: VM.ArithOp, co
 
     // Try fast path (numeric arithmetic)
     if (canDoArith(vb, vc)) {
-        try vm.arithBinary(inst, arith_op);
+        try arithBinary(vm, inst, arith_op);
         return .Continue;
     }
 
@@ -1690,7 +2006,7 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
 
         vm.top = new_base + proto.maxstacksize;
 
-        _ = try vm.pushCallInfo(proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
         return .LoopContinue;
     }
 
@@ -1763,7 +2079,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 
         vm.top = new_base + proto.maxstacksize;
 
-        _ = try vm.pushCallInfo(proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
         return .LoopContinue;
     }
 
@@ -1837,7 +2153,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         vm.top = new_base + proto.maxstacksize;
 
         // __newindex doesn't return a value, but we still need to call it
-        _ = try vm.pushCallInfo(proto, closure, new_base, new_base, 0);
+        _ = try pushCallInfo(vm, proto, closure, new_base, new_base, 0);
         return .LoopContinue;
     }
 
@@ -1894,7 +2210,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
         vm.top = new_base + proto.maxstacksize;
 
-        _ = try vm.pushCallInfo(proto, closure, new_base, new_base, nresults);
+        _ = try pushCallInfo(vm, proto, closure, new_base, new_base, nresults);
         return .LoopContinue;
     }
 
@@ -1938,7 +2254,7 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
         vm.top = new_base + proto.maxstacksize;
 
         // Push call info, result goes to result_reg
-        _ = try vm.pushCallInfo(proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
         return .LoopContinue;
     }
 
@@ -1998,7 +2314,7 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
         vm.top = new_base + proto.maxstacksize;
 
         // Push call info, result goes to result_reg
-        _ = try vm.pushCallInfo(proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
         return .LoopContinue;
     }
 
@@ -2034,7 +2350,7 @@ fn getEqMM(vm: *VM, val: TValue) ?TValue {
 /// Note: Only supports native metamethods for now (Lua functions require async handling)
 fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
     // Primitive equality check first - if equal, no metamethod needed
-    if (VM.eqOp(left, right)) {
+    if (eqOp(left, right)) {
         return true;
     }
 
@@ -2071,7 +2387,7 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __eq is a Lua function - call synchronously using VM's executeSync
     if (left_mm.asClosure()) |closure| {
-        const result = try vm.executeSyncMM(closure, &[_]TValue{
+        const result = try executeSyncMM(vm, closure, &[_]TValue{
             TValue.fromTable(left_table),
             TValue.fromTable(right_table),
         });
@@ -2092,7 +2408,7 @@ fn getLtMM(vm: *VM, val: TValue) ?TValue {
 /// Returns true/false if comparison can be done, null if no metamethod and not comparable
 fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
     // Try numeric comparison first
-    if (VM.ltOp(left, right)) |result| {
+    if (ltOp(left, right)) |result| {
         return result;
     } else |_| {}
 
@@ -2118,7 +2434,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __lt is a Lua function - call synchronously
     if (lt_mm.asClosure()) |closure| {
-        const result = try vm.executeSyncMM(closure, &[_]TValue{ left, right });
+        const result = try executeSyncMM(vm, closure, &[_]TValue{ left, right });
         return result.toBoolean();
     }
 
@@ -2137,7 +2453,7 @@ fn getLeMM(vm: *VM, val: TValue) ?TValue {
 /// Returns true/false if comparison can be done, null if not comparable
 fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
     // Try numeric comparison first
-    if (VM.leOp(left, right)) |result| {
+    if (leOp(left, right)) |result| {
         return result;
     } else |_| {}
 
@@ -2160,7 +2476,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __le is a Lua function
         if (le_mm.asClosure()) |closure| {
-            const result = try vm.executeSyncMM(closure, &[_]TValue{ left, right });
+            const result = try executeSyncMM(vm, closure, &[_]TValue{ left, right });
             return result.toBoolean();
         }
     }
@@ -2185,7 +2501,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __lt is a Lua function
         if (lt_mm.asClosure()) |closure| {
-            const result = try vm.executeSyncMM(closure, &[_]TValue{ right, left });
+            const result = try executeSyncMM(vm, closure, &[_]TValue{ right, left });
             return !result.toBoolean();
         }
     }
@@ -2244,7 +2560,7 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
         }
 
         vm.top = new_base + proto.maxstacksize;
-        _ = try vm.pushCallInfo(proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
         return .LoopContinue;
     }
 
@@ -2282,7 +2598,7 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
         }
 
         vm.top = new_base + proto.maxstacksize;
-        _ = try vm.pushCallInfo(proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
         return .LoopContinue;
     }
 
