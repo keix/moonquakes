@@ -12,78 +12,12 @@ const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
 
-// Re-export Mnemonics module for direct access to execution functions
-pub const Mnemonics = @import("mnemonics.zig");
+// Execution ABI: CallInfo (frame), ReturnValue (result)
+const execution = @import("execution.zig");
+pub const CallInfo = execution.CallInfo;
 
-// CallInfo represents a function call in the call stack
-pub const CallInfo = struct {
-    // Function info
-    func: *const Proto,
-    closure: ?*ClosureObject, // closure for upvalue access (null for main chunk)
-
-    // Execution state
-    pc: [*]const Instruction,
-    savedpc: ?[*]const Instruction, // saved pc for yielding
-
-    // Stack frame
-    base: u32,
-    ret_base: u32, // Where to place return values in caller's frame
-
-    // Call control
-    nresults: i16, // expected number of results (-1 = multiple)
-    previous: ?*CallInfo, // previous frame in the call stack
-
-    // Protected call support (for pcall)
-    is_protected: bool = false, // true if this is a pcall frame
-
-    /// Fetch next instruction and advance PC
-    /// Encapsulates PC bounds checking as an invariant
-    pub inline fn fetch(self: *CallInfo) !Instruction {
-        try self.validatePC();
-        const inst = self.pc[0];
-        self.skip();
-
-        return inst;
-    }
-
-    /// Skip next instruction (increment PC by 1)
-    pub inline fn skip(self: *CallInfo) void {
-        self.pc += 1;
-    }
-
-    /// Jump relatively from current PC position
-    /// Handles both forward and backward jumps
-    pub inline fn jumpRel(self: *CallInfo, offset: i32) !void {
-        if (offset >= 0) {
-            self.pc += @as(usize, @intCast(offset));
-        } else {
-            self.pc -= @as(usize, @intCast(-offset));
-        }
-
-        try self.validatePC();
-    }
-
-    /// Fetch next instruction expecting it to be EXTRAARG
-    /// Used by instructions like LOADKX that consume 2-word opcodes
-    pub inline fn fetchExtraArg(self: *CallInfo) !Instruction {
-        const inst = try self.fetch();
-        if (inst.getOpCode() != .EXTRAARG) {
-            return error.UnknownOpcode;
-        }
-        return inst;
-    }
-
-    /// Validate PC is within function bounds (disabled in ReleaseFast)
-    inline fn validatePC(self: *CallInfo) !void {
-        if (std.debug.runtime_safety) {
-            const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
-            const pc_index = pc_offset / @sizeOf(Instruction);
-            if (pc_index >= self.func.code.len) {
-                return error.PcOutOfRange;
-            }
-        }
-    }
-};
+// Mnemonics is imported internally for execute(), not re-exported to avoid circular dependency
+const Mnemonics = @import("mnemonics.zig");
 
 /// Pre-allocated metamethod key strings for fast lookup
 /// These are allocated once at VM startup and never collected
@@ -142,8 +76,9 @@ pub const MetamethodKeys = struct {
 };
 
 pub const VM = struct {
-    /// Re-export from Mnemonics for backward compatibility
-    pub const ReturnValue = Mnemonics.ReturnValue;
+    // Re-export from execution for backward compatibility
+    pub const ReturnValue = execution.ReturnValue;
+
     stack: [256]TValue,
     stack_last: u32,
     top: u32,
