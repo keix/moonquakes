@@ -10,6 +10,8 @@ const TableObject = object.TableObject;
 const FILE_OUTPUT_KEY = "_output";
 const FILE_EXITCODE_KEY = "_exitcode";
 const FILE_CLOSED_KEY = "_closed";
+const FILE_FILENAME_KEY = "_filename";
+const FILE_MODE_KEY = "_mode";
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const string = @import("string.zig");
     var stdout_writer = std.fs.File.stdout().writer(&.{});
@@ -91,7 +93,7 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
 /// io.open(filename [, mode]) - Opens a file in specified mode
 /// Returns file handle or nil, errmsg on error
-/// Currently supports "r" mode (read) - reads entire file into memory
+/// Supports: "r" (read), "w" (write), "a" (append), and variants with "+" and "b"
 pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Reserve stack slots BEFORE any GC-triggering allocation.
     // Stack layout: func_reg (result), +1 (temp/errmsg), +2..+4 (metatable creation)
@@ -119,64 +121,171 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         }
     }
 
-    // Currently only support read mode
-    if (mode.len == 0 or mode[0] != 'r') {
-        // TODO: implement write modes
+    // Parse mode - first char determines primary mode
+    if (mode.len == 0) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("unsupported mode");
+            const err_str = try vm.gc.allocString("invalid mode");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
     }
 
-    // Open and read the file
-    const file = std.fs.cwd().openFile(filename, .{}) catch {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc.allocString("cannot open file");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    const primary_mode = mode[0];
+
+    // Handle read mode
+    if (primary_mode == 'r') {
+        // Open and read the file
+        const file = std.fs.cwd().openFile(filename, .{}) catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("cannot open file");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+        defer file.close();
+
+        // Read entire file content
+        const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("cannot read file");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+        defer vm.allocator.free(content);
+
+        // Create file handle table
+        const file_table = try vm.gc.allocTable();
+        vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+
+        // Store file content
+        const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
+        const output_str = try vm.gc.allocString(content);
+        try file_table.set(output_key, TValue.fromString(output_str));
+
+        // Store closed flag
+        const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+        try file_table.set(closed_key, .{ .boolean = false });
+
+        // Store exit code (0 for regular files)
+        const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
+        try file_table.set(exitcode_key, .{ .integer = 0 });
+
+        // Store mode
+        const mode_key = try vm.gc.allocString(FILE_MODE_KEY);
+        const mode_str = try vm.gc.allocString(mode);
+        try file_table.set(mode_key, TValue.fromString(mode_str));
+
+        // Create metatable with file methods
+        const mt = try createFileMetatable(vm, func_reg + 2);
+        file_table.metatable = mt;
+
+        if (nresults == 0) {
+            vm.stack[vm.base + func_reg] = .nil;
         }
         return;
-    };
-    defer file.close();
+    }
 
-    // Read entire file content
-    const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc.allocString("cannot read file");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    // Handle write mode ("w" - truncate or create)
+    if (primary_mode == 'w') {
+        // Create file handle table with empty buffer
+        const file_table = try vm.gc.allocTable();
+        vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+
+        // Store empty output buffer
+        const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+        const empty_str = try vm.gc.allocString("");
+        try file_table.set(output_key, TValue.fromString(empty_str));
+
+        // Store filename for writing on close
+        const filename_key = try vm.gc.allocString(FILE_FILENAME_KEY);
+        const filename_str = try vm.gc.allocString(filename);
+        try file_table.set(filename_key, TValue.fromString(filename_str));
+
+        // Store mode
+        const mode_key = try vm.gc.allocString(FILE_MODE_KEY);
+        const mode_str = try vm.gc.allocString(mode);
+        try file_table.set(mode_key, TValue.fromString(mode_str));
+
+        // Store closed flag
+        const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+        try file_table.set(closed_key, .{ .boolean = false });
+
+        // Store exit code (0 for regular files)
+        const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
+        try file_table.set(exitcode_key, .{ .integer = 0 });
+
+        // Create metatable with file methods
+        const mt = try createFileMetatable(vm, func_reg + 2);
+        file_table.metatable = mt;
+
+        if (nresults == 0) {
+            vm.stack[vm.base + func_reg] = .nil;
         }
         return;
-    };
-    defer vm.allocator.free(content);
+    }
 
-    // Create file handle table
-    const file_table = try vm.gc.allocTable();
-    vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
+    // Handle append mode ("a" - append or create)
+    if (primary_mode == 'a') {
+        // Try to read existing content
+        var initial_content: []const u8 = "";
+        var owned_content: ?[]u8 = null;
+        defer if (owned_content) |c| vm.allocator.free(c);
 
-    // Store file content
-    const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
-    vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
-    const output_str = try vm.gc.allocString(content);
-    try file_table.set(output_key, TValue.fromString(output_str));
+        if (std.fs.cwd().openFile(filename, .{})) |file| {
+            defer file.close();
+            if (file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024)) |content| {
+                owned_content = content;
+                initial_content = content;
+            } else |_| {}
+        } else |_| {}
 
-    // Store closed flag
-    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
-    try file_table.set(closed_key, .{ .boolean = false });
+        // Create file handle table
+        const file_table = try vm.gc.allocTable();
+        vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
 
-    // Store exit code (0 for regular files)
-    const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
-    try file_table.set(exitcode_key, .{ .integer = 0 });
+        // Store initial content (existing file content or empty)
+        const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+        const content_str = try vm.gc.allocString(initial_content);
+        try file_table.set(output_key, TValue.fromString(content_str));
 
-    // Create metatable with file methods
-    const mt = try createFileMetatable(vm, func_reg + 2);
-    file_table.metatable = mt;
+        // Store filename for writing on close
+        const filename_key = try vm.gc.allocString(FILE_FILENAME_KEY);
+        const filename_str = try vm.gc.allocString(filename);
+        try file_table.set(filename_key, TValue.fromString(filename_str));
 
-    // Result already in stack at func_reg
-    if (nresults == 0) {
-        vm.stack[vm.base + func_reg] = .nil;
+        // Store mode
+        const mode_key = try vm.gc.allocString(FILE_MODE_KEY);
+        const mode_str = try vm.gc.allocString(mode);
+        try file_table.set(mode_key, TValue.fromString(mode_str));
+
+        // Store closed flag
+        const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+        try file_table.set(closed_key, .{ .boolean = false });
+
+        // Store exit code (0 for regular files)
+        const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
+        try file_table.set(exitcode_key, .{ .integer = 0 });
+
+        // Create metatable with file methods
+        const mt = try createFileMetatable(vm, func_reg + 2);
+        file_table.metatable = mt;
+
+        if (nresults == 0) {
+            vm.stack[vm.base + func_reg] = .nil;
+        }
+        return;
+    }
+
+    // Unknown mode
+    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        const err_str = try vm.gc.allocString("invalid mode");
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
     }
 }
 
@@ -366,6 +475,12 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     const close_key = try vm.gc.allocString("close");
     try index_table.set(close_key, TValue.fromNativeClosure(close_nc));
 
+    // Reuse scratch slot for write method
+    const write_nc = try vm.gc.allocNativeClosure(.{ .id = .file_write });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(write_nc);
+    const write_key = try vm.gc.allocString("write");
+    try index_table.set(write_key, TValue.fromNativeClosure(write_nc));
+
     return mt;
 }
 
@@ -423,6 +538,7 @@ pub fn nativeIoType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 // File handle methods (these would be implemented when userdata/file handles are added)
 
 /// file:close() - Closes file handle
+/// For write/append modes, flushes buffer to disk
 /// For popen handles, returns: true/nil, "exit", exit_code
 pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
@@ -447,8 +563,62 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         }
     }
 
+    // Check if this is a write/append mode file
+    const mode_key = try vm.gc.allocString(FILE_MODE_KEY);
+    const filename_key = try vm.gc.allocString(FILE_FILENAME_KEY);
+
+    var write_error: bool = false;
+
+    if (file_table.get(mode_key)) |mode_val| {
+        if (mode_val.asString()) |mode_str| {
+            const mode = mode_str.asSlice();
+            if (mode.len > 0 and (mode[0] == 'w' or mode[0] == 'a')) {
+                // This is a write/append mode file - flush to disk
+                if (file_table.get(filename_key)) |fn_val| {
+                    if (fn_val.asString()) |fn_str| {
+                        const filename = fn_str.asSlice();
+
+                        // Get the output buffer
+                        const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+                        const content = if (file_table.get(output_key)) |v|
+                            if (v.asString()) |s| s.asSlice() else ""
+                        else
+                            "";
+
+                        // Write to file
+                        const file = std.fs.cwd().createFile(filename, .{}) catch {
+                            write_error = true;
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            if (nresults > 1) {
+                                const err_str = try vm.gc.allocString("cannot write file");
+                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                            }
+                            // Still mark as closed
+                            try file_table.set(closed_key, .{ .boolean = true });
+                            return;
+                        };
+                        defer file.close();
+
+                        file.writeAll(content) catch {
+                            write_error = true;
+                        };
+                    }
+                }
+            }
+        }
+    }
+
     // Mark as closed
     try file_table.set(closed_key, .{ .boolean = true });
+
+    if (write_error) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("write error");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
 
     // Get exit code
     const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
@@ -616,10 +786,79 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 }
 
 /// file:write(...) - Writes values to file
+/// Appends string representations to the file's output buffer
 pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement file:write method
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get the file handle table (self)
+    const self_arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = self_arg.asTable() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if closed
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+    }
+
+    // Get current output buffer
+    const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+    const current_output = if (file_table.get(output_key)) |v|
+        if (v.asString()) |s| s.asSlice() else ""
+    else
+        "";
+
+    // Build new content by appending all arguments
+    var new_content = std.ArrayList(u8).initCapacity(vm.allocator, current_output.len + 256) catch {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    defer new_content.deinit(vm.allocator);
+    new_content.appendSlice(vm.allocator, current_output) catch {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    const string = @import("string.zig");
+    const saved_top = vm.top;
+
+    var i: u32 = 1; // Start from 1 (skip self)
+    while (i < nargs) : (i += 1) {
+        const tmp_reg = vm.top;
+        vm.top += 2;
+
+        // Copy argument to temporary register
+        const arg_reg = func_reg + 1 + i;
+        vm.stack[vm.base + tmp_reg + 1] = vm.stack[vm.base + arg_reg];
+
+        // Call tostring
+        try string.nativeToString(vm, tmp_reg, 1, 1);
+
+        // Get the string result
+        const result = vm.stack[vm.base + tmp_reg];
+        if (result.asString()) |str_val| {
+            try new_content.appendSlice(vm.allocator, str_val.asSlice());
+        }
+
+        vm.top -= 2;
+    }
+
+    vm.top = saved_top;
+
+    // Store new content
+    const new_str = try vm.gc.allocString(new_content.items);
+    try file_table.set(output_key, TValue.fromString(new_str));
+
+    // Return the file handle for chaining
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = self_arg;
+    }
 }
