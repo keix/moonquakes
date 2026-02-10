@@ -74,13 +74,16 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
+/// TODO: Implement proper protected mode execution
 pub fn nativePcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
     _ = nargs;
-    _ = nresults;
-    // TODO: Implement pcall
-    // Should catch errors and return (true, result...) or (false, error_message)
+    // pcall requires VM-level support for proper error catching
+    // For now, return a stub response
+    vm.stack[vm.base + func_reg] = .{ .boolean = false };
+    if (nresults > 1) {
+        const err_str = try vm.gc.allocString("pcall not yet implemented");
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    }
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Calls function f with error handler msgh
@@ -392,13 +395,56 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 }
 
 /// select(index, ...) - Returns all arguments after argument number index
+/// select(index, ...) - Returns arguments after index, or count with "#"
 pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement select
-    // Special case: select("#", ...) returns argument count
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const index_arg = vm.stack[vm.base + func_reg + 1];
+    const extra_args: u32 = if (nargs > 1) nargs - 1 else 0;
+
+    // Check for "#" which returns count
+    if (index_arg.asString()) |str| {
+        if (std.mem.eql(u8, str.asSlice(), "#")) {
+            vm.stack[vm.base + func_reg] = .{ .integer = @intCast(extra_args) };
+            return;
+        }
+    }
+
+    // Otherwise, index should be a number
+    const index = index_arg.toInteger() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Handle negative indices (count from end)
+    var start_idx: i64 = index;
+    if (start_idx < 0) {
+        start_idx = @as(i64, @intCast(extra_args)) + start_idx + 1;
+    }
+
+    if (start_idx < 1 or start_idx > @as(i64, @intCast(extra_args))) {
+        // Out of range - return nothing
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .nil;
+        }
+        return;
+    }
+
+    // Return arguments from start_idx onwards
+    const start: u32 = @intCast(start_idx);
+    var i: u32 = 0;
+    while (i < nresults and (start + i) <= extra_args) : (i += 1) {
+        // Arguments start at func_reg + 2 (func_reg + 1 is the index)
+        vm.stack[vm.base + func_reg + i] = vm.stack[vm.base + func_reg + 1 + start + i];
+    }
+
+    // Fill remaining result slots with nil
+    while (i < nresults) : (i += 1) {
+        vm.stack[vm.base + func_reg + i] = .nil;
+    }
 }
 
 /// tonumber(e [, base]) - Tries to convert argument to a number

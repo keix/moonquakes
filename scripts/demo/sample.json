@@ -1,0 +1,30 @@
+{
+    "name": "Moonquakes",
+    "version": "0.1.0",
+    "description": "A Lua 5.4 interpreter written in Zig",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/keix/moonquakes"
+    },
+    "features": [
+        "Garbage collection",
+        "Closures and upvalues",
+        "Metatables",
+        "Generic for loops",
+        "String library",
+        "Math library",
+        "IO library"
+    ],
+    "stats": {
+        "lines_of_code": 15000,
+        "test_files": 50,
+        "demo_files": 12
+    },
+    "contributors": [
+        {"name": "Developer", "commits": 100}
+    ],
+    "license": "MIT",
+    "keywords": ["lua", "interpreter", "zig", "programming-language"],
+    "stable": false,
+    "rating": 4.5
+}

@@ -84,6 +84,19 @@ pub const OpCode = enum(u7) {
     VARARG = 80,
     VARARGPREP = 81,
     EXTRAARG = 82,
+
+    // --- Extended opcodes (100+) ---
+    // These opcodes are not part of the original Lua 5.4 instruction set.
+    // They encode VM-level control semantics that cannot be expressed
+    // as ordinary function calls (e.g. protected execution).
+    //
+    // Reserved range: 100-127 (to avoid collision with future Lua opcodes)
+    // Lua 5.4 uses 0-82, leaving buffer for future standard opcodes.
+
+    /// PCALL A B C - Protected call: R(A), ..., R(A+C-2) := pcall(R(A+1), R(A+2), ..., R(A+B))
+    /// On success: R(A) = true, R(A+1...) = return values
+    /// On failure: R(A) = false, R(A+1) = error message
+    PCALL = 100,
 };
 
 pub const OpMode = enum {

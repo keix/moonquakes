@@ -648,15 +648,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
                 try VM.ltOp(left, right)
-            // Fast path: both are strings - lexicographic comparison
+                // Fast path: both are strings - lexicographic comparison
             else if (left.asString() != null and right.asString() != null) blk: {
                 const left_str = left.asString().?.asSlice();
                 const right_str = right.asString().?.asSlice();
                 break :blk std.mem.order(u8, left_str, right_str) == .lt;
             }
-            // Slow path: try metamethod
-            else
-                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+                // Slow path: try metamethod
+                else try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -674,16 +673,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: both are numbers
             const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
                 try VM.leOp(left, right)
-            // Fast path: both are strings - lexicographic comparison
+                // Fast path: both are strings - lexicographic comparison
             else if (left.asString() != null and right.asString() != null) blk: {
                 const left_str = left.asString().?.asSlice();
                 const right_str = right.asString().?.asSlice();
                 const order = std.mem.order(u8, left_str, right_str);
                 break :blk order == .lt or order == .eq;
             }
-            // Slow path: try metamethod
-            else
-                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+                // Slow path: try metamethod
+                else try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -956,9 +954,29 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const returning_ci = vm.ci.?;
                 const nresults = returning_ci.nresults;
                 const dst_base = returning_ci.ret_base;
+                const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
                 vm.popCallInfo();
+
+                // Protected frame: prepend true and shift results by 1
+                if (is_protected) {
+                    vm.stack[dst_base] = .{ .boolean = true };
+                    if (b == 0) {
+                        return error.VariableReturnNotImplemented;
+                    } else if (b == 1) {
+                        // No return values from function
+                        vm.top = dst_base + 1;
+                    } else {
+                        const ret_count: u32 = b - 1;
+                        // Copy return values to dst_base + 1
+                        for (0..ret_count) |i| {
+                            vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
+                        }
+                        vm.top = dst_base + 1 + ret_count;
+                    }
+                    return .LoopContinue;
+                }
 
                 if (b == 0) {
                     return error.VariableReturnNotImplemented;
@@ -1017,9 +1035,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const returning_ci = vm.ci.?;
                 const nresults = returning_ci.nresults;
                 const dst_base = returning_ci.ret_base;
+                const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
                 vm.popCallInfo();
+
+                // Protected frame: return (true) with no additional values
+                if (is_protected) {
+                    vm.stack[dst_base] = .{ .boolean = true };
+                    vm.top = dst_base + 1;
+                    return .LoopContinue;
+                }
 
                 // Fill expected result slots with nil
                 if (nresults > 0) {
@@ -1041,9 +1067,18 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const returning_ci = vm.ci.?;
                 const nresults = returning_ci.nresults;
                 const dst_base = returning_ci.ret_base;
+                const is_protected = returning_ci.is_protected;
 
                 vm.closeUpvalues(returning_ci.base);
                 vm.popCallInfo();
+
+                // Protected frame: return (true, value)
+                if (is_protected) {
+                    vm.stack[dst_base] = .{ .boolean = true };
+                    vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
+                    vm.top = dst_base + 2;
+                    return .LoopContinue;
+                }
 
                 if (nresults < 0) {
                     vm.stack[dst_base] = vm.stack[returning_ci.base + a];
@@ -1490,6 +1525,94 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .EXTRAARG => {
             return error.UnknownOpcode;
         },
+
+        // --- Extended opcodes ---
+        // Protected call: catches runtime errors and returns (true, results...) or (false, error)
+        .PCALL => {
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+
+            const func_val = vm.stack[vm.base + a + 1];
+            const nargs: u32 = if (b > 0) b - 1 else blk: {
+                const arg_start = vm.base + a + 2;
+                break :blk vm.top - arg_start;
+            };
+            const nresults: u32 = if (c > 0) c - 1 else 1;
+
+            // Handle native closure
+            if (func_val.isObject()) {
+                const obj = func_val.object;
+                if (obj.type == .native_closure) {
+                    const nc = object.getObject(NativeClosureObject, obj);
+
+                    // Set up call at temporary position
+                    const call_reg: u32 = a + 1;
+                    vm.top = vm.base + call_reg + 1 + nargs;
+
+                    // Execute with error catching
+                    if (vm.callNative(nc.func.id, @intCast(call_reg), nargs, nresults)) {
+                        // Success: move results and prepend true
+                        var i: u32 = nresults;
+                        while (i > 0) : (i -= 1) {
+                            vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
+                        }
+                        vm.stack[vm.base + a] = .{ .boolean = true };
+                    } else |_| {
+                        // Failure: set false and error message
+                        // CRITICAL: Initialize result slots and set top BEFORE any GC-triggering operation
+                        vm.stack[vm.base + a] = .{ .boolean = false };
+                        vm.stack[vm.base + a + 1] = .nil; // Safe placeholder
+                        vm.top = vm.base + a + 2;
+
+                        // Now safe to access stored message or allocate
+                        if (vm.lua_error_msg) |msg| {
+                            vm.stack[vm.base + a + 1] = TValue.fromString(msg);
+                            vm.lua_error_msg = null;
+                        } else {
+                            const err_str = try vm.gc.allocString("error");
+                            vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
+                        }
+                    }
+                    return .Continue;
+                }
+            }
+
+            // Handle Lua closure with protected execution
+            if (func_val.asClosure()) |closure| {
+                const func_proto = closure.proto;
+                const call_base = vm.base + a + 1;
+
+                // Shift arguments (overwrite function)
+                if (nargs > 0) {
+                    for (0..nargs) |i| {
+                        vm.stack[call_base + i] = vm.stack[call_base + 1 + i];
+                    }
+                }
+
+                // Fill remaining params with nil
+                if (nargs < func_proto.numparams) {
+                    for (vm.stack[call_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                        slot.* = .nil;
+                    }
+                }
+
+                // Push a protected call frame
+                const pcall_nresults: i16 = @intCast(nresults);
+                const new_ci = try vm.pushCallInfo(func_proto, closure, call_base, vm.base + a, pcall_nresults);
+                new_ci.is_protected = true;
+
+                vm.top = call_base + func_proto.maxstacksize;
+                return .LoopContinue;
+            }
+
+            // Not a function - return error
+            vm.stack[vm.base + a] = .{ .boolean = false };
+            const err_str = try vm.gc.allocString("attempt to call a non-function value");
+            vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
+            return .Continue;
+        },
+
         else => return error.UnknownOpcode,
     }
 }
