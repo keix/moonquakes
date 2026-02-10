@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -148,7 +149,7 @@ pub fn expectSideEffectFree(vm: *VM, proto: *const Proto, affected_regs: []const
     }
 
     // Execute
-    _ = try vm.execute(proto);
+    _ = try Mnemonics.execute(vm, proto);
 
     // Check only specified registers changed
     i = 0;
@@ -183,7 +184,7 @@ pub const InstructionTest = struct {
     }
 
     pub fn execute(self: *InstructionTest) !ReturnValue {
-        return self.vm.execute(self.proto);
+        return Mnemonics.execute(self.vm, self.proto);
     }
 
     pub fn expectSuccess(self: *InstructionTest, reg_count: u8) !ExecutionTrace {
@@ -294,7 +295,7 @@ pub const ComparisonTest = struct {
         vm.stack[vm.base + b] = reg_a_val;
         vm.stack[vm.base + c] = reg_b_val;
 
-        const result = try vm.execute(&proto);
+        const result = try Mnemonics.execute(vm, &proto);
 
         // If comparison skips, LFALSESKIP is skipped, LOADFALSE executes
         // R0 should be false
@@ -324,7 +325,7 @@ pub const ComparisonTest = struct {
         vm.stack[vm.base + b] = reg_a_val;
         vm.stack[vm.base + c] = reg_b_val;
 
-        const result = try vm.execute(&proto);
+        const result = try Mnemonics.execute(vm, &proto);
 
         // If comparison doesn't skip, LFALSESKIP executes (sets R0=false and skips LOADTRUE)
         // R0 should be false
@@ -382,7 +383,7 @@ pub fn testArithmeticOp(vm: *VM, inst: Instruction, a_val: TValue, b_val: TValue
     vm.stack[vm.base + inst.getB()] = a_val;
     vm.stack[vm.base + inst.getC()] = b_val;
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(vm, &proto);
 
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));

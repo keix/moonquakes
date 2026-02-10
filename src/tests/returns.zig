@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -40,7 +41,7 @@ test "return: no values (RETURN with B=1)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectNoResult(result);
 }
@@ -65,7 +66,7 @@ test "return: single value (RETURN with B=2)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -94,7 +95,7 @@ test "return: multiple values (RETURN with B=4)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },
@@ -119,7 +120,7 @@ test "return: RETURN0 - no values" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try testing.expect(result == .none);
 }
@@ -144,7 +145,7 @@ test "return: RETURN1 - single value" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }

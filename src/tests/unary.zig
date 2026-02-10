@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -34,7 +35,7 @@ test "unary: -5 = -5" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = -5 });
 }
@@ -60,7 +61,7 @@ test "unary: -3.5 = -3.5" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .number = -3.5 });
 }
@@ -86,7 +87,7 @@ test "unary: not true = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -112,7 +113,7 @@ test "unary: not nil = true" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -138,7 +139,7 @@ test "unary: not 0 = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -167,7 +168,7 @@ test "unary: -5 + 3 = -2" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = -2 });
 }
@@ -197,7 +198,7 @@ test "unary: #\"hello\" = 5 (string length)" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 5 });
 }
@@ -227,7 +228,7 @@ test "unary: #\"\" = 0 (empty string length)" {
         .maxstacksize = 2,
     };
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 0 });
 }

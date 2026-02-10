@@ -70,7 +70,7 @@ test "manual multi-proto execution - simple call and return" {
     // Capture initial state
     var trace = test_utils.ExecutionTrace.captureInitial(&vm, 4);
 
-    const result = try vm.execute(&main_proto);
+    const result = try Mnemonics.execute(&vm, &main_proto);
 
     // Update final state
     trace.updateFinal(&vm, 4);
@@ -261,7 +261,7 @@ test "nested function call with register tracking" {
     // Track call stack depth
     try std.testing.expect(vm.callstack_size == 0);
 
-    const result = try vm.execute(&main_proto);
+    const result = try Mnemonics.execute(&vm, &main_proto);
 
     // (3 + 4) * 2 = 14
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 14 });

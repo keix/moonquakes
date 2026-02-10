@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -39,7 +40,7 @@ test "FORPREP minimal test" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .number = 4.0 }); // init - step = 5 - 1 = 4
 }
@@ -82,7 +83,7 @@ test "for loop: simple integer loop 1 to 3" {
     // Added: Comprehensive state tracking
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
 
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     trace.updateFinal(&vm, 5);
 
@@ -130,7 +131,7 @@ test "for loop: negative step (countdown)" {
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 5);
 
     // Should execute: 5, 4, 3, 2, 1 = 15
@@ -175,7 +176,7 @@ test "for loop: zero iterations (start > limit with positive step)" {
     vm.stack[3] = .nil;
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 5);
 
     // Should not execute any iterations
@@ -222,7 +223,7 @@ test "for loop: float loop variables with integer path detection" {
     _ = loop_trace; // Will use after execution
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 5);
 
     // Check if VM optimized to integer path or stayed float
@@ -268,7 +269,7 @@ test "for loop: step of zero should error" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     // Step of zero should cause an error
     // FIXED: VM now checks for zero step in FORPREP
@@ -305,7 +306,7 @@ test "for loop: overflow behavior" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // Should execute 3 times: max-2, max-1, max
     try expectSingleResult(result, TValue{ .integer = 3 });
@@ -350,7 +351,7 @@ test "for loop: side effects on unused registers" {
     vm.stack[10] = TValue{ .boolean = false };
 
     var trace = utils.ExecutionTrace.captureInitial(&vm, 11);
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
     trace.updateFinal(&vm, 11);
 
     // Use result to avoid unused warning

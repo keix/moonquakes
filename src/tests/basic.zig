@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -40,7 +41,7 @@ test "basic: 1 + 2 = 3" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 

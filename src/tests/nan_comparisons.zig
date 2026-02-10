@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -42,7 +43,7 @@ test "LT with NaN: NaN < 5.0 = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // NaN < 5.0 should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -77,7 +78,7 @@ test "LT with NaN: 5.0 < NaN = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // 5.0 < NaN should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -112,7 +113,7 @@ test "LE with NaN: NaN <= 5.0 = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // NaN <= 5.0 should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -147,7 +148,7 @@ test "LE with NaN: NaN <= NaN = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // NaN <= NaN should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -182,7 +183,7 @@ test "EQ with NaN: NaN == NaN = false" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // NaN == NaN should be false
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -212,7 +213,7 @@ test "Arithmetic with NaN propagation" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     // NaN + 5.0 should propagate NaN
     try testing.expect(result == .single);

@@ -4,6 +4,7 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -39,7 +40,7 @@ test "DIV: division by zero (integer)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -67,7 +68,7 @@ test "DIV: division by zero (float)" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -95,7 +96,7 @@ test "IDIV: integer division by zero" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -123,7 +124,7 @@ test "MOD: modulo by zero" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -150,7 +151,7 @@ test "DIVK: division by zero constant" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -177,7 +178,7 @@ test "IDIVK: integer division by zero constant" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -204,7 +205,7 @@ test "MODK: modulo by zero constant" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = vm.execute(&proto);
+    const result = Mnemonics.execute(&vm, &proto);
 
     try expectError(result, error.ArithmeticError);
 }
@@ -234,7 +235,7 @@ test "Division operations with non-zero divisors should succeed" {
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try vm.execute(&proto);
+    const result = try Mnemonics.execute(&vm, &proto);
 
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);
