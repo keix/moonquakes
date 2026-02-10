@@ -1,7 +1,4 @@
 const std = @import("std");
-const vm_mod = @import("vm.zig");
-const VM = vm_mod.VM;
-const CallInfo = vm_mod.CallInfo;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -16,22 +13,15 @@ const MetaEvent = metamethod.MetaEvent;
 const builtin = @import("../builtin/dispatch.zig");
 const ErrorHandler = @import("error.zig");
 
-// ============================================================================
-// Return Value Types
-// ============================================================================
+// Execution ABI: CallInfo (frame), ReturnValue (result)
+const execution = @import("execution.zig");
+pub const CallInfo = execution.CallInfo;
+pub const ReturnValue = execution.ReturnValue;
+pub const ExecuteResult = execution.ExecuteResult;
 
-pub const ReturnValue = union(enum) {
-    none,
-    single: TValue,
-    multiple: []TValue,
-};
-
-/// Result of executing a single instruction.
-pub const ExecuteResult = union(enum) {
-    Continue,
-    LoopContinue,
-    ReturnVM: ReturnValue,
-};
+// Import VM (one-way dependency: Mnemonics -> VM)
+const vm_mod = @import("vm.zig");
+const VM = vm_mod.VM;
 
 // ============================================================================
 // Arithmetic Operations
