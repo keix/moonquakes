@@ -5,9 +5,10 @@ const parser = @import("../compiler/parser.zig");
 const materialize = @import("../compiler/materialize.zig").materialize;
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const test_utils = @import("test_utils.zig");
 
-fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
+fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
     var lx = lexer.Lexer.init(source);
     var proto_builder = parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
@@ -198,7 +199,7 @@ test "parser: return (no expression)" {
 
     // Bare return is valid - returns no values
     const result = try parseAndExecute(&vm, allocator, "return");
-    try testing.expectEqual(VM.ReturnValue.none, result);
+    try testing.expectEqual(ReturnValue.none, result);
 }
 
 test "parser: return \"hello\" (string literal)" {

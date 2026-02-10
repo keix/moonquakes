@@ -14,7 +14,8 @@ const builtin = @import("../builtin/dispatch.zig");
 
 // Execution ABI: CallInfo (frame), ReturnValue (result)
 const execution = @import("execution.zig");
-pub const CallInfo = execution.CallInfo;
+const CallInfo = execution.CallInfo;
+const ReturnValue = execution.ReturnValue;
 
 // Mnemonics is imported internally for execute(), not re-exported to avoid circular dependency
 const Mnemonics = @import("mnemonics.zig");
@@ -75,10 +76,9 @@ pub const MetamethodKeys = struct {
     }
 };
 
+/// VM represents an execution thread (Lua "thread"/coroutine state).
+/// The name VM is kept intentionally as a clean-room abstraction.
 pub const VM = struct {
-    // Re-export from execution for backward compatibility
-    pub const ReturnValue = execution.ReturnValue;
-
     stack: [256]TValue,
     stack_last: u32,
     top: u32,

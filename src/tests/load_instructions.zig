@@ -4,16 +4,17 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const OpCode = opcodes.OpCode;
 
-fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
+fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));
 }
 
-fn expectMultipleResults(result: VM.ReturnValue, expected: []const TValue) !void {
+fn expectMultipleResults(result: ReturnValue, expected: []const TValue) !void {
     try testing.expect(result == .multiple);
     try testing.expectEqual(expected.len, result.multiple.len);
     for (expected, result.multiple) |e, r| {

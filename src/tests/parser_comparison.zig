@@ -3,16 +3,17 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
 const materialize = @import("../compiler/materialize.zig").materialize;
 
-fn expectSingleResult(result: VM.ReturnValue, expected: TValue) !void {
+fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));
 }
 
-fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !VM.ReturnValue {
+fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
     // Compile to RawProto (no GC needed)
     var lx = lexer.Lexer.init(source);
     var proto_builder = parser.ProtoBuilder.init(allocator, null);
