@@ -6,6 +6,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
 const GC = @import("../runtime/gc/gc.zig").GC;
+const ver = @import("../version.zig");
 
 // Builtin library modules - organized by Lua manual chapters
 const string = @import("string.zig");
@@ -100,7 +101,7 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     // _G is a self-reference to the globals table itself
     try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
     // _VERSION is a version string constant
-    const version_str = try gc.allocString("Moonquakes 0.1.0");
+    const version_str = try gc.allocString(ver.version_string);
     try setStringKey(globals, gc, "_VERSION", TValue.fromString(version_str));
 }
 
