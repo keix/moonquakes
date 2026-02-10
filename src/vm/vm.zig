@@ -34,6 +34,9 @@ pub const CallInfo = struct {
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
 
+    // Protected call support (for pcall)
+    is_protected: bool = false, // true if this is a pcall frame
+
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
@@ -153,6 +156,7 @@ pub const VM = struct {
     gc: GC, // Garbage collector (replaces arena)
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
     mm_keys: MetamethodKeys, // Pre-allocated metamethod strings
+    lua_error_msg: ?*StringObject = null, // Stored Lua error message for pcall
 
     pub fn init(allocator: std.mem.Allocator) !VM {
         // Initialize GC first so we can allocate strings and tables
@@ -205,6 +209,7 @@ pub const VM = struct {
     /// | callstack[0..size]    | Active call frames                               |
     /// | globals               | Global environment table                         |
     /// | open_upvalues         | Captured variables still on stack                |
+    /// | lua_error_msg         | Stored error message for pcall                   |
     ///
     /// CRITICAL: base_ci is NOT in callstack[] - it's the main chunk's frame.
     /// When inside a function call, base_ci still references the main proto which
@@ -218,13 +223,11 @@ pub const VM = struct {
         // === Mark phase: traverse from roots ===
 
         // 1. Mark VM stack (active portion)
-        // Use the current frame's maxstacksize to ensure all registers are marked,
-        // even if vm.top was lowered after a call returned
-        const stack_end = if (self.ci) |ci|
-            self.base + ci.func.maxstacksize
-        else
-            self.top;
-        self.gc.markStack(self.stack[0..stack_end]);
+        // vm.top is the authoritative stack boundary; only slots below vm.top are scanned.
+        // Native functions MUST extend vm.top before using temporary slots.
+        // Using maxstacksize is unsafe because slots above vm.top may contain
+        // stale object pointers from previous calls.
+        self.gc.markStack(self.stack[0..self.top]);
 
         // 2. Mark call frames
         // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
@@ -255,6 +258,11 @@ pub const VM = struct {
         while (upval) |uv| {
             self.gc.mark(&uv.header);
             upval = uv.next_open;
+        }
+
+        // 5. Mark lua_error_msg (stored error message for pcall)
+        if (self.lua_error_msg) |msg| {
+            self.gc.mark(&msg.header);
         }
 
         // === Sweep phase ===
@@ -316,6 +324,19 @@ pub const VM = struct {
     /// VM is just a bridge - dispatches to appropriate native function
     pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
         try builtin.invoke(id, self, func_reg, nargs, nresults);
+    }
+
+    /// Reserve temporary stack slots for native functions.
+    /// MUST be called before any GC-triggering operation (allocString, allocTable, etc.)
+    /// when using stack slots beyond the function's arguments.
+    ///
+    /// func_reg: base-relative register where the function was called
+    /// count: number of slots to reserve (func_reg + 0 through func_reg + count - 1)
+    ///
+    /// GC uses vm.top as the boundary; only slots below vm.top are scanned as roots.
+    pub inline fn reserveSlots(self: *VM, func_reg: u32, count: u32) void {
+        const needed = self.base + func_reg + count;
+        if (self.top < needed) self.top = needed;
     }
 
     /// Sugar Layer: Handle VM error with user-friendly reporting
@@ -615,13 +636,73 @@ pub const VM = struct {
         // Changing Mnemonics requires revisiting standard library and C API.
         while (true) {
             const ci = self.ci.?;
-            const inst = try ci.fetch();
+            const inst = ci.fetch() catch |err| {
+                // PC validation error - handle as protected call error or propagate
+                if (self.handleProtectedError(err)) continue;
+                return err;
+            };
 
-            switch (try Mnemonics.do(self, inst)) {
+            const result = Mnemonics.do(self, inst) catch |err| {
+                // Instruction execution error - handle as protected call error or propagate
+                if (self.handleProtectedError(err)) continue;
+                return err;
+            };
+
+            switch (result) {
                 .Continue => {},
                 .LoopContinue => continue,
                 .ReturnVM => |ret| return ret,
             }
         }
+    }
+
+    /// Find the nearest protected frame and handle the error.
+    /// Returns true if error was handled by a protected frame, false otherwise.
+    fn handleProtectedError(self: *VM, err: anyerror) bool {
+        // Walk up the call stack to find a protected frame
+        var current = self.ci;
+        while (current) |ci| {
+            if (ci.is_protected) {
+                // Found a protected frame - copy needed values before unwinding
+                // (ci pointer remains valid since callstack is a fixed array,
+                // but copying is safer and clearer)
+                const ret_base = ci.ret_base;
+                const close_base = ci.base;
+                const target_ci = ci.previous;
+
+                // Close upvalues for all frames we're unwinding
+                self.closeUpvalues(close_base);
+
+                // Pop all frames down to (and including) the protected frame
+                while (self.ci != null and self.ci != target_ci) {
+                    self.popCallInfo();
+                }
+
+                // CRITICAL: Set up result slots and update top BEFORE any GC-triggering operation
+                // This prevents GC from marking invalid/uninitialized stack slots
+                self.stack[ret_base] = .{ .boolean = false };
+                self.stack[ret_base + 1] = .nil; // Placeholder, will be overwritten
+                self.top = ret_base + 2;
+
+                // Now safe to use stored error message or allocate new one
+                if (self.lua_error_msg) |msg| {
+                    self.stack[ret_base + 1] = TValue.fromString(msg);
+                    self.lua_error_msg = null; // Clear after use
+                } else {
+                    // allocString may trigger GC, but top is already correct
+                    const err_str = self.gc.allocString(@errorName(err)) catch {
+                        // nil is already in place from above
+                        return true;
+                    };
+                    self.stack[ret_base + 1] = TValue.fromString(err_str);
+                }
+
+                return true;
+            }
+            current = ci.previous;
+        }
+
+        // No protected frame found - error should propagate
+        return false;
     }
 };

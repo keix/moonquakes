@@ -295,6 +295,18 @@ pub const ProtoBuilder = struct {
 
     pub const VARARG_SENTINEL: u8 = 255;
 
+    /// Emit PCALL instruction for protected calls.
+    /// PCALL A B C: R(A)..R(A+C-2) := pcall(R(A+1), R(A+2)..R(A+B))
+    /// On success: R(A) = true, R(A+1...) = return values
+    /// On failure: R(A) = false, R(A+1) = error message
+    /// result_reg is where the status boolean goes; the function is at result_reg+1
+    pub fn emitPcall(self: *ProtoBuilder, result_reg: u8, nargs: u8, nresults: u8) !void {
+        const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
+        const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
+        const instr = Instruction.initABC(.PCALL, result_reg, b, c);
+        try self.code.append(self.allocator, instr);
+    }
+
     pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.DIV, dst, left, right);
         try self.code.append(self.allocator, instr);
@@ -2594,22 +2606,24 @@ pub const Parser = struct {
             }
 
             // Handle multiple return values: if single expression assigns to multiple vars,
-            // adjust the last CALL instruction's nresults to match var_count
+            // adjust the last CALL/PCALL instruction's nresults to match var_count
             var handled_multi_return = false;
             if (expr_count == 1 and var_count > 1) {
-                // Find the CALL instruction (may be last or before a MOVE)
+                // Find the CALL or PCALL instruction (may be last or before a MOVE)
                 if (self.proto.code.items.len > 0) {
                     var call_idx: ?usize = null;
                     var call_func_reg: u8 = 0;
                     const last_idx = self.proto.code.items.len - 1;
                     const last_inst = self.proto.code.items[last_idx];
 
-                    if (last_inst.getOpCode() == .CALL) {
+                    const is_call = last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL;
+                    if (is_call) {
                         call_idx = last_idx;
                         call_func_reg = last_inst.a;
                     } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
                         const prev_inst = self.proto.code.items[last_idx - 1];
-                        if (prev_inst.getOpCode() == .CALL) {
+                        const prev_is_call = prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL;
+                        if (prev_is_call) {
                             call_idx = last_idx - 1;
                             call_func_reg = prev_inst.a;
                             // Remove the single MOVE - we'll emit multiple MOVEs below
@@ -2618,7 +2632,7 @@ pub const Parser = struct {
                     }
 
                     if (call_idx) |idx| {
-                        // Adjust CALL to return var_count results
+                        // Adjust CALL/PCALL to return var_count results
                         self.proto.code.items[idx].c = var_count + 1;
 
                         // Emit MOVEs to copy results from call_func_reg to first_reg...
@@ -2802,6 +2816,11 @@ pub const Parser = struct {
             return func_reg;
         }
 
+        // Special handling for pcall - emits PCALL opcode
+        if (std.mem.eql(u8, func_name, "pcall")) {
+            return self.parsePcallExpr();
+        }
+
         // Fall back to global lookup via GETTABUP for any unresolved function
         // This handles builtin functions like assert, setmetatable, getmetatable, etc.
         self.advance(); // consume function name
@@ -2818,6 +2837,30 @@ pub const Parser = struct {
 
         // Return the register where the result is stored
         return func_reg;
+    }
+
+    /// Parse pcall(f, ...) and emit PCALL opcode
+    /// PCALL layout: R(A) = status, R(A+1) = function, R(A+2...) = args
+    fn parsePcallExpr(self: *Parser) ParseError!u8 {
+        self.advance(); // consume "pcall"
+
+        // Allocate result register - this is where the status boolean will go
+        // Arguments will be placed at result_reg+1, result_reg+2, etc.
+        const result_reg = self.proto.allocTemp();
+
+        // parseCallArgs expects func_reg and places args at func_reg+1, func_reg+2...
+        // For PCALL: result_reg = status, result_reg+1 = function, result_reg+2... = args
+        // So we pass result_reg as "func_reg" and it places pcall's arguments correctly
+        const arg_count = try self.parseCallArgs(result_reg);
+
+        // Emit PCALL instruction
+        // nresults = 2 means status + 1 return value (typical usage)
+        // Use VARARG_SENTINEL for variable results if caller wants multiple
+        try self.proto.emitPcall(result_reg, arg_count, 2);
+
+        // Return the result register (where status boolean is stored)
+        // Note: caller may need to handle multiple return values
+        return result_reg;
     }
 
     /// Parse a function call where the function is stored in a local register

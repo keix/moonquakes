@@ -93,6 +93,10 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 /// Returns file handle or nil, errmsg on error
 /// Currently supports "r" mode (read) - reads entire file into memory
 pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // Reserve stack slots BEFORE any GC-triggering allocation.
+    // Stack layout: func_reg (result), +1 (temp/errmsg), +2..+4 (metatable creation)
+    vm.reserveSlots(func_reg, 5);
+
     if (nargs < 1) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -233,6 +237,11 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     //   func_reg:     file_table (result)
     //   func_reg+1:   temp for intermediate allocations
     //   func_reg+2-4: reserved for createFileMetatable
+
+    // CRITICAL: Reserve stack slots BEFORE any GC-triggering allocation.
+    // GC uses vm.top as the boundary; only slots below vm.top are scanned as roots.
+    // Stack layout: func_reg (result), +1 (temp), +2..+4 (metatable creation)
+    vm.reserveSlots(func_reg, 5);
 
     const file_table = try vm.gc.allocTable();
     vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);

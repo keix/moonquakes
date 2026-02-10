@@ -54,19 +54,10 @@ pub fn nativeError(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 /// Internal helper: Raise a Lua error with message
 /// This bridges from Expression Layer to Sugar Layer error translation
 fn raiseError(vm: anytype, message: []const u8) !void {
-    _ = vm; // TODO: Use vm for proper stack unwinding context
+    // Store error message in VM for pcall to retrieve
+    vm.lua_error_msg = vm.gc.allocString(message) catch null;
 
-    // TODO: This should:
-    // 1. Create proper stack unwinding context
-    // 2. Use Sugar Layer error formatting
-    // 3. Integrate with VM error handling mechanism
-
-    // For now, print error and return VM error
-    var stderr_writer = std.fs.File.stderr().writer(&.{});
-    const stderr = &stderr_writer.interface;
-    try stderr.print("Lua error: {s}\n", .{message});
-
-    // Return a VM error that will be caught by the Sugar Layer
+    // Return a VM error that will be caught by protected call handler
     return RuntimeError.RuntimeError;
 }
 
