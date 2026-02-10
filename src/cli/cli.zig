@@ -1,11 +1,10 @@
 //! Command-line Interface
 //!
 //! CLI entry point for Moonquakes interpreter.
-//! Separated from main.zig for testability and extensibility.
+//! Uses launcher directly for script execution with arg support.
 
 const std = @import("std");
-const mq = @import("../moonquakes.zig");
-const Moonquakes = mq.Moonquakes;
+const launcher = @import("../launcher.zig");
 const ver = @import("../version.zig");
 
 pub const version = ver.version;
@@ -29,11 +28,20 @@ pub const CLI = struct {
             return;
         }
 
-        var moonquakes = Moonquakes.init(self.allocator);
-        defer moonquakes.deinit();
-
         const file_path = arg;
-        var result = moonquakes.loadFile(file_path) catch |err| switch (err) {
+
+        // Collect script arguments (args after the script file)
+        // args[0] = interpreter, args[1] = script, args[2..] = script args
+        const script_args: []const []const u8 = if (args.len > 2)
+            @as([]const []const u8, @ptrCast(args[2..]))
+        else
+            &.{};
+
+        // Use launcher for execution with arg support
+        var result = launcher.runFile(self.allocator, file_path, .{
+            .script_name = file_path,
+            .args = script_args,
+        }) catch |err| switch (err) {
             error.FileNotFound => {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
@@ -56,13 +64,13 @@ pub const CLI = struct {
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         const stdout = &stdout_writer.interface;
         try stdout.writeAll(
-            \\Usage: moonquakes [options] <lua_file>
+            \\Usage: moonquakes [options] <lua_file> [script_args...]
             \\
             \\Options:
             \\  -v, --version  Print version
             \\
             \\Example:
-            \\  moonquakes script.lua
+            \\  moonquakes script.lua arg1 arg2
             \\
         );
     }
