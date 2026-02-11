@@ -1127,8 +1127,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const obj = func_val.object;
                 if (obj.type == .native_closure) {
                     const nc = object.getObject(NativeClosureObject, obj);
+                    const frame_max = vm.base + ci.func.maxstacksize;
                     vm.top = vm.base + call_reg + 3; // func + 2 args
                     try vm.callNative(nc.func.id, call_reg, 2, nresults);
+                    // GC SAFETY: Clear stale slots and restore top
+                    const result_end = vm.base + call_reg + nresults;
+                    if (result_end < frame_max) {
+                        for (vm.stack[result_end..frame_max]) |*slot| {
+                            slot.* = .nil;
+                        }
+                    }
+                    vm.top = frame_max;
                     return .Continue;
                 }
             }
@@ -1193,13 +1202,22 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // When C=0 (variable returns), default to 1 for native functions
                     // since most natives return exactly 1 value
                     const nresults: u32 = if (c > 0) c - 1 else 1;
+                    // Remember frame extent before call
+                    const frame_max = vm.base + ci.func.maxstacksize;
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);
-                    // Adjust vm.top to reflect actual results when C=0 (variable returns)
-                    if (c == 0) {
-                        vm.top = vm.base + a + nresults;
+                    // GC SAFETY: Clear stack slots that may contain stale pointers.
+                    // After call completes, slots from result_end to frame_max might have
+                    // stale object pointers from previous operations. Clear them to nil
+                    // so GC doesn't try to mark freed objects.
+                    const result_end = vm.base + a + nresults;
+                    if (result_end < frame_max) {
+                        for (vm.stack[result_end..frame_max]) |*slot| {
+                            slot.* = .nil;
+                        }
                     }
+                    vm.top = frame_max;
                     return .LoopContinue;
                 }
             }
@@ -1851,25 +1869,25 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const obj = func_val.object;
                 if (obj.type == .native_closure) {
                     const nc = object.getObject(NativeClosureObject, obj);
+                    const frame_max = vm.base + ci.func.maxstacksize;
 
                     // Set up call at temporary position
                     const call_reg: u32 = a + 1;
                     vm.top = vm.base + call_reg + 1 + nargs;
 
                     // Execute with error catching
-                    if (vm.callNative(nc.func.id, @intCast(call_reg), nargs, nresults)) {
+                    const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), nargs, nresults)) blk: {
                         // Success: move results and prepend true
                         var i: u32 = nresults;
                         while (i > 0) : (i -= 1) {
                             vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
                         }
                         vm.stack[vm.base + a] = .{ .boolean = true };
-                    } else |_| {
+                        break :blk nresults + 1; // true + results
+                    } else |_| blk: {
                         // Failure: set false and error message
-                        // CRITICAL: Initialize result slots and set top BEFORE any GC-triggering operation
                         vm.stack[vm.base + a] = .{ .boolean = false };
                         vm.stack[vm.base + a + 1] = .nil; // Safe placeholder
-                        vm.top = vm.base + a + 2;
 
                         // Now safe to access stored message or allocate
                         if (vm.lua_error_msg) |msg| {
@@ -1879,7 +1897,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             const err_str = try vm.gc.allocString("error");
                             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
                         }
+                        break :blk 2; // false + error message
+                    };
+                    // GC SAFETY: Clear stale slots and restore top
+                    const result_end = vm.base + a + result_count;
+                    if (result_end < frame_max) {
+                        for (vm.stack[result_end..frame_max]) |*slot| {
+                            slot.* = .nil;
+                        }
                     }
+                    vm.top = frame_max;
                     return .Continue;
                 }
             }
