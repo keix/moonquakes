@@ -245,6 +245,16 @@ pub const ProtoBuilder = struct {
         try self.code.append(self.allocator, instr);
     }
 
+    pub fn emitWithK(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8, k: bool) !void {
+        const instr = Instruction.initABCk(op, a, b, c, k);
+        try self.code.append(self.allocator, instr);
+    }
+
+    pub fn emitExtraArg(self: *ProtoBuilder, ax: u25) !void {
+        const instr = Instruction.initAx(.EXTRAARG, ax);
+        try self.code.append(self.allocator, instr);
+    }
+
     pub fn emitAdd(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.ADD, dst, left, right);
         try self.code.append(self.allocator, instr);
@@ -1017,6 +1027,20 @@ pub const Parser = struct {
             return;
         }
 
+        // Check for 'return ...' (return all varargs)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            if (!self.proto.is_vararg) {
+                return error.VarargOutsideVarargFunction;
+            }
+            self.advance(); // consume '...'
+            const reg = self.proto.allocTemp();
+            // VARARG with C=0 loads all varargs and sets top
+            try self.proto.emit(.VARARG, reg, 0, 0);
+            // RETURN with B=0 returns values from reg to top
+            try self.proto.emit(.RETURN, reg, 0, 0);
+            return;
+        }
+
         // Parse first return value
         const first_reg = try self.parseExpr();
         var count: u8 = 1;
@@ -1024,6 +1048,21 @@ pub const Parser = struct {
         // Parse additional return values (comma-separated)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
+
+            // Check for '...' as last return value
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                if (!self.proto.is_vararg) {
+                    return error.VarargOutsideVarargFunction;
+                }
+                self.advance(); // consume '...'
+                // Load varargs starting at next register
+                const vararg_reg = first_reg + count;
+                try self.proto.emit(.VARARG, vararg_reg, 0, 0);
+                // RETURN with B=0 returns from first_reg to top
+                try self.proto.emit(.RETURN, first_reg, 0, 0);
+                return;
+            }
+
             const expr_reg = try self.parseExpr();
 
             // Values must be in consecutive registers
@@ -1644,6 +1683,25 @@ pub const Parser = struct {
 
                 // Free temp registers used by the expression
                 self.proto.next_reg = base_reg;
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                // Vararg expansion: {...} includes all varargs
+                if (!self.proto.is_vararg) {
+                    return error.VarargOutsideVarargFunction;
+                }
+                self.advance(); // consume '...'
+
+                // Emit VARARG with C=0 to load all varargs starting at table_reg+1
+                const vararg_start = table_reg + 1;
+                try self.proto.emit(.VARARG, vararg_start, 0, 0);
+
+                // Emit SETLIST with k=1 to indicate offset mode
+                // EXTRAARG contains the starting index (list_index)
+                // When k=1: start_index = EXTRAARG value (not (C-1)*50+1)
+                try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);
+                try self.proto.emitExtraArg(@intCast(list_index));
+
+                // After vararg expansion, no more list elements expected
+                // (vararg should be last in constructor)
             } else {
                 // List element: expr (no key, use auto-index)
                 const base_reg = self.proto.next_reg;
@@ -2928,6 +2986,7 @@ pub const Parser = struct {
     fn parseCallArgs(self: *Parser, func_reg: u8) ParseError!u8 {
         var arg_count: u8 = 0;
         var last_was_call = false;
+        var last_was_vararg = false;
 
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
@@ -2947,20 +3006,44 @@ pub const Parser = struct {
 
         // Parse arguments
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const code_len_before = self.proto.code.items.len;
-            const arg_reg = try self.parseExpr();
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
+            // Check for vararg as first/only argument: f(...)
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                if (!self.proto.is_vararg) {
+                    return error.VarargOutsideVarargFunction;
+                }
+                self.advance(); // consume '...'
+                // Emit VARARG with C=0 to load all varargs starting at func_reg+1
+                try self.proto.emit(.VARARG, func_reg + 1, 0, 0);
+                last_was_vararg = true;
+            } else {
+                // Parse first argument
+                const code_len_before = self.proto.code.items.len;
+                const arg_reg = try self.parseExpr();
+                if (arg_reg != func_reg + 1) {
+                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                }
+                arg_count = 1;
+                // Check if this argument resulted in a CALL instruction
+                last_was_call = self.proto.code.items.len > code_len_before and
+                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
             }
-            arg_count = 1;
-            // Check if this argument resulted in a CALL instruction
-            last_was_call = self.proto.code.items.len > code_len_before and
-                self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
 
             // Parse additional arguments
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+
+                // Check for vararg as last argument: f(a, b, ...)
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                    if (!self.proto.is_vararg) {
+                        return error.VarargOutsideVarargFunction;
+                    }
+                    self.advance(); // consume '...'
+                    // Emit VARARG with C=0 to load all varargs starting at func_reg+arg_count+1
+                    try self.proto.emit(.VARARG, func_reg + arg_count + 1, 0, 0);
+                    last_was_vararg = true;
+                    break; // ... must be last argument
+                }
+
                 const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
                 arg_count += 1;
@@ -2978,6 +3061,11 @@ pub const Parser = struct {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
+
+        // If last argument was vararg, return VARARG_SENTINEL for variable argument count
+        if (last_was_vararg) {
+            return ProtoBuilder.VARARG_SENTINEL;
+        }
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)

@@ -1253,7 +1253,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                     // Copy varargs to their storage location (after maxstacksize)
                     // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
-                    for (0..vararg_count) |i| {
+                    // IMPORTANT: Copy backwards to handle overlapping regions (dest > src)
+                    var i: u32 = vararg_count;
+                    while (i > 0) {
+                        i -= 1;
                         vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
                     }
                 }
@@ -1309,16 +1312,23 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
+                // Calculate actual return count
+                // B=0 means variable returns (from R[A] to top)
+                // B>0 means B-1 fixed returns
+                const ret_count: u32 = if (b == 0)
+                    vm.top - (returning_ci.base + a)
+                else if (b == 1)
+                    0
+                else
+                    b - 1;
+
                 // Protected frame: prepend true and shift results by 1
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
-                    if (b == 0) {
-                        return error.VariableReturnNotImplemented;
-                    } else if (b == 1) {
+                    if (ret_count == 0) {
                         // No return values from function
                         vm.top = dst_base + 1;
                     } else {
-                        const ret_count: u32 = b - 1;
                         // Copy return values to dst_base + 1
                         for (0..ret_count) |i| {
                             vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
@@ -1328,9 +1338,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return .LoopContinue;
                 }
 
-                if (b == 0) {
-                    return error.VariableReturnNotImplemented;
-                } else if (b == 1) {
+                if (ret_count == 0) {
                     // No return values - fill expected slots with nil
                     if (nresults > 0) {
                         const n: usize = @intCast(nresults);
@@ -1338,45 +1346,46 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
-                } else {
-                    const ret_count: u32 = b - 1;
-
-                    if (nresults < 0) {
-                        // Variable results - copy all return values
-                        // Note: regions may overlap, copy forward (src >= dst)
-                        for (0..ret_count) |i| {
-                            vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                        }
-                        vm.top = dst_base + ret_count;
-                    } else {
-                        // Fixed results - copy available values, fill rest with nil
-                        const n: u32 = @intCast(nresults);
-                        const copy_count = @min(ret_count, n);
-                        for (0..copy_count) |i| {
-                            vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                        }
-                        if (n > copy_count) {
-                            for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
-                                slot.* = .nil;
-                            }
-                        }
-                        // Update vm.top to reflect actual stack usage after return
-                        vm.top = dst_base + n;
+                } else if (nresults < 0) {
+                    // Variable results - copy all return values
+                    // Note: regions may overlap, copy forward (src >= dst)
+                    for (0..ret_count) |i| {
+                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
                     }
+                    vm.top = dst_base + ret_count;
+                } else {
+                    // Fixed results - copy available values, fill rest with nil
+                    const n: u32 = @intCast(nresults);
+                    const copy_count = @min(ret_count, n);
+                    for (0..copy_count) |i| {
+                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
+                    }
+                    if (n > copy_count) {
+                        for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
+                            slot.* = .nil;
+                        }
+                    }
+                    // Update vm.top to reflect actual stack usage after return
+                    vm.top = dst_base + n;
                 }
 
                 return .LoopContinue;
             }
 
-            if (b == 0) {
+            // Top-level return (no previous call frame)
+            const ret_count: u32 = if (b == 0)
+                vm.top - (vm.base + a)
+            else if (b == 1)
+                0
+            else
+                b - 1;
+
+            if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
-            } else if (b == 1) {
-                return .{ .ReturnVM = .none };
-            } else if (b == 2) {
+            } else if (ret_count == 1) {
                 return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
             } else {
-                const count = b - 1;
-                const values = vm.stack[vm.base + a .. vm.base + a + count];
+                const values = vm.stack[vm.base + a .. vm.base + a + ret_count];
                 return .{ .ReturnVM = .{ .multiple = values } };
             }
         },
@@ -1790,17 +1799,26 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .SETLIST => {
             // SETLIST A B C k: R[A][(C-1)*FPF+i] := R[A+i], 1 <= i <= B
             // FPF (Fields Per Flush) = 50 in Lua 5.4
+            // Special case: when k=1 and C=0, EXTRAARG contains direct start index
             const FIELDS_PER_FLUSH: u32 = 50;
 
             const a = inst.getA();
             const b = inst.getB();
+            const c_raw = inst.getC();
             const k = inst.getk();
 
-            // Get C value - if k is set, use next EXTRAARG instruction
-            const c: u32 = if (k) blk: {
+            // Calculate starting index
+            const start_index: i64 = if (k) blk: {
                 const extraarg_inst = try ci.fetchExtraArg();
-                break :blk extraarg_inst.getAx();
-            } else inst.getC();
+                const ax = extraarg_inst.getAx();
+                if (c_raw == 0) {
+                    // Direct index mode: EXTRAARG is the start index
+                    break :blk @as(i64, ax);
+                } else {
+                    // Large batch mode: EXTRAARG is the batch number
+                    break :blk @as(i64, (ax - 1) * FIELDS_PER_FLUSH) + 1;
+                }
+            } else @as(i64, (c_raw - 1) * FIELDS_PER_FLUSH) + 1;
 
             // Get table from R[A]
             const table_val = vm.stack[vm.base + a];
@@ -1809,10 +1827,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Calculate number of values to set
             // B=0 means use top - (base + a + 1) values
             const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
-
-            // Calculate starting index (Lua uses 1-based indexing)
-            // c is 1-based block number, so first index = (c-1)*FPF + 1
-            const start_index: i64 = @as(i64, (c - 1) * FIELDS_PER_FLUSH) + 1;
 
             // Set values R[A+1], R[A+2], ..., R[A+n] into table
             var key_buffer: [32]u8 = undefined;
