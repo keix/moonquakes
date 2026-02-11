@@ -297,6 +297,15 @@ pub const ProtoBuilder = struct {
         try self.code.append(self.allocator, instr);
     }
 
+    /// Emit TAILCALL instruction for tail call optimization
+    /// TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
+    pub fn emitTailCall(self: *ProtoBuilder, func_reg: u8, nargs: u8) !void {
+        // B = nargs + 1, C = 0 (return all), k = 0 (no TBC close needed here)
+        const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
+        const instr = Instruction.initABC(.TAILCALL, func_reg, b, 0);
+        try self.code.append(self.allocator, instr);
+    }
+
     /// Emit CALL with variable args (B=0) or variable results (C=0)
     /// Use VARARG_SENTINEL (255) for nargs or nresults to indicate variable
     pub fn emitCallVararg(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
@@ -1053,6 +1062,24 @@ pub const Parser = struct {
         // Parse first return value
         const first_reg = try self.parseExpr();
         var count: u8 = 1;
+
+        // Check for tail call optimization: return f(...)
+        // If the return is a single function call, convert CALL to TAILCALL
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) {
+            // Single return value - check if it was a function call
+            if (self.proto.code.items.len > 0) {
+                const last_idx = self.proto.code.items.len - 1;
+                const last_inst = self.proto.code.items[last_idx];
+                if (last_inst.getOpCode() == .CALL) {
+                    // Convert CALL to TAILCALL
+                    // CALL A B C -> TAILCALL A B 0
+                    const a = last_inst.getA();
+                    const b = last_inst.getB();
+                    self.proto.code.items[last_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
+                    return; // TAILCALL handles the return
+                }
+            }
+        }
 
         // Parse additional return values (comma-separated)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {

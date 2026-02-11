@@ -1340,6 +1340,140 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             return error.NotAFunction;
         },
+        // TAILCALL: Tail call optimization - reuse current frame
+        // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
+        .TAILCALL => {
+            const a = inst.getA();
+            const b = inst.getB();
+            const k = inst.getk();
+
+            const func_val = vm.stack[vm.base + a];
+            const current_ci = vm.ci.?;
+
+            // Close TBC variables if k flag is set
+            if (k) {
+                try closeTBCVariables(vm, current_ci, 0);
+            }
+
+            // Close upvalues before tail call
+            vm.closeUpvalues(current_ci.base);
+
+            // Handle Lua closure tail call
+            if (func_val.asClosure()) |closure| {
+                const func_proto = closure.proto;
+
+                const nargs: u32 = if (b > 0) b - 1 else blk: {
+                    const arg_start = vm.base + a + 1;
+                    break :blk vm.top - arg_start;
+                };
+
+                // For tail call, we reuse the current frame's ret_base and nresults
+                const ret_base = current_ci.ret_base;
+                const nresults = current_ci.nresults;
+
+                // Calculate new base - move everything to current frame's base
+                const new_base = current_ci.base;
+
+                // Calculate vararg info
+                var vararg_base: u32 = 0;
+                var vararg_count: u32 = 0;
+
+                if (func_proto.is_vararg and nargs > func_proto.numparams) {
+                    vararg_count = nargs - func_proto.numparams;
+                    vararg_base = new_base + func_proto.maxstacksize;
+
+                    // Copy varargs to storage location
+                    // Check overlap direction to determine copy order
+                    const src_start = vm.base + a + 1 + func_proto.numparams;
+                    if (vararg_base > src_start) {
+                        // Destination is after source - copy backwards
+                        var i: u32 = vararg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
+                        }
+                    } else {
+                        // Destination is before source - copy forwards
+                        for (0..vararg_count) |i| {
+                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
+                        }
+                    }
+                }
+
+                // Copy arguments to new_base (overwriting current frame's locals)
+                // Source: vm.base + a + 1 (first arg after function)
+                // Dest: new_base (start of frame)
+                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+                if (params_to_copy > 0) {
+                    // Copy forward since destination might overlap with source
+                    for (0..params_to_copy) |i| {
+                        vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
+                    }
+                }
+
+                // Fill remaining parameter slots with nil
+                if (nargs < func_proto.numparams) {
+                    for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                        slot.* = .nil;
+                    }
+                }
+
+                // Reuse current CallInfo instead of pushing new one
+                current_ci.func = func_proto;
+                current_ci.closure = closure;
+                current_ci.pc = func_proto.code.ptr;
+                current_ci.base = new_base;
+                current_ci.ret_base = ret_base;
+                current_ci.nresults = nresults;
+                current_ci.vararg_base = vararg_base;
+                current_ci.vararg_count = vararg_count;
+                current_ci.tbc_bitmap = 0; // Reset TBC tracking
+
+                vm.base = new_base;
+                vm.top = new_base + func_proto.maxstacksize + vararg_count;
+
+                return .LoopContinue;
+            }
+
+            // Handle native closure tail call (fall back to regular call + return)
+            if (func_val.isObject()) {
+                const obj = func_val.object;
+                if (obj.type == .native_closure) {
+                    const nc = object.getObject(NativeClosureObject, obj);
+                    const nargs: u32 = if (b > 0) b - 1 else blk: {
+                        const arg_start = vm.base + a + 1;
+                        break :blk vm.top - arg_start;
+                    };
+
+                    // For native tail calls, we call normally but adjust return handling
+                    const ret_base = current_ci.ret_base;
+                    const nresults = current_ci.nresults;
+
+                    vm.top = vm.base + a + 1 + nargs;
+                    // Native returns variable results, we'll handle them
+                    try vm.callNative(nc.func.id, a, nargs, if (nresults < 0) 1 else @intCast(nresults));
+
+                    // Pop current frame and copy results
+                    if (current_ci.previous != null) {
+                        const actual_nresults: u32 = if (nresults < 0) 1 else @intCast(nresults);
+
+                        // Copy results from vm.base + a to ret_base
+                        for (0..actual_nresults) |i| {
+                            vm.stack[ret_base + i] = vm.stack[vm.base + a + i];
+                        }
+
+                        popCallInfo(vm);
+                        vm.top = ret_base + actual_nresults;
+                        return .LoopContinue;
+                    }
+
+                    // Top-level native tail call - return to VM
+                    return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
+                }
+            }
+
+            return error.NotAFunction;
+        },
         .RETURN => {
             const a = inst.getA();
             const b = inst.getB();
@@ -2248,8 +2382,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
             return .Continue;
         },
-
-        else => return error.UnknownOpcode,
+        // All opcodes now implemented - no else branch needed
     }
 }
 
