@@ -156,6 +156,10 @@ pub fn leOp(a: TValue, b: TValue) !bool {
 // ============================================================================
 
 pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+    return pushCallInfoVararg(vm, func, closure, base, ret_base, nresults, 0, 0);
+}
+
+pub fn pushCallInfoVararg(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16, vararg_base: u32, vararg_count: u32) !*CallInfo {
     if (vm.callstack_size >= vm.callstack.len) {
         return error.CallStackOverflow;
     }
@@ -168,6 +172,8 @@ pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base:
         .savedpc = null,
         .base = base,
         .ret_base = ret_base,
+        .vararg_base = vararg_base,
+        .vararg_count = vararg_count,
         .nresults = nresults,
         .previous = vm.ci,
     };
@@ -1236,10 +1242,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const new_base = vm.base + a;
                 const ret_base = vm.base + a;
 
+                // Calculate vararg info before shifting arguments
+                var vararg_base: u32 = 0;
+                var vararg_count: u32 = 0;
+
+                if (func_proto.is_vararg and nargs > func_proto.numparams) {
+                    // Store varargs at the end of the new frame
+                    vararg_count = nargs - func_proto.numparams;
+                    vararg_base = new_base + func_proto.maxstacksize;
+
+                    // Copy varargs to their storage location (after maxstacksize)
+                    // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
+                    for (0..vararg_count) |i| {
+                        vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
+                    }
+                }
+
                 // Shift arguments down by 1 slot (overwrite function value)
                 // Note: regions overlap, so copy forward (src > dst)
-                if (nargs > 0) {
-                    for (0..nargs) |i| {
+                // Only copy fixed parameters, not varargs
+                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+                if (params_to_copy > 0) {
+                    for (0..params_to_copy) |i| {
                         vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
                     }
                 }
@@ -1251,9 +1275,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                _ = try pushCallInfo(vm, func_proto, closure, new_base, ret_base, nresults);
+                _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
 
-                vm.top = new_base + func_proto.maxstacksize;
+                // Extend top to include vararg storage if needed
+                const frame_top = new_base + func_proto.maxstacksize + vararg_count;
+                vm.top = frame_top;
                 return .LoopContinue;
             }
 
@@ -1892,6 +1918,43 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // MMBINK A B C k: metamethod for binary op with constant
             // TODO: Implement constant metamethod dispatch
             return error.UnknownOpcode;
+        },
+        .VARARG => {
+            // VARARG A C: Load varargs into R[A], R[A+1], ..., R[A+C-2]
+            // If C=0, load all varargs and set top
+            const a = inst.getA();
+            const c = inst.getC();
+
+            const vararg_base = ci.vararg_base;
+            const vararg_count = ci.vararg_count;
+
+            if (c == 0) {
+                // Load all varargs, set top accordingly
+                for (0..vararg_count) |i| {
+                    vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+                }
+                vm.top = vm.base + a + vararg_count;
+            } else {
+                // Load exactly c-1 values
+                const want: u32 = c - 1;
+                for (0..want) |i| {
+                    if (i < vararg_count) {
+                        vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+                    } else {
+                        // Fill with nil if not enough varargs
+                        vm.stack[vm.base + a + i] = .nil;
+                    }
+                }
+            }
+            return .Continue;
+        },
+        .VARARGPREP => {
+            // VARARGPREP A: Prepare vararg function with A fixed parameters
+            // In our implementation, CALL already handles vararg setup,
+            // so this is mostly a no-op for verification
+            const a = inst.getA();
+            _ = a; // numparams - could verify ci.func.numparams == a
+            return .Continue;
         },
         .EXTRAARG => {
             return error.UnknownOpcode;

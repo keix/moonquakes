@@ -64,6 +64,7 @@ const ParseError = error{
     ExpectedColon,
     ExpectedIn,
     TooManyLoopVariables,
+    VarargOutsideVarargFunction,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -121,6 +122,7 @@ pub const ProtoBuilder = struct {
     // Ordered constant references
     const_refs: std.ArrayList(ConstRef),
     protos: std.ArrayList(*const RawProto), // Nested function prototypes (for CLOSURE)
+    is_vararg: bool = false, // True if function accepts varargs (...)
     maxstacksize: u8,
     next_reg: u8, // Next available register (for temps)
     locals_top: u8, // Register watermark: locals occupy [0, locals_top)
@@ -871,7 +873,7 @@ pub const ProtoBuilder = struct {
             .const_refs = const_refs_slice,
             .protos = protos_slice,
             .numparams = num_params,
-            .is_vararg = false,
+            .is_vararg = self.is_vararg,
             .maxstacksize = self.maxstacksize,
             .nups = @intCast(self.upvalues.items.len),
             .upvalues = upvalues_slice,
@@ -1325,6 +1327,19 @@ pub const Parser = struct {
     // Expression parsing (precedence order: Atom -> Pow -> Primary -> Mul -> Add -> Compare)
     // parseAtom: literals, parentheses, table constructors, identifiers
     fn parseAtom(self: *Parser) ParseError!u8 {
+        // Vararg expression: ...
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            if (!self.proto.is_vararg) {
+                return error.VarargOutsideVarargFunction;
+            }
+            self.advance(); // consume '...'
+            const reg = self.proto.allocTemp();
+            // VARARG A C: load varargs into R[A]...
+            // C=2 means load 1 value (C-1=1)
+            try self.proto.emit(.VARARG, reg, 0, 2);
+            return reg;
+        }
+
         // Table constructor: { field, field, ... }
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "{")) {
             return try self.parseTableConstructor();
@@ -3302,7 +3317,11 @@ pub const Parser = struct {
 
         // Parse parameters and assign to registers
         var param_count: u8 = 0;
-        if (self.current.kind == .Identifier) {
+        // Check for vararg-only function: function(...)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            func_builder.is_vararg = true;
+            self.advance(); // consume '...'
+        } else if (self.current.kind == .Identifier) {
             // Parse first parameter
             const param_name = self.current.lexeme;
             self.advance();
@@ -3314,6 +3333,12 @@ pub const Parser = struct {
             // Parse additional parameters
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+                // Check for vararg: function(a, b, ...)
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                    func_builder.is_vararg = true;
+                    self.advance(); // consume '...'
+                    break;
+                }
                 if (self.current.kind != .Identifier) {
                     return error.ExpectedIdentifier;
                 }
@@ -3333,6 +3358,11 @@ pub const Parser = struct {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
+
+        // Emit VARARGPREP for vararg functions
+        if (func_builder.is_vararg) {
+            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
+        }
 
         // Parse function body dynamically
         const old_proto = self.proto;
@@ -3406,7 +3436,11 @@ pub const Parser = struct {
 
         // Parse parameters
         var param_count: u8 = 0;
-        if (self.current.kind == .Identifier) {
+        // Check for vararg-only function: function(...)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            func_builder.is_vararg = true;
+            self.advance(); // consume '...'
+        } else if (self.current.kind == .Identifier) {
             const param_name = self.current.lexeme;
             self.advance();
             try func_builder.addVariable(param_name, param_count);
@@ -3414,6 +3448,12 @@ pub const Parser = struct {
 
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+                // Check for vararg: function(a, b, ...)
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                    func_builder.is_vararg = true;
+                    self.advance(); // consume '...'
+                    break;
+                }
                 if (self.current.kind != .Identifier) {
                     return error.ExpectedIdentifier;
                 }
@@ -3431,6 +3471,11 @@ pub const Parser = struct {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
+
+        // Emit VARARGPREP for vararg functions
+        if (func_builder.is_vararg) {
+            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
+        }
 
         // Parse function body
         const old_proto = self.proto;
@@ -3484,7 +3529,11 @@ pub const Parser = struct {
 
         // Parse parameters
         var param_count: u8 = 0;
-        if (self.current.kind == .Identifier) {
+        // Check for vararg-only function: function(...)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            func_builder.is_vararg = true;
+            self.advance(); // consume '...'
+        } else if (self.current.kind == .Identifier) {
             const param_name = self.current.lexeme;
             self.advance();
             try func_builder.addVariable(param_name, param_count);
@@ -3492,6 +3541,12 @@ pub const Parser = struct {
 
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+                // Check for vararg: function(a, b, ...)
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                    func_builder.is_vararg = true;
+                    self.advance(); // consume '...'
+                    break;
+                }
                 if (self.current.kind != .Identifier) {
                     return error.ExpectedIdentifier;
                 }
@@ -3509,6 +3564,11 @@ pub const Parser = struct {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
+
+        // Emit VARARGPREP for vararg functions
+        if (func_builder.is_vararg) {
+            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
+        }
 
         // Parse function body
         const old_proto = self.proto;

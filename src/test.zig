@@ -27,6 +27,7 @@ pub const parser_comparison_tests = @import("tests/parser_comparison.zig");
 pub const upvalue_opcodes_tests = @import("tests/upvalue_opcodes.zig");
 pub const register_scope_tests = @import("tests/register_scope.zig");
 pub const local_variables_tests = @import("tests/local_variables.zig");
+pub const vararg_tests = @import("tests/vararg.zig");
 // pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {

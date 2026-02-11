@@ -51,6 +51,10 @@ pub const CallInfo = struct {
     base: u32,
     ret_base: u32, // Where to place return values in caller's frame
 
+    // Vararg support
+    vararg_base: u32 = 0, // Stack position where varargs are stored
+    vararg_count: u32 = 0, // Number of vararg values
+
     // Call control
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
