@@ -23,6 +23,10 @@ const owned = @import("runtime/owned.zig");
 pub const OwnedReturnValue = owned.OwnedReturnValue;
 pub const OwnedValue = owned.OwnedValue;
 
+// Launcher for execution context setup (arg injection, etc.)
+pub const launcher = @import("launcher.zig");
+pub const RunOptions = launcher.RunOptions;
+
 // Core types for embedding
 pub const VM = @import("vm/vm.zig").VM;
 pub const Mnemonics = @import("vm/mnemonics.zig");
@@ -33,6 +37,8 @@ pub const Proto = @import("compiler/proto.zig").Proto;
 const ErrorHandler = @import("vm/error.zig");
 
 /// High-level API for embedding Moonquakes
+/// Pure execution without runtime conventions (no arg, etc.)
+/// For script execution with arg support, use launcher.run() instead.
 pub const Moonquakes = struct {
     allocator: std.mem.Allocator,
 
@@ -57,6 +63,7 @@ pub const Moonquakes = struct {
 
     /// Compile and execute Lua source in one step.
     /// Returns owned values that don't depend on VM lifetime.
+    /// Note: Does not set up `arg` global. Use launcher.run() for that.
     pub fn runSource(self: *Moonquakes, source: []const u8) !OwnedReturnValue {
         // Phase 1: Compile to RawProto (no GC needed)
         const raw_proto = try pipeline.compile(self.allocator, source);
@@ -81,6 +88,7 @@ pub const Moonquakes = struct {
 
     /// Load and execute Lua file.
     /// Returns owned values that don't depend on VM lifetime.
+    /// Note: Does not set up `arg` global. Use launcher.runFile() for that.
     pub fn loadFile(self: *Moonquakes, file_path: []const u8) !OwnedReturnValue {
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
