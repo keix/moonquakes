@@ -6,6 +6,10 @@ runtime, and execution semantics.
 
 ## High-level layout
 
+- `api/`
+  C API constants and types for embedding.
+  Provides Lua 5.4 compatible definitions with MQ_/MQL_ prefixes.
+
 - `builtin/`
   Built-in standard libraries (e.g. `math`, `string`, `table`, `coroutine`).
   Implemented as native functions exposed to the language.
