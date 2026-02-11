@@ -82,13 +82,132 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 }
 
 /// io.lines([filename, ...]) - Returns an iterator function for reading files line by line
+/// Returns iterator function, state table, nil (for generic for)
 pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement io.lines
-    // If filename is nil, uses default input file
+    if (nresults == 0) return;
+
+    // Reserve stack slots for GC safety
+    vm.reserveSlots(func_reg, 5);
+
+    // Get filename argument (required for this implementation)
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const filename_arg = vm.stack[vm.base + func_reg + 1];
+    const filename_obj = filename_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const filename = filename_obj.asSlice();
+
+    // Open and read the file
+    const file = std.fs.cwd().openFile(filename, .{}) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    defer file.close();
+
+    const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    defer vm.allocator.free(content);
+
+    // Create state table with content and position
+    const state_table = try vm.gc.allocTable();
+    vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+
+    const content_key = try vm.gc.allocString("_content");
+    vm.stack[vm.base + func_reg + 2] = TValue.fromString(content_key);
+    const content_str = try vm.gc.allocString(content);
+    try state_table.set(content_key, TValue.fromString(content_str));
+
+    const pos_key = try vm.gc.allocString("_pos");
+    try state_table.set(pos_key, .{ .integer = 0 });
+
+    // Return iterator function
+    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .io_lines_iterator });
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+
+    // Return state table (for-in will pass this to iterator)
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+    }
+
+    // Return nil as initial control variable
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = .nil;
+    }
+}
+
+/// Iterator function for io.lines
+/// Takes (state_table, _) where state_table has {_content=string, _pos=position}
+/// Returns next line (without newline), updates _pos
+/// Returns nil when no more lines
+pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get state table
+    const state_arg = vm.stack[vm.base + func_reg + 1];
+    const state_table = state_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Get content from state table
+    const content_key = try vm.gc.allocString("_content");
+    const content_val = state_table.get(content_key) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const content_obj = content_val.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const content = content_obj.asSlice();
+
+    // Get current position from state table
+    const pos_key = try vm.gc.allocString("_pos");
+    const pos_val = state_table.get(pos_key) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pos_i64 = pos_val.toInteger() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    if (pos_i64 < 0) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+    const start_pos: usize = @intCast(pos_i64);
+
+    // Check if we're at or past the end
+    if (start_pos >= content.len) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Find next newline
+    var end_pos: usize = start_pos;
+    while (end_pos < content.len and content[end_pos] != '\n') : (end_pos += 1) {}
+
+    // Extract the line (without newline)
+    const line = content[start_pos..end_pos];
+    const line_str = try vm.gc.allocString(line);
+    vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
+
+    // Update position (skip past the newline if present)
+    const new_pos: i64 = @intCast(if (end_pos < content.len) end_pos + 1 else end_pos);
+    try state_table.set(pos_key, .{ .integer = new_pos });
 }
 
 /// io.open(filename [, mode]) - Opens a file in specified mode
@@ -481,6 +600,18 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     const write_key = try vm.gc.allocString("write");
     try index_table.set(write_key, TValue.fromNativeClosure(write_nc));
 
+    // Reuse scratch slot for lines method
+    const lines_nc = try vm.gc.allocNativeClosure(.{ .id = .file_lines });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(lines_nc);
+    const lines_key = try vm.gc.allocString("lines");
+    try index_table.set(lines_key, TValue.fromNativeClosure(lines_nc));
+
+    // Reuse scratch slot for flush method
+    const flush_nc = try vm.gc.allocNativeClosure(.{ .id = .file_flush });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(flush_nc);
+    const flush_key = try vm.gc.allocString("flush");
+    try index_table.set(flush_key, TValue.fromNativeClosure(flush_nc));
+
     return mt;
 }
 
@@ -641,21 +772,156 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 }
 
 /// file:flush() - Saves any written data to file
+/// file:flush() - Saves any written data to file
+/// For write/append mode files, writes buffer to disk
+/// Returns true on success, nil + error message on failure
 pub fn nativeFileFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement file:flush method
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get the file handle table (self)
+    const self_arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = self_arg.asTable() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if closed
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("file is closed");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        }
+    }
+
+    // Check if this is a write/append mode file
+    const mode_key = try vm.gc.allocString(FILE_MODE_KEY);
+    const filename_key = try vm.gc.allocString(FILE_FILENAME_KEY);
+
+    if (file_table.get(mode_key)) |mode_val| {
+        if (mode_val.asString()) |mode_str| {
+            const mode = mode_str.asSlice();
+            if (mode.len > 0 and (mode[0] == 'w' or mode[0] == 'a')) {
+                // This is a write/append mode file - flush to disk
+                if (file_table.get(filename_key)) |fn_val| {
+                    if (fn_val.asString()) |fn_str| {
+                        const filename = fn_str.asSlice();
+
+                        // Get the output buffer
+                        const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+                        const content = if (file_table.get(output_key)) |v|
+                            if (v.asString()) |s| s.asSlice() else ""
+                        else
+                            "";
+
+                        // Write to file
+                        const file = std.fs.cwd().createFile(filename, .{}) catch {
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            if (nresults > 1) {
+                                const err_str = try vm.gc.allocString("cannot write file");
+                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                            }
+                            return;
+                        };
+                        defer file.close();
+
+                        file.writeAll(content) catch {
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            if (nresults > 1) {
+                                const err_str = try vm.gc.allocString("write error");
+                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                            }
+                            return;
+                        };
+
+                        // Success
+                        if (nresults > 0) {
+                            vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // For read mode or files without filename, flush is a no-op but returns true
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    }
 }
 
 /// file:lines(...) - Returns iterator for reading file line by line
+/// Returns iterator function, state table, nil (for generic for)
 pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement file:lines method
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get the file handle table (self)
+    const self_arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = self_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if closed
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+    }
+
+    // Get content from file handle's _output field
+    const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+    const content_val = file_table.get(output_key) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const content_obj = content_val.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Reserve stack slots for GC safety
+    vm.reserveSlots(func_reg, 5);
+
+    // Create state table with content and position
+    // Reuse the same format as io.lines so we can use the same iterator
+    const state_table = try vm.gc.allocTable();
+    vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+
+    const content_key = try vm.gc.allocString("_content");
+    try state_table.set(content_key, TValue.fromString(content_obj));
+
+    const pos_key = try vm.gc.allocString("_pos");
+    try state_table.set(pos_key, .{ .integer = 0 });
+
+    // Return iterator function (reuse io_lines_iterator)
+    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .io_lines_iterator });
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+
+    // Return state table
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+    }
+
+    // Return nil as initial control variable
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = .nil;
+    }
 }
 
 /// file:read(...) - Reads from file according to given formats
