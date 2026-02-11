@@ -1720,6 +1720,31 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = TValue.fromTable(table);
             return .Continue;
         },
+        // [MM_INDEX] SELF: Prepare for method call. R[A+1] := R[B]; R[A] := R[B][K[C]]
+        .SELF => {
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+            const obj = vm.stack[vm.base + b];
+
+            // R[A+1] := R[B] (copy object for self parameter)
+            vm.stack[vm.base + a + 1] = obj;
+
+            // R[A] := R[B][K[C]] (get method from object)
+            const key_val = ci.func.k[c];
+            if (obj.asTable()) |table| {
+                if (key_val.asString()) |key| {
+                    if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
+                        return result;
+                    }
+                } else {
+                    return error.InvalidTableOperation;
+                }
+            } else {
+                return error.InvalidTableOperation;
+            }
+            return .Continue;
+        },
         // [MM_EQ] Fast path: equality with constant. Slow path: __eq metamethod.
         .EQK => {
             const a = inst.getA();

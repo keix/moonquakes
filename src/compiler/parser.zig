@@ -504,6 +504,14 @@ pub const ProtoBuilder = struct {
         self.updateMaxStack(dst + 1);
     }
 
+    /// Emit SELF instruction: R[A+1] := R[B]; R[A] := R[B][K[C]]
+    /// Prepares for method call: method goes to R[A], object goes to R[A+1]
+    pub fn emitSELF(self: *ProtoBuilder, dst: u8, obj: u8, method_const: u32) !void {
+        const instr = Instruction.initABC(.SELF, dst, obj, @intCast(method_const));
+        try self.code.append(self.allocator, instr);
+        self.updateMaxStack(dst + 2); // SELF uses two registers: dst and dst+1
+    }
+
     pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MUL, dst, left, right);
         try self.code.append(self.allocator, instr);
@@ -1545,14 +1553,12 @@ pub const Parser = struct {
                     const method_name = self.current.lexeme;
                     self.advance(); // consume method name
 
-                    // Get method from receiver
+                    // Use SELF: R[func_reg] := R[base_reg][K[method_const]]
+                    //           R[func_reg+1] := R[base_reg]
                     const method_const = try self.proto.addConstString(method_name);
                     const func_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(func_reg, base_reg, method_const);
-
-                    // Reserve slot for receiver and place it there
-                    const self_reg = self.proto.allocTemp(); // = func_reg + 1
-                    try self.proto.emitMOVE(self_reg, base_reg);
+                    _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+                    try self.proto.emitSELF(func_reg, base_reg, method_const);
 
                     // Parse extra arguments starting at func_reg + 2
                     const extra_args = try self.parseMethodArgs(func_reg);
@@ -3162,14 +3168,12 @@ pub const Parser = struct {
         const method_name = self.current.lexeme;
         self.advance(); // consume method name
 
-        // Get method from receiver: t.method
+        // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
+        //           R[func_reg+1] := R[receiver_reg]
         const method_const = try self.proto.addConstString(method_name);
         const func_reg = self.proto.allocTemp();
-        try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
-
-        // Reserve slot for receiver (self) and place it there
-        const self_reg = self.proto.allocTemp(); // = func_reg + 1
-        try self.proto.emitMOVE(self_reg, receiver_reg);
+        _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+        try self.proto.emitSELF(func_reg, receiver_reg, method_const);
 
         // Parse extra arguments starting at func_reg + 2
         const extra_args = try self.parseMethodArgs(func_reg);
@@ -3282,14 +3286,12 @@ pub const Parser = struct {
                 const method_name = self.current.lexeme;
                 self.advance(); // consume method name
 
-                // Get method from receiver
+                // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
+                //           R[func_reg+1] := R[receiver_reg]
                 const method_const = try self.proto.addConstString(method_name);
                 const func_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(func_reg, receiver_reg, method_const);
-
-                // Reserve slot for receiver and place it there
-                const self_reg = self.proto.allocTemp(); // = func_reg + 1
-                try self.proto.emitMOVE(self_reg, receiver_reg);
+                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+                try self.proto.emitSELF(func_reg, receiver_reg, method_const);
 
                 // Parse extra arguments
                 const extra_args = try self.parseMethodArgs(func_reg);

@@ -31,6 +31,7 @@ pub const vararg_tests = @import("tests/vararg.zig");
 pub const setlist_tests = @import("tests/setlist.zig");
 pub const mmbini_mmbink_tests = @import("tests/mmbini_mmbink.zig");
 pub const tbc_tests = @import("tests/tbc.zig");
+pub const self_tests = @import("tests/self.zig");
 // pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {
