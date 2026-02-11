@@ -65,6 +65,7 @@ const ParseError = error{
     ExpectedIn,
     TooManyLoopVariables,
     VarargOutsideVarargFunction,
+    InvalidAttribute,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -1081,7 +1082,13 @@ pub const Parser = struct {
         self.advance(); // consume 'do'
 
         try self.proto.enterScope();
+        const scope_base = self.proto.locals_top; // First local of this scope
         try self.parseStatements();
+
+        // Emit CLOSE to close upvalues and TBC variables from this scope
+        if (self.proto.locals_top > scope_base) {
+            try self.proto.emit(.CLOSE, scope_base, 0, 0);
+        }
         self.proto.leaveScope();
 
         // Expect 'end'
@@ -2619,8 +2626,9 @@ pub const Parser = struct {
             return self.parseLocalFunction();
         }
 
-        // Parse variable names (comma-separated)
+        // Parse variable names (comma-separated) with optional <close> attribute
         var var_names: [256][]const u8 = undefined;
+        var var_is_close: [256]bool = undefined;
         var var_count: u8 = 0;
 
         // First identifier
@@ -2628,16 +2636,40 @@ pub const Parser = struct {
             return error.ExpectedIdentifier;
         }
         var_names[var_count] = self.current.lexeme;
-        var_count += 1;
+        var_is_close[var_count] = false;
         self.advance();
 
-        // Additional identifiers after comma
+        // Check for <close> attribute
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "<")) {
+            self.advance(); // consume '<'
+            if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "close")) {
+                var_is_close[var_count] = true;
+                self.advance(); // consume 'close'
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume '>'
+            } else if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "const")) {
+                // <const> attribute - for now, just parse and ignore
+                self.advance(); // consume 'const'
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume '>'
+            } else {
+                return error.InvalidAttribute;
+            }
+        }
+        var_count += 1;
+
+        // Additional identifiers after comma (note: <close> only valid for single variable)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
                 return error.ExpectedIdentifier;
             }
             var_names[var_count] = self.current.lexeme;
+            var_is_close[var_count] = false;
             var_count += 1;
             self.advance();
         }
@@ -2738,6 +2770,14 @@ pub const Parser = struct {
         i = 0;
         while (i < var_count) : (i += 1) {
             try self.proto.addVariable(var_names[i], first_reg + i);
+        }
+
+        // Emit TBC opcode for close variables
+        i = 0;
+        while (i < var_count) : (i += 1) {
+            if (var_is_close[i]) {
+                try self.proto.emit(.TBC, first_reg + i, 0, 0);
+            }
         }
     }
 

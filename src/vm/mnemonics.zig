@@ -205,7 +205,11 @@ pub fn popCallInfo(vm: *VM) void {
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
 pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
     const proto = closure.proto;
-    const call_base = vm.top;
+    // Use a safe stack location that doesn't overlap with the caller's active stack.
+    // The caller's base + maxstacksize should be safe.
+    const caller_ci = vm.ci.?;
+    const safe_base = caller_ci.base + caller_ci.func.maxstacksize;
+    const call_base = @max(vm.top, safe_base);
     const result_slot = call_base;
 
     // Set up arguments
@@ -249,6 +253,43 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 // ============================================================================
 // Main Execution Loop
 // ============================================================================
+
+/// Close to-be-closed variables from the current frame
+/// Calls __close metamethod on TBC variables from highest to 'from_reg'
+fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
+    // Process TBC variables from high to low (reverse order)
+    var reg = ci.getHighestTBC(from_reg);
+    while (reg) |r| {
+        const val = vm.stack[vm.base + r];
+
+        // Get __close metamethod
+        if (try metamethod.getMetamethod(val, .close, &vm.gc)) |mm| {
+            // Call __close(val, nil) - second arg is error object (nil for normal close)
+            const saved_top = vm.top;
+
+            if (mm.asClosure()) |closure| {
+                // executeSyncMM handles stack setup using vm.top
+                _ = try executeSyncMM(vm, closure, &[_]TValue{ val, .nil });
+            } else if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                // Set up arguments for native call
+                const temp = vm.top;
+                vm.stack[temp] = val;
+                vm.stack[temp + 1] = .nil;
+                vm.top = temp + 2;
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0);
+            }
+            vm.top = saved_top;
+        }
+
+        // Clear TBC mark
+        ci.clearTBC(r);
+
+        // Get next TBC variable
+        if (r == 0) break;
+        reg = ci.getHighestTBC(from_reg);
+    }
+}
 
 fn setupMainFrame(vm: *VM, proto: *const Proto) void {
     vm.base_ci = CallInfo{
@@ -1309,6 +1350,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
@@ -1373,6 +1416,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Top-level return (no previous call frame)
+            // Close TBC variables before returning
+            try closeTBCVariables(vm, vm.ci.?, 0);
             const ret_count: u32 = if (b == 0)
                 vm.top - (vm.base + a)
             else if (b == 1)
@@ -1396,6 +1441,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
@@ -1417,6 +1464,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Top-level return - close TBC variables
+            try closeTBCVariables(vm, vm.ci.?, 0);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -1428,6 +1477,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
@@ -1456,6 +1507,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Top-level return - close TBC variables
+            try closeTBCVariables(vm, vm.ci.?, 0);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
@@ -1788,12 +1841,31 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         .CLOSE => {
             const a = inst.getA();
+            // First, call __close on any TBC variables from top down to 'a'
+            try closeTBCVariables(vm, ci, a);
+            // Then close upvalues
             vm.closeUpvalues(vm.base + a);
             return .Continue;
         },
         .TBC => {
+            // TBC A: Mark R[A] as to-be-closed
+            // The value must have a __close metamethod or be false/nil
             const a = inst.getA();
-            _ = a;
+            const val = vm.stack[vm.base + a];
+
+            // nil and false don't need __close (they're valid but do nothing)
+            if (val.isNil() or (val.isBoolean() and !val.toBoolean())) {
+                // No need to mark, these are valid but won't call __close
+                return .Continue;
+            }
+
+            // Check that value has __close metamethod
+            if (try metamethod.getMetamethod(val, .close, &vm.gc) == null) {
+                return error.NoCloseMetamethod;
+            }
+
+            // Mark this register as to-be-closed
+            ci.markTBC(a);
             return .Continue;
         },
         .SETLIST => {

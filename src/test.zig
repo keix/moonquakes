@@ -28,6 +28,9 @@ pub const upvalue_opcodes_tests = @import("tests/upvalue_opcodes.zig");
 pub const register_scope_tests = @import("tests/register_scope.zig");
 pub const local_variables_tests = @import("tests/local_variables.zig");
 pub const vararg_tests = @import("tests/vararg.zig");
+pub const setlist_tests = @import("tests/setlist.zig");
+pub const mmbini_mmbink_tests = @import("tests/mmbini_mmbink.zig");
+pub const tbc_tests = @import("tests/tbc.zig");
 // pub const function_calls_tests = @import("tests/function_calls.zig");
 
 test {

@@ -62,6 +62,44 @@ pub const CallInfo = struct {
     // Protected call support (for pcall)
     is_protected: bool = false, // true if this is a pcall frame
 
+    // To-be-closed variable support (Lua 5.4)
+    // Bitmap tracking which registers are marked as TBC (up to 64 registers)
+    tbc_bitmap: u64 = 0,
+
+    /// Mark a register as to-be-closed
+    pub fn markTBC(self: *CallInfo, reg: u8) void {
+        if (reg < 64) {
+            self.tbc_bitmap |= (@as(u64, 1) << @intCast(reg));
+        }
+    }
+
+    /// Check if a register is marked as to-be-closed
+    pub fn isTBC(self: *const CallInfo, reg: u8) bool {
+        if (reg >= 64) return false;
+        return (self.tbc_bitmap & (@as(u64, 1) << @intCast(reg))) != 0;
+    }
+
+    /// Get the highest TBC register at or above 'from' (returns null if none)
+    pub fn getHighestTBC(self: *const CallInfo, from: u8) ?u8 {
+        if (self.tbc_bitmap == 0) return null;
+        var i: u8 = 63;
+        while (true) {
+            if (i >= from and self.isTBC(i)) {
+                return i;
+            }
+            if (i == 0) break;
+            i -= 1;
+        }
+        return null;
+    }
+
+    /// Clear TBC mark for a register
+    pub fn clearTBC(self: *CallInfo, reg: u8) void {
+        if (reg < 64) {
+            self.tbc_bitmap &= ~(@as(u64, 1) << @intCast(reg));
+        }
+    }
+
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
