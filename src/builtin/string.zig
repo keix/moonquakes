@@ -1,5 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const call = @import("../vm/call.zig");
 
 /// Lua 5.4 String Library
 /// Corresponds to Lua manual chapter "String Manipulation"
@@ -795,23 +796,420 @@ const PatternMatcher = struct {
 };
 
 /// string.gmatch(s, pattern) - Returns iterator for all matches of pattern in string s
+/// Returns: iterator function, state table {s=string, p=pattern, pos=0}, nil
+/// State table stores position internally, updated by iterator
 pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.gmatch
-    // Returns iterator function for use in for loops
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get string argument
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    if (str_arg.asString() == null) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get pattern argument
+    const pat_arg = vm.stack[vm.base + func_reg + 2];
+    if (pat_arg.asString() == null) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Create state table with string, pattern, and position
+    const state_table = try vm.gc.allocTable();
+    const key_s = try vm.gc.allocString("s");
+    const key_p = try vm.gc.allocString("p");
+    const key_pos = try vm.gc.allocString("pos");
+    try state_table.set(key_s, str_arg);
+    try state_table.set(key_p, pat_arg);
+    try state_table.set(key_pos, .{ .integer = 0 });
+
+    // Return iterator function
+    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .string_gmatch_iterator });
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+
+    // Return state table (for-in will pass this to iterator)
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+    }
+
+    // Return nil as initial control variable (we track position in state table)
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = .nil;
+    }
+}
+
+/// Iterator function for string.gmatch
+/// Takes (state_table, _) where state_table has {s=string, p=pattern, pos=position}
+/// Returns captures or whole match, then updates state_table.pos
+/// Returns nil when no more matches
+pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get state table
+    const state_arg = vm.stack[vm.base + func_reg + 1];
+    const state_table = state_arg.asTable() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Get string from state table
+    const key_s = try vm.gc.allocString("s");
+    const str_val = state_table.get(key_s) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str_obj = str_val.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Get pattern from state table
+    const key_p = try vm.gc.allocString("p");
+    const pat_val = state_table.get(key_p) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pat_obj = pat_val.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pattern = pat_obj.asSlice();
+
+    // Get current position from state table
+    const key_pos = try vm.gc.allocString("pos");
+    const pos_val = state_table.get(key_pos) orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pos_i64 = pos_val.toInteger() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    if (pos_i64 < 0) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+    const start_pos: usize = @intCast(pos_i64);
+
+    // Check if we're past the end
+    if (start_pos > str.len) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Create pattern matcher and find next match
+    var matcher = PatternMatcher.init(pattern, str, start_pos);
+
+    var match_start: usize = start_pos;
+    while (match_start <= str.len) : (match_start += 1) {
+        matcher.reset(match_start);
+        if (matcher.match()) {
+            // Match found - calculate next position
+            // For empty matches, advance by 1 to avoid infinite loop
+            var next_pos = matcher.match_end;
+            if (next_pos == match_start) {
+                next_pos += 1;
+            }
+
+            // Update position in state table for next iteration
+            try state_table.set(key_pos, .{ .integer = @as(i64, @intCast(next_pos)) });
+
+            // Return captures or whole match
+            if (matcher.capture_count > 0) {
+                var i: u32 = 0;
+                while (i < matcher.capture_count and i < nresults) : (i += 1) {
+                    const cap = matcher.captures[i];
+                    const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                    vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                }
+            } else {
+                // Return whole match
+                const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+                vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
+            }
+            return;
+        }
+
+        // If pattern starts with ^, only try at start
+        if (pattern.len > 0 and pattern[0] == '^') break;
+    }
+
+    // No more matches
+    vm.stack[vm.base + func_reg] = .nil;
 }
 
 /// string.gsub(s, pattern, repl [, n]) - Returns copy of s with all/first n occurrences of pattern replaced by repl
+/// repl can be: string (with %0-%9 for captures), table (lookup), or function (called with captures)
+/// Returns: new string, number of substitutions made
 pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.gsub
-    // Returns new string and number of substitutions made
+    if (nargs < 3) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get string
+    const str_arg = vm.stack[vm.base + func_reg + 1];
+    const str_obj = str_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const str = str_obj.asSlice();
+
+    // Get pattern
+    const pat_arg = vm.stack[vm.base + func_reg + 2];
+    const pat_obj = pat_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const pattern = pat_obj.asSlice();
+
+    // Get replacement (string, table, or function)
+    const repl_arg = vm.stack[vm.base + func_reg + 3];
+
+    // Get max replacements (optional, default unlimited)
+    var max_replacements: usize = std.math.maxInt(usize);
+    if (nargs > 3) {
+        const n_arg = vm.stack[vm.base + func_reg + 4];
+        if (n_arg.toInteger()) |n| {
+            if (n >= 0) max_replacements = @intCast(n);
+        }
+    }
+
+    // Build result string
+    const allocator = vm.allocator;
+    var result = try std.ArrayList(u8).initCapacity(allocator, str.len);
+    defer result.deinit(allocator);
+
+    var pos: usize = 0;
+    var replacement_count: i64 = 0;
+    var matcher = PatternMatcher.init(pattern, str, 0);
+
+    while (pos <= str.len and replacement_count < max_replacements) {
+        matcher.reset(pos);
+
+        if (matcher.match()) {
+            // Append text before match
+            try result.appendSlice(allocator, str[pos..matcher.match_start]);
+
+            // Get replacement string based on repl type
+            const replacement = try getGsubReplacement(
+                vm,
+                repl_arg,
+                str,
+                &matcher,
+            );
+
+            if (replacement) |repl_str| {
+                try result.appendSlice(allocator, repl_str);
+            } else {
+                // If replacement is nil/false, keep original match
+                try result.appendSlice(allocator, str[matcher.match_start..matcher.match_end]);
+            }
+
+            replacement_count += 1;
+
+            // Move position forward
+            if (matcher.match_end > pos) {
+                pos = matcher.match_end;
+            } else {
+                // Empty match - advance by 1 to avoid infinite loop
+                if (pos < str.len) {
+                    try result.append(allocator, str[pos]);
+                }
+                pos += 1;
+            }
+        } else {
+            // No match at this position
+            if (pattern.len > 0 and pattern[0] == '^') {
+                // Anchored pattern - no more matches possible
+                break;
+            }
+            // Append current character and move forward
+            if (pos < str.len) {
+                try result.append(allocator, str[pos]);
+            }
+            pos += 1;
+        }
+    }
+
+    // Append remaining text after last match
+    if (pos < str.len) {
+        try result.appendSlice(allocator, str[pos..]);
+    }
+
+    // Return result string
+    const result_str = try vm.gc.allocString(result.items);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+
+    // Return replacement count as second value
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = .{ .integer = replacement_count };
+    }
+}
+
+/// Get replacement string for gsub based on repl type
+fn getGsubReplacement(
+    vm: anytype,
+    repl_arg: TValue,
+    str: []const u8,
+    matcher: *PatternMatcher,
+) !?[]const u8 {
+    // String replacement
+    if (repl_arg.asString()) |repl_obj| {
+        const repl = repl_obj.asSlice();
+        return try expandGsubCaptures(vm, repl, str, matcher);
+    }
+
+    // Table replacement
+    if (repl_arg.asTable()) |repl_table| {
+        // Use first capture or whole match as key
+        const key_str = if (matcher.capture_count > 0)
+            str[matcher.captures[0].start..matcher.captures[0].end]
+        else
+            str[matcher.match_start..matcher.match_end];
+
+        const key = try vm.gc.allocString(key_str);
+        if (repl_table.get(key)) |val| {
+            if (val.asString()) |s| {
+                return s.asSlice();
+            }
+            // Convert to string if not nil/false
+            if (!val.isNil() and !(val.isBoolean() and !val.boolean)) {
+                // For simplicity, only handle string values
+                // Full implementation would call tostring
+                return null;
+            }
+        }
+        return null;
+    }
+
+    // Function replacement
+    if (repl_arg.asClosure() != null or repl_arg.asNativeClosure() != null) {
+        // Build arguments: captures or whole match
+        var args_buf: [32]TValue = undefined;
+        var arg_count: usize = 0;
+
+        if (matcher.capture_count > 0) {
+            // Pass captures as arguments
+            var i: u32 = 0;
+            while (i < matcher.capture_count and i < 32) : (i += 1) {
+                const cap = matcher.captures[i];
+                const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                args_buf[arg_count] = TValue.fromString(cap_str);
+                arg_count += 1;
+            }
+        } else {
+            // Pass whole match as argument
+            const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+            args_buf[0] = TValue.fromString(match_str);
+            arg_count = 1;
+        }
+
+        // Call the function
+        const result = call.callValue(vm, repl_arg, args_buf[0..arg_count]) catch |err| {
+            // If not callable, treat as nil replacement (keep original)
+            if (err == call.CallError.NotCallable) return null;
+            return err;
+        };
+
+        // Process result according to Lua 5.4 semantics:
+        // - nil/false: keep original match
+        // - string: use as replacement
+        // - number: convert to string
+        if (result.isNil()) return null;
+        if (result.isBoolean() and !result.boolean) return null;
+
+        if (result.asString()) |s| {
+            return s.asSlice();
+        }
+
+        // Convert number to string
+        if (result.toNumber()) |num| {
+            var buf: [64]u8 = undefined;
+            const num_str = if (result.isInteger())
+                std.fmt.bufPrint(&buf, "{d}", .{result.integer}) catch return null
+            else
+                std.fmt.bufPrint(&buf, "{d}", .{num}) catch return null;
+            const str_obj = try vm.gc.allocString(num_str);
+            return str_obj.asSlice();
+        }
+
+        // Other types: error (for now, return nil to keep original)
+        return null;
+    }
+
+    return null;
+}
+
+/// Expand %0-%9 capture references in replacement string
+fn expandGsubCaptures(
+    vm: anytype,
+    repl: []const u8,
+    str: []const u8,
+    matcher: *PatternMatcher,
+) ![]const u8 {
+    // Check if there are any % escapes
+    var has_escapes = false;
+    for (repl) |c| {
+        if (c == '%') {
+            has_escapes = true;
+            break;
+        }
+    }
+    if (!has_escapes) return repl;
+
+    // Expand escapes
+    const allocator = vm.allocator;
+    var result = try std.ArrayList(u8).initCapacity(allocator, repl.len);
+    defer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < repl.len) {
+        if (repl[i] == '%' and i + 1 < repl.len) {
+            const next = repl[i + 1];
+            if (next == '%') {
+                // %% -> literal %
+                try result.append(allocator, '%');
+                i += 2;
+            } else if (next >= '0' and next <= '9') {
+                // %0-%9 -> capture reference
+                const cap_idx = next - '0';
+                if (cap_idx == 0) {
+                    // %0 = whole match
+                    try result.appendSlice(allocator, str[matcher.match_start..matcher.match_end]);
+                } else if (cap_idx <= matcher.capture_count) {
+                    // %1-%9 = capture
+                    const cap = matcher.captures[cap_idx - 1];
+                    try result.appendSlice(allocator, str[cap.start..cap.end]);
+                }
+                i += 2;
+            } else {
+                // Invalid escape - keep as is
+                try result.append(allocator, repl[i]);
+                i += 1;
+            }
+        } else {
+            try result.append(allocator, repl[i]);
+            i += 1;
+        }
+    }
+
+    // Allocate result as GC string and return slice
+    const result_obj = try vm.gc.allocString(result.items);
+    return result_obj.asSlice();
 }
 
 /// string.format(formatstring, ...) - Returns formatted version of its variable number of arguments

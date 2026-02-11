@@ -2,6 +2,7 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
+const call = @import("../vm/call.zig");
 
 /// Lua 5.4 Table Library
 /// Corresponds to Lua manual chapter "Table Manipulation"
@@ -120,10 +121,8 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// table.sort(list [, comp]) - Sorts table elements in-place
 /// Uses < operator by default. Implements insertion sort for simplicity.
-///
-/// TODO: Custom comparator function (second argument) is not yet supported.
-///       Implementing this requires calling Lua functions from native code,
-///       which needs VM nested execution support.
+/// If comp is provided, it must be a function that takes two arguments
+/// and returns true if the first argument should come before the second.
 pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
@@ -132,6 +131,19 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
+
+    // Get optional comparator function
+    const comp: ?TValue = if (nargs >= 2) blk: {
+        const comp_arg = vm.stack[vm.base + func_reg + 2];
+        // Verify it's callable
+        if (comp_arg.asClosure() != null or comp_arg.asNativeClosure() != null) {
+            break :blk comp_arg;
+        }
+        if (!comp_arg.isNil()) {
+            return error.BadArgument; // comp must be function or nil
+        }
+        break :blk null;
+    } else null;
 
     const len = getTableLength(table, vm);
     if (len <= 1) return; // Already sorted
@@ -148,7 +160,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         elements.appendAssumeCapacity(val);
     }
 
-    // Insertion sort with default < comparison
+    // Insertion sort
     var j: usize = 1;
     while (j < elements.items.len) : (j += 1) {
         const current = elements.items[j];
@@ -158,23 +170,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             const prev = elements.items[k - 1];
 
             // Compare: is prev > current? (need to swap)
-            const should_swap = blk: {
-                // Compare numbers
-                if (prev.toNumber()) |prev_num| {
-                    if (current.toNumber()) |curr_num| {
-                        break :blk prev_num > curr_num;
-                    }
-                }
-                // Compare strings
-                if (prev.asString()) |prev_str| {
-                    if (current.asString()) |curr_str| {
-                        const cmp = std.mem.order(u8, prev_str.asSlice(), curr_str.asSlice());
-                        break :blk cmp == .gt;
-                    }
-                }
-                // Mixed types or incomparable - don't swap
-                break :blk false;
-            };
+            const should_swap = try compareForSort(vm, prev, current, comp);
 
             if (should_swap) {
                 elements.items[k] = prev;
@@ -196,6 +192,53 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     // table.sort returns nothing
+}
+
+/// Compare two values for sorting.
+/// Returns true if `a` should come AFTER `b` (i.e., need to swap).
+/// With custom comparator: returns true if NOT comp(a, b) AND comp(b, a)
+/// Default: returns true if a > b
+fn compareForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
+    if (comp) |comp_fn| {
+        // Call comparator with (a, b) - returns true if a < b
+        var args: [2]TValue = .{ a, b };
+        const result = call.callValue(vm, comp_fn, &args) catch |err| {
+            if (err == call.CallError.NotCallable) return false;
+            return err;
+        };
+
+        // If comp(a, b) is true, a should come before b, so don't swap
+        if (result.isBoolean() and result.boolean) {
+            return false;
+        }
+
+        // comp(a, b) is false or nil
+        // For stable sort behavior, only swap if comp(b, a) is true
+        args = .{ b, a };
+        const reverse = call.callValue(vm, comp_fn, &args) catch |err| {
+            if (err == call.CallError.NotCallable) return false;
+            return err;
+        };
+
+        return reverse.isBoolean() and reverse.boolean;
+    } else {
+        // Default comparison: a > b means swap
+        // Compare numbers
+        if (a.toNumber()) |a_num| {
+            if (b.toNumber()) |b_num| {
+                return a_num > b_num;
+            }
+        }
+        // Compare strings
+        if (a.asString()) |a_str| {
+            if (b.asString()) |b_str| {
+                const cmp = std.mem.order(u8, a_str.asSlice(), b_str.asSlice());
+                return cmp == .gt;
+            }
+        }
+        // Mixed types or incomparable - don't swap
+        return false;
+    }
 }
 
 /// table.concat(list [, sep [, start [, end]]]) - Concatenates table elements

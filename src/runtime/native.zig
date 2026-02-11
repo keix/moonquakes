@@ -58,6 +58,7 @@ pub const NativeFnId = enum(u8) {
     string_find,
     string_match,
     string_gmatch,
+    string_gmatch_iterator,
     string_gsub,
     string_format,
     string_dump,
