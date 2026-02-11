@@ -315,6 +315,10 @@ pub const Lexer = struct {
                 '.' => {
                     if (second_char == '.') {
                         _ = self.advance();
+                        // Check for three dots: ...
+                        if (self.pos < self.src.len and self.peek() == '.') {
+                            _ = self.advance();
+                        }
                     }
                 },
                 '/' => {

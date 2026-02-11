@@ -49,22 +49,19 @@ test "CLOSE opcode - no-op behavior" {
     try final_trace.expectRegisterUnchanged(2);
 }
 
-test "TBC opcode - no-op behavior" {
+test "TBC opcode - nil value (no-op)" {
     var vm = try test_utils.createTestVM();
     defer vm.deinit();
 
-    // Allocate string through GC
-    const test_str = try vm.gc.allocString("test");
-
-    // Initialize some registers
-    vm.stack[0] = TValue.fromString(test_str);
-    vm.stack[1] = .{ .integer = 100 };
+    // Initialize registers - nil is a valid TBC target that does nothing
+    vm.stack[0] = .{ .integer = 42 };
+    vm.stack[1] = .nil; // nil doesn't require __close
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
 
     const code = [_]Instruction{
         inst,
-        Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
     const proto = Proto{
@@ -75,18 +72,37 @@ test "TBC opcode - no-op behavior" {
         .maxstacksize = 3,
     };
 
-    const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const result = try Mnemonics.execute(&vm, &proto);
+    try testing.expect(result == .single);
+    try testing.expect(result.single.eql(.{ .integer = 42 }));
+}
+
+test "TBC opcode - false value (no-op)" {
+    var vm = try test_utils.createTestVM();
+    defer vm.deinit();
+
+    // false is also a valid TBC target that does nothing
+    vm.stack[0] = .{ .integer = 100 };
+    vm.stack[1] = .{ .boolean = false };
+
+    const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
+
+    const code = [_]Instruction{
+        inst,
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
+    };
+
+    const proto = Proto{
+        .k = &[_]TValue{},
+        .code = &code,
+        .numparams = 0,
+        .is_vararg = false,
+        .maxstacksize = 3,
+    };
 
     const result = try Mnemonics.execute(&vm, &proto);
-    try test_utils.ReturnTest.expectNone(result);
-
-    var final_trace = initial_trace;
-    final_trace.updateFinal(&vm, 3);
-
-    // TBC should be a no-op for now - all registers should be unchanged
-    try final_trace.expectRegisterUnchanged(0);
-    try final_trace.expectRegisterUnchanged(1);
-    try final_trace.expectRegisterUnchanged(2);
+    try testing.expect(result == .single);
+    try testing.expect(result.single.eql(.{ .integer = 100 }));
 }
 
 test "SETUPVAL opcode - no-op behavior" {
@@ -258,11 +274,12 @@ test "All new opcodes - integration test" {
     // Initialize registers
     vm.stack[0] = .{ .integer = 999 };
     vm.stack[1] = .{ .number = 2.71 };
+    vm.stack[2] = .nil; // TBC target (nil is valid without __close)
 
     const code = [_]Instruction{
         // Test all four new opcodes in sequence
         Instruction.initABC(.CLOSE, 1, 0, 0), // close from R[1] upward (no-op)
-        Instruction.initABC(.TBC, 0, 0, 0), // mark R[0] as to-be-closed (no-op)
+        Instruction.initABC(.TBC, 2, 0, 0), // mark R[2] (nil) as to-be-closed
         Instruction.initABC(.SETUPVAL, 1, 0, 0), // UpValue[0] := R[1] (no-op)
         Instruction.initABC(.SETTABUP, 0, 0, 0), // _ENV[K[0]] := R[0] (sets global)
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing

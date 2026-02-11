@@ -156,6 +156,10 @@ pub fn leOp(a: TValue, b: TValue) !bool {
 // ============================================================================
 
 pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+    return pushCallInfoVararg(vm, func, closure, base, ret_base, nresults, 0, 0);
+}
+
+pub fn pushCallInfoVararg(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16, vararg_base: u32, vararg_count: u32) !*CallInfo {
     if (vm.callstack_size >= vm.callstack.len) {
         return error.CallStackOverflow;
     }
@@ -168,6 +172,8 @@ pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base:
         .savedpc = null,
         .base = base,
         .ret_base = ret_base,
+        .vararg_base = vararg_base,
+        .vararg_count = vararg_count,
         .nresults = nresults,
         .previous = vm.ci,
     };
@@ -199,7 +205,11 @@ pub fn popCallInfo(vm: *VM) void {
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
 pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
     const proto = closure.proto;
-    const call_base = vm.top;
+    // Use a safe stack location that doesn't overlap with the caller's active stack.
+    // The caller's base + maxstacksize should be safe.
+    const caller_ci = vm.ci.?;
+    const safe_base = caller_ci.base + caller_ci.func.maxstacksize;
+    const call_base = @max(vm.top, safe_base);
     const result_slot = call_base;
 
     // Set up arguments
@@ -243,6 +253,43 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 // ============================================================================
 // Main Execution Loop
 // ============================================================================
+
+/// Close to-be-closed variables from the current frame
+/// Calls __close metamethod on TBC variables from highest to 'from_reg'
+fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
+    // Process TBC variables from high to low (reverse order)
+    var reg = ci.getHighestTBC(from_reg);
+    while (reg) |r| {
+        const val = vm.stack[vm.base + r];
+
+        // Get __close metamethod
+        if (try metamethod.getMetamethod(val, .close, &vm.gc)) |mm| {
+            // Call __close(val, nil) - second arg is error object (nil for normal close)
+            const saved_top = vm.top;
+
+            if (mm.asClosure()) |closure| {
+                // executeSyncMM handles stack setup using vm.top
+                _ = try executeSyncMM(vm, closure, &[_]TValue{ val, .nil });
+            } else if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                // Set up arguments for native call
+                const temp = vm.top;
+                vm.stack[temp] = val;
+                vm.stack[temp + 1] = .nil;
+                vm.top = temp + 2;
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0);
+            }
+            vm.top = saved_top;
+        }
+
+        // Clear TBC mark
+        ci.clearTBC(r);
+
+        // Get next TBC variable
+        if (r == 0) break;
+        reg = ci.getHighestTBC(from_reg);
+    }
+}
 
 fn setupMainFrame(vm: *VM, proto: *const Proto) void {
     vm.base_ci = CallInfo{
@@ -1236,10 +1283,31 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const new_base = vm.base + a;
                 const ret_base = vm.base + a;
 
+                // Calculate vararg info before shifting arguments
+                var vararg_base: u32 = 0;
+                var vararg_count: u32 = 0;
+
+                if (func_proto.is_vararg and nargs > func_proto.numparams) {
+                    // Store varargs at the end of the new frame
+                    vararg_count = nargs - func_proto.numparams;
+                    vararg_base = new_base + func_proto.maxstacksize;
+
+                    // Copy varargs to their storage location (after maxstacksize)
+                    // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
+                    // IMPORTANT: Copy backwards to handle overlapping regions (dest > src)
+                    var i: u32 = vararg_count;
+                    while (i > 0) {
+                        i -= 1;
+                        vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
+                    }
+                }
+
                 // Shift arguments down by 1 slot (overwrite function value)
                 // Note: regions overlap, so copy forward (src > dst)
-                if (nargs > 0) {
-                    for (0..nargs) |i| {
+                // Only copy fixed parameters, not varargs
+                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+                if (params_to_copy > 0) {
+                    for (0..params_to_copy) |i| {
                         vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
                     }
                 }
@@ -1251,9 +1319,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                _ = try pushCallInfo(vm, func_proto, closure, new_base, ret_base, nresults);
+                _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
 
-                vm.top = new_base + func_proto.maxstacksize;
+                // Extend top to include vararg storage if needed
+                const frame_top = new_base + func_proto.maxstacksize + vararg_count;
+                vm.top = frame_top;
                 return .LoopContinue;
             }
 
@@ -1270,6 +1340,140 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             return error.NotAFunction;
         },
+        // TAILCALL: Tail call optimization - reuse current frame
+        // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
+        .TAILCALL => {
+            const a = inst.getA();
+            const b = inst.getB();
+            const k = inst.getk();
+
+            const func_val = vm.stack[vm.base + a];
+            const current_ci = vm.ci.?;
+
+            // Close TBC variables if k flag is set
+            if (k) {
+                try closeTBCVariables(vm, current_ci, 0);
+            }
+
+            // Close upvalues before tail call
+            vm.closeUpvalues(current_ci.base);
+
+            // Handle Lua closure tail call
+            if (func_val.asClosure()) |closure| {
+                const func_proto = closure.proto;
+
+                const nargs: u32 = if (b > 0) b - 1 else blk: {
+                    const arg_start = vm.base + a + 1;
+                    break :blk vm.top - arg_start;
+                };
+
+                // For tail call, we reuse the current frame's ret_base and nresults
+                const ret_base = current_ci.ret_base;
+                const nresults = current_ci.nresults;
+
+                // Calculate new base - move everything to current frame's base
+                const new_base = current_ci.base;
+
+                // Calculate vararg info
+                var vararg_base: u32 = 0;
+                var vararg_count: u32 = 0;
+
+                if (func_proto.is_vararg and nargs > func_proto.numparams) {
+                    vararg_count = nargs - func_proto.numparams;
+                    vararg_base = new_base + func_proto.maxstacksize;
+
+                    // Copy varargs to storage location
+                    // Check overlap direction to determine copy order
+                    const src_start = vm.base + a + 1 + func_proto.numparams;
+                    if (vararg_base > src_start) {
+                        // Destination is after source - copy backwards
+                        var i: u32 = vararg_count;
+                        while (i > 0) {
+                            i -= 1;
+                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
+                        }
+                    } else {
+                        // Destination is before source - copy forwards
+                        for (0..vararg_count) |i| {
+                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
+                        }
+                    }
+                }
+
+                // Copy arguments to new_base (overwriting current frame's locals)
+                // Source: vm.base + a + 1 (first arg after function)
+                // Dest: new_base (start of frame)
+                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+                if (params_to_copy > 0) {
+                    // Copy forward since destination might overlap with source
+                    for (0..params_to_copy) |i| {
+                        vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
+                    }
+                }
+
+                // Fill remaining parameter slots with nil
+                if (nargs < func_proto.numparams) {
+                    for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                        slot.* = .nil;
+                    }
+                }
+
+                // Reuse current CallInfo instead of pushing new one
+                current_ci.func = func_proto;
+                current_ci.closure = closure;
+                current_ci.pc = func_proto.code.ptr;
+                current_ci.base = new_base;
+                current_ci.ret_base = ret_base;
+                current_ci.nresults = nresults;
+                current_ci.vararg_base = vararg_base;
+                current_ci.vararg_count = vararg_count;
+                current_ci.tbc_bitmap = 0; // Reset TBC tracking
+
+                vm.base = new_base;
+                vm.top = new_base + func_proto.maxstacksize + vararg_count;
+
+                return .LoopContinue;
+            }
+
+            // Handle native closure tail call (fall back to regular call + return)
+            if (func_val.isObject()) {
+                const obj = func_val.object;
+                if (obj.type == .native_closure) {
+                    const nc = object.getObject(NativeClosureObject, obj);
+                    const nargs: u32 = if (b > 0) b - 1 else blk: {
+                        const arg_start = vm.base + a + 1;
+                        break :blk vm.top - arg_start;
+                    };
+
+                    // For native tail calls, we call normally but adjust return handling
+                    const ret_base = current_ci.ret_base;
+                    const nresults = current_ci.nresults;
+
+                    vm.top = vm.base + a + 1 + nargs;
+                    // Native returns variable results, we'll handle them
+                    try vm.callNative(nc.func.id, a, nargs, if (nresults < 0) 1 else @intCast(nresults));
+
+                    // Pop current frame and copy results
+                    if (current_ci.previous != null) {
+                        const actual_nresults: u32 = if (nresults < 0) 1 else @intCast(nresults);
+
+                        // Copy results from vm.base + a to ret_base
+                        for (0..actual_nresults) |i| {
+                            vm.stack[ret_base + i] = vm.stack[vm.base + a + i];
+                        }
+
+                        popCallInfo(vm);
+                        vm.top = ret_base + actual_nresults;
+                        return .LoopContinue;
+                    }
+
+                    // Top-level native tail call - return to VM
+                    return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
+                }
+            }
+
+            return error.NotAFunction;
+        },
         .RETURN => {
             const a = inst.getA();
             const b = inst.getB();
@@ -1280,19 +1484,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
+
+                // Calculate actual return count
+                // B=0 means variable returns (from R[A] to top)
+                // B>0 means B-1 fixed returns
+                const ret_count: u32 = if (b == 0)
+                    vm.top - (returning_ci.base + a)
+                else if (b == 1)
+                    0
+                else
+                    b - 1;
 
                 // Protected frame: prepend true and shift results by 1
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
-                    if (b == 0) {
-                        return error.VariableReturnNotImplemented;
-                    } else if (b == 1) {
+                    if (ret_count == 0) {
                         // No return values from function
                         vm.top = dst_base + 1;
                     } else {
-                        const ret_count: u32 = b - 1;
                         // Copy return values to dst_base + 1
                         for (0..ret_count) |i| {
                             vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
@@ -1302,9 +1515,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return .LoopContinue;
                 }
 
-                if (b == 0) {
-                    return error.VariableReturnNotImplemented;
-                } else if (b == 1) {
+                if (ret_count == 0) {
                     // No return values - fill expected slots with nil
                     if (nresults > 0) {
                         const n: usize = @intCast(nresults);
@@ -1312,45 +1523,48 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
-                } else {
-                    const ret_count: u32 = b - 1;
-
-                    if (nresults < 0) {
-                        // Variable results - copy all return values
-                        // Note: regions may overlap, copy forward (src >= dst)
-                        for (0..ret_count) |i| {
-                            vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                        }
-                        vm.top = dst_base + ret_count;
-                    } else {
-                        // Fixed results - copy available values, fill rest with nil
-                        const n: u32 = @intCast(nresults);
-                        const copy_count = @min(ret_count, n);
-                        for (0..copy_count) |i| {
-                            vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                        }
-                        if (n > copy_count) {
-                            for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
-                                slot.* = .nil;
-                            }
-                        }
-                        // Update vm.top to reflect actual stack usage after return
-                        vm.top = dst_base + n;
+                } else if (nresults < 0) {
+                    // Variable results - copy all return values
+                    // Note: regions may overlap, copy forward (src >= dst)
+                    for (0..ret_count) |i| {
+                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
                     }
+                    vm.top = dst_base + ret_count;
+                } else {
+                    // Fixed results - copy available values, fill rest with nil
+                    const n: u32 = @intCast(nresults);
+                    const copy_count = @min(ret_count, n);
+                    for (0..copy_count) |i| {
+                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
+                    }
+                    if (n > copy_count) {
+                        for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
+                            slot.* = .nil;
+                        }
+                    }
+                    // Update vm.top to reflect actual stack usage after return
+                    vm.top = dst_base + n;
                 }
 
                 return .LoopContinue;
             }
 
-            if (b == 0) {
+            // Top-level return (no previous call frame)
+            // Close TBC variables before returning
+            try closeTBCVariables(vm, vm.ci.?, 0);
+            const ret_count: u32 = if (b == 0)
+                vm.top - (vm.base + a)
+            else if (b == 1)
+                0
+            else
+                b - 1;
+
+            if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
-            } else if (b == 1) {
-                return .{ .ReturnVM = .none };
-            } else if (b == 2) {
+            } else if (ret_count == 1) {
                 return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
             } else {
-                const count = b - 1;
-                const values = vm.stack[vm.base + a .. vm.base + a + count];
+                const values = vm.stack[vm.base + a .. vm.base + a + ret_count];
                 return .{ .ReturnVM = .{ .multiple = values } };
             }
         },
@@ -1361,6 +1575,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
@@ -1382,6 +1598,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Top-level return - close TBC variables
+            try closeTBCVariables(vm, vm.ci.?, 0);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -1393,6 +1611,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
 
+                // Close TBC variables before returning (Lua 5.4)
+                try closeTBCVariables(vm, vm.ci.?, 0);
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
@@ -1421,6 +1641,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Top-level return - close TBC variables
+            try closeTBCVariables(vm, vm.ci.?, 0);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
@@ -1632,6 +1854,31 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a] = TValue.fromTable(table);
             return .Continue;
         },
+        // [MM_INDEX] SELF: Prepare for method call. R[A+1] := R[B]; R[A] := R[B][K[C]]
+        .SELF => {
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+            const obj = vm.stack[vm.base + b];
+
+            // R[A+1] := R[B] (copy object for self parameter)
+            vm.stack[vm.base + a + 1] = obj;
+
+            // R[A] := R[B][K[C]] (get method from object)
+            const key_val = ci.func.k[c];
+            if (obj.asTable()) |table| {
+                if (key_val.asString()) |key| {
+                    if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
+                        return result;
+                    }
+                } else {
+                    return error.InvalidTableOperation;
+                }
+            } else {
+                return error.InvalidTableOperation;
+            }
+            return .Continue;
+        },
         // [MM_EQ] Fast path: equality with constant. Slow path: __eq metamethod.
         .EQK => {
             const a = inst.getA();
@@ -1753,28 +2000,56 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         .CLOSE => {
             const a = inst.getA();
+            // First, call __close on any TBC variables from top down to 'a'
+            try closeTBCVariables(vm, ci, a);
+            // Then close upvalues
             vm.closeUpvalues(vm.base + a);
             return .Continue;
         },
         .TBC => {
+            // TBC A: Mark R[A] as to-be-closed
+            // The value must have a __close metamethod or be false/nil
             const a = inst.getA();
-            _ = a;
+            const val = vm.stack[vm.base + a];
+
+            // nil and false don't need __close (they're valid but do nothing)
+            if (val.isNil() or (val.isBoolean() and !val.toBoolean())) {
+                // No need to mark, these are valid but won't call __close
+                return .Continue;
+            }
+
+            // Check that value has __close metamethod
+            if (try metamethod.getMetamethod(val, .close, &vm.gc) == null) {
+                return error.NoCloseMetamethod;
+            }
+
+            // Mark this register as to-be-closed
+            ci.markTBC(a);
             return .Continue;
         },
         .SETLIST => {
             // SETLIST A B C k: R[A][(C-1)*FPF+i] := R[A+i], 1 <= i <= B
             // FPF (Fields Per Flush) = 50 in Lua 5.4
+            // Special case: when k=1 and C=0, EXTRAARG contains direct start index
             const FIELDS_PER_FLUSH: u32 = 50;
 
             const a = inst.getA();
             const b = inst.getB();
+            const c_raw = inst.getC();
             const k = inst.getk();
 
-            // Get C value - if k is set, use next EXTRAARG instruction
-            const c: u32 = if (k) blk: {
+            // Calculate starting index
+            const start_index: i64 = if (k) blk: {
                 const extraarg_inst = try ci.fetchExtraArg();
-                break :blk extraarg_inst.getAx();
-            } else inst.getC();
+                const ax = extraarg_inst.getAx();
+                if (c_raw == 0) {
+                    // Direct index mode: EXTRAARG is the start index
+                    break :blk @as(i64, ax);
+                } else {
+                    // Large batch mode: EXTRAARG is the batch number
+                    break :blk @as(i64, (ax - 1) * FIELDS_PER_FLUSH) + 1;
+                }
+            } else @as(i64, (c_raw - 1) * FIELDS_PER_FLUSH) + 1;
 
             // Get table from R[A]
             const table_val = vm.stack[vm.base + a];
@@ -1783,10 +2058,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Calculate number of values to set
             // B=0 means use top - (base + a + 1) values
             const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
-
-            // Calculate starting index (Lua uses 1-based indexing)
-            // c is 1-based block number, so first index = (c-1)*FPF + 1
-            const start_index: i64 = @as(i64, (c - 1) * FIELDS_PER_FLUSH) + 1;
 
             // Set values R[A+1], R[A+2], ..., R[A+n] into table
             var key_buffer: [32]u8 = undefined;
@@ -1885,13 +2156,132 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         .MMBINI => {
             // MMBINI A sB C k: metamethod for binary op with immediate
-            // TODO: Implement immediate metamethod dispatch
-            return error.UnknownOpcode;
+            // A = register operand, sB = signed immediate, C = metamethod event
+            // k = operand order: k=0 means R[A] op sB, k=1 means sB op R[A]
+            const a = inst.getA();
+            const sb = @as(i8, @bitCast(inst.getB()));
+            const c = inst.getC();
+            const k = inst.getk();
+
+            const va = vm.stack[vm.base + a];
+            const vb = TValue{ .integer = @as(i64, sb) };
+
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+
+            // Determine operand order based on k flag
+            const left = if (k) vb else va;
+            const right = if (k) va else vb;
+
+            // Try to get metamethod from either operand
+            const mm = try metamethod.getBinMetamethod(left, right, event, &vm.gc) orelse {
+                return error.ArithmeticError;
+            };
+
+            // Call the metamethod: mm(left, right) -> result at a
+            const temp = vm.top;
+            vm.stack[temp] = mm;
+            vm.stack[temp + 1] = left;
+            vm.stack[temp + 2] = right;
+            vm.top = temp + 3;
+
+            if (mm.asClosure()) |closure| {
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                return .LoopContinue;
+            }
+
+            if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                vm.stack[vm.base + a] = vm.stack[temp];
+                vm.top = temp;
+                return .Continue;
+            }
+
+            return error.NotAFunction;
         },
         .MMBINK => {
             // MMBINK A B C k: metamethod for binary op with constant
-            // TODO: Implement constant metamethod dispatch
-            return error.UnknownOpcode;
+            // A = register operand, B = constant index, C = metamethod event
+            // k = operand order: k=0 means R[A] op K[B], k=1 means K[B] op R[A]
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+            const k = inst.getk();
+
+            const va = vm.stack[vm.base + a];
+            const vb = ci.func.k[b];
+
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+
+            // Determine operand order based on k flag
+            const left = if (k) vb else va;
+            const right = if (k) va else vb;
+
+            // Try to get metamethod from either operand
+            const mm = try metamethod.getBinMetamethod(left, right, event, &vm.gc) orelse {
+                return error.ArithmeticError;
+            };
+
+            // Call the metamethod: mm(left, right) -> result at a
+            const temp = vm.top;
+            vm.stack[temp] = mm;
+            vm.stack[temp + 1] = left;
+            vm.stack[temp + 2] = right;
+            vm.top = temp + 3;
+
+            if (mm.asClosure()) |closure| {
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                return .LoopContinue;
+            }
+
+            if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                vm.stack[vm.base + a] = vm.stack[temp];
+                vm.top = temp;
+                return .Continue;
+            }
+
+            return error.NotAFunction;
+        },
+        .VARARG => {
+            // VARARG A C: Load varargs into R[A], R[A+1], ..., R[A+C-2]
+            // If C=0, load all varargs and set top
+            const a = inst.getA();
+            const c = inst.getC();
+
+            const vararg_base = ci.vararg_base;
+            const vararg_count = ci.vararg_count;
+
+            if (c == 0) {
+                // Load all varargs, set top accordingly
+                for (0..vararg_count) |i| {
+                    vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+                }
+                vm.top = vm.base + a + vararg_count;
+            } else {
+                // Load exactly c-1 values
+                const want: u32 = c - 1;
+                for (0..want) |i| {
+                    if (i < vararg_count) {
+                        vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+                    } else {
+                        // Fill with nil if not enough varargs
+                        vm.stack[vm.base + a + i] = .nil;
+                    }
+                }
+            }
+            return .Continue;
+        },
+        .VARARGPREP => {
+            // VARARGPREP A: Prepare vararg function with A fixed parameters
+            // In our implementation, CALL already handles vararg setup,
+            // so this is mostly a no-op for verification
+            const a = inst.getA();
+            _ = a; // numparams - could verify ci.func.numparams == a
+            return .Continue;
         },
         .EXTRAARG => {
             return error.UnknownOpcode;
@@ -1992,8 +2382,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
             return .Continue;
         },
-
-        else => return error.UnknownOpcode,
+        // All opcodes now implemented - no else branch needed
     }
 }
 
