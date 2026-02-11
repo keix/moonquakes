@@ -54,6 +54,10 @@ pub fn callValue(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValu
 /// Call a native closure with arguments.
 /// Native closures use a different calling convention than Lua closures.
 fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) anyerror!TValue {
+    // GC SAFETY: Save caller's frame state for restoration after call
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
     const call_base = vm.top;
     const result_slot = call_base;
 
@@ -64,18 +68,34 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
         vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
     }
 
+    // Set vm.base to call_base so native function sees correct stack layout
+    // (native functions use vm.base + func_reg to access their frame)
+    vm.base = call_base;
     vm.top = call_base + 1 + @as(u32, @intCast(args.len));
 
-    // Call native function
+    // Call native function (func_reg = 0 relative to new vm.base)
     try vm.callNative(nc.func.id, 0, @intCast(args.len), 1);
 
-    return vm.stack[result_slot];
+    // Get result before restoring frame state
+    const result = vm.stack[result_slot];
+
+    // GC SAFETY: Restore caller's frame state
+    // This ensures the caller's full stack frame is visible to GC
+    vm.base = saved_base;
+    vm.top = saved_top;
+
+    return result;
 }
 
 /// Call a Lua closure with arguments.
 /// Executes synchronously until the function returns.
 fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
     const proto = closure.proto;
+
+    // GC SAFETY: Save caller's frame state for restoration after call
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
     const call_base = vm.top;
     const result_slot = call_base;
 
@@ -92,18 +112,24 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
 
     vm.top = call_base + proto.maxstacksize;
 
-    // Execute until return
-    return runUntilReturn(vm, proto, closure, call_base, result_slot);
+    // Execute until return, then restore caller's frame state
+    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
 }
 
 /// Execute a Lua function until it returns to saved call depth.
 /// This is the core reentrant execution loop.
+///
+/// GC Safety: saved_base and saved_top are the caller's frame state,
+/// which must be restored after the call completes to ensure the caller's
+/// full stack frame is visible to GC.
 fn runUntilReturn(
     vm: *VM,
     proto: *const @import("../compiler/proto.zig").Proto,
     closure: *ClosureObject,
     call_base: u32,
     result_slot: u32,
+    saved_base: u32,
+    saved_top: u32,
 ) anyerror!TValue {
     // Save current call depth for reentrancy
     const saved_depth = vm.callstack_size;
@@ -115,10 +141,18 @@ fn runUntilReturn(
     while (vm.callstack_size > saved_depth) {
         const ci = &vm.callstack[vm.callstack_size - 1];
         const inst = ci.fetch() catch {
-            // End of function - clean up
-            vm.base = ci.ret_base;
-            vm.top = ci.ret_base + 1;
+            // End of function - pop this frame
             mnemonics.popCallInfo(vm);
+
+            // If we're back to the original depth, restore caller's frame
+            if (vm.callstack_size == saved_depth) {
+                break;
+            }
+
+            // Otherwise, restore to the previous frame in the callstack
+            const prev_ci = &vm.callstack[vm.callstack_size - 1];
+            vm.base = prev_ci.ret_base;
+            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
             continue;
         };
         switch (try mnemonics.do(vm, inst)) {
@@ -128,5 +162,12 @@ fn runUntilReturn(
         }
     }
 
-    return vm.stack[result_slot];
+    // Get result before restoring frame state
+    const result = vm.stack[result_slot];
+
+    // GC SAFETY: Restore caller's frame state
+    vm.base = saved_base;
+    vm.top = saved_top;
+
+    return result;
 }

@@ -1761,6 +1761,53 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             _ = a;
             return .Continue;
         },
+        .SETLIST => {
+            // SETLIST A B C k: R[A][(C-1)*FPF+i] := R[A+i], 1 <= i <= B
+            // FPF (Fields Per Flush) = 50 in Lua 5.4
+            const FIELDS_PER_FLUSH: u32 = 50;
+
+            const a = inst.getA();
+            const b = inst.getB();
+            const k = inst.getk();
+
+            // Get C value - if k is set, use next EXTRAARG instruction
+            const c: u32 = if (k) blk: {
+                const extraarg_inst = try ci.fetchExtraArg();
+                break :blk extraarg_inst.getAx();
+            } else inst.getC();
+
+            // Get table from R[A]
+            const table_val = vm.stack[vm.base + a];
+            const table = table_val.asTable() orelse return error.InvalidTableOperation;
+
+            // Calculate number of values to set
+            // B=0 means use top - (base + a + 1) values
+            const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
+
+            // Calculate starting index (Lua uses 1-based indexing)
+            // c is 1-based block number, so first index = (c-1)*FPF + 1
+            const start_index: i64 = @as(i64, (c - 1) * FIELDS_PER_FLUSH) + 1;
+
+            // Set values R[A+1], R[A+2], ..., R[A+n] into table
+            var key_buffer: [32]u8 = undefined;
+            for (0..n) |i| {
+                const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                const index: i64 = start_index + @as(i64, @intCast(i));
+
+                // Convert integer index to string key
+                const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{index}) catch {
+                    return error.InvalidTableOperation;
+                };
+                const key = try vm.gc.allocString(key_slice);
+
+                // Use dispatchNewindexMM to handle potential metamethods
+                if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
+                    return result;
+                }
+            }
+
+            return .Continue;
+        },
         .CLOSURE => {
             const a = inst.getA();
             const bx = inst.getBx();
