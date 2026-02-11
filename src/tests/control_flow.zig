@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -15,6 +16,9 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "control flow: JMP forward" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 1 },
         .{ .integer = 2 },
@@ -27,22 +31,16 @@ test "control flow: JMP forward" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
 
 test "control flow: JMP 0 goes to next instruction" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 0 },
         .{ .integer = 1 },
@@ -59,22 +57,16 @@ test "control flow: JMP 0 goes to next instruction" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 4,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
 
 test "control flow: JMP out of bounds should error" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 0 },
     };
@@ -86,22 +78,16 @@ test "control flow: JMP out of bounds should error" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (never reached)
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = Mnemonics.execute(&vm, proto);
 
     try testing.expectError(error.PcOutOfRange, result);
 }
 
 test "control flow: JMP backward (real loop)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 0 }, // counter
         .{ .integer = 1 }, // increment
@@ -121,22 +107,16 @@ test "control flow: JMP backward (real loop)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // 7: return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 }
 
 test "control flow: TEST with true value" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .boolean = true },
         .{ .integer = 1 },
@@ -151,22 +131,16 @@ test "control flow: TEST with true value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
 
 test "control flow: TEST with false value" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .boolean = false },
         .{ .integer = 1 },
@@ -181,22 +155,16 @@ test "control flow: TEST with false value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
 
 test "control flow: TEST with k=true (inverted)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .boolean = false },
         .{ .integer = 1 },
@@ -211,22 +179,16 @@ test "control flow: TEST with k=true (inverted)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
 
 test "control flow: TESTSET with true value" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .boolean = true },
         .{ .integer = 99 },
@@ -240,23 +202,17 @@ test "control flow: TESTSET with true value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // TESTSET should not have copied, R1 is replaced with 99 again
     try expectSingleResult(result, TValue{ .integer = 99 });
 }
 
 test "control flow: if-then-else simulation" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 5 },
         .{ .integer = 10 },
@@ -281,17 +237,8 @@ test "control flow: if-then-else simulation" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 100 });
 }

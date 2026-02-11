@@ -8,7 +8,9 @@ const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
-const Proto = @import("../../compiler/proto.zig").Proto;
+const ProtoObject = object.ProtoObject;
+const Upvaldesc = object.Upvaldesc;
+const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 
@@ -190,7 +192,7 @@ pub const GC = struct {
     }
 
     /// Allocate a new closure object with upvalues array
-    pub fn allocClosure(self: *GC, proto: *const Proto) !*ClosureObject {
+    pub fn allocClosure(self: *GC, proto: *ProtoObject) !*ClosureObject {
         const obj = try self.allocObject(ClosureObject, 0);
 
         // Initialize GC header
@@ -205,6 +207,45 @@ pub const GC = struct {
         } else {
             obj.upvalues = &.{};
         }
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
+    /// Allocate a new proto object
+    /// Creates a GC-managed function prototype from materialized data
+    pub fn allocProto(
+        self: *GC,
+        k: []const TValue,
+        code: []const Instruction,
+        protos: []const *ProtoObject,
+        numparams: u8,
+        is_vararg: bool,
+        maxstacksize: u8,
+        nups: u8,
+        upvalues: []const Upvaldesc,
+    ) !*ProtoObject {
+        const obj = try self.allocObject(ProtoObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.proto, self.objects);
+        obj.k = k;
+        obj.code = code;
+        obj.protos = protos;
+        obj.numparams = numparams;
+        obj.is_vararg = is_vararg;
+        obj.maxstacksize = maxstacksize;
+        obj.nups = nups;
+        obj.upvalues = upvalues;
+        obj.allocator = self.allocator;
+
+        // Track memory for arrays (allocated by materialize)
+        self.bytes_allocated += k.len * @sizeOf(TValue);
+        self.bytes_allocated += code.len * @sizeOf(Instruction);
+        self.bytes_allocated += protos.len * @sizeOf(*ProtoObject);
+        self.bytes_allocated += upvalues.len * @sizeOf(Upvaldesc);
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -280,22 +321,12 @@ pub const GC = struct {
         // Immediate values (nil, bool, integer, number) don't need marking
     }
 
-    /// Mark proto constants recursively (including nested protos)
+    /// Mark a ProtoObject (GC-managed prototype)
     ///
-    /// GC SAFETY: This function marks both proto.k (constants) AND proto.protos
-    /// (nested function prototypes). Nested protos contain their own constants
-    /// which must be marked, otherwise inner function literals become invalid.
-    ///
-    /// Called from:
-    /// - vm.collectGarbage(): marks base_ci and callstack frames
-    /// - markObject(.closure): marks closure.proto recursively
-    pub fn markProto(self: *GC, proto: *const Proto) void {
-        for (proto.k) |value| {
-            self.markValue(value);
-        }
-        for (proto.protos) |child| {
-            self.markProto(child);
-        }
+    /// GC SAFETY: This function marks the proto itself, its constants (k),
+    /// and nested ProtoObjects. All are now GC-managed.
+    pub fn markProtoObject(self: *GC, proto: *ProtoObject) void {
+        markObject(self, &proto.header);
     }
 
     /// Mark an object and recursively mark its children
@@ -331,8 +362,8 @@ pub const GC = struct {
                 for (closure.upvalues) |upval| {
                     markObject(self, &upval.header);
                 }
-                // Mark proto constants (including nested protos)
-                self.markProto(closure.proto);
+                // Mark proto (GC-managed)
+                self.markProtoObject(closure.proto);
             },
             .native_closure => {
                 // Native closures have no references to other objects
@@ -346,6 +377,17 @@ pub const GC = struct {
             },
             .userdata => {
                 // Basic userdata has no references
+            },
+            .proto => {
+                const proto: *ProtoObject = @fieldParentPtr("header", obj);
+                // Mark constants (may contain GC objects like strings)
+                for (proto.k) |value| {
+                    self.markValue(value);
+                }
+                // Mark nested protos
+                for (proto.protos) |nested| {
+                    markObject(self, &nested.header);
+                }
             },
         }
     }
@@ -433,6 +475,31 @@ pub const GC = struct {
             },
             .userdata => {
                 // TODO: Implement when userdata is available
+            },
+            .proto => {
+                const proto_obj: *ProtoObject = @fieldParentPtr("header", obj);
+                // Free internal arrays (allocated by materialize)
+                if (proto_obj.k.len > 0) {
+                    self.bytes_allocated -= proto_obj.k.len * @sizeOf(TValue);
+                    self.allocator.free(proto_obj.k);
+                }
+                if (proto_obj.code.len > 0) {
+                    self.bytes_allocated -= proto_obj.code.len * @sizeOf(Instruction);
+                    self.allocator.free(proto_obj.code);
+                }
+                if (proto_obj.protos.len > 0) {
+                    self.bytes_allocated -= proto_obj.protos.len * @sizeOf(*ProtoObject);
+                    self.allocator.free(proto_obj.protos);
+                }
+                if (proto_obj.upvalues.len > 0) {
+                    self.bytes_allocated -= proto_obj.upvalues.len * @sizeOf(Upvaldesc);
+                    self.allocator.free(proto_obj.upvalues);
+                }
+                // Free the ProtoObject itself
+                const size = @sizeOf(ProtoObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(proto_obj))[0..size];
+                self.allocator.free(memory);
             },
         }
     }
@@ -690,30 +757,34 @@ test "markValue marks closure" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
 
-    // Create a minimal Proto for testing
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &[_]@import("../../compiler/opcodes.zig").Instruction{},
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
+    // Allocate a minimal ProtoObject via GC
+    const proto = try gc.allocProto(
+        &[_]TValue{},
+        &[_]Instruction{},
+        &[_]*ProtoObject{},
+        0,
+        false,
+        1,
+        0,
+        &[_]Upvaldesc{},
+    );
 
     // Allocate a closure
-    const closure = try gc.allocClosure(&proto);
+    const closure = try gc.allocClosure(proto);
     const garbage = try gc.allocString("not referenced");
     _ = garbage;
 
     const stats_before = gc.getStats();
-    try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
+    // proto + closure + garbage string = 3 objects
+    try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
 
-    // Mark the closure via TValue
+    // Mark the closure via TValue (should also mark proto transitively)
     gc.markValue(TValue.fromClosure(closure));
 
     // Run GC
     gc.sweep();
 
-    // Closure should survive, garbage string should be collected
+    // Closure and proto should survive, garbage string should be collected
     const stats_after = gc.getStats();
-    try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
+    try std.testing.expectEqual(@as(usize, 2), stats_after.object_count);
 }

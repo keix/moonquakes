@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 fn expectError(result: anyerror!ReturnValue, expected_error: anyerror) !void {
     if (result) |_| {
@@ -18,6 +19,9 @@ fn expectError(result: anyerror!ReturnValue, expected_error: anyerror) !void {
 }
 
 test "DIV: division by zero (integer)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 10 },
         .{ .integer = 0 },
@@ -30,22 +34,16 @@ test "DIV: division by zero (integer)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "DIV: division by zero (float)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = 10.5 },
         .{ .number = 0.0 },
@@ -58,22 +56,16 @@ test "DIV: division by zero (float)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "IDIV: integer division by zero" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 20 },
         .{ .integer = 0 },
@@ -86,22 +78,16 @@ test "IDIV: integer division by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "MOD: modulo by zero" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 15 },
         .{ .integer = 0 },
@@ -114,22 +100,16 @@ test "MOD: modulo by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "DIVK: division by zero constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 25 },
         .{ .number = 0.0 },
@@ -141,22 +121,16 @@ test "DIVK: division by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "IDIVK: integer division by zero constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 30 },
         .{ .integer = 0 },
@@ -168,22 +142,16 @@ test "IDIVK: integer division by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "MODK: modulo by zero constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 35 },
         .{ .integer = 0 },
@@ -195,22 +163,16 @@ test "MODK: modulo by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "Division operations with non-zero divisors should succeed" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 20 },
         .{ .integer = 4 },
@@ -225,17 +187,8 @@ test "Division operations with non-zero divisors should succeed" {
         Instruction.initABC(.RETURN, 2, 4, 0), // return R2, R3, R4
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);

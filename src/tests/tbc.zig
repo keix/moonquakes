@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
+
+const test_utils = @import("test_utils.zig");
 
 test "TBC with nil - no error" {
     var vm = try VM.init(testing.allocator);
@@ -21,15 +22,9 @@ test "TBC with nil - no error" {
         Instruction.initABC(.RETURN, 1, 2, 0), // Return 42
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 42 }));
 }
@@ -46,15 +41,9 @@ test "TBC with false - no error" {
         Instruction.initABC(.RETURN, 1, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 100 }));
 }
@@ -71,15 +60,9 @@ test "TBC with value without __close - error" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.NoCloseMetamethod, result);
 }
 
@@ -96,15 +79,9 @@ test "TBC with table without __close - error" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.NoCloseMetamethod, result);
 }
 
@@ -137,14 +114,8 @@ test "CLOSE triggers TBC __close" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
 }

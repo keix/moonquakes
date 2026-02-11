@@ -9,12 +9,12 @@
 
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const OpCode = opcodes.OpCode;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
+const ProtoObject = object.ProtoObject;
 
 // ============================================================================
 // Execution Results
@@ -40,7 +40,7 @@ pub const ExecuteResult = union(enum) {
 /// CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
     // Function info
-    func: *const Proto,
+    func: *const ProtoObject,
     closure: ?*ClosureObject, // closure for upvalue access (null for main chunk)
 
     // Execution state

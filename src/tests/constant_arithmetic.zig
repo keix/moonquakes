@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
@@ -10,12 +9,17 @@ const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const OpCode = opcodes.OpCode;
 
+const test_utils = @import("test_utils.zig");
+
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));
 }
 
 test "ADDK: integer + integer constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 10 },
         .{ .integer = 25 },
@@ -27,22 +31,16 @@ test "ADDK: integer + integer constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 35 });
 }
 
 test "ADDK: number + number constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = 10.5 },
         .{ .number = 2.25 },
@@ -54,22 +52,16 @@ test "ADDK: number + number constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 12.75 });
 }
 
 test "SUBK: integer - integer constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 50 },
         .{ .integer = 15 },
@@ -81,22 +73,16 @@ test "SUBK: integer - integer constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 35 });
 }
 
 test "MULK: integer * integer constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 7 },
         .{ .integer = 6 },
@@ -108,22 +94,16 @@ test "MULK: integer * integer constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
 
 test "DIVK: number / number constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = 100.0 },
         .{ .number = 4.0 },
@@ -135,22 +115,16 @@ test "DIVK: number / number constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
 }
 
 test "IDIVK: integer // constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 17 },
         .{ .integer = 5 },
@@ -162,22 +136,16 @@ test "IDIVK: integer // constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 3.0 });
 }
 
 test "MODK: integer % constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 17 },
         .{ .integer = 5 },
@@ -189,22 +157,16 @@ test "MODK: integer % constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 2.0 });
 }
 
 test "Constant arithmetic: mixed types" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 10 },
         .{ .number = 2.5 },
@@ -216,22 +178,16 @@ test "Constant arithmetic: mixed types" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
 }
 
 test "Constant arithmetic: chain operations" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 100 },
         .{ .integer = 10 },
@@ -245,22 +201,16 @@ test "Constant arithmetic: chain operations" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 30.0 });
 }
 
 test "MODK: Lua-style negative modulo" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = -7.0 },
         .{ .number = 5.0 },
@@ -272,22 +222,16 @@ test "MODK: Lua-style negative modulo" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 3.0 });
 }
 
 test "IDIVK: Lua-style floor division with negative" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = -7.0 },
         .{ .number = 5.0 },
@@ -299,22 +243,16 @@ test "IDIVK: Lua-style floor division with negative" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = -2.0 });
 }
 
 test "POWK: power with constant" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .number = 3.0 },
         .{ .number = 4.0 },
@@ -326,22 +264,16 @@ test "POWK: power with constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 81.0 });
 }
 
 test "POWK: integer base with constant exponent" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 2 },
         .{ .integer = 5 },
@@ -353,17 +285,8 @@ test "POWK: integer base with constant exponent" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 32.0 });
 }

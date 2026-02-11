@@ -3,7 +3,6 @@ const testing = std.testing;
 const test_utils = @import("test_utils.zig");
 const Mnemonics = @import("../vm/mnemonics.zig");
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -25,15 +24,9 @@ test "LOADKX with EXTRAARG loads large constant index" {
         Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
     };
 
-    var proto = Proto{
-        .code = &instructions,
-        .k = &constants,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 10,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
 
-    _ = try Mnemonics.execute(&vm, &proto);
+    _ = try Mnemonics.execute(&vm, proto);
 
     // Verify R[0] contains the constant value from index 5
     try test_utils.expectRegister(&vm, 0, .{ .integer = 42 });
@@ -54,16 +47,10 @@ test "GETI with nil table returns error" {
         Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
     };
 
-    var proto = Proto{
-        .code = &instructions,
-        .k = &constants,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 10,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
 
     // Should return InvalidTableOperation since R[0] is nil
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expect(std.meta.isError(result));
     // Note: We can't test specific error type without proper error handling
 }
@@ -86,16 +73,10 @@ test "GETFIELD with nil table returns error" {
         Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
     };
 
-    var proto = Proto{
-        .code = &instructions,
-        .k = &constants,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 10,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
 
     // Should return InvalidTableOperation since R[0] is nil
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expect(std.meta.isError(result));
 }
 
@@ -131,15 +112,9 @@ test "Multiple LOADKX operations" {
         Instruction.initABC(.RETURN, 0, 1, 0), // Return with no values
     };
 
-    var proto = Proto{
-        .code = &instructions,
-        .k = &constants,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 10,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
 
-    _ = try Mnemonics.execute(&vm, &proto);
+    _ = try Mnemonics.execute(&vm, proto);
 
     // Verify all loaded values
     try test_utils.expectRegisters(&vm, 0, &[_]TValue{

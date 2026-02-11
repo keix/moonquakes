@@ -2,11 +2,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 test "TAILCALL - basic structure" {
     var vm = try VM.init(testing.allocator);
@@ -23,15 +24,9 @@ test "TAILCALL - basic structure" {
         Instruction.initABC(.TAILCALL, 0, 1, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
     // Should fail because integer is not a function
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.NotAFunction, result);
 }

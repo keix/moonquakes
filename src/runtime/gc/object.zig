@@ -1,5 +1,7 @@
 const std = @import("std");
-const Proto = @import("../../compiler/proto.zig").Proto;
+const proto_mod = @import("../../compiler/proto.zig");
+pub const Instruction = @import("../../compiler/opcodes.zig").Instruction;
+pub const Upvaldesc = proto_mod.Upvaldesc;
 
 /// Types of GC-managed objects
 pub const GCObjectType = enum(u8) {
@@ -9,6 +11,7 @@ pub const GCObjectType = enum(u8) {
     native_closure,
     upvalue,
     userdata,
+    proto,
 };
 
 /// Common header for all GC-managed objects
@@ -135,14 +138,14 @@ pub const TableObject = struct {
 
 /// Closure Object - GC-managed function instance
 ///
-/// Wraps a Proto (bytecode) with upvalues for captured variables.
+/// Wraps a ProtoObject (bytecode) with upvalues for captured variables.
 pub const ClosureObject = struct {
     header: GCObject,
-    proto: *const Proto,
+    proto: *ProtoObject,
     upvalues: []*UpvalueObject,
 
-    /// Get the underlying Proto
-    pub fn getProto(self: *const ClosureObject) *const Proto {
+    /// Get the underlying ProtoObject
+    pub fn getProto(self: *const ClosureObject) *ProtoObject {
         return self.proto;
     }
 };
@@ -199,6 +202,39 @@ pub const UpvalueObject = struct {
     pub fn set(self: *UpvalueObject, value: TValue) void {
         self.location.* = value;
     }
+};
+
+/// Proto Object - GC-managed function prototype
+///
+/// Contains bytecode, constants, and metadata for Lua functions.
+/// Previously allocated via raw allocator, now GC-managed for proper lifecycle.
+///
+/// Lua semantics: Proto contains TValues (constants) and nested ProtoObjects,
+/// forming a tree structure that must be traced by GC.
+pub const ProtoObject = struct {
+    const TValue = @import("../value.zig").TValue;
+
+    header: GCObject,
+    /// Constants table (may contain GC objects like strings)
+    k: []const TValue,
+    /// Bytecode instructions
+    code: []const Instruction,
+    /// Nested function prototypes (GC-managed)
+    protos: []const *ProtoObject,
+    /// Number of fixed parameters
+    numparams: u8,
+    /// Whether function accepts varargs
+    is_vararg: bool,
+    /// Maximum stack size needed
+    maxstacksize: u8,
+    /// Number of upvalues
+    nups: u8,
+    /// Upvalue descriptors
+    upvalues: []const Upvaldesc,
+
+    /// Allocator used to allocate k, code, protos, upvalues arrays
+    /// Needed for deallocation during GC sweep
+    allocator: std.mem.Allocator,
 };
 
 /// Utility functions for working with GC objects

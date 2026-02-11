@@ -2,11 +2,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 test "SETLIST basic - set array elements" {
     var vm = try VM.init(testing.allocator);
@@ -26,15 +27,9 @@ test "SETLIST basic - set array elements" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return table
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
 
     // Check table contents
@@ -70,15 +65,9 @@ test "SETLIST with B=0 - variable count from top" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
@@ -114,15 +103,9 @@ test "SETLIST with offset mode (k=1, C=0)" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;

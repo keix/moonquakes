@@ -170,7 +170,7 @@ pub const VM = struct {
             self.gc.mark(&closure.header);
         } else {
             // Main chunk: mark proto and all nested protos recursively
-            self.gc.markProto(self.base_ci.func);
+            self.gc.markProtoObject(@constCast(self.base_ci.func));
         }
 
         // Mark function call frames on the callstack
@@ -178,7 +178,7 @@ pub const VM = struct {
             if (frame.closure) |closure| {
                 self.gc.mark(&closure.header);
             } else {
-                self.gc.markProto(frame.func);
+                self.gc.markProtoObject(@constCast(frame.func));
             }
         }
 

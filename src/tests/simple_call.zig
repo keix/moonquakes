@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
-const Proto = @import("../compiler/proto.zig").Proto;
 const TValue = @import("../runtime/value.zig").TValue;
 const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
 const GC = @import("../runtime/gc/gc.zig").GC;
@@ -11,19 +10,13 @@ const test_utils = @import("test_utils.zig");
 
 test "closure constant loading" {
     // First, test if we can load a closure constant
-    const func_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &[_]Instruction{},
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
+    const func_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &[_]Instruction{}, 0, false, 1);
+
     // Create closure via GC
-    const func_closure = try vm.gc.allocClosure(&func_proto);
+    const func_closure = try vm.gc.allocClosure(func_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -34,15 +27,9 @@ test "closure constant loading" {
         Instruction.initABx(.LOADK, 0, 0), // R[0] = closure
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = Proto{
-        .k = &main_constants,
-        .code = &main_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
+    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 1);
 
-    const result = try Mnemonics.execute(&vm, &main_proto);
+    const result = try Mnemonics.execute(&vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue.fromClosure(func_closure));
 }
@@ -56,19 +43,14 @@ test "simple function call without arguments" {
     const func_constants = [_]TValue{
         .{ .integer = 42 },
     };
-    const func_proto = Proto{
-        .k = &func_constants,
-        .code = &func_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
+    const func_proto = try test_utils.createTestProto(&vm, &func_constants, &func_code, 0, false, 1);
+
     // Create closure via GC
-    const func_closure = try vm.gc.allocClosure(&func_proto);
+    const func_closure = try vm.gc.allocClosure(func_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -84,15 +66,9 @@ test "simple function call without arguments" {
         // Return the result
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = Proto{
-        .k = &main_constants,
-        .code = &main_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
+    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&vm, &main_proto);
+    const result = try Mnemonics.execute(&vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
 }
@@ -103,19 +79,14 @@ test "function call with arguments" {
         Instruction.initABC(.ADD, 2, 0, 1), // R[2] = R[0] + R[1]
         Instruction.initABC(.RETURN, 2, 2, 0), // return R[2]
     };
-    const add_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &add_code,
-        .numparams = 2,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
 
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
+    const add_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &add_code, 2, false, 3);
+
     // Create closure via GC
-    const add_closure = try vm.gc.allocClosure(&add_proto);
+    const add_closure = try vm.gc.allocClosure(add_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -132,15 +103,9 @@ test "function call with arguments" {
         Instruction.initABC(.CALL, 0, 3, 2), // R[0] = R[0](R[1], R[2])
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = Proto{
-        .k = &main_constants,
-        .code = &main_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&vm, &main_proto);
+    const result = try Mnemonics.execute(&vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
 }

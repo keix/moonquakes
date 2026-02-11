@@ -1,6 +1,9 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const string = @import("string.zig");
+const call = @import("../vm/call.zig");
+const pipeline = @import("../compiler/pipeline.zig");
+const RuntimeError = @import("error.zig").RuntimeError;
 
 /// Lua 5.4 Global Functions (Basic Functions)
 /// Corresponds to Lua manual chapter "Basic Functions"
@@ -63,6 +66,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                 .closure, .native_closure => "function",
                 .upvalue => "upvalue",
                 .userdata => "userdata",
+                .proto => "proto", // Internal type - should not be exposed to user
             },
         };
     } else "nil";
@@ -74,26 +78,115 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
-/// TODO: Implement proper protected mode execution
+/// Returns: (true, results...) on success, (false, error_message) on failure
 pub fn nativePcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nargs;
-    // pcall requires VM-level support for proper error catching
-    // For now, return a stub response
-    vm.stack[vm.base + func_reg] = .{ .boolean = false };
-    if (nresults > 1) {
-        const err_str = try vm.gc.allocString("pcall not yet implemented");
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #1 to 'pcall' (value expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const func_val = vm.stack[vm.base + func_reg + 1];
+
+    // Build argument array
+    const arg_count = if (nargs > 1) nargs - 1 else 0;
+    var args: [256]TValue = undefined;
+    for (0..arg_count) |i| {
+        args[i] = vm.stack[vm.base + func_reg + 2 + @as(u32, @intCast(i))];
+    }
+
+    // Call in protected mode
+    const result = call.callValue(vm, func_val, args[0..arg_count]);
+
+    if (result) |ret_val| {
+        // Success: return (true, result)
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = ret_val;
+        }
+    } else |err| {
+        // Error: return (false, error_message)
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        if (nresults > 1) {
+            if (vm.lua_error_msg) |msg| {
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(msg);
+                vm.lua_error_msg = null;
+            } else {
+                const err_str = try vm.gc.allocString(@errorName(err));
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+        }
     }
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Calls function f with error handler msgh
+/// Returns: (true, results...) on success, (false, handler_result) on failure
 pub fn nativeXpcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement xpcall
-    // Enhanced version of pcall with custom error handler
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #2 to 'xpcall' (value expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const func_val = vm.stack[vm.base + func_reg + 1];
+    const handler_val = vm.stack[vm.base + func_reg + 2];
+
+    // Build argument array (arguments after the handler)
+    const arg_count = if (nargs > 2) nargs - 2 else 0;
+    var args: [256]TValue = undefined;
+    for (0..arg_count) |i| {
+        args[i] = vm.stack[vm.base + func_reg + 3 + @as(u32, @intCast(i))];
+    }
+
+    // Call in protected mode
+    const result = call.callValue(vm, func_val, args[0..arg_count]);
+
+    if (result) |ret_val| {
+        // Success: return (true, result)
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = ret_val;
+        }
+    } else |_| {
+        // Get original error message
+        var error_msg: TValue = .nil;
+        if (vm.lua_error_msg) |msg| {
+            error_msg = TValue.fromString(msg);
+            vm.lua_error_msg = null;
+        } else {
+            const err_str = try vm.gc.allocString("error");
+            error_msg = TValue.fromString(err_str);
+        }
+
+        // Call error handler with the error message
+        var handler_args = [1]TValue{error_msg};
+        const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| {
+            // Handler itself failed - return original error
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            if (nresults > 1) {
+                if (vm.lua_error_msg) |msg| {
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(msg);
+                    vm.lua_error_msg = null;
+                } else {
+                    const err_str = try vm.gc.allocString(@errorName(handler_err));
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+            }
+            return;
+        };
+
+        // Return (false, handler_result)
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = handler_result;
+        }
+    }
 }
 
 /// next(table [, index]) - Allows traversal of all fields of a table
@@ -530,36 +623,194 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 }
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Loads a chunk
+/// chunk: string or function returning strings
+/// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement load
-    // Loads Lua chunk from string or reader function
-    // Requires integration with compiler/parser
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #1 to 'load' (value expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const chunk_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Get source string
+    const source = if (chunk_arg.asString()) |str_obj|
+        str_obj.asSlice()
+    else {
+        // TODO: Support reader function
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("load: reader function not yet supported");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+
+    // Compile the source
+    const raw_proto = pipeline.compile(vm.allocator, source) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("syntax error");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+
+    // Materialize to Proto
+    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("failed to materialize chunk");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+
+    // Create closure
+    const closure = try vm.gc.allocClosure(proto);
+    vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
 
 /// loadfile([filename [, mode [, env]]]) - Loads a chunk from a file
+/// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement loadfile
-    // Loads Lua chunk from file
-    // Requires integration with compiler/parser
+    if (nargs < 1) {
+        // loadfile() without args reads from stdin - not implemented
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("loadfile: stdin not supported");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const filename_arg = vm.stack[vm.base + func_reg + 1];
+    const filename = if (filename_arg.asString()) |str_obj|
+        str_obj.asSlice()
+    else {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #1 to 'loadfile' (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+
+    // Read file contents
+    const file = std.fs.cwd().openFile(filename, .{}) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("cannot open file");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer file.close();
+
+    const source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("cannot read file");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer vm.allocator.free(source);
+
+    // Compile the source
+    const raw_proto = pipeline.compile(vm.allocator, source) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("syntax error");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+
+    // Materialize to Proto
+    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("failed to materialize chunk");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+
+    // Create closure
+    const closure = try vm.gc.allocClosure(proto);
+    vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
 
 /// dofile([filename]) - Executes a Lua file
+/// Returns: all values returned by the chunk
 pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement dofile
-    // Equivalent to: assert(loadfile(filename))()
-    // Requires integration with compiler/parser
+    if (nargs < 1) {
+        // dofile() without args reads from stdin - not implemented
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("dofile: stdin not supported");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const filename_arg = vm.stack[vm.base + func_reg + 1];
+    const filename = if (filename_arg.asString()) |str_obj|
+        str_obj.asSlice()
+    else {
+        return RuntimeError.RuntimeError;
+    };
+
+    // Read file contents
+    const file = std.fs.cwd().openFile(filename, .{}) catch {
+        vm.lua_error_msg = try vm.gc.allocString("cannot open file");
+        return RuntimeError.RuntimeError;
+    };
+    defer file.close();
+
+    const source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+        vm.lua_error_msg = try vm.gc.allocString("cannot read file");
+        return RuntimeError.RuntimeError;
+    };
+    defer vm.allocator.free(source);
+
+    // Compile the source
+    const raw_proto = pipeline.compile(vm.allocator, source) catch {
+        vm.lua_error_msg = try vm.gc.allocString("syntax error");
+        return RuntimeError.RuntimeError;
+    };
+    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+
+    // Materialize to Proto
+    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+        vm.lua_error_msg = try vm.gc.allocString("failed to materialize chunk");
+        return RuntimeError.RuntimeError;
+    };
+
+    // Create closure
+    const closure = try vm.gc.allocClosure(proto);
+    const func_val = TValue.fromClosure(closure);
+
+    // Execute the chunk
+    const result = call.callValue(vm, func_val, &[_]TValue{}) catch |err| {
+        // Propagate error
+        if (vm.lua_error_msg == null) {
+            vm.lua_error_msg = try vm.gc.allocString(@errorName(err));
+        }
+        return RuntimeError.RuntimeError;
+    };
+
+    // Return the result
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = result;
+    }
 }
 
 /// warn(msg1, ...) - Emits a warning with a message (Lua 5.4 feature)

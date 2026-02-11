@@ -1,12 +1,11 @@
 //! Compiler Pipeline
 //!
-//! Compilation stages: source -> RawProto -> Proto
+//! Compilation stages: source -> RawProto -> ProtoObject
 //! - RawProto: intermediate representation (no GC dependencies)
-//! - Proto: materialized bytecode (strings allocated via GC)
+//! - ProtoObject: GC-managed bytecode (strings allocated via GC)
 
 const std = @import("std");
 const proto_mod = @import("proto.zig");
-const Proto = proto_mod.Proto;
 const RawProto = proto_mod.RawProto;
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
@@ -45,14 +44,5 @@ pub fn freeRawProto(allocator: std.mem.Allocator, raw: RawProto) void {
     allocator.free(raw.upvalues);
 }
 
-/// Free Proto and all nested protos
-pub fn freeProto(allocator: std.mem.Allocator, proto: *Proto) void {
-    allocator.free(proto.k);
-    allocator.free(proto.code);
-    allocator.free(proto.upvalues);
-    for (proto.protos) |nested| {
-        freeProto(allocator, @constCast(nested));
-    }
-    allocator.free(proto.protos);
-    allocator.destroy(proto);
-}
+// Note: freeProto removed - ProtoObject is now GC-managed
+// GC handles freeing ProtoObject and its internal arrays during sweep
