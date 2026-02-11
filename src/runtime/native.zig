@@ -114,6 +114,7 @@ pub const NativeFnId = enum(u8) {
     io_flush,
     io_input,
     io_lines,
+    io_lines_iterator,
     io_open,
     io_output,
     io_popen,

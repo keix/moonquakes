@@ -3380,7 +3380,7 @@ pub const Parser = struct {
     }
 
     fn parseIoCall(self: *Parser) ParseError!void {
-        // Parse "io.write(...)" calls
+        // Parse "io.<method>(...)" calls (io.write, io.input, io.output, etc.)
         // Current token should be "io"
         if (!std.mem.eql(u8, self.current.lexeme, "io")) {
             return error.UnsupportedStatement;
@@ -3393,11 +3393,12 @@ pub const Parser = struct {
         }
         self.advance(); // consume '.'
 
-        // Expect method name (currently only support "write")
-        if (!(self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "write"))) {
+        // Expect method name (any io method)
+        if (self.current.kind != .Identifier) {
             return error.UnsupportedStatement;
         }
-        self.advance(); // consume "write"
+        const method_name = self.current.lexeme;
+        self.advance(); // consume method name
 
         // Expect '('
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
@@ -3405,20 +3406,20 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Generate bytecode for io.write call
+        // Generate bytecode for io.<method> call
         // Get io table from global
         const io_reg = self.proto.allocTemp();
         const io_key_const = try self.proto.addConstString("io");
         try self.proto.emitGETTABUP(io_reg, 0, io_key_const);
 
-        // Get write method from io table
-        const write_reg = self.proto.allocTemp();
-        const write_key_const = try self.proto.addConstString("write");
-        try self.proto.emitLoadK(write_reg, write_key_const);
+        // Get method from io table
+        const method_reg = self.proto.allocTemp();
+        const method_key_const = try self.proto.addConstString(method_name);
+        try self.proto.emitLoadK(method_reg, method_key_const);
 
-        // Get io.write function
+        // Get io.<method> function
         const func_reg = self.proto.allocTemp();
-        try self.proto.emitGETTABLE(func_reg, io_reg, write_reg);
+        try self.proto.emitGETTABLE(func_reg, io_reg, method_reg);
 
         // Parse arguments
         var arg_count: u8 = 0;

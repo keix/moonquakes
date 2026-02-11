@@ -373,6 +373,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .io_flush => try io.nativeIoFlush(vm, func_reg, nargs, nresults),
         .io_input => try io.nativeIoInput(vm, func_reg, nargs, nresults),
         .io_lines => try io.nativeIoLines(vm, func_reg, nargs, nresults),
+        .io_lines_iterator => try io.nativeIoLinesIterator(vm, func_reg, nargs, nresults),
         .io_open => try io.nativeIoOpen(vm, func_reg, nargs, nresults),
         .io_output => try io.nativeIoOutput(vm, func_reg, nargs, nresults),
         .io_popen => try io.nativeIoPopen(vm, func_reg, nargs, nresults),
