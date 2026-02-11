@@ -1,6 +1,5 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const opcodes = @import("../compiler/opcodes.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
@@ -8,6 +7,7 @@ const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
+const ProtoObject = object.ProtoObject;
 const metamethod = @import("metamethod.zig");
 const MetaEvent = metamethod.MetaEvent;
 const builtin = @import("../builtin/dispatch.zig");
@@ -155,11 +155,11 @@ pub fn leOp(a: TValue, b: TValue) !bool {
 // Call Stack Management
 // ============================================================================
 
-pub fn pushCallInfo(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
+pub fn pushCallInfo(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
     return pushCallInfoVararg(vm, func, closure, base, ret_base, nresults, 0, 0);
 }
 
-pub fn pushCallInfoVararg(vm: *VM, func: *const Proto, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16, vararg_base: u32, vararg_count: u32) !*CallInfo {
+pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16, vararg_base: u32, vararg_count: u32) !*CallInfo {
     if (vm.callstack_size >= vm.callstack.len) {
         return error.CallStackOverflow;
     }
@@ -291,7 +291,7 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
     }
 }
 
-fn setupMainFrame(vm: *VM, proto: *const Proto) void {
+fn setupMainFrame(vm: *VM, proto: *const ProtoObject) void {
     vm.base_ci = CallInfo{
         .func = proto,
         .closure = null,
@@ -347,7 +347,7 @@ fn handleProtectedError(vm: *VM, err: anyerror) bool {
 
 /// Main VM execution loop.
 /// Executes instructions until RETURN from main chunk.
-pub fn execute(vm: *VM, proto: *const Proto) !ReturnValue {
+pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     vm.gc.setVM(vm);
 
     setupMainFrame(vm, proto);

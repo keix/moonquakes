@@ -2,13 +2,14 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const OpCode = opcodes.OpCode;
+
+const test_utils = @import("test_utils.zig");
 
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -26,17 +27,11 @@ test "ADDI: positive immediate with integer" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 15 });
 }
@@ -55,17 +50,11 @@ test "ADDI: negative immediate with integer" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 7 });
 }
@@ -81,17 +70,11 @@ test "ADDI: with float number" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 13.5 });
 }
@@ -107,17 +90,11 @@ test "ADDI: maximum positive immediate" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 227 });
 }
@@ -136,17 +113,11 @@ test "ADDI: maximum negative immediate" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -28 });
 }
@@ -164,17 +135,11 @@ test "ADDI: loop counter optimization" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 }

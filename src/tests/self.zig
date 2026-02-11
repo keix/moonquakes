@@ -2,11 +2,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 test "SELF - prepare method call" {
     var vm = try VM.init(testing.allocator);
@@ -36,15 +37,9 @@ test "SELF - prepare method call" {
         Instruction.initABC(.RETURN, 1, 3, 0), // Return R[1], R[2]
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 4,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try testing.expect(result == .multiple);
 
     // R[1] should be the method (42 in our test)

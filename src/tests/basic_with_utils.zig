@@ -2,13 +2,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
-const utils = @import("test_utils.zig");
+const test_utils = @import("test_utils.zig");
 
 test "MOVE with stack verification" {
     const code = [_]Instruction{
@@ -21,36 +20,30 @@ test "MOVE with stack verification" {
         .{ .integer = 42 },
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+
     // Capture initial state
-    const trace = utils.ExecutionTrace.captureInitial(&vm, 2);
+    const trace = test_utils.ExecutionTrace.captureInitial(&vm, 2);
 
     // Execute
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // Update final state
     var final_trace = trace;
     final_trace.updateFinal(&vm, 2);
 
     // Verify result
-    try utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
 
     // Verify registers
     try final_trace.expectRegisterChanged(0, TValue{ .integer = 42 });
     try final_trace.expectRegisterChanged(1, TValue{ .integer = 42 });
 
     // Verify stack boundaries
-    try utils.expectVMState(&vm, 0, 2);
+    try test_utils.expectVMState(&vm, 0, 2);
 }
 
 test "LOADK with comprehensive state tracking" {
@@ -67,32 +60,26 @@ test "LOADK with comprehensive state tracking" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
-    // Verify initial state - all registers should be nil
-    try utils.expectNilRange(&vm, 0, 3);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
-    var inst_test = utils.InstructionTest.init(&vm, &proto, 3);
+    // Verify initial state - all registers should be nil
+    try test_utils.expectNilRange(&vm, 0, 3);
+
+    var inst_test = test_utils.InstructionTest.init(&vm, proto, 3);
     _ = try inst_test.expectSuccess(3);
 
     // Verify final state
-    try utils.expectRegisters(&vm, 0, &[_]TValue{
+    try test_utils.expectRegisters(&vm, 0, &[_]TValue{
         .{ .integer = 100 },
         .{ .number = 3.14 },
         .{ .boolean = true },
     });
 
     // Verify VM state didn't change unexpectedly
-    try utils.expectVMState(&vm, 0, 3);
+    try test_utils.expectVMState(&vm, 0, 3);
 }
 
 test "ADD instruction with side effect verification" {
@@ -110,7 +97,7 @@ test "ADD instruction with side effect verification" {
         .{ .integer = 99 }, // R3 unchanged
     };
 
-    try utils.testSingleInstruction(Instruction.initABC(.ADD, 0, 1, 2), &[_]TValue{}, // no constants needed
+    try test_utils.testSingleInstruction(Instruction.initABC(.ADD, 0, 1, 2), &[_]TValue{}, // no constants needed
         &initial_regs, &expected_regs, 0, // expected base
         4 // expected top
     );
@@ -121,14 +108,14 @@ test "Arithmetic operation helper usage" {
     defer vm.deinit();
 
     // Test integer addition
-    try utils.testArithmeticOp(&vm, Instruction.initABC(.ADD, 2, 0, 1), TValue{ .integer = 10 }, TValue{ .integer = 20 }, TValue{ .integer = 30 }, &[_]TValue{});
+    try test_utils.testArithmeticOp(&vm, Instruction.initABC(.ADD, 2, 0, 1), TValue{ .integer = 10 }, TValue{ .integer = 20 }, TValue{ .integer = 30 }, &[_]TValue{});
 
     // Reset VM
     vm.deinit();
     vm = try VM.init(testing.allocator);
 
     // Test float multiplication
-    try utils.testArithmeticOp(&vm, Instruction.initABC(.MUL, 2, 0, 1), TValue{ .number = 2.5 }, TValue{ .number = 4.0 }, TValue{ .number = 10.0 }, &[_]TValue{});
+    try test_utils.testArithmeticOp(&vm, Instruction.initABC(.MUL, 2, 0, 1), TValue{ .number = 2.5 }, TValue{ .number = 4.0 }, TValue{ .number = 10.0 }, &[_]TValue{});
 }
 
 test "EQ comparison with skip verification" {
@@ -136,7 +123,7 @@ test "EQ comparison with skip verification" {
     defer vm.deinit();
 
     // Test equal values with A=0 (skip if equal)
-    try utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
+    try test_utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 
     // Reset VM
@@ -144,7 +131,7 @@ test "EQ comparison with skip verification" {
     vm = try VM.init(testing.allocator);
 
     // Test unequal values with A=0 (don't skip if unequal)
-    try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
+    try test_utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
         TValue{ .integer = 42 }, TValue{ .integer = 43 }, &[_]TValue{});
 
     // Reset VM
@@ -152,7 +139,7 @@ test "EQ comparison with skip verification" {
     vm = try VM.init(testing.allocator);
 
     // Test equal values with A=1 (don't skip if equal, because A=1 negates)
-    try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) == (A==0) then skip
+    try test_utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) == (A==0) then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 }
 
@@ -176,25 +163,19 @@ test "FORPREP/FORLOOP with state tracking" {
         .{ .integer = 1 }, // step
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
+
     // Capture loop state before execution
-    const initial_loop = utils.ForLoopTrace.capture(&vm, 0);
+    const initial_loop = test_utils.ForLoopTrace.capture(&vm, 0);
     _ = initial_loop;
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // Capture final loop state
-    const final_loop = utils.ForLoopTrace.capture(&vm, 0);
+    const final_loop = test_utils.ForLoopTrace.capture(&vm, 0);
 
     // Verify integer path was used
     try final_loop.expectIntegerPath();

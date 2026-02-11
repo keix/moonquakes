@@ -2,14 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
-const utils = @import("test_utils.zig");
+const test_utils = @import("test_utils.zig");
 
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -17,9 +16,17 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "concat: \"hello\" .. \"world\" = \"helloworld\"" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate strings through GC
+    const hello_str = try vm.gc.allocString("hello");
+    const world_str = try vm.gc.allocString("world");
+    const expected_str = try vm.gc.allocString("helloworld");
+
     const constants = [_]TValue{
-        .{ .string = "hello" },
-        .{ .string = "world" },
+        TValue.fromString(hello_str),
+        TValue.fromString(world_str),
     };
 
     const code = [_]Instruction{
@@ -29,37 +36,37 @@ test "concat: \"hello\" .. \"world\" = \"helloworld\"" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 3);
 
-    try utils.expectResultAndState(result, TValue{ .string = "helloworld" }, &vm, 0, 3);
+    try test_utils.expectResultAndState(result, TValue.fromString(expected_str), &vm, 0, 3);
 
     // Verify register changes
-    try trace.expectRegisterChanged(0, TValue{ .string = "hello" });
-    try trace.expectRegisterChanged(1, TValue{ .string = "world" });
-    try trace.expectRegisterChanged(2, TValue{ .string = "helloworld" });
+    try trace.expectRegisterChanged(0, TValue.fromString(hello_str));
+    try trace.expectRegisterChanged(1, TValue.fromString(world_str));
+    try trace.expectRegisterChanged(2, TValue.fromString(expected_str));
 
     // Verify no side effects
-    try utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
+    try test_utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
 }
 
 test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate strings through GC
+    const hello_str = try vm.gc.allocString("hello");
+    const empty_str = try vm.gc.allocString("");
+    const world_str = try vm.gc.allocString("world");
+    const expected_str = try vm.gc.allocString("helloworld");
+
     const constants = [_]TValue{
-        .{ .string = "hello" },
-        .{ .string = "" },
-        .{ .string = "world" },
+        TValue.fromString(hello_str),
+        TValue.fromString(empty_str),
+        TValue.fromString(world_str),
     };
 
     const code = [_]Instruction{
@@ -70,42 +77,40 @@ test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
         Instruction.initABC(.RETURN, 3, 2, 0), // return R3
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 5, // Extra space to verify no side effects
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
 
     // Set up registers beyond what we need to verify no side effects
     vm.stack[4] = TValue{ .boolean = true };
 
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 5);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 5);
 
-    try utils.expectResultAndState(result, TValue{ .string = "helloworld" }, &vm, 0, 5);
+    try test_utils.expectResultAndState(result, TValue.fromString(expected_str), &vm, 0, 5);
 
     // Verify register states
-    try utils.expectRegisters(&vm, 0, &[_]TValue{
-        .{ .string = "hello" }, // R0
-        .{ .string = "" }, // R1
-        .{ .string = "world" }, // R2
-        .{ .string = "helloworld" }, // R3
+    try test_utils.expectRegisters(&vm, 0, &[_]TValue{
+        TValue.fromString(hello_str), // R0
+        TValue.fromString(empty_str), // R1
+        TValue.fromString(world_str), // R2
+        TValue.fromString(expected_str), // R3
     });
 
     // Verify register 4 is unchanged (side effect check)
     try trace.expectRegisterUnchanged(4);
-    try utils.expectRegistersUnchanged(&trace, 5, &[_]u8{ 0, 1, 2, 3 });
+    try test_utils.expectRegistersUnchanged(&trace, 5, &[_]u8{ 0, 1, 2, 3 });
 }
 
 test "concat: \"number: \" .. 42 = \"number: 42\"" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate strings through GC
+    const prefix_str = try vm.gc.allocString("number: ");
+    const expected_str = try vm.gc.allocString("number: 42");
+
     const constants = [_]TValue{
-        .{ .string = "number: " },
+        TValue.fromString(prefix_str),
         .{ .integer = 42 },
     };
 
@@ -116,33 +121,30 @@ test "concat: \"number: \" .. 42 = \"number: 42\"" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 3);
 
-    try expectSingleResult(result, TValue{ .string = "number: 42" });
+    try expectSingleResult(result, TValue.fromString(expected_str));
 
     // Verify register changes with specific values
-    try trace.expectRegisterChanged(0, TValue{ .string = "number: " });
+    try trace.expectRegisterChanged(0, TValue.fromString(prefix_str));
     try trace.expectRegisterChanged(1, TValue{ .integer = 42 });
-    try trace.expectRegisterChanged(2, TValue{ .string = "number: 42" });
+    try trace.expectRegisterChanged(2, TValue.fromString(expected_str));
 
     // VM state verification
-    try utils.expectVMState(&vm, 0, 3);
+    try test_utils.expectVMState(&vm, 0, 3);
 }
 
 test "concat: 1 .. 2 .. 3 = \"123\"" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate expected string through GC
+    const expected_str = try vm.gc.allocString("123");
+
     const constants = [_]TValue{
         .{ .integer = 1 },
         .{ .integer = 2 },
@@ -157,45 +159,44 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
         Instruction.initABC(.RETURN, 3, 2, 0), // return R3
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 6, // Extra space for side effect testing
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 6);
 
     // Initialize extra registers to test side effects
-    vm.stack[4] = TValue{ .string = "untouched" };
+    const untouched_str = try vm.gc.allocString("untouched");
+    vm.stack[4] = TValue.fromString(untouched_str);
     vm.stack[5] = TValue{ .number = 9.99 };
 
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 6);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 6);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 6);
 
-    try utils.expectResultAndState(result, TValue{ .string = "123" }, &vm, 0, 6);
+    try test_utils.expectResultAndState(result, TValue.fromString(expected_str), &vm, 0, 6);
 
     // Verify all register states
-    try utils.expectRegisters(&vm, 0, &[_]TValue{
+    try test_utils.expectRegisters(&vm, 0, &[_]TValue{
         .{ .integer = 1 }, // R0
         .{ .integer = 2 }, // R1
         .{ .integer = 3 }, // R2
-        .{ .string = "123" }, // R3
+        TValue.fromString(expected_str), // R3
     });
 
     // Verify no side effects on registers 4 and 5
     try trace.expectRegisterUnchanged(4);
     try trace.expectRegisterUnchanged(5);
-    try utils.expectRegistersUnchanged(&trace, 6, &[_]u8{ 0, 1, 2, 3 });
+    try test_utils.expectRegistersUnchanged(&trace, 6, &[_]u8{ 0, 1, 2, 3 });
 }
 
 test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate strings through GC
+    const suffix_str = try vm.gc.allocString(" is pi");
+    const expected_str = try vm.gc.allocString("3.14 is pi");
+
     const constants = [_]TValue{
         .{ .number = 3.14 },
-        .{ .string = " is pi" },
+        TValue.fromString(suffix_str),
     };
 
     const code = [_]Instruction{
@@ -205,36 +206,33 @@ test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 3);
 
-    try expectSingleResult(result, TValue{ .string = "3.14 is pi" });
+    try expectSingleResult(result, TValue.fromString(expected_str));
 
     // Detailed register verification
     try trace.expectRegisterChanged(0, TValue{ .number = 3.14 });
-    try trace.expectRegisterChanged(1, TValue{ .string = " is pi" });
-    try trace.expectRegisterChanged(2, TValue{ .string = "3.14 is pi" });
+    try trace.expectRegisterChanged(1, TValue.fromString(suffix_str));
+    try trace.expectRegisterChanged(2, TValue.fromString(expected_str));
 
     // Complete state verification
-    try utils.expectVMState(&vm, 0, 3);
-    try utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
+    try test_utils.expectVMState(&vm, 0, 3);
+    try test_utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
 }
 
 test "concat: empty concatenation (single string)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
+    // Allocate string through GC
+    const alone_str = try vm.gc.allocString("alone");
+
     const constants = [_]TValue{
-        .{ .string = "alone" },
+        TValue.fromString(alone_str),
     };
 
     const code = [_]Instruction{
@@ -243,27 +241,18 @@ test "concat: empty concatenation (single string)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 2);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 2);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 2);
 
-    try utils.expectResultAndState(result, TValue{ .string = "alone" }, &vm, 0, 2);
+    try test_utils.expectResultAndState(result, TValue.fromString(alone_str), &vm, 0, 2);
 
     // Verify single value concatenation behavior
-    try trace.expectRegisterChanged(0, TValue{ .string = "alone" });
-    try trace.expectRegisterChanged(1, TValue{ .string = "alone" });
+    try trace.expectRegisterChanged(0, TValue.fromString(alone_str));
+    try trace.expectRegisterChanged(1, TValue.fromString(alone_str));
 
     // Ensure no other registers affected
-    try utils.expectRegistersUnchanged(&trace, 2, &[_]u8{ 0, 1 });
+    try test_utils.expectRegistersUnchanged(&trace, 2, &[_]u8{ 0, 1 });
 }

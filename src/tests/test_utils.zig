@@ -5,9 +5,126 @@ const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
-const Proto = @import("../compiler/proto.zig").Proto;
+const object = @import("../runtime/gc/object.zig");
+const ProtoObject = object.ProtoObject;
+const Upvaldesc = object.Upvaldesc;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+// Re-export types that tests may need
+pub const GCObject = object.GCObject;
+pub const UpvaldescType = Upvaldesc;
+
+/// Create a test ProtoObject via GC
+/// This is the test-friendly version of gc.allocProto
+pub fn createTestProto(
+    vm: *VM,
+    k: []const TValue,
+    code: []const Instruction,
+    numparams: u8,
+    is_vararg: bool,
+    maxstacksize: u8,
+) !*ProtoObject {
+    // Dupe the arrays since ProtoObject owns them
+    const k_copy = try vm.gc.allocator.dupe(TValue, k);
+    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
+
+    return vm.gc.allocProto(
+        k_copy,
+        code_copy,
+        &[_]*ProtoObject{}, // no nested protos
+        numparams,
+        is_vararg,
+        maxstacksize,
+        0, // nups
+        &[_]Upvaldesc{}, // no upvalues
+    );
+}
+
+/// Create a test ProtoObject with upvalue descriptors
+pub fn createTestProtoWithUpvalues(
+    vm: *VM,
+    k: []const TValue,
+    code: []const Instruction,
+    numparams: u8,
+    is_vararg: bool,
+    maxstacksize: u8,
+    nups: u8,
+    upvalues: []const Upvaldesc,
+) !*ProtoObject {
+    // Dupe the arrays since ProtoObject owns them
+    const k_copy = try vm.gc.allocator.dupe(TValue, k);
+    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
+    const upvalues_copy = try vm.gc.allocator.dupe(Upvaldesc, upvalues);
+
+    return vm.gc.allocProto(
+        k_copy,
+        code_copy,
+        &[_]*ProtoObject{}, // no nested protos
+        numparams,
+        is_vararg,
+        maxstacksize,
+        nups,
+        upvalues_copy,
+    );
+}
+
+/// Create a test ProtoObject with child protos
+pub fn createTestProtoWithChildProtos(
+    vm: *VM,
+    k: []const TValue,
+    code: []const Instruction,
+    numparams: u8,
+    is_vararg: bool,
+    maxstacksize: u8,
+    child_protos: []const *ProtoObject,
+) !*ProtoObject {
+    // Dupe the arrays since ProtoObject owns them
+    const k_copy = try vm.gc.allocator.dupe(TValue, k);
+    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
+    const protos_copy = try vm.gc.allocator.dupe(*ProtoObject, child_protos);
+
+    return vm.gc.allocProto(
+        k_copy,
+        code_copy,
+        protos_copy,
+        numparams,
+        is_vararg,
+        maxstacksize,
+        0, // nups
+        &[_]Upvaldesc{},
+    );
+}
+
+/// Create a test ProtoObject with both upvalues and child protos
+pub fn createTestProtoFull(
+    vm: *VM,
+    k: []const TValue,
+    code: []const Instruction,
+    numparams: u8,
+    is_vararg: bool,
+    maxstacksize: u8,
+    nups: u8,
+    upvalues: []const Upvaldesc,
+    child_protos: []const *ProtoObject,
+) !*ProtoObject {
+    // Dupe the arrays since ProtoObject owns them
+    const k_copy = try vm.gc.allocator.dupe(TValue, k);
+    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
+    const upvalues_copy = try vm.gc.allocator.dupe(Upvaldesc, upvalues);
+    const protos_copy = try vm.gc.allocator.dupe(*ProtoObject, child_protos);
+
+    return vm.gc.allocProto(
+        k_copy,
+        code_copy,
+        protos_copy,
+        numparams,
+        is_vararg,
+        maxstacksize,
+        nups,
+        upvalues_copy,
+    );
+}
 
 /// Helper function to create a VM with proper cleanup
 pub fn createTestVM() !VM {
@@ -138,7 +255,7 @@ pub const ExecutionTrace = struct {
 };
 
 /// Verify instruction doesn't affect unrelated registers
-pub fn expectSideEffectFree(vm: *VM, proto: *const Proto, affected_regs: []const u8, total_regs: u8) !void {
+pub fn expectSideEffectFree(vm: *VM, proto: *const ProtoObject, affected_regs: []const u8, total_regs: u8) !void {
     // Capture initial state with base consideration
     var initial_state: [256]TValue = undefined;
     const base = vm.base;
@@ -172,10 +289,10 @@ pub fn expectSideEffectFree(vm: *VM, proto: *const Proto, affected_regs: []const
 /// Execute single instruction and verify state
 pub const InstructionTest = struct {
     vm: *VM,
-    proto: *const Proto,
+    proto: *const ProtoObject,
     initial_trace: ExecutionTrace,
 
-    pub fn init(vm: *VM, proto: *const Proto, reg_count: u8) InstructionTest {
+    pub fn init(vm: *VM, proto: *const ProtoObject, reg_count: u8) InstructionTest {
         return .{
             .vm = vm,
             .proto = proto,
@@ -211,23 +328,17 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = @as(u8, @intCast(initial_regs.len)),
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
+
+    const proto = try createTestProto(&vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));
 
     // Set initial registers
     for (initial_regs, 0..) |val, i| {
         vm.stack[i] = val;
     }
 
-    var inst_test = InstructionTest.init(&vm, &proto, @as(u8, @intCast(initial_regs.len)));
+    var inst_test = InstructionTest.init(&vm, proto, @as(u8, @intCast(initial_regs.len)));
     const trace = try inst_test.expectSuccess(@as(u8, @intCast(expected_regs.len)));
 
     // Verify expected registers
@@ -256,19 +367,13 @@ pub fn expectPCAdvance(initial_pc: [*]const Instruction, final_pc: [*]const Inst
     try testing.expectEqual(expected_advance * @sizeOf(Instruction), actual_advance);
 }
 
-/// Create test proto with single instruction
-pub fn createSingleInstructionProto(allocator: std.mem.Allocator, inst: Instruction, constants: []const TValue, stack_size: u8) !Proto {
-    var code = try allocator.alloc(Instruction, 2);
-    code[0] = inst;
-    code[1] = Instruction.initABC(.RETURN, 0, 1, 0);
-
-    return Proto{
-        .k = constants,
-        .code = code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = stack_size,
+/// Create test proto with single instruction (via GC)
+pub fn createSingleInstructionProtoGC(vm: *VM, inst: Instruction, constants: []const TValue, stack_size: u8) !*ProtoObject {
+    const code = [_]Instruction{
+        inst,
+        Instruction.initABC(.RETURN, 0, 1, 0),
     };
+    return createTestProto(vm, constants, &code, 0, false, stack_size);
 }
 
 /// Test comparison operation with skip behavior
@@ -281,13 +386,7 @@ pub const ComparisonTest = struct {
             Instruction.initABC(.RETURN, 0, 2, 0), // return R0
         };
 
-        const proto = Proto{
-            .k = constants,
-            .code = &code,
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 3,
-        };
+        const proto = try createTestProto(vm, constants, &code, 0, false, 3);
 
         // Set up registers with base offset
         const b = inst.getB();
@@ -295,7 +394,7 @@ pub const ComparisonTest = struct {
         vm.stack[vm.base + b] = reg_a_val;
         vm.stack[vm.base + c] = reg_b_val;
 
-        const result = try Mnemonics.execute(vm, &proto);
+        const result = try Mnemonics.execute(vm, proto);
 
         // If comparison skips, LFALSESKIP is skipped, LOADFALSE executes
         // R0 should be false
@@ -311,13 +410,7 @@ pub const ComparisonTest = struct {
             Instruction.initABC(.RETURN, 0, 2, 0), // return R0
         };
 
-        const proto = Proto{
-            .k = constants,
-            .code = &code,
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 3,
-        };
+        const proto = try createTestProto(vm, constants, &code, 0, false, 3);
 
         // Set up registers with base offset
         const b = inst.getB();
@@ -325,7 +418,7 @@ pub const ComparisonTest = struct {
         vm.stack[vm.base + b] = reg_a_val;
         vm.stack[vm.base + c] = reg_b_val;
 
-        const result = try Mnemonics.execute(vm, &proto);
+        const result = try Mnemonics.execute(vm, proto);
 
         // If comparison doesn't skip, LFALSESKIP executes (sets R0=false and skips LOADTRUE)
         // R0 should be false
@@ -371,19 +464,13 @@ pub fn testArithmeticOp(vm: *VM, inst: Instruction, a_val: TValue, b_val: TValue
         Instruction.initABC(.RETURN, inst.getA(), 2, 0),
     };
 
-    const proto = Proto{
-        .k = constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try createTestProto(vm, constants, &code, 0, false, 3);
 
     // Set up operand registers
     vm.stack[vm.base + inst.getB()] = a_val;
     vm.stack[vm.base + inst.getC()] = b_val;
 
-    const result = try Mnemonics.execute(vm, &proto);
+    const result = try Mnemonics.execute(vm, proto);
 
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));

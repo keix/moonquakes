@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -31,20 +32,14 @@ test "basic: 1 + 2 = 3" {
         Instruction.initABC(.RETURN, 2, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 
     // Optional: print success for debugging
-    // std.debug.print("✓ basic: 1 + 2 = 3\n", .{});
+    // std.debug.print("basic: 1 + 2 = 3\n", .{});
 }

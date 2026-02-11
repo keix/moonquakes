@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
+
+const test_utils = @import("test_utils.zig");
 
 fn createTableWithAddMM(vm: *VM, value: i64) !*object.TableObject {
     const table = try vm.gc.allocTable();
@@ -52,16 +53,10 @@ test "MMBINI - add with immediate (basic structure)" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &.{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
 
     // Should fail because integer has no __add metamethod
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.ArithmeticError, result);
 }
 
@@ -82,16 +77,10 @@ test "MMBINK - add with constant (basic structure)" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
     // Should fail because integer has no __add metamethod
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.ArithmeticError, result);
 }
 
@@ -111,15 +100,9 @@ test "MMBINI operand order with k flag" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto_k0 = Proto{
-        .k = &.{},
-        .code = &code_k0,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto_k0 = try test_utils.createTestProto(&vm, &.{}, &code_k0, 0, false, 3);
 
-    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&vm, &proto_k0));
+    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&vm, proto_k0));
 
     // k=1: 5 + R[0], C=6 (add event)
     const code_k1 = [_]Instruction{
@@ -127,13 +110,7 @@ test "MMBINI operand order with k flag" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto_k1 = Proto{
-        .k = &.{},
-        .code = &code_k1,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto_k1 = try test_utils.createTestProto(&vm, &.{}, &code_k1, 0, false, 3);
 
-    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&vm, &proto_k1));
+    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&vm, proto_k1));
 }

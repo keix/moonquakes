@@ -2,12 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
+
+const test_utils = @import("test_utils.zig");
 
 fn expectNoResult(result: ReturnValue) !void {
     try testing.expect(result == .none);
@@ -31,17 +32,11 @@ test "return: no values (RETURN with B=1)" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectNoResult(result);
 }
@@ -56,17 +51,11 @@ test "return: single value (RETURN with B=2)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -85,17 +74,11 @@ test "return: multiple values (RETURN with B=4)" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2 (B=4 means 3 values)
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },
@@ -110,17 +93,11 @@ test "return: RETURN0 - no values" {
         Instruction.initABC(.RETURN0, 0, 0, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try testing.expect(result == .none);
 }
@@ -135,17 +112,11 @@ test "return: RETURN1 - single value" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R0
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
     var vm = try VM.init(testing.allocator);
     defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }

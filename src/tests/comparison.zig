@@ -2,14 +2,13 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 
-const utils = @import("test_utils.zig");
+const test_utils = @import("test_utils.zig");
 
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
@@ -17,6 +16,9 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "comparison: 5 == 5 = true" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 5 },
         .{ .integer = 5 },
@@ -35,22 +37,13 @@ test "comparison: 5 == 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
     // Added: ComparisonTest helper could be used for simpler verification
     // However, this test is complex so we verify manually
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
 
     trace.updateFinal(&vm, 3);
 
@@ -63,10 +56,13 @@ test "comparison: 5 == 5 = true" {
     try trace.expectRegisterChanged(2, TValue{ .boolean = true }); // EQ didn't skip, so true was set
 
     // VM final state
-    try utils.expectVMState(&vm, 0, 3);
+    try test_utils.expectVMState(&vm, 0, 3);
 }
 
 test "comparison: 5 == 3 = false" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 5 },
         .{ .integer = 3 },
@@ -85,22 +81,16 @@ test "comparison: 5 == 3 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "comparison: 3 < 5 = true" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 3 },
         .{ .integer = 5 },
@@ -119,22 +109,16 @@ test "comparison: 3 < 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: 5 < 3 = false" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 5 },
         .{ .integer = 3 },
@@ -152,22 +136,16 @@ test "comparison: 5 < 3 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "comparison: 3 <= 5 = true" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 3 },
         .{ .integer = 5 },
@@ -185,22 +163,16 @@ test "comparison: 3 <= 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: 5 <= 5 = true" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 5 },
         .{ .integer = 5 },
@@ -218,22 +190,16 @@ test "comparison: 5 <= 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: mixed types 3 < 3.5 = true" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 3 },
         .{ .number = 3.5 },
@@ -251,22 +217,16 @@ test "comparison: mixed types 3 < 3.5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: different types nil == false = false" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .nil,
         .{ .boolean = false },
@@ -284,22 +244,16 @@ test "comparison: different types nil == false = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 1 },
         .{ .number = 1.0 },
@@ -317,23 +271,17 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // In Lua 5.3+, 1 == 1.0 is true
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "EQ instruction: integer != non-integer float (42 != 42.5)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = 42 },
         .{ .number = 42.5 },
@@ -351,23 +299,17 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // 42 != 42.5, so should return false
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "EQ instruction: negative integer == float (-100 == -100.0)" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     const constants = [_]TValue{
         .{ .integer = -100 },
         .{ .number = -100.0 },
@@ -385,17 +327,8 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
     // -100 == -100.0 should be true in Lua 5.3+
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -407,16 +340,19 @@ test "comparison: EQ with skip behavior verification" {
     defer vm.deinit();
 
     // Test 1: Equal values with A=0 (should skip)
-    try utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
+    try test_utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 
     // Test 2: Different values with A=0 (should not skip)
     vm.deinit();
     vm = try VM.init(testing.allocator);
-    try utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
+    try test_utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
 }
 
 test "comparison: LT with side effect verification" {
+    var vm = try VM.init(testing.allocator);
+    defer vm.deinit();
+
     // Verify that comparison instruction itself doesn't modify values
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 10
@@ -434,23 +370,14 @@ test "comparison: LT with side effect verification" {
         .{ .integer = 200 },
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 4,
-    };
-
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
 
     // Initialize R2, R3 to track changes
     vm.stack[2] = .nil;
     vm.stack[3] = .nil;
 
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 4);
-    const result = try Mnemonics.execute(&vm, &proto);
+    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 4);
+    const result = try Mnemonics.execute(&vm, proto);
     trace.updateFinal(&vm, 4);
 
     // Verify registers

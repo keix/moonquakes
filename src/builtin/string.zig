@@ -47,6 +47,7 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 .closure, .native_closure => TValue.fromString(try vm.gc.allocString("<function>")),
                 .upvalue => TValue.fromString(try vm.gc.allocString("<upvalue>")),
                 .userdata => TValue.fromString(try vm.gc.allocString("<userdata>")),
+                .proto => TValue.fromString(try vm.gc.allocString("<proto>")),
             },
         };
     } else TValue.fromString(try vm.gc.allocString("nil"));
@@ -1489,31 +1490,562 @@ pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     // Requires access to bytecode generation/serialization
 }
 
+/// Pack format parser state
+const PackState = struct {
+    little_endian: bool = false, // < = little, > = big, = = native
+    max_align: usize = 1,
+
+    fn init() PackState {
+        // Default to native endianness
+        const native_little = @import("builtin").cpu.arch.endian() == .little;
+        return .{ .little_endian = native_little };
+    }
+
+    /// Get size and alignment for a format option
+    fn getOptionSize(self: *PackState, opt: u8, size_override: ?usize) struct { size: usize, align_to: usize } {
+        const size: usize = switch (opt) {
+            'b', 'B' => 1,
+            'h', 'H' => 2,
+            'l', 'L' => 8, // long is 8 bytes on 64-bit
+            'j', 'J' => 8, // lua_Integer / lua_Unsigned
+            'T' => 8, // size_t
+            'i', 'I' => size_override orelse 4,
+            'f' => 4,
+            'd', 'n' => 8,
+            'x' => 1,
+            else => 0,
+        };
+        const natural_align = size;
+        const align_to = @min(natural_align, self.max_align);
+        return .{ .size = size, .align_to = align_to };
+    }
+};
+
+/// Parse a number from format string (e.g., "i4" -> 4)
+fn parseFormatNumber(fmt: []const u8, pos: *usize) ?usize {
+    if (pos.* >= fmt.len) return null;
+    if (fmt[pos.*] < '0' or fmt[pos.*] > '9') return null;
+
+    var num: usize = 0;
+    while (pos.* < fmt.len and fmt[pos.*] >= '0' and fmt[pos.*] <= '9') {
+        num = num * 10 + (fmt[pos.*] - '0');
+        pos.* += 1;
+    }
+    return num;
+}
+
+/// string.packsize(fmt) - Returns size of a string resulting from string.pack with given format
+/// Only works for fixed-size formats (no 's' or 'z')
+pub fn nativeStringPacksize(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const fmt_arg = vm.stack[vm.base + func_reg + 1];
+    const fmt_obj = fmt_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const fmt = fmt_obj.asSlice();
+
+    var state = PackState.init();
+    var total_size: usize = 0;
+    var pos: usize = 0;
+
+    while (pos < fmt.len) {
+        const c = fmt[pos];
+        pos += 1;
+
+        switch (c) {
+            ' ' => continue,
+            '<' => state.little_endian = true,
+            '>' => state.little_endian = false,
+            '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
+            '!' => {
+                const n = parseFormatNumber(fmt, &pos) orelse 1;
+                state.max_align = if (n == 0) 8 else n; // !0 means native max alignment
+            },
+            'b', 'B', 'h', 'H', 'l', 'L', 'j', 'J', 'T', 'f', 'd', 'n' => {
+                const opt = state.getOptionSize(c, null);
+                // Add alignment padding
+                const aligned = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
+                total_size = aligned + opt.size;
+            },
+            'i', 'I' => {
+                const n = parseFormatNumber(fmt, &pos) orelse 4;
+                const opt = state.getOptionSize(c, n);
+                const aligned = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
+                total_size = aligned + opt.size;
+            },
+            'x' => {
+                total_size += 1;
+            },
+            'X' => {
+                // Alignment option - peek at next char
+                if (pos < fmt.len) {
+                    const next = fmt[pos];
+                    pos += 1;
+                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &pos));
+                    if (opt.align_to > 1) {
+                        total_size = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
+                    }
+                }
+            },
+            'c' => {
+                const n = parseFormatNumber(fmt, &pos) orelse 1;
+                total_size += n;
+            },
+            's', 'z' => {
+                // Variable-size formats - error
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            },
+            else => {},
+        }
+    }
+
+    vm.stack[vm.base + func_reg] = .{ .integer = @intCast(total_size) };
+}
+
 /// string.pack(fmt, v1, v2, ...) - Returns binary string containing values v1, v2, etc. packed according to format fmt
 pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.pack
-    // Binary packing with format specifiers
+    if (nresults == 0) return;
+
+    if (nargs < 1) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const fmt_arg = vm.stack[vm.base + func_reg + 1];
+    const fmt_obj = fmt_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const fmt = fmt_obj.asSlice();
+
+    const allocator = vm.allocator;
+    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
+    defer result.deinit(allocator);
+
+    var state = PackState.init();
+    var fmt_pos: usize = 0;
+    var arg_idx: u32 = 2; // Start after format string
+
+    while (fmt_pos < fmt.len) {
+        const c = fmt[fmt_pos];
+        fmt_pos += 1;
+
+        switch (c) {
+            ' ' => continue,
+            '<' => state.little_endian = true,
+            '>' => state.little_endian = false,
+            '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
+            '!' => {
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                state.max_align = if (n == 0) 8 else n;
+            },
+            'b' => {
+                // Signed byte
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                const byte: i8 = @truncate(val);
+                try result.append(allocator, @bitCast(byte));
+            },
+            'B' => {
+                // Unsigned byte
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                const byte: u8 = @truncate(@as(u64, @bitCast(val)));
+                try result.append(allocator, byte);
+            },
+            'h' => {
+                // Signed short (2 bytes)
+                try addAlignment(allocator, &result, 2, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                const short: i16 = @truncate(val);
+                try packInteger(allocator, &result, @as(u16, @bitCast(short)), 2, state.little_endian);
+            },
+            'H' => {
+                // Unsigned short (2 bytes)
+                try addAlignment(allocator, &result, 2, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                const short: u16 = @truncate(@as(u64, @bitCast(val)));
+                try packInteger(allocator, &result, short, 2, state.little_endian);
+            },
+            'l', 'j' => {
+                // Signed long / lua_Integer (8 bytes)
+                try addAlignment(allocator, &result, 8, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                try packInteger(allocator, &result, @as(u64, @bitCast(val)), 8, state.little_endian);
+            },
+            'L', 'J', 'T' => {
+                // Unsigned long / lua_Unsigned / size_t (8 bytes)
+                try addAlignment(allocator, &result, 8, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                try packInteger(allocator, &result, @as(u64, @bitCast(val)), 8, state.little_endian);
+            },
+            'i', 'I' => {
+                // Signed/unsigned int with optional size
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 4;
+                const size = @min(n, 8);
+                try addAlignment(allocator, &result, size, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toInteger() orelse 0;
+                try packInteger(allocator, &result, @as(u64, @bitCast(val)), size, state.little_endian);
+            },
+            'f' => {
+                // Float (4 bytes)
+                try addAlignment(allocator, &result, 4, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toNumber() orelse 0.0;
+                const float: f32 = @floatCast(val);
+                const bits: u32 = @bitCast(float);
+                try packInteger(allocator, &result, bits, 4, state.little_endian);
+            },
+            'd', 'n' => {
+                // Double / lua_Number (8 bytes)
+                try addAlignment(allocator, &result, 8, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                const val = arg.toNumber() orelse 0.0;
+                const bits: u64 = @bitCast(val);
+                try packInteger(allocator, &result, bits, 8, state.little_endian);
+            },
+            'c' => {
+                // Fixed-size string
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                if (arg.asString()) |str_obj| {
+                    const str = str_obj.asSlice();
+                    const copy_len = @min(str.len, n);
+                    try result.appendSlice(allocator, str[0..copy_len]);
+                    // Pad with zeros if string is shorter
+                    for (0..(n - copy_len)) |_| {
+                        try result.append(allocator, 0);
+                    }
+                } else {
+                    // Pad with zeros
+                    for (0..n) |_| {
+                        try result.append(allocator, 0);
+                    }
+                }
+            },
+            'z' => {
+                // Zero-terminated string
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                if (arg.asString()) |str_obj| {
+                    const str = str_obj.asSlice();
+                    try result.appendSlice(allocator, str);
+                }
+                try result.append(allocator, 0); // Null terminator
+            },
+            's' => {
+                // String with length prefix
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 8; // Default to size_t (8)
+                const size = @min(n, 8);
+                try addAlignment(allocator, &result, size, state.max_align);
+                const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+                arg_idx += 1;
+                if (arg.asString()) |str_obj| {
+                    const str = str_obj.asSlice();
+                    try packInteger(allocator, &result, str.len, size, state.little_endian);
+                    try result.appendSlice(allocator, str);
+                } else {
+                    try packInteger(allocator, &result, 0, size, state.little_endian);
+                }
+            },
+            'x' => {
+                // One byte of padding
+                try result.append(allocator, 0);
+            },
+            'X' => {
+                // Alignment padding
+                if (fmt_pos < fmt.len) {
+                    const next = fmt[fmt_pos];
+                    fmt_pos += 1;
+                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &fmt_pos));
+                    try addAlignment(allocator, &result, opt.size, state.max_align);
+                }
+            },
+            else => {},
+        }
+    }
+
+    const result_str = try vm.gc.allocString(result.items);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+}
+
+/// Helper: Add alignment padding
+fn addAlignment(allocator: std.mem.Allocator, result: *std.ArrayList(u8), size: usize, max_align: usize) !void {
+    const align_to = @min(size, max_align);
+    if (align_to <= 1) return;
+    const current = result.items.len;
+    const aligned = (current + align_to - 1) / align_to * align_to;
+    const padding = aligned - current;
+    for (0..padding) |_| {
+        try result.append(allocator, 0);
+    }
+}
+
+/// Helper: Pack integer with specified byte order
+fn packInteger(allocator: std.mem.Allocator, result: *std.ArrayList(u8), val: u64, size: usize, little_endian: bool) !void {
+    if (little_endian) {
+        for (0..size) |i| {
+            try result.append(allocator, @truncate(val >> @intCast(i * 8)));
+        }
+    } else {
+        var i: usize = size;
+        while (i > 0) {
+            i -= 1;
+            try result.append(allocator, @truncate(val >> @intCast(i * 8)));
+        }
+    }
 }
 
 /// string.unpack(fmt, s [, pos]) - Returns values packed in string s according to format fmt
 pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.unpack
-    // Binary unpacking with format specifiers
+    if (nresults == 0) return;
+
+    if (nargs < 2) {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    const fmt_arg = vm.stack[vm.base + func_reg + 1];
+    const fmt_obj = fmt_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const fmt = fmt_obj.asSlice();
+
+    const str_arg = vm.stack[vm.base + func_reg + 2];
+    const str_obj = str_arg.asString() orelse {
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    const data = str_obj.asSlice();
+
+    // Get optional starting position (1-based)
+    var data_pos: usize = 0;
+    if (nargs >= 3) {
+        const pos_arg = vm.stack[vm.base + func_reg + 3];
+        if (pos_arg.toInteger()) |p| {
+            if (p > 0) data_pos = @intCast(p - 1);
+        }
+    }
+
+    var state = PackState.init();
+    var fmt_pos: usize = 0;
+    var result_idx: u32 = 0;
+
+    while (fmt_pos < fmt.len and result_idx < nresults - 1) { // -1 to leave room for final position
+        const c = fmt[fmt_pos];
+        fmt_pos += 1;
+
+        switch (c) {
+            ' ' => continue,
+            '<' => state.little_endian = true,
+            '>' => state.little_endian = false,
+            '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
+            '!' => {
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                state.max_align = if (n == 0) 8 else n;
+            },
+            'b' => {
+                // Signed byte
+                if (data_pos >= data.len) break;
+                const byte: i8 = @bitCast(data[data_pos]);
+                data_pos += 1;
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = byte };
+                result_idx += 1;
+            },
+            'B' => {
+                // Unsigned byte
+                if (data_pos >= data.len) break;
+                const byte = data[data_pos];
+                data_pos += 1;
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = byte };
+                result_idx += 1;
+            },
+            'h' => {
+                // Signed short (2 bytes)
+                data_pos = alignPosition(data_pos, 2, state.max_align);
+                if (data_pos + 2 > data.len) break;
+                const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
+                data_pos += 2;
+                const signed: i16 = @bitCast(@as(u16, @truncate(val)));
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = signed };
+                result_idx += 1;
+            },
+            'H' => {
+                // Unsigned short (2 bytes)
+                data_pos = alignPosition(data_pos, 2, state.max_align);
+                if (data_pos + 2 > data.len) break;
+                const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
+                data_pos += 2;
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @intCast(val) };
+                result_idx += 1;
+            },
+            'l', 'j' => {
+                // Signed long / lua_Integer (8 bytes)
+                data_pos = alignPosition(data_pos, 8, state.max_align);
+                if (data_pos + 8 > data.len) break;
+                const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
+                data_pos += 8;
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                result_idx += 1;
+            },
+            'L', 'J', 'T' => {
+                // Unsigned long / lua_Unsigned / size_t (8 bytes)
+                data_pos = alignPosition(data_pos, 8, state.max_align);
+                if (data_pos + 8 > data.len) break;
+                const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
+                data_pos += 8;
+                // Note: Large unsigned values may overflow i64
+                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                result_idx += 1;
+            },
+            'i', 'I' => {
+                // Signed/unsigned int with optional size
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 4;
+                const size = @min(n, 8);
+                data_pos = alignPosition(data_pos, size, state.max_align);
+                if (data_pos + size > data.len) break;
+                const val = unpackInteger(data[data_pos..][0..size], size, state.little_endian);
+                data_pos += size;
+                if (c == 'i') {
+                    // Sign extend for signed
+                    const signed = signExtend(val, size);
+                    vm.stack[vm.base + func_reg + result_idx] = .{ .integer = signed };
+                } else {
+                    vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                }
+                result_idx += 1;
+            },
+            'f' => {
+                // Float (4 bytes)
+                data_pos = alignPosition(data_pos, 4, state.max_align);
+                if (data_pos + 4 > data.len) break;
+                const bits: u32 = @truncate(unpackInteger(data[data_pos..][0..4], 4, state.little_endian));
+                data_pos += 4;
+                const float: f32 = @bitCast(bits);
+                vm.stack[vm.base + func_reg + result_idx] = .{ .number = float };
+                result_idx += 1;
+            },
+            'd', 'n' => {
+                // Double / lua_Number (8 bytes)
+                data_pos = alignPosition(data_pos, 8, state.max_align);
+                if (data_pos + 8 > data.len) break;
+                const bits = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
+                data_pos += 8;
+                const double: f64 = @bitCast(bits);
+                vm.stack[vm.base + func_reg + result_idx] = .{ .number = double };
+                result_idx += 1;
+            },
+            'c' => {
+                // Fixed-size string
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                if (data_pos + n > data.len) break;
+                const str = try vm.gc.allocString(data[data_pos..][0..n]);
+                data_pos += n;
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
+                result_idx += 1;
+            },
+            'z' => {
+                // Zero-terminated string
+                var end_pos = data_pos;
+                while (end_pos < data.len and data[end_pos] != 0) {
+                    end_pos += 1;
+                }
+                const str = try vm.gc.allocString(data[data_pos..end_pos]);
+                data_pos = if (end_pos < data.len) end_pos + 1 else end_pos; // Skip null terminator
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
+                result_idx += 1;
+            },
+            's' => {
+                // String with length prefix
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse 8;
+                const size = @min(n, 8);
+                data_pos = alignPosition(data_pos, size, state.max_align);
+                if (data_pos + size > data.len) break;
+                const len = unpackInteger(data[data_pos..][0..size], size, state.little_endian);
+                data_pos += size;
+                if (data_pos + len > data.len) break;
+                const str = try vm.gc.allocString(data[data_pos..][0..len]);
+                data_pos += len;
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
+                result_idx += 1;
+            },
+            'x' => {
+                // Skip one byte
+                if (data_pos < data.len) data_pos += 1;
+            },
+            'X' => {
+                // Alignment padding
+                if (fmt_pos < fmt.len) {
+                    const next = fmt[fmt_pos];
+                    fmt_pos += 1;
+                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &fmt_pos));
+                    data_pos = alignPosition(data_pos, opt.size, state.max_align);
+                }
+            },
+            else => {},
+        }
+    }
+
+    // Return final position (1-based) as last return value
+    if (result_idx < nresults) {
+        vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @intCast(data_pos + 1) };
+    }
 }
 
-/// string.packsize(fmt) - Returns size of a string resulting from string.pack with given format
-pub fn nativeStringPacksize(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.packsize
+/// Helper: Align position
+fn alignPosition(pos: usize, size: usize, max_align: usize) usize {
+    const align_to = @min(size, max_align);
+    if (align_to <= 1) return pos;
+    return (pos + align_to - 1) / align_to * align_to;
+}
+
+/// Helper: Unpack integer from bytes
+fn unpackInteger(data: []const u8, size: usize, little_endian: bool) u64 {
+    var val: u64 = 0;
+    if (little_endian) {
+        for (0..size) |i| {
+            val |= @as(u64, data[i]) << @intCast(i * 8);
+        }
+    } else {
+        for (0..size) |i| {
+            val |= @as(u64, data[i]) << @intCast((size - 1 - i) * 8);
+        }
+    }
+    return val;
+}
+
+/// Helper: Sign extend value
+fn signExtend(val: u64, size: usize) i64 {
+    const bits = size * 8;
+    const sign_bit: u64 = @as(u64, 1) << @intCast(bits - 1);
+    if ((val & sign_bit) != 0) {
+        // Negative - extend sign
+        const mask: u64 = (@as(u64, 0) -% 1) << @intCast(bits);
+        return @bitCast(val | mask);
+    }
+    return @bitCast(val);
 }

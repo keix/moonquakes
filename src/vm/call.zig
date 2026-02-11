@@ -10,6 +10,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const ProtoObject = object.ProtoObject;
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const mnemonics = @import("mnemonics.zig");
@@ -124,7 +125,7 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
 /// full stack frame is visible to GC.
 fn runUntilReturn(
     vm: *VM,
-    proto: *const @import("../compiler/proto.zig").Proto,
+    proto: *const ProtoObject,
     closure: *ClosureObject,
     call_base: u32,
     result_slot: u32,
@@ -136,6 +137,18 @@ fn runUntilReturn(
 
     // Push call info
     _ = try mnemonics.pushCallInfo(vm, proto, closure, call_base, result_slot, 1);
+
+    // CRITICAL: Ensure vm.base and vm.top are restored even on error
+    // Without this, errors in called functions leave the VM in a corrupt state
+    errdefer {
+        // Pop any frames we pushed
+        while (vm.callstack_size > saved_depth) {
+            mnemonics.popCallInfo(vm);
+        }
+        // Restore caller's frame state
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
 
     // Execute until we return to saved depth
     while (vm.callstack_size > saved_depth) {

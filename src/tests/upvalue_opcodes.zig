@@ -4,15 +4,15 @@ const testing = std.testing;
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
-const proto_mod = @import("../compiler/proto.zig");
-const Proto = proto_mod.Proto;
-const Upvaldesc = proto_mod.Upvaldesc;
+const object = @import("../runtime/gc/object.zig");
+const Upvaldesc = object.Upvaldesc;
+const ProtoObject = object.ProtoObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "CLOSE opcode - no-op behavior" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Initialize some registers
@@ -27,17 +27,11 @@ test "CLOSE opcode - no-op behavior" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
 
     const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
@@ -50,7 +44,7 @@ test "CLOSE opcode - no-op behavior" {
 }
 
 test "TBC opcode - nil value (no-op)" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Initialize registers - nil is a valid TBC target that does nothing
@@ -64,21 +58,15 @@ test "TBC opcode - nil value (no-op)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
-    const result = try Mnemonics.execute(&vm, &proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 42 }));
 }
 
 test "TBC opcode - false value (no-op)" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // false is also a valid TBC target that does nothing
@@ -92,21 +80,15 @@ test "TBC opcode - false value (no-op)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
 
-    const result = try Mnemonics.execute(&vm, &proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 100 }));
 }
 
 test "SETUPVAL opcode - no-op behavior" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Initialize some registers
@@ -120,17 +102,11 @@ test "SETUPVAL opcode - no-op behavior" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &[_]TValue{},
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
 
     const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
 
-    const result = try Mnemonics.execute(&vm, &proto);
+    const result = try Mnemonics.execute(&vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
@@ -143,7 +119,7 @@ test "SETUPVAL opcode - no-op behavior" {
 }
 
 test "SETTABUP opcode - global variable assignment" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Allocate string through GC
@@ -164,15 +140,8 @@ test "SETTABUP opcode - global variable assignment" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify the global variable was set
@@ -181,7 +150,7 @@ test "SETTABUP opcode - global variable assignment" {
 }
 
 test "SETTABUP opcode - multiple global assignments" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Allocate strings through GC
@@ -208,15 +177,8 @@ test "SETTABUP opcode - multiple global assignments" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify all global variables were set correctly
@@ -230,7 +192,7 @@ test "SETTABUP opcode - multiple global assignments" {
 }
 
 test "SETTABUP opcode - invalid key type" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Create constant with non-string key
@@ -247,21 +209,15 @@ test "SETTABUP opcode - invalid key type" {
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
 
     // Should fail with InvalidTableKey error
-    const result = Mnemonics.execute(&vm, &proto);
+    const result = Mnemonics.execute(&vm, proto);
     try testing.expectError(error.InvalidTableKey, result);
 }
 
 test "All new opcodes - integration test" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Allocate string through GC
@@ -285,15 +241,8 @@ test "All new opcodes - integration test" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = Proto{
-        .k = &constants,
-        .code = &code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 3,
-    };
-
-    const result = try Mnemonics.execute(&vm, &proto);
+    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Only SETTABUP should have side effects
@@ -302,7 +251,7 @@ test "All new opcodes - integration test" {
 }
 
 test "CLOSURE opcode - create closure without upvalues" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Child proto: simple function that returns 42
@@ -311,15 +260,7 @@ test "CLOSURE opcode - create closure without upvalues" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R[0]
     };
 
-    const child_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &child_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-        .nups = 0,
-        .upvalues = &[_]Upvaldesc{},
-    };
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 0, &[_]Upvaldesc{});
 
     // Parent proto: create closure and return it
     const parent_code = [_]Instruction{
@@ -327,25 +268,16 @@ test "CLOSURE opcode - create closure without upvalues" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R[0]
     };
 
-    const protos = [_]*const Proto{&child_proto};
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 1, &[_]*ProtoObject{child_proto});
 
-    const parent_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &parent_code,
-        .protos = &protos,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-    };
-
-    const result = try Mnemonics.execute(&vm, &parent_proto);
+    const result = try Mnemonics.execute(&vm, parent_proto);
 
     // Should return a closure
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
             const closure = val.asClosure().?;
-            try testing.expectEqual(&child_proto, closure.proto);
+            try testing.expectEqual(child_proto, closure.proto);
             try testing.expectEqual(@as(usize, 0), closure.upvalues.len);
         },
         else => return error.UnexpectedResult,
@@ -353,7 +285,7 @@ test "CLOSURE opcode - create closure without upvalues" {
 }
 
 test "CLOSURE opcode - create closure with upvalue from stack" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Child proto: function that reads upvalue
@@ -367,15 +299,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &child_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-        .nups = 1,
-        .upvalues = &child_upvalues,
-    };
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 100
@@ -387,25 +311,16 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const protos = [_]*const Proto{&child_proto};
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const parent_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &parent_code,
-        .protos = &protos,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    const result = try Mnemonics.execute(&vm, &parent_proto);
+    const result = try Mnemonics.execute(&vm, parent_proto);
 
     // Should return a closure with one upvalue
     switch (result) {
         .single => |val| {
             try testing.expect(val.isClosure());
             const closure = val.asClosure().?;
-            try testing.expectEqual(&child_proto, closure.proto);
+            try testing.expectEqual(child_proto, closure.proto);
             try testing.expectEqual(@as(usize, 1), closure.upvalues.len);
 
             // The upvalue should point to the value 100
@@ -417,7 +332,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
 }
 
 test "CLOSE opcode - closes open upvalues" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Child proto: function that reads upvalue
@@ -430,15 +345,7 @@ test "CLOSE opcode - closes open upvalues" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &child_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-        .nups = 1,
-        .upvalues = &child_upvalues,
-    };
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 200
@@ -452,18 +359,9 @@ test "CLOSE opcode - closes open upvalues" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const protos = [_]*const Proto{&child_proto};
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const parent_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &parent_code,
-        .protos = &protos,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    const result = try Mnemonics.execute(&vm, &parent_proto);
+    const result = try Mnemonics.execute(&vm, parent_proto);
 
     switch (result) {
         .single => |val| {
@@ -485,7 +383,7 @@ test "CLOSE opcode - closes open upvalues" {
 }
 
 test "GETUPVAL and SETUPVAL with closure" {
-    var vm = try test_utils.createTestVM();
+    var vm = try VM.init(testing.allocator);
     defer vm.deinit();
 
     // Child proto: function that modifies upvalue and returns it
@@ -502,15 +400,7 @@ test "GETUPVAL and SETUPVAL with closure" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &child_code,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 1,
-        .nups = 1,
-        .upvalues = &child_upvalues,
-    };
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 10
@@ -522,18 +412,9 @@ test "GETUPVAL and SETUPVAL with closure" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const protos = [_]*const Proto{&child_proto};
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const parent_proto = Proto{
-        .k = &[_]TValue{},
-        .code = &parent_code,
-        .protos = &protos,
-        .numparams = 0,
-        .is_vararg = false,
-        .maxstacksize = 2,
-    };
-
-    const result = try Mnemonics.execute(&vm, &parent_proto);
+    const result = try Mnemonics.execute(&vm, parent_proto);
 
     switch (result) {
         .single => |val| {

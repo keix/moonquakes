@@ -538,13 +538,65 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 }
 
 /// os.setlocale(locale [, category]) - Sets the current locale of the program
+/// locale: string specifying locale, "" for native locale, or nil to query
+/// category: "all" (default), "collate", "ctype", "monetary", "numeric", "time"
+/// Returns: string with current locale for the category, or nil on failure
+///
+/// NOTE: This is a minimal implementation that only supports the "C" locale.
+/// POSIX guarantees "C" and "" (native) are always available. Since we don't
+/// link libc, we always operate in "C" locale. When C API integration is added,
+/// this can be replaced with proper setlocale() calls.
 pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement os.setlocale
-    // Returns new locale or nil on failure
+    if (nresults == 0) return;
+
+    // Validate category if provided
+    if (nargs >= 2) {
+        const cat_arg = vm.stack[vm.base + func_reg + 2];
+        if (cat_arg.asString()) |cat_obj| {
+            const cat = cat_obj.asSlice();
+            const valid = std.mem.eql(u8, cat, "all") or
+                std.mem.eql(u8, cat, "collate") or
+                std.mem.eql(u8, cat, "ctype") or
+                std.mem.eql(u8, cat, "monetary") or
+                std.mem.eql(u8, cat, "numeric") or
+                std.mem.eql(u8, cat, "time");
+            if (!valid) {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+        }
+    }
+
+    // Check locale argument
+    if (nargs >= 1) {
+        const locale_arg = vm.stack[vm.base + func_reg + 1];
+        if (locale_arg != .nil) {
+            if (locale_arg.asString()) |locale_obj| {
+                const locale = locale_obj.asSlice();
+                // Only "C", "POSIX", and "" (native) are supported
+                if (locale.len == 0 or
+                    std.mem.eql(u8, locale, "C") or
+                    std.mem.eql(u8, locale, "POSIX"))
+                {
+                    // Setting to C locale - always succeeds
+                    const result_str = try vm.gc.allocString("C");
+                    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+                    return;
+                }
+                // Unsupported locale
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            } else {
+                // Bad argument type
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+        }
+    }
+
+    // Query current locale (nil or no argument) - always "C"
+    const result_str = try vm.gc.allocString("C");
+    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
 /// os.time([table]) - Returns the current time when called without arguments
