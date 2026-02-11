@@ -1925,13 +1925,95 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         .MMBINI => {
             // MMBINI A sB C k: metamethod for binary op with immediate
-            // TODO: Implement immediate metamethod dispatch
-            return error.UnknownOpcode;
+            // A = register operand, sB = signed immediate, C = metamethod event
+            // k = operand order: k=0 means R[A] op sB, k=1 means sB op R[A]
+            const a = inst.getA();
+            const sb = @as(i8, @bitCast(inst.getB()));
+            const c = inst.getC();
+            const k = inst.getk();
+
+            const va = vm.stack[vm.base + a];
+            const vb = TValue{ .integer = @as(i64, sb) };
+
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+
+            // Determine operand order based on k flag
+            const left = if (k) vb else va;
+            const right = if (k) va else vb;
+
+            // Try to get metamethod from either operand
+            const mm = try metamethod.getBinMetamethod(left, right, event, &vm.gc) orelse {
+                return error.ArithmeticError;
+            };
+
+            // Call the metamethod: mm(left, right) -> result at a
+            const temp = vm.top;
+            vm.stack[temp] = mm;
+            vm.stack[temp + 1] = left;
+            vm.stack[temp + 2] = right;
+            vm.top = temp + 3;
+
+            if (mm.asClosure()) |closure| {
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                return .LoopContinue;
+            }
+
+            if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                vm.stack[vm.base + a] = vm.stack[temp];
+                vm.top = temp;
+                return .Continue;
+            }
+
+            return error.NotAFunction;
         },
         .MMBINK => {
             // MMBINK A B C k: metamethod for binary op with constant
-            // TODO: Implement constant metamethod dispatch
-            return error.UnknownOpcode;
+            // A = register operand, B = constant index, C = metamethod event
+            // k = operand order: k=0 means R[A] op K[B], k=1 means K[B] op R[A]
+            const a = inst.getA();
+            const b = inst.getB();
+            const c = inst.getC();
+            const k = inst.getk();
+
+            const va = vm.stack[vm.base + a];
+            const vb = ci.func.k[b];
+
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+
+            // Determine operand order based on k flag
+            const left = if (k) vb else va;
+            const right = if (k) va else vb;
+
+            // Try to get metamethod from either operand
+            const mm = try metamethod.getBinMetamethod(left, right, event, &vm.gc) orelse {
+                return error.ArithmeticError;
+            };
+
+            // Call the metamethod: mm(left, right) -> result at a
+            const temp = vm.top;
+            vm.stack[temp] = mm;
+            vm.stack[temp + 1] = left;
+            vm.stack[temp + 2] = right;
+            vm.top = temp + 3;
+
+            if (mm.asClosure()) |closure| {
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                return .LoopContinue;
+            }
+
+            if (mm.isObject() and mm.object.type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.object);
+                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                vm.stack[vm.base + a] = vm.stack[temp];
+                vm.top = temp;
+                return .Continue;
+            }
+
+            return error.NotAFunction;
         },
         .VARARG => {
             // VARARG A C: Load varargs into R[A], R[A+1], ..., R[A+C-2]
