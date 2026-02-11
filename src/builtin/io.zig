@@ -12,6 +12,7 @@ const FILE_EXITCODE_KEY = "_exitcode";
 const FILE_CLOSED_KEY = "_closed";
 const FILE_FILENAME_KEY = "_filename";
 const FILE_MODE_KEY = "_mode";
+const FILE_POS_KEY = "_pos";
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const string = @import("string.zig");
     var stdout_writer = std.fs.File.stdout().writer(&.{});
@@ -299,6 +300,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_str = try vm.gc.allocString(mode);
         try file_table.set(mode_key, TValue.fromString(mode_str));
 
+        // Store read position (0 for beginning)
+        const pos_key = try vm.gc.allocString(FILE_POS_KEY);
+        try file_table.set(pos_key, .{ .integer = 0 });
+
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
         file_table.metatable = mt;
@@ -337,6 +342,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         // Store exit code (0 for regular files)
         const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
         try file_table.set(exitcode_key, .{ .integer = 0 });
+
+        // Store position (0 for write mode)
+        const pos_key = try vm.gc.allocString(FILE_POS_KEY);
+        try file_table.set(pos_key, .{ .integer = 0 });
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -389,6 +398,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         // Store exit code (0 for regular files)
         const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
         try file_table.set(exitcode_key, .{ .integer = 0 });
+
+        // Store position (0 for append mode)
+        const pos_key = try vm.gc.allocString(FILE_POS_KEY);
+        try file_table.set(pos_key, .{ .integer = 0 });
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -611,6 +624,18 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(flush_nc);
     const flush_key = try vm.gc.allocString("flush");
     try index_table.set(flush_key, TValue.fromNativeClosure(flush_nc));
+
+    // Reuse scratch slot for seek method
+    const seek_nc = try vm.gc.allocNativeClosure(.{ .id = .file_seek });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(seek_nc);
+    const seek_key = try vm.gc.allocString("seek");
+    try index_table.set(seek_key, TValue.fromNativeClosure(seek_nc));
+
+    // Reuse scratch slot for setvbuf method
+    const setvbuf_nc = try vm.gc.allocNativeClosure(.{ .id = .file_setvbuf });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(setvbuf_nc);
+    const setvbuf_key = try vm.gc.allocString("setvbuf");
+    try index_table.set(setvbuf_key, TValue.fromNativeClosure(setvbuf_nc));
 
     return mt;
 }
@@ -959,7 +984,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
     }
 
-    // Get stored output
+    // Get stored output (full content)
     const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
     const output_val = file_table.get(output_key) orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -969,62 +994,68 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
-    const output = output_str.asSlice();
+    const content = output_str.asSlice();
+
+    // Get current position
+    const pos_key = try vm.gc.allocString(FILE_POS_KEY);
+    const pos_val = file_table.get(pos_key) orelse TValue{ .integer = 0 };
+    const pos_i64 = pos_val.toInteger() orelse 0;
+    const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
 
     // Handle different formats
     if (std.mem.eql(u8, format, "*a") or std.mem.eql(u8, format, "a")) {
-        // Read all - return entire output
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = output_val;
+        // Read all from current position
+        const remaining = content[pos..];
+        if (remaining.len == 0) {
+            // Return empty string at EOF (Lua behavior)
+            const empty_str = try vm.gc.allocString("");
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(empty_str);
+        } else {
+            const result_str = try vm.gc.allocString(remaining);
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
         }
-        // Clear the output (it's been consumed)
-        const empty_str = try vm.gc.allocString("");
-        try file_table.set(output_key, TValue.fromString(empty_str));
+        // Update position to end
+        try file_table.set(pos_key, .{ .integer = @intCast(content.len) });
     } else if (std.mem.eql(u8, format, "*l") or std.mem.eql(u8, format, "l")) {
         // Read line (without newline)
-        if (output.len == 0) {
+        if (pos >= content.len) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             return;
         }
 
-        // Find newline
-        var end: usize = 0;
-        while (end < output.len and output[end] != '\n') : (end += 1) {}
+        // Find newline from current position
+        var end: usize = pos;
+        while (end < content.len and content[end] != '\n') : (end += 1) {}
 
-        const line = output[0..end];
+        const line = content[pos..end];
         const line_str = try vm.gc.allocString(line);
-        // Store in stack immediately to protect from GC
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
         }
 
-        // Now safe to allocate remaining
-        const remaining = if (end < output.len) output[end + 1 ..] else "";
-        const remaining_str = try vm.gc.allocString(remaining);
-        try file_table.set(output_key, TValue.fromString(remaining_str));
+        // Update position (skip past newline if present)
+        const new_pos: i64 = @intCast(if (end < content.len) end + 1 else end);
+        try file_table.set(pos_key, .{ .integer = new_pos });
     } else if (std.mem.eql(u8, format, "*L") or std.mem.eql(u8, format, "L")) {
         // Read line (with newline)
-        if (output.len == 0) {
+        if (pos >= content.len) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             return;
         }
 
-        // Find newline
-        var end: usize = 0;
-        while (end < output.len and output[end] != '\n') : (end += 1) {}
-        if (end < output.len) end += 1; // Include newline
+        // Find newline from current position
+        var end: usize = pos;
+        while (end < content.len and content[end] != '\n') : (end += 1) {}
+        if (end < content.len) end += 1; // Include newline
 
-        const line = output[0..end];
+        const line = content[pos..end];
         const line_str = try vm.gc.allocString(line);
-        // Store in stack immediately to protect from GC
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
         }
 
-        // Now safe to allocate remaining
-        const remaining = output[end..];
-        const remaining_str = try vm.gc.allocString(remaining);
-        try file_table.set(output_key, TValue.fromString(remaining_str));
+        // Update position
+        try file_table.set(pos_key, .{ .integer = @intCast(end) });
     } else {
         // Unknown format, return nil
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -1032,23 +1063,151 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 }
 
 /// file:seek([whence [, offset]]) - Sets and gets file position
+/// whence: "set" (from beginning), "cur" (from current), "end" (from end)
+/// offset: number (default 0)
+/// Returns: new position from beginning of file
 pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement file:seek method
-    // whence can be "set", "cur", "end"
+    if (nargs < 1) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get the file handle table (self)
+    const self_arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = self_arg.asTable() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if closed
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+    }
+
+    // Get content length
+    const output_key = try vm.gc.allocString(FILE_OUTPUT_KEY);
+    const content_len: i64 = if (file_table.get(output_key)) |v|
+        if (v.asString()) |s| @intCast(s.asSlice().len) else 0
+    else
+        0;
+
+    // Get current position
+    const pos_key = try vm.gc.allocString(FILE_POS_KEY);
+    const current_pos: i64 = if (file_table.get(pos_key)) |v| v.toInteger() orelse 0 else 0;
+
+    // Get whence argument (default "cur")
+    var whence: []const u8 = "cur";
+    if (nargs > 1) {
+        const whence_arg = vm.stack[vm.base + func_reg + 2];
+        if (whence_arg.asString()) |s| {
+            whence = s.asSlice();
+        }
+    }
+
+    // Get offset argument (default 0)
+    var offset: i64 = 0;
+    if (nargs > 2) {
+        const offset_arg = vm.stack[vm.base + func_reg + 3];
+        offset = offset_arg.toInteger() orelse 0;
+    }
+
+    // Calculate new position based on whence
+    var new_pos: i64 = undefined;
+    if (std.mem.eql(u8, whence, "set")) {
+        new_pos = offset;
+    } else if (std.mem.eql(u8, whence, "cur")) {
+        new_pos = current_pos + offset;
+    } else if (std.mem.eql(u8, whence, "end")) {
+        new_pos = content_len + offset;
+    } else {
+        // Invalid whence
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Clamp to valid range
+    if (new_pos < 0) new_pos = 0;
+    if (new_pos > content_len) new_pos = content_len;
+
+    // Update position
+    try file_table.set(pos_key, .{ .integer = new_pos });
+
+    // Return new position
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .integer = new_pos };
+    }
 }
 
 /// file:setvbuf(mode [, size]) - Sets buffering mode for file
+/// file:setvbuf(mode [, size]) - Sets buffering mode for file
+/// mode: "no" (no buffering), "full" (full buffering), "line" (line buffering)
+/// size: buffer size (optional, ignored in this implementation)
+/// Returns: true on success, nil + error on failure
+///
+/// NOTE: Current implementation uses in-memory buffering, so this is a no-op
+/// that only validates arguments. When C API integration is implemented,
+/// consider using libc's setvbuf() for real buffering control.
 pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement file:setvbuf method
-    // mode can be "no", "full", "line"
+    if (nargs < 2) {
+        // Need at least self and mode
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    }
+
+    // Get the file handle table (self)
+    const self_arg = vm.stack[vm.base + func_reg + 1];
+    const file_table = self_arg.asTable() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+
+    // Check if closed
+    const closed_key = try vm.gc.allocString(FILE_CLOSED_KEY);
+    if (file_table.get(closed_key)) |closed_val| {
+        if (closed_val.toBoolean()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("file is closed");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        }
+    }
+
+    // Get mode argument
+    const mode_arg = vm.stack[vm.base + func_reg + 2];
+    const mode_str = mode_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #1 (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    const mode = mode_str.asSlice();
+
+    // Validate mode
+    if (!std.mem.eql(u8, mode, "no") and
+        !std.mem.eql(u8, mode, "full") and
+        !std.mem.eql(u8, mode, "line"))
+    {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc.allocString("bad argument #1 (invalid mode)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    // In our memory-buffered implementation, buffering mode doesn't affect behavior
+    // but we accept it for compatibility and return success
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    }
 }
 
 /// file:write(...) - Writes values to file
