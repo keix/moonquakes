@@ -1,6 +1,9 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const call = @import("../vm/call.zig");
+const metamethod = @import("../vm/metamethod.zig");
+const mnemonics = @import("../vm/mnemonics.zig");
+const object = @import("../runtime/gc/object.zig");
 
 /// Lua 5.4 String Library
 /// Corresponds to Lua manual chapter "String Manipulation"
@@ -24,37 +27,56 @@ fn formatInteger(buf: []u8, i: i64) []const u8 {
 }
 
 pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const arg = if (nargs > 0) &vm.stack[vm.base + func_reg + 1] else null;
+    if (nresults == 0) return;
+
+    const arg = if (nargs > 0) vm.stack[vm.base + func_reg + 1] else TValue.nil;
 
     // Stack buffer for number formatting (64 bytes covers i64 range and f64)
     var buf: [64]u8 = undefined;
 
-    const result = if (arg) |v| blk: {
-        break :blk switch (v.*) {
-            .number => |n| ret: {
-                const formatted = formatNumber(&buf, n);
-                break :ret TValue.fromString(try vm.gc.allocString(formatted));
+    const result = switch (arg) {
+        .number => |n| ret: {
+            const formatted = formatNumber(&buf, n);
+            break :ret TValue.fromString(try vm.gc.allocString(formatted));
+        },
+        .integer => |i| ret: {
+            const formatted = formatInteger(&buf, i);
+            break :ret TValue.fromString(try vm.gc.allocString(formatted));
+        },
+        .nil => TValue.fromString(try vm.gc.allocString("nil")),
+        .boolean => |b| TValue.fromString(try vm.gc.allocString(if (b) "true" else "false")),
+        .object => |obj| switch (obj.type) {
+            .string => arg,
+            .table, .userdata => ret: {
+                // Check for __tostring metamethod
+                if (try metamethod.getMetamethod(arg, .tostring, &vm.gc)) |mm| {
+                    if (mm.asClosure()) |closure| {
+                        // Save and restore vm.top since executeSyncMM modifies it
+                        const saved_top = vm.top;
+                        const mm_result = try mnemonics.executeSyncMM(vm, closure, &[_]TValue{arg});
+                        vm.top = saved_top;
+                        // __tostring should return a string
+                        if (mm_result.asString()) |_| {
+                            break :ret mm_result;
+                        }
+                        // If not a string, fall through to default
+                    }
+                    // Note: Native __tostring is not supported (very rare in practice)
+                }
+                // Default representation
+                if (obj.type == .table) {
+                    break :ret TValue.fromString(try vm.gc.allocString("<table>"));
+                } else {
+                    break :ret TValue.fromString(try vm.gc.allocString("<userdata>"));
+                }
             },
-            .integer => |i| ret: {
-                const formatted = formatInteger(&buf, i);
-                break :ret TValue.fromString(try vm.gc.allocString(formatted));
-            },
-            .nil => TValue.fromString(try vm.gc.allocString("nil")),
-            .boolean => |b| TValue.fromString(try vm.gc.allocString(if (b) "true" else "false")),
-            .object => |obj| switch (obj.type) {
-                .string => v.*,
-                .table => TValue.fromString(try vm.gc.allocString("<table>")),
-                .closure, .native_closure => TValue.fromString(try vm.gc.allocString("<function>")),
-                .upvalue => TValue.fromString(try vm.gc.allocString("<upvalue>")),
-                .userdata => TValue.fromString(try vm.gc.allocString("<userdata>")),
-                .proto => TValue.fromString(try vm.gc.allocString("<proto>")),
-            },
-        };
-    } else TValue.fromString(try vm.gc.allocString("nil"));
+            .closure, .native_closure => TValue.fromString(try vm.gc.allocString("<function>")),
+            .upvalue => TValue.fromString(try vm.gc.allocString("<upvalue>")),
+            .proto => TValue.fromString(try vm.gc.allocString("<proto>")),
+        },
+    };
 
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = result;
-    }
+    vm.stack[vm.base + func_reg] = result;
 }
 
 /// string.len(s) - Returns the length of string s

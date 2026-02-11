@@ -35,6 +35,10 @@ pub const MetaEvent = enum {
     newindex, // __newindex
     call, // __call
     close, // __close (Lua 5.4 to-be-closed)
+    tostring, // __tostring
+    metatable, // __metatable
+    name, // __name
+    pairs, // __pairs
 
     /// Get the metamethod key string for this event
     pub fn key(self: MetaEvent) []const u8 {
@@ -62,6 +66,10 @@ pub const MetaEvent = enum {
             .newindex => "__newindex",
             .call => "__call",
             .close => "__close",
+            .tostring => "__tostring",
+            .metatable => "__metatable",
+            .name => "__name",
+            .pairs => "__pairs",
         };
     }
 };

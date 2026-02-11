@@ -240,7 +240,8 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pairs(t) - Returns three values for iterating over table
-/// Returns: next function, table, nil
+/// TODO: If t has __pairs metamethod, should call it and return its results
+/// Currently returns: next function, table, nil (default behavior)
 pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -249,7 +250,10 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
 
-    // Return next function
+    // TODO: Check for __pairs metamethod
+    // Currently not implemented due to error set inference limitations with anytype
+
+    // Default behavior: return next, table, nil
     const next_nc = try vm.gc.allocNativeClosure(.{ .id = .next });
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(next_nc);
 
