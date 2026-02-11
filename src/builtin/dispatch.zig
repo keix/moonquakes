@@ -359,6 +359,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .string_find => try string.nativeStringFind(vm, func_reg, nargs, nresults),
         .string_match => try string.nativeStringMatch(vm, func_reg, nargs, nresults),
         .string_gmatch => try string.nativeStringGmatch(vm, func_reg, nargs, nresults),
+        .string_gmatch_iterator => try string.nativeStringGmatchIterator(vm, func_reg, nargs, nresults),
         .string_gsub => try string.nativeStringGsub(vm, func_reg, nargs, nresults),
         .string_format => try string.nativeStringFormat(vm, func_reg, nargs, nresults),
         .string_dump => try string.nativeStringDump(vm, func_reg, nargs, nresults),
