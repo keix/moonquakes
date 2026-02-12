@@ -665,7 +665,11 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
-    // Materialize to Proto
+    // Materialize to Proto and create closure
+    // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
+    vm.gc.inhibitGC();
+    defer vm.gc.allowGC();
+
     const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
@@ -675,7 +679,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         return;
     };
 
-    // Create closure
+    // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
@@ -737,7 +741,11 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     };
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
-    // Materialize to Proto
+    // Materialize to Proto and create closure
+    // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
+    vm.gc.inhibitGC();
+    defer vm.gc.allowGC();
+
     const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
@@ -747,7 +755,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    // Create closure
+    // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
@@ -792,15 +800,22 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     };
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
-    // Materialize to Proto
+    // Materialize to Proto and create closure
+    // Inhibit GC until closure is executed (proto is not rooted otherwise)
+    vm.gc.inhibitGC();
+
     const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+        vm.gc.allowGC();
         vm.lua_error_msg = try vm.gc.allocString("failed to materialize chunk");
         return RuntimeError.RuntimeError;
     };
 
-    // Create closure
+    // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
     const func_val = TValue.fromClosure(closure);
+
+    // Allow GC again before execution (closure is now rooted when called)
+    vm.gc.allowGC();
 
     // Execute the chunk
     const result = call.callValue(vm, func_val, &[_]TValue{}) catch |err| {
