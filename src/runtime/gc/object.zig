@@ -114,11 +114,31 @@ pub const TableObject = struct {
         std.hash_map.default_max_load_percentage,
     );
 
+    /// Weak table mode for __mode metamethod
+    pub const WeakMode = enum(u2) {
+        none = 0, // Strong table (default)
+        weak_keys = 1, // __mode contains 'k'
+        weak_values = 2, // __mode contains 'v'
+        weak_both = 3, // __mode contains both 'k' and 'v'
+    };
+
     header: GCObject,
     hash_part: HashMap,
     allocator: std.mem.Allocator,
     /// Metatable for metamethod dispatch (null if no metatable)
     metatable: ?*TableObject,
+    /// Weak mode, cached from metatable.__mode during GC cycle
+    weak_mode: WeakMode = .none,
+
+    /// Check if this table has weak keys
+    pub fn hasWeakKeys(self: *const TableObject) bool {
+        return self.weak_mode == .weak_keys or self.weak_mode == .weak_both;
+    }
+
+    /// Check if this table has weak values
+    pub fn hasWeakValues(self: *const TableObject) bool {
+        return self.weak_mode == .weak_values or self.weak_mode == .weak_both;
+    }
 
     /// Get a value by StringObject key
     pub fn get(self: *const TableObject, key: *const StringObject) ?TValue {

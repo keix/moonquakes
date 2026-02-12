@@ -60,6 +60,10 @@ pub const GC = struct {
     /// When > 0, GC will not run automatically
     gc_inhibit: u32 = 0,
 
+    /// List of weak tables found during mark phase
+    /// Used for cleanup after sweep
+    weak_tables: std.ArrayListUnmanaged(*TableObject),
+
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
@@ -69,6 +73,7 @@ pub const GC = struct {
             .next_gc = GC_THRESHOLD,
             .vm = null,
             .gc_inhibit = 0,
+            .weak_tables = .{},
         };
     }
 
@@ -104,6 +109,9 @@ pub const GC = struct {
     pub fn deinit(self: *GC) void {
         // Clear intern table first (objects will be freed below)
         self.strings.clearAndFree();
+
+        // Clear weak tables list
+        self.weak_tables.deinit(self.allocator);
 
         // Free all remaining objects without mark/sweep
         // (no need to determine liveness at program exit)
@@ -289,8 +297,23 @@ pub const GC = struct {
         return self.bytes_allocated + additional_bytes > self.next_gc;
     }
 
-    /// Sweep phase + threshold update (called after VM marks roots)
+    /// Prepare for a new GC cycle (called before VM marks roots)
+    pub fn beginCollection(self: *GC) void {
+        // Clear weak tables list from previous cycle
+        self.weak_tables.clearRetainingCapacity();
+    }
+
+    /// Complete collection: ephemeron propagation, sweep, cleanup (called after VM marks roots)
     pub fn collect(self: *GC) void {
+        // Propagate ephemerons until stable
+        // For weak-key tables, values are only marked if their keys are marked
+        while (self.propagateEphemerons()) {}
+
+        // Clean dead entries from weak tables BEFORE sweep clears marks
+        // (sweep clears mark bits, so we need to check them first)
+        self.cleanWeakTables();
+
+        // Sweep phase (also runs __gc finalizers)
         self.sweep();
 
         // Adjust next GC threshold based on survival rate
@@ -343,18 +366,39 @@ pub const GC = struct {
             },
             .table => {
                 const table: *TableObject = @fieldParentPtr("header", obj);
-                // Mark metatable if present
+                // Mark metatable if present and parse __mode
                 if (table.metatable) |mt| {
                     markObject(self, &mt.header);
+                    // Parse __mode from metatable
+                    table.weak_mode = self.parseWeakMode(mt);
+                } else {
+                    table.weak_mode = .none;
                 }
-                // Mark all keys and values in the hash part
-                var iter = table.hash_part.iterator();
-                while (iter.next()) |entry| {
-                    // Mark key (StringObject pointer - no arithmetic needed)
-                    const key: *StringObject = @constCast(entry.key_ptr.*);
-                    markObject(self, &key.header);
-                    // Mark value
-                    self.markValue(entry.value_ptr.*);
+
+                // Handle weak tables differently
+                if (table.weak_mode != .none) {
+                    // Track weak table for cleanup after sweep
+                    self.weak_tables.append(self.allocator, table) catch {};
+
+                    // For weak values only: mark all keys but not values
+                    if (table.weak_mode == .weak_values) {
+                        var iter = table.hash_part.iterator();
+                        while (iter.next()) |entry| {
+                            const key: *StringObject = @constCast(entry.key_ptr.*);
+                            markObject(self, &key.header);
+                            // Skip marking values - they are weak
+                        }
+                    }
+                    // For weak keys (ephemerons): defer marking to propagation phase
+                    // Keys and values are not marked here - handled by propagateEphemerons
+                } else {
+                    // Strong table: mark all keys and values
+                    var iter = table.hash_part.iterator();
+                    while (iter.next()) |entry| {
+                        const key: *StringObject = @constCast(entry.key_ptr.*);
+                        markObject(self, &key.header);
+                        self.markValue(entry.value_ptr.*);
+                    }
                 }
             },
             .closure => {
@@ -390,6 +434,99 @@ pub const GC = struct {
                     markObject(self, &nested.header);
                 }
             },
+        }
+    }
+
+    /// Parse __mode string from metatable to determine weak table mode
+    fn parseWeakMode(self: *GC, metatable: *TableObject) TableObject.WeakMode {
+        const VM = @import("../../vm/vm.zig").VM;
+        const vm_ptr = self.vm orelse return .none;
+        const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+
+        const mode_val = metatable.get(vm.mm_keys.mode) orelse return .none;
+        const mode_str = mode_val.asString() orelse return .none;
+
+        var has_k = false;
+        var has_v = false;
+        for (mode_str.asSlice()) |c| {
+            if (c == 'k' or c == 'K') has_k = true;
+            if (c == 'v' or c == 'V') has_v = true;
+        }
+
+        if (has_k and has_v) return .weak_both;
+        if (has_k) return .weak_keys;
+        if (has_v) return .weak_values;
+        return .none;
+    }
+
+    /// Propagate marks through ephemeron tables (weak keys)
+    /// For tables with weak keys, value is only marked if key is marked
+    /// Returns true if any new marks were made (requires another iteration)
+    fn propagateEphemerons(self: *GC) bool {
+        var changed = false;
+
+        for (self.weak_tables.items) |table| {
+            // Only process tables with weak keys (ephemerons)
+            if (!table.hasWeakKeys()) continue;
+
+            var iter = table.hash_part.iterator();
+            while (iter.next()) |entry| {
+                const key: *StringObject = @constCast(entry.key_ptr.*);
+
+                // If key is marked, mark the value (unless weak values)
+                if (key.header.marked and !table.hasWeakValues()) {
+                    const value = entry.value_ptr.*;
+                    if (value == .object and !value.object.marked) {
+                        markObject(self, value.object);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    /// Clean dead entries from weak tables after sweep
+    fn cleanWeakTables(self: *GC) void {
+        for (self.weak_tables.items) |table| {
+            self.cleanWeakTableEntries(table);
+            table.weak_mode = .none; // Reset for next cycle
+        }
+    }
+
+    /// Remove entries from a weak table where key or value was collected
+    fn cleanWeakTableEntries(self: *GC, table: *TableObject) void {
+        // Collect keys to remove (can't remove during iteration)
+        var to_remove: std.ArrayListUnmanaged(*const StringObject) = .{};
+        defer to_remove.deinit(self.allocator);
+
+        var iter = table.hash_part.iterator();
+        while (iter.next()) |entry| {
+            var remove = false;
+            const key: *StringObject = @constCast(entry.key_ptr.*);
+
+            // Check weak key
+            if (table.hasWeakKeys() and !key.header.marked) {
+                remove = true;
+            }
+
+            // Check weak value (only for collectable values)
+            if (table.hasWeakValues() and !remove) {
+                const val = entry.value_ptr.*;
+                if (val == .object and !val.object.marked) {
+                    remove = true;
+                }
+            }
+
+            if (remove) {
+                to_remove.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        // Remove dead entries
+        for (to_remove.items) |key| {
+            _ = table.hash_part.remove(key);
         }
     }
 
