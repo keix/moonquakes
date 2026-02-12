@@ -66,6 +66,8 @@ const ParseError = error{
     TooManyLoopVariables,
     VarargOutsideVarargFunction,
     InvalidAttribute,
+    ExpectedLabel,
+    UndefinedLabel,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -112,6 +114,12 @@ const ScopeMark = struct {
     locals_top: u8, // register watermark for this scope
 };
 
+/// Pending goto that needs to be patched when the label is defined
+const PendingGoto = struct {
+    name: []const u8, // label name
+    code_pos: usize, // position of the JMP instruction to patch
+};
+
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
     // Type-specific constant arrays (unmaterialized)
@@ -135,6 +143,9 @@ pub const ProtoBuilder = struct {
     parent: ?*ProtoBuilder, // For function scope hierarchy
     // Constant deduplication maps (string content -> const_refs index)
     string_constants: std.StringHashMap(u32),
+    // Label tracking for goto support
+    labels: std.StringHashMap(usize), // label name -> code position
+    pending_gotos: std.ArrayList(PendingGoto), // gotos that need patching
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
@@ -156,6 +167,8 @@ pub const ProtoBuilder = struct {
             .upvalues = .{},
             .parent = parent,
             .string_constants = std.StringHashMap(u32).init(allocator),
+            .labels = std.StringHashMap(usize).init(allocator),
+            .pending_gotos = .{},
         };
     }
 
@@ -184,6 +197,8 @@ pub const ProtoBuilder = struct {
         self.scope_starts.deinit(self.allocator);
         self.upvalues.deinit(self.allocator);
         self.string_constants.deinit();
+        self.labels.deinit();
+        self.pending_gotos.deinit(self.allocator);
     }
 
     /// Allocate a temporary register (for expression evaluation)
@@ -961,6 +976,12 @@ pub const Parser = struct {
     // Parse functions grouped together
     pub fn parseChunk(self: *Parser) ParseError!void {
         while (self.current.kind != .Eof) {
+            // Skip empty statements (semicolons)
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                self.advance();
+            }
+            if (self.current.kind == .Eof) break;
+
             // Mark registers before each statement
             const stmt_mark = self.proto.markTemps();
 
@@ -982,6 +1003,15 @@ pub const Parser = struct {
                     try self.parseLocalDecl();
                 } else if (std.mem.eql(u8, self.current.lexeme, "do")) {
                     try self.parseDoEnd();
+                } else if (std.mem.eql(u8, self.current.lexeme, "goto")) {
+                    try self.parseGoto();
+                } else {
+                    return error.UnsupportedStatement;
+                }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+                // Check for label: ::name::
+                if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    try self.parseLabel();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -1022,6 +1052,11 @@ pub const Parser = struct {
             self.proto.resetTemps(stmt_mark);
         }
 
+        // Check for unresolved gotos
+        if (self.proto.pending_gotos.items.len > 0) {
+            return error.UndefinedLabel;
+        }
+
         // Auto-append return nil if no explicit return was encountered
         try self.autoReturnNil();
     }
@@ -1041,6 +1076,11 @@ pub const Parser = struct {
             return;
         }
         if (self.current.kind == .Eof) {
+            try self.proto.emitReturn(0, 0);
+            return;
+        }
+        // Check for return followed by semicolon (bare return)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
             try self.proto.emitReturn(0, 0);
             return;
         }
@@ -1133,13 +1173,15 @@ pub const Parser = struct {
         self.advance(); // consume 'end'
     }
 
-    // Assignment: x = expr, t.field = expr, t.a.b = expr, t[key] = expr
+    // Assignment: x = expr, t.field = expr, t.a.b = expr, t[key] = expr, t[1][2] = expr
     fn parseAssignment(self: *Parser) ParseError!void {
         const name = self.current.lexeme;
         self.advance(); // consume identifier
 
-        // Check for field access: t.field or t.a.b.c
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+        // Check for field/index access: t.field, t.a.b.c, t[key], t[1][2], t.a[1].b, etc.
+        if (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
+        {
             // Get the base table
             var table_reg: u8 = undefined;
             if (try self.proto.resolveVariable(name)) |loc| {
@@ -1201,57 +1243,79 @@ pub const Parser = struct {
                 }
             }
 
-            // Expect '='
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
-                return error.ExpectedEquals;
-            }
-            self.advance(); // consume '='
+            // Check for ',' (multiple assignment), '=' (single assignment), or '(' (function call)
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                // Multiple assignment with indexed first target: t[1], a[1] = ...
+                // Build the first target and delegate to multiple assignment handler
+                const first_target: AssignTarget = if (last_key_const) |kc|
+                    .{ .field = .{ .table_reg = table_reg, .field_const = kc } }
+                else if (last_key_reg) |kr|
+                    .{ .index = .{ .table_reg = table_reg, .key_reg = kr } }
+                else
+                    return error.ExpectedEquals;
 
-            const value_reg = try self.parseExpr();
+                return self.parseMultipleAssignmentWithFirstTarget(first_target);
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                self.advance(); // consume '='
 
-            // Emit SET instruction for the final key
-            if (last_key_const) |kc| {
-                try self.proto.emitSETFIELD(table_reg, kc, value_reg);
-            } else if (last_key_reg) |kr| {
-                try self.proto.emitSETTABLE(table_reg, kr, value_reg);
-            }
-        } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
-            // Index assignment: t[key] = expr
-            var table_reg: u8 = undefined;
-            if (try self.proto.resolveVariable(name)) |loc| {
-                switch (loc) {
-                    .local => |reg| table_reg = reg,
-                    .upvalue => |idx| {
-                        // Upvalue: load table into temp register first
-                        table_reg = self.proto.allocTemp();
-                        try self.proto.emitGETUPVAL(table_reg, idx);
-                    },
+                const value_reg = try self.parseExpr();
+
+                // Emit SET instruction for the final key
+                if (last_key_const) |kc| {
+                    try self.proto.emitSETFIELD(table_reg, kc, value_reg);
+                } else if (last_key_reg) |kr| {
+                    try self.proto.emitSETTABLE(table_reg, kr, value_reg);
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Function call: t[key]() or t.field[key]() etc.
+                // First, get the function from the table
+                const func_reg = self.proto.allocTemp();
+                if (last_key_const) |kc| {
+                    try self.proto.emitGETFIELD(func_reg, table_reg, kc);
+                } else if (last_key_reg) |kr| {
+                    try self.proto.emitGETTABLE(func_reg, table_reg, kr);
+                } else {
+                    return error.ExpectedEquals;
+                }
+
+                // Parse arguments and emit call
+                const arg_count = try self.parseCallArgs(func_reg);
+                try self.proto.emitCallVararg(func_reg, arg_count, 0);
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+                // Method call on indexed value: t[key]:method()
+                // First, get the receiver from the table
+                const receiver_reg = self.proto.allocTemp();
+                if (last_key_const) |kc| {
+                    try self.proto.emitGETFIELD(receiver_reg, table_reg, kc);
+                } else if (last_key_reg) |kr| {
+                    try self.proto.emitGETTABLE(receiver_reg, table_reg, kr);
+                } else {
+                    return error.ExpectedEquals;
+                }
+
+                self.advance(); // consume ':'
+
+                // Parse method name
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const method_name = self.current.lexeme;
+                self.advance(); // consume method name
+
+                // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
+                //           R[func_reg+1] := R[receiver_reg]
+                const method_const = try self.proto.addConstString(method_name);
+                const func_reg = self.proto.allocTemp();
+                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+                try self.proto.emitSELF(func_reg, receiver_reg, method_const);
+
+                // Parse extra arguments
+                const extra_args = try self.parseMethodArgs(func_reg);
+
+                try self.proto.emitCall(func_reg, extra_args + 1, 0);
             } else {
-                // Global variable: load from _ENV
-                table_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(name);
-                try self.proto.emitGETTABUP(table_reg, 0, name_const);
-            }
-
-            self.advance(); // consume '['
-
-            const key_reg = try self.parseExpr();
-
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
-                return error.ExpectedCloseBracket;
-            }
-            self.advance(); // consume ']'
-
-            // Expect '='
-            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
                 return error.ExpectedEquals;
             }
-            self.advance(); // consume '='
-
-            const value_reg = try self.parseExpr();
-
-            try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
         } else {
             // Simple assignment: x = expr
             // Expect '='
@@ -1275,27 +1339,35 @@ pub const Parser = struct {
         }
     }
 
+    /// Target type for multiple assignment
+    const AssignTarget = union(enum) {
+        /// Simple variable (local, upvalue, or global)
+        variable: []const u8,
+        /// Field access: table.field (table_reg, field_const)
+        field: struct { table_reg: u8, field_const: u32 },
+        /// Index access: table[key] (table_reg, key_reg)
+        index: struct { table_reg: u8, key_reg: u8 },
+    };
+
     /// Parse multiple assignment: a, b, c = expr, expr, ...
-    /// Handles both local and global variables, and multiple return values from function calls
+    /// Also handles indexed targets: t[1], a.x = expr, expr
     fn parseMultipleAssignment(self: *Parser) ParseError!void {
-        // Collect all variable names
-        var var_names: [256][]const u8 = undefined;
-        var var_count: u8 = 0;
+        // Collect all targets
+        var targets: [256]AssignTarget = undefined;
+        var target_count: u8 = 0;
 
-        // First identifier (already at current token)
-        var_names[var_count] = self.current.lexeme;
-        var_count += 1;
-        self.advance(); // consume first identifier
+        // Parse first target (already at current token which is an identifier)
+        targets[target_count] = try self.parseAssignTarget();
+        target_count += 1;
 
-        // Parse remaining identifiers after commas
+        // Parse remaining targets after commas
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
                 return error.ExpectedIdentifier;
             }
-            var_names[var_count] = self.current.lexeme;
-            var_count += 1;
-            self.advance();
+            targets[target_count] = try self.parseAssignTarget();
+            target_count += 1;
         }
 
         // Expect '='
@@ -1307,7 +1379,7 @@ pub const Parser = struct {
         // Allocate temp registers for all values
         const first_temp = self.proto.allocTemp();
         var i: u8 = 1;
-        while (i < var_count) : (i += 1) {
+        while (i < target_count) : (i += 1) {
             _ = self.proto.allocTemp();
         }
 
@@ -1326,7 +1398,7 @@ pub const Parser = struct {
             self.advance(); // consume ','
             expr_reg = try self.parseExpr();
 
-            if (expr_count < var_count) {
+            if (expr_count < target_count) {
                 const target_reg = first_temp + expr_count;
                 if (expr_reg != target_reg) {
                     try self.proto.emitMOVE(target_reg, expr_reg);
@@ -1337,7 +1409,7 @@ pub const Parser = struct {
 
         // Handle multiple return values from single function call
         var handled_multi_return = false;
-        if (expr_count == 1 and var_count > 1) {
+        if (expr_count == 1 and target_count > 1) {
             if (self.proto.code.items.len > 0) {
                 var call_idx: ?usize = null;
                 var call_func_reg: u8 = 0;
@@ -1358,12 +1430,12 @@ pub const Parser = struct {
                 }
 
                 if (call_idx) |idx| {
-                    // Adjust CALL to return var_count results
-                    self.proto.code.items[idx].c = var_count + 1;
+                    // Adjust CALL to return target_count results
+                    self.proto.code.items[idx].c = target_count + 1;
 
                     // Move results from call_func_reg to first_temp...
                     var vi: u8 = 0;
-                    while (vi < var_count) : (vi += 1) {
+                    while (vi < target_count) : (vi += 1) {
                         const src = call_func_reg + vi;
                         const dst = first_temp + vi;
                         if (src != dst) {
@@ -1376,31 +1448,227 @@ pub const Parser = struct {
         }
 
         // Fill remaining temps with nil if fewer values
-        if (expr_count < var_count and !handled_multi_return) {
+        if (expr_count < target_count and !handled_multi_return) {
             const nil_start = first_temp + expr_count;
-            const nil_count = var_count - expr_count;
+            const nil_count = target_count - expr_count;
             try self.proto.emitLOADNIL(nil_start, nil_count);
         }
 
-        // Now assign from temps to actual variables
+        // Now assign from temps to actual targets
         i = 0;
-        while (i < var_count) : (i += 1) {
-            const var_name = var_names[i];
+        while (i < target_count) : (i += 1) {
+            const target = targets[i];
             const value_reg = first_temp + i;
 
-            if (try self.proto.resolveVariable(var_name)) |loc| {
-                switch (loc) {
-                    .local => |local_reg| {
-                        if (local_reg != value_reg) {
-                            try self.proto.emitMOVE(local_reg, value_reg);
+            switch (target) {
+                .variable => |var_name| {
+                    if (try self.proto.resolveVariable(var_name)) |loc| {
+                        switch (loc) {
+                            .local => |local_reg| {
+                                if (local_reg != value_reg) {
+                                    try self.proto.emitMOVE(local_reg, value_reg);
+                                }
+                            },
+                            .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
                         }
+                    } else {
+                        // Global variable
+                        const name_const = try self.proto.addConstString(var_name);
+                        try self.proto.emitSETTABUP(0, name_const, value_reg);
+                    }
+                },
+                .field => |f| {
+                    try self.proto.emitSETFIELD(f.table_reg, f.field_const, value_reg);
+                },
+                .index => |idx| {
+                    try self.proto.emitSETTABLE(idx.table_reg, idx.key_reg, value_reg);
+                },
+            }
+        }
+    }
+
+    /// Parse a single assignment target (variable, field, or index)
+    fn parseAssignTarget(self: *Parser) ParseError!AssignTarget {
+        const base_name = self.current.lexeme;
+        self.advance(); // consume identifier
+
+        // Check for field or index access
+        if (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
+        {
+            // Load base table
+            var table_reg: u8 = undefined;
+            if (try self.proto.resolveVariable(base_name)) |loc| {
+                switch (loc) {
+                    .local => |reg| table_reg = reg,
+                    .upvalue => |idx| {
+                        table_reg = self.proto.allocTemp();
+                        try self.proto.emitGETUPVAL(table_reg, idx);
                     },
-                    .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
                 }
             } else {
-                // Global variable
-                const name_const = try self.proto.addConstString(var_name);
-                try self.proto.emitSETTABUP(0, name_const, value_reg);
+                table_reg = self.proto.allocTemp();
+                const name_const = try self.proto.addConstString(base_name);
+                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+            }
+
+            // Parse field chain until we hit ',' or '='
+            var last_is_field = false;
+            var last_field_const: u32 = 0;
+            var last_key_reg: u8 = 0;
+
+            while (self.current.kind == .Symbol) {
+                if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                    // Navigate to field first if we have a pending access
+                    if (last_is_field) {
+                        const next_reg = self.proto.allocTemp();
+                        try self.proto.emitGETFIELD(next_reg, table_reg, last_field_const);
+                        table_reg = next_reg;
+                    } else if (last_key_reg != 0) {
+                        const next_reg = self.proto.allocTemp();
+                        try self.proto.emitGETTABLE(next_reg, table_reg, last_key_reg);
+                        table_reg = next_reg;
+                        last_key_reg = 0;
+                    }
+
+                    self.advance(); // consume '.'
+                    if (self.current.kind != .Identifier) {
+                        return error.ExpectedIdentifier;
+                    }
+                    last_field_const = try self.proto.addConstString(self.current.lexeme);
+                    last_is_field = true;
+                    self.advance(); // consume field name
+                } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
+                    // Navigate to field first if we have a pending access
+                    if (last_is_field) {
+                        const next_reg = self.proto.allocTemp();
+                        try self.proto.emitGETFIELD(next_reg, table_reg, last_field_const);
+                        table_reg = next_reg;
+                        last_is_field = false;
+                    } else if (last_key_reg != 0) {
+                        const next_reg = self.proto.allocTemp();
+                        try self.proto.emitGETTABLE(next_reg, table_reg, last_key_reg);
+                        table_reg = next_reg;
+                    }
+
+                    self.advance(); // consume '['
+                    last_key_reg = try self.parseExpr();
+                    last_is_field = false;
+
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume ']'
+                } else {
+                    break;
+                }
+            }
+
+            // Return the final target
+            if (last_is_field) {
+                return .{ .field = .{ .table_reg = table_reg, .field_const = last_field_const } };
+            } else {
+                return .{ .index = .{ .table_reg = table_reg, .key_reg = last_key_reg } };
+            }
+        }
+
+        // Simple variable
+        return .{ .variable = base_name };
+    }
+
+    /// Parse multiple assignment when the first target has already been parsed
+    /// Used when parseAssignment encounters ',' after an indexed target
+    fn parseMultipleAssignmentWithFirstTarget(self: *Parser, first_target: AssignTarget) ParseError!void {
+        var targets: [256]AssignTarget = undefined;
+        var target_count: u8 = 0;
+
+        // Store the first target
+        targets[target_count] = first_target;
+        target_count += 1;
+
+        // Parse remaining targets after commas
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            if (self.current.kind != .Identifier) {
+                return error.ExpectedIdentifier;
+            }
+            targets[target_count] = try self.parseAssignTarget();
+            target_count += 1;
+        }
+
+        // Expect '='
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+            return error.ExpectedEquals;
+        }
+        self.advance(); // consume '='
+
+        // Allocate temp registers for all values
+        const first_temp = self.proto.allocTemp();
+        var i: u8 = 1;
+        while (i < target_count) : (i += 1) {
+            _ = self.proto.allocTemp();
+        }
+
+        // Parse expressions
+        var expr_count: u8 = 0;
+        var expr_reg = try self.parseExpr();
+
+        // Move first expression to first temp
+        if (expr_reg != first_temp) {
+            try self.proto.emitMOVE(first_temp, expr_reg);
+        }
+        expr_count += 1;
+
+        // Parse remaining expressions
+        while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            self.advance(); // consume ','
+            expr_reg = try self.parseExpr();
+
+            if (expr_count < target_count) {
+                const target_reg = first_temp + expr_count;
+                if (expr_reg != target_reg) {
+                    try self.proto.emitMOVE(target_reg, expr_reg);
+                }
+            }
+            expr_count += 1;
+        }
+
+        // Fill remaining temps with nil if fewer values
+        if (expr_count < target_count) {
+            const nil_start = first_temp + expr_count;
+            const nil_count = target_count - expr_count;
+            try self.proto.emitLOADNIL(nil_start, nil_count);
+        }
+
+        // Now assign from temps to actual targets
+        i = 0;
+        while (i < target_count) : (i += 1) {
+            const target = targets[i];
+            const value_reg = first_temp + i;
+
+            switch (target) {
+                .variable => |var_name| {
+                    if (try self.proto.resolveVariable(var_name)) |loc| {
+                        switch (loc) {
+                            .local => |local_reg| {
+                                if (local_reg != value_reg) {
+                                    try self.proto.emitMOVE(local_reg, value_reg);
+                                }
+                            },
+                            .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
+                        }
+                    } else {
+                        // Global variable
+                        const name_const = try self.proto.addConstString(var_name);
+                        try self.proto.emitSETTABUP(0, name_const, value_reg);
+                    }
+                },
+                .field => |f| {
+                    try self.proto.emitSETFIELD(f.table_reg, f.field_const, value_reg);
+                },
+                .index => |idx| {
+                    try self.proto.emitSETTABLE(idx.table_reg, idx.key_reg, value_reg);
+                },
             }
         }
     }
@@ -1608,8 +1876,61 @@ pub const Parser = struct {
 
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "^")) {
             self.advance(); // consume '^'
-            const right = try self.parsePow(); // right-associative: recursive call
+            const right = try self.parsePowRight(); // use parsePowRight for right operand
 
+            const dst = self.proto.allocTemp();
+            try self.proto.emitPOW(dst, left, right);
+            left = dst;
+        }
+
+        return left;
+    }
+
+    // parsePowRight: handles right operand of ^ which can include unary operators
+    // This allows 2^-3 to be parsed as 2^(-3)
+    fn parsePowRight(self: *Parser) ParseError!u8 {
+        // Unary 'not' operator
+        if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "not")) {
+            self.advance();
+            const operand = try self.parsePowRight();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitNOT(dst, operand);
+            return dst;
+        }
+
+        // Unary minus operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
+            self.advance();
+            const operand = try self.parsePowRight();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitUNM(dst, operand);
+            return dst;
+        }
+
+        // Length operator
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "#")) {
+            self.advance();
+            const operand = try self.parsePowRight();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitLEN(dst, operand);
+            return dst;
+        }
+
+        // Bitwise NOT operator (unary ~)
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "~")) {
+            self.advance();
+            const operand = try self.parsePowRight();
+            const dst = self.proto.allocTemp();
+            try self.proto.emitBNOT(dst, operand);
+            return dst;
+        }
+
+        // Otherwise, parse atom and check for chained ^
+        var left = try self.parseAtom();
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "^")) {
+            self.advance();
+            const right = try self.parsePowRight();
             const dst = self.proto.allocTemp();
             try self.proto.emitPOW(dst, left, right);
             left = dst;
@@ -2578,6 +2899,74 @@ pub const Parser = struct {
         try self.break_jumps.append(self.proto.allocator, jmp_addr);
     }
 
+    /// Parse 'goto label' statement
+    fn parseGoto(self: *Parser) ParseError!void {
+        self.advance(); // consume 'goto'
+
+        // Expect label name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const label_name = self.current.lexeme;
+        self.advance(); // consume label name
+
+        // Check if label is already defined
+        if (self.proto.labels.get(label_name)) |target_pos| {
+            // Backward jump - emit JMP directly
+            const current_pos = self.proto.code.items.len;
+            const offset = @as(i32, @intCast(target_pos)) - @as(i32, @intCast(current_pos)) - 1;
+            try self.proto.emitJMP(@intCast(offset));
+        } else {
+            // Forward jump - emit placeholder JMP and record for patching
+            const jmp_addr = try self.proto.emitPatchableJMP();
+            try self.proto.pending_gotos.append(self.proto.allocator, .{
+                .name = label_name,
+                .code_pos = jmp_addr,
+            });
+        }
+    }
+
+    /// Parse '::label::' label definition
+    fn parseLabel(self: *Parser) ParseError!void {
+        self.advance(); // consume first ':'
+        self.advance(); // consume second ':'
+
+        // Expect label name
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const label_name = self.current.lexeme;
+        self.advance(); // consume label name
+
+        // Expect closing '::'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":"))) {
+            return error.ExpectedLabel;
+        }
+        self.advance(); // consume ':'
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":"))) {
+            return error.ExpectedLabel;
+        }
+        self.advance(); // consume ':'
+
+        // Record label position
+        const label_pos = self.proto.code.items.len;
+        try self.proto.labels.put(label_name, label_pos);
+
+        // Patch any pending gotos to this label
+        var i: usize = 0;
+        while (i < self.proto.pending_gotos.items.len) {
+            const pending = self.proto.pending_gotos.items[i];
+            if (std.mem.eql(u8, pending.name, label_name)) {
+                // Patch the JMP instruction
+                self.proto.patchJMP(@intCast(pending.code_pos), @intCast(label_pos));
+                // Remove from pending list (swap remove)
+                _ = self.proto.pending_gotos.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     fn parseStatements(self: *Parser) StatementError!void {
         // Support return statements and nested if/for inside blocks
         while (self.current.kind != .Eof and
@@ -2587,12 +2976,28 @@ pub const Parser = struct {
                     std.mem.eql(u8, self.current.lexeme, "end") or
                     std.mem.eql(u8, self.current.lexeme, "until"))))
         {
+            // Skip empty statements (semicolons)
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                self.advance();
+            }
+            // Re-check loop condition after consuming semicolons
+            if (self.current.kind == .Eof or
+                (self.current.kind == .Keyword and
+                    (std.mem.eql(u8, self.current.lexeme, "else") or
+                        std.mem.eql(u8, self.current.lexeme, "elseif") or
+                        std.mem.eql(u8, self.current.lexeme, "end") or
+                        std.mem.eql(u8, self.current.lexeme, "until")))) break;
+
             // Mark registers before each statement
             const stmt_mark = self.proto.markTemps();
 
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
+                    // Skip optional trailing semicolons after return
+                    while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        self.advance();
+                    }
                     return; // return ends the statement block
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
                     try self.parseIf();
@@ -2608,6 +3013,17 @@ pub const Parser = struct {
                     try self.parseDoEnd();
                 } else if (std.mem.eql(u8, self.current.lexeme, "break")) {
                     try self.parseBreak();
+                } else if (std.mem.eql(u8, self.current.lexeme, "goto")) {
+                    try self.parseGoto();
+                } else if (std.mem.eql(u8, self.current.lexeme, "function")) {
+                    try self.parseFunctionDefinition();
+                } else {
+                    return error.UnsupportedStatement;
+                }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+                // Check for label: ::name::
+                if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
+                    try self.parseLabel();
                 } else {
                     return error.UnsupportedStatement;
                 }
@@ -3445,17 +3861,46 @@ pub const Parser = struct {
 
     fn parseFunctionDefinition(self: *Parser) ParseError!void {
         // function name(param) return param end
+        // function t.field(param) ... end  -- equivalent to t.field = function(param) ... end
+        // function t:method(param) ... end -- equivalent to t.method = function(self, param) ... end
         self.advance(); // consume 'function'
 
-        // Parse function name
+        // Parse function name (possibly with . or : chain)
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
         }
-        const func_name = self.current.lexeme;
-        // Add function name to constants NOW, before lexer advances through body
-        // (func_name slice becomes invalid after advance)
-        const name_const = try self.proto.addConstString(func_name);
-        self.advance(); // consume function name
+        const base_name = self.current.lexeme;
+        const base_const = try self.proto.addConstString(base_name);
+        self.advance(); // consume base name
+
+        // Check for field access chain (t.a.b.c) or method (t:m)
+        var is_method = false;
+        var field_names: [64][]const u8 = undefined;
+        var field_count: usize = 0;
+
+        while (self.current.kind == .Symbol) {
+            if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                self.advance(); // consume '.'
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                field_names[field_count] = self.current.lexeme;
+                field_count += 1;
+                self.advance(); // consume field name
+            } else if (std.mem.eql(u8, self.current.lexeme, ":")) {
+                self.advance(); // consume ':'
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                field_names[field_count] = self.current.lexeme;
+                field_count += 1;
+                is_method = true;
+                self.advance(); // consume method name
+                break; // ':' must be last in the chain
+            } else {
+                break;
+            }
+        }
 
         // Parse parameters: (param)
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
@@ -3471,10 +3916,18 @@ pub const Parser = struct {
         const proto_ptr = try self.proto.allocator.create(RawProto);
 
         // Temporarily add function for recursive calls with unfilled RawProto
-        try self.proto.addFunction(func_name, proto_ptr);
+        // Use the full qualified name for lookup (base.field1.field2 or base)
+        try self.proto.addFunction(base_name, proto_ptr);
 
         // Parse parameters and assign to registers
         var param_count: u8 = 0;
+
+        // For method syntax (t:method), add implicit 'self' parameter
+        if (is_method) {
+            try func_builder.addVariable("self", param_count);
+            param_count += 1;
+        }
+
         // Check for vararg-only function: function(...)
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
             func_builder.is_vararg = true;
@@ -3549,13 +4002,61 @@ pub const Parser = struct {
         proto_ptr.* = func_proto_data;
 
         // Proto is already registered in old_proto.functions for recursive lookup
-        // Now emit CLOSURE + SETTABUP to store in _ENV (globals)
+        // Now emit CLOSURE to create the function
         const closure_reg = old_proto.allocTemp();
         const proto_idx = try old_proto.addProto(proto_ptr);
         try old_proto.emitClosure(closure_reg, proto_idx);
 
-        // Store closure in _ENV[func_name] using pre-computed constant index
-        try old_proto.emitSETTABUP(0, name_const, closure_reg);
+        // Store the closure based on how the function was defined
+        if (field_count == 0) {
+            // Simple function: function name() -> name = closure
+            // First check if there's a local or upvalue with this name
+            if (try old_proto.resolveVariable(base_name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| {
+                        // Local found - store to local variable
+                        try old_proto.emitMOVE(local_reg, closure_reg);
+                    },
+                    .upvalue => |uv_idx| {
+                        // Upvalue found - store to upvalue
+                        try old_proto.emit(.SETUPVAL, closure_reg, uv_idx, 0);
+                    },
+                }
+            } else {
+                // No local or upvalue - store to global _ENV[name]
+                try old_proto.emitSETTABUP(0, base_const, closure_reg);
+            }
+        } else {
+            // Field function: function t.a.b() -> t.a.b = closure
+            // Load base table (could be local, upvalue, or global)
+            var table_reg = old_proto.allocTemp();
+            if (try old_proto.resolveVariable(base_name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| {
+                        try old_proto.emitMOVE(table_reg, local_reg);
+                    },
+                    .upvalue => |uv_idx| {
+                        try old_proto.emit(.GETUPVAL, table_reg, uv_idx, 0);
+                    },
+                }
+            } else {
+                // Load from _ENV
+                try old_proto.emitGETTABUP(table_reg, 0, base_const);
+            }
+
+            // Navigate through intermediate fields (all but the last)
+            var i: usize = 0;
+            while (i < field_count - 1) : (i += 1) {
+                const field_const = try old_proto.addConstString(field_names[i]);
+                const next_reg = old_proto.allocTemp();
+                try old_proto.emitGETFIELD(next_reg, table_reg, field_const);
+                table_reg = next_reg;
+            }
+
+            // Set the last field to the closure
+            const last_field_const = try old_proto.addConstString(field_names[field_count - 1]);
+            try old_proto.emitSETFIELD(table_reg, last_field_const, closure_reg);
+        }
     }
 
     /// Parse 'local function name(...) ... end'

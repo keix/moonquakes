@@ -1264,7 +1264,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
-                    vm.top = frame_max;
+                    // For C=0 (variable results feeding into next call), set vm.top to
+                    // result_end so the next CALL with B=0 knows the argument count.
+                    // For fixed results (C>0), restore to frame_max for safe temp usage.
+                    vm.top = if (c == 0) result_end else frame_max;
                     return .LoopContinue;
                 }
             }
