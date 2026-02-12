@@ -13,6 +13,7 @@ const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
+const call = @import("../../vm/call.zig");
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
@@ -393,7 +394,13 @@ pub const GC = struct {
     }
 
     /// Sweep phase: free all unmarked objects
+    /// Calls __gc finalizers for tables before freeing
     pub fn sweep(self: *GC) void {
+        // First pass: call __gc finalizers for unmarked tables
+        // We do this before freeing to ensure objects are still valid
+        self.runFinalizers();
+
+        // Second pass: free unmarked objects
         var prev: ?*GCObject = null;
         var current = self.objects;
 
@@ -416,6 +423,33 @@ pub const GC = struct {
                 self.freeObject(obj);
                 current = next;
             }
+        }
+    }
+
+    /// Run __gc finalizers for all unmarked tables that have them
+    fn runFinalizers(self: *GC) void {
+        const VM = @import("../../vm/vm.zig").VM;
+        const vm_ptr = self.vm orelse return;
+        const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+
+        // Inhibit GC during finalizer execution to prevent recursive collection
+        self.gc_inhibit += 1;
+        defer self.gc_inhibit -= 1;
+
+        var current = self.objects;
+        while (current) |obj| {
+            if (!obj.marked and obj.type == .table) {
+                const table: *TableObject = @fieldParentPtr("header", obj);
+                if (table.metatable) |mt| {
+                    // Look up __gc in metatable
+                    if (mt.get(vm.mm_keys.gc)) |gc_fn| {
+                        // Call __gc(table)
+                        // Errors in finalizers are ignored (standard Lua behavior)
+                        _ = call.callValue(vm, gc_fn, &[_]TValue{TValue.fromTable(table)}) catch {};
+                    }
+                }
+            }
+            current = obj.next;
         }
     }
 

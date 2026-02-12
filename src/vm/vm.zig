@@ -43,6 +43,8 @@ pub const MetamethodKeys = struct {
     call: *StringObject,
     metatable: *StringObject,
     pairs: *StringObject,
+    name: *StringObject,
+    gc: *StringObject,
 
     pub fn init(gc: *GC) !MetamethodKeys {
         return .{
@@ -70,6 +72,8 @@ pub const MetamethodKeys = struct {
             .call = try gc.allocString("__call"),
             .metatable = try gc.allocString("__metatable"),
             .pairs = try gc.allocString("__pairs"),
+            .name = try gc.allocString("__name"),
+            .gc = try gc.allocString("__gc"),
         };
     }
 };

@@ -35,6 +35,7 @@ pub const MetaEvent = enum {
     newindex, // __newindex
     call, // __call
     close, // __close (Lua 5.4 to-be-closed)
+    gc, // __gc (garbage collection finalizer)
     tostring, // __tostring
     metatable, // __metatable
     name, // __name
@@ -66,6 +67,7 @@ pub const MetaEvent = enum {
             .newindex => "__newindex",
             .call => "__call",
             .close => "__close",
+            .gc => "__gc",
             .tostring => "__tostring",
             .metatable => "__metatable",
             .name => "__name",

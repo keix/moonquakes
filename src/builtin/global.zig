@@ -52,29 +52,48 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 }
 
 /// type(v) - Returns the type of its only argument, coded as a string
+/// If the value is a table with __name metamethod, returns that value instead
 pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const type_name_str = if (nargs > 0) blk: {
-        const arg = vm.stack[vm.base + func_reg + 1];
-        break :blk switch (arg) {
-            .nil => "nil",
-            .boolean => "boolean",
-            .integer => "number",
-            .number => "number",
-            .object => |obj| switch (obj.type) {
-                .string => "string",
-                .table => "table",
-                .closure, .native_closure => "function",
-                .upvalue => "upvalue",
-                .userdata => "userdata",
-                .proto => "proto", // Internal type - should not be exposed to user
-            },
-        };
-    } else "nil";
+    if (nresults == 0) return;
 
-    if (nresults > 0) {
-        const type_name = try vm.gc.allocString(type_name_str);
+    if (nargs == 0) {
+        const type_name = try vm.gc.allocString("nil");
         vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
+        return;
     }
+
+    const arg = vm.stack[vm.base + func_reg + 1];
+
+    // Check for __name metamethod on tables
+    if (arg.asTable()) |table| {
+        if (table.metatable) |mt| {
+            if (mt.get(vm.mm_keys.name)) |name_val| {
+                if (name_val.asString()) |name_str| {
+                    vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Default type names
+    const type_name_str: []const u8 = switch (arg) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer => "number",
+        .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .upvalue => "upvalue",
+            .userdata => "userdata",
+            .proto => "proto",
+        },
+    };
+
+    const type_name = try vm.gc.allocString(type_name_str);
+    vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
@@ -240,8 +259,8 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pairs(t) - Returns three values for iterating over table
-/// TODO: If t has __pairs metamethod, should call it and return its results
-/// Currently returns: next function, table, nil (default behavior)
+/// If t has __pairs metamethod, calls it and returns its results
+/// Otherwise returns: next function, table, nil (default behavior)
 pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -250,8 +269,23 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
 
-    // TODO: Check for __pairs metamethod
-    // Currently not implemented due to error set inference limitations with anytype
+    // Check for __pairs metamethod
+    if (table_arg.asTable()) |table| {
+        if (table.metatable) |mt| {
+            if (mt.get(vm.mm_keys.pairs)) |pairs_mm| {
+                // Call __pairs(t) and return its results
+                // __pairs should return (iterator, state, initial_key)
+                const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
+                vm.stack[vm.base + func_reg] = result;
+                // Note: callValue only returns first result
+                // For full multi-return support, we'd need callValueMulti
+                // For now, common usage is to return a single iterator function
+                if (nresults > 1) vm.stack[vm.base + func_reg + 1] = table_arg;
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
+                return;
+            }
+        }
+    }
 
     // Default behavior: return next, table, nil
     const next_nc = try vm.gc.allocNativeClosure(.{ .id = .next });
