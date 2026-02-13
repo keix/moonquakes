@@ -1492,6 +1492,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
+                // Get caller's frame extent for vm.top restoration
+                // After popCallInfo, vm.ci points to the caller's frame
+                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
                 // Calculate actual return count
                 // B=0 means variable returns (from R[A] to top)
                 // B>0 means B-1 fixed returns
@@ -1507,31 +1511,35 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     vm.stack[dst_base] = .{ .boolean = true };
                     if (ret_count == 0) {
                         // No return values from function
-                        vm.top = dst_base + 1;
+                        vm.top = caller_frame_max;
                     } else {
                         // Copy return values to dst_base + 1
                         for (0..ret_count) |i| {
                             vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
                         }
-                        vm.top = dst_base + 1 + ret_count;
+                        vm.top = caller_frame_max;
                     }
                     return .LoopContinue;
                 }
 
                 if (ret_count == 0) {
-                    // No return values - fill expected slots with nil
+                    // No return values - fill expected slots with nil or update top
                     if (nresults > 0) {
                         const n: usize = @intCast(nresults);
                         for (vm.stack[dst_base..][0..n]) |*slot| {
                             slot.* = .nil;
                         }
                     }
+                    // For variable results (nresults < 0), vm.top must indicate no results
+                    // For fixed results (nresults >= 0), restore to caller's frame extent
+                    vm.top = if (nresults < 0) dst_base else caller_frame_max;
                 } else if (nresults < 0) {
                     // Variable results - copy all return values
                     // Note: regions may overlap, copy forward (src >= dst)
                     for (0..ret_count) |i| {
                         vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
                     }
+                    // vm.top must indicate result count for variable results
                     vm.top = dst_base + ret_count;
                 } else {
                     // Fixed results - copy available values, fill rest with nil
@@ -1545,8 +1553,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
-                    // Update vm.top to reflect actual stack usage after return
-                    vm.top = dst_base + n;
+                    // GC SAFETY: Restore vm.top to caller's frame extent
+                    // This ensures all caller's local variables are marked during GC
+                    vm.top = caller_frame_max;
                 }
 
                 return .LoopContinue;
@@ -1583,10 +1592,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
+                // Get caller's frame extent for vm.top restoration
+                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
                 // Protected frame: return (true) with no additional values
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
-                    vm.top = dst_base + 1;
+                    vm.top = caller_frame_max;
                     return .LoopContinue;
                 }
 
@@ -1597,6 +1609,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         slot.* = .nil;
                     }
                 }
+
+                // GC SAFETY: For variable results, vm.top indicates no results (dst_base)
+                // For fixed results, restore to caller's frame extent
+                vm.top = if (nresults < 0) dst_base else caller_frame_max;
 
                 return .LoopContinue;
             }
@@ -1619,11 +1635,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.closeUpvalues(returning_ci.base);
                 popCallInfo(vm);
 
+                // Get caller's frame extent for vm.top restoration
+                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
                 // Protected frame: return (true, value)
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
                     vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
-                    vm.top = dst_base + 2;
+                    vm.top = caller_frame_max;
                     return .LoopContinue;
                 }
 
@@ -1639,6 +1658,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
+                    // GC SAFETY: Restore vm.top to caller's frame extent
+                    vm.top = caller_frame_max;
+                } else {
+                    // nresults == 0: caller doesn't want any results
+                    vm.top = caller_frame_max;
                 }
 
                 return .LoopContinue;
@@ -1713,7 +1737,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = vm.stack[vm.base + c];
 
             if (table_val.asTable()) |table| {
-                if (key_val.asString()) |key| {
+                if (key_val.isNil()) {
+                    // t[nil] always returns nil (nil is not a valid table key)
+                    vm.stack[vm.base + a] = TValue.nil;
+                } else if (key_val.asString()) |key| {
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }

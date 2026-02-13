@@ -9,6 +9,7 @@ const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
+const UserdataObject = object.UserdataObject;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
@@ -235,6 +236,8 @@ pub const GC = struct {
         maxstacksize: u8,
         nups: u8,
         upvalues: []const Upvaldesc,
+        source: []const u8,
+        lineinfo: []const u32,
     ) !*ProtoObject {
         const obj = try self.allocObject(ProtoObject, 0);
 
@@ -249,12 +252,16 @@ pub const GC = struct {
         obj.nups = nups;
         obj.upvalues = upvalues;
         obj.allocator = self.allocator;
+        obj.source = source;
+        obj.lineinfo = lineinfo;
 
         // Track memory for arrays (allocated by materialize)
         self.bytes_allocated += k.len * @sizeOf(TValue);
         self.bytes_allocated += code.len * @sizeOf(Instruction);
         self.bytes_allocated += protos.len * @sizeOf(*ProtoObject);
         self.bytes_allocated += upvalues.len * @sizeOf(Upvaldesc);
+        self.bytes_allocated += source.len;
+        self.bytes_allocated += lineinfo.len * @sizeOf(u32);
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -285,6 +292,34 @@ pub const GC = struct {
         // Initialize GC header
         obj.header = GCObject.init(.native_closure, self.objects);
         obj.func = func;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
+    /// Allocate a new userdata object
+    /// data_size: size of the raw data block in bytes
+    /// num_user_values: number of user values (0-255)
+    pub fn allocUserdata(self: *GC, data_size: usize, num_user_values: u8) !*UserdataObject {
+        const extra = @as(usize, num_user_values) * @sizeOf(TValue) + data_size;
+        const obj = try self.allocObject(UserdataObject, extra);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.userdata, self.objects);
+        obj.size = data_size;
+        obj.nuvalue = num_user_values;
+        obj.metatable = null;
+
+        // Initialize user values to nil
+        const uvals = obj.userValues();
+        for (uvals) |*uv| {
+            uv.* = TValue.nil;
+        }
+
+        // Zero-initialize data block
+        @memset(obj.dataSlice(), 0);
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -421,7 +456,15 @@ pub const GC = struct {
                 }
             },
             .userdata => {
-                // Basic userdata has no references
+                const ud: *UserdataObject = @fieldParentPtr("header", obj);
+                // Mark metatable if present
+                if (ud.metatable) |mt| {
+                    markObject(self, &mt.header);
+                }
+                // Mark user values
+                for (ud.userValues()) |uv| {
+                    self.markValue(uv);
+                }
             },
             .proto => {
                 const proto: *ProtoObject = @fieldParentPtr("header", obj);
@@ -645,7 +688,11 @@ pub const GC = struct {
                 self.allocator.free(memory);
             },
             .userdata => {
-                // TODO: Implement when userdata is available
+                const ud_obj: *UserdataObject = @fieldParentPtr("header", obj);
+                const size = UserdataObject.allocationSize(ud_obj.size, ud_obj.nuvalue);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(ud_obj))[0..size];
+                self.allocator.free(memory);
             },
             .proto => {
                 const proto_obj: *ProtoObject = @fieldParentPtr("header", obj);
@@ -665,6 +712,14 @@ pub const GC = struct {
                 if (proto_obj.upvalues.len > 0) {
                     self.bytes_allocated -= proto_obj.upvalues.len * @sizeOf(Upvaldesc);
                     self.allocator.free(proto_obj.upvalues);
+                }
+                if (proto_obj.source.len > 0) {
+                    self.bytes_allocated -= proto_obj.source.len;
+                    self.allocator.free(proto_obj.source);
+                }
+                if (proto_obj.lineinfo.len > 0) {
+                    self.bytes_allocated -= proto_obj.lineinfo.len * @sizeOf(u32);
+                    self.allocator.free(proto_obj.lineinfo);
                 }
                 // Free the ProtoObject itself
                 const size = @sizeOf(ProtoObject);
@@ -938,6 +993,8 @@ test "markValue marks closure" {
         1,
         0,
         &[_]Upvaldesc{},
+        "",
+        &[_]u32{},
     );
 
     // Allocate a closure

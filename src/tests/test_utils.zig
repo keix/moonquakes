@@ -38,6 +38,8 @@ pub fn createTestProto(
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{}, // no upvalues
+        "", // source
+        &[_]u32{}, // lineinfo
     );
 }
 
@@ -66,6 +68,8 @@ pub fn createTestProtoWithUpvalues(
         maxstacksize,
         nups,
         upvalues_copy,
+        "", // source
+        &[_]u32{}, // lineinfo
     );
 }
 
@@ -93,6 +97,8 @@ pub fn createTestProtoWithChildProtos(
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{},
+        "", // source
+        &[_]u32{}, // lineinfo
     );
 }
 
@@ -123,6 +129,8 @@ pub fn createTestProtoFull(
         maxstacksize,
         nups,
         upvalues_copy,
+        "", // source
+        &[_]u32{}, // lineinfo
     );
 }
 
