@@ -56,7 +56,16 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
 /// Creates VM, injects context, compiles, executes, returns owned result
 pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !OwnedReturnValue {
     // Phase 1: Compile to RawProto (no GC needed)
-    const raw_proto = try pipeline.compile(allocator, source);
+    const compile_result = pipeline.compile(allocator, source, .{});
+    switch (compile_result) {
+        .err => |e| {
+            defer e.deinit(allocator);
+            std.debug.print("[string]:{d}: {s}\n", .{ e.line, e.message });
+            return error.CompileFailed;
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(allocator, raw_proto);
 
     // Phase 2: Create VM
