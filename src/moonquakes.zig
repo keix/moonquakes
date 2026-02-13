@@ -66,7 +66,16 @@ pub const Moonquakes = struct {
     /// Note: Does not set up `arg` global. Use launcher.run() for that.
     pub fn runSource(self: *Moonquakes, source: []const u8) !OwnedReturnValue {
         // Phase 1: Compile to RawProto (no GC needed)
-        const raw_proto = try pipeline.compile(self.allocator, source);
+        const compile_result = pipeline.compile(self.allocator, source, .{});
+        switch (compile_result) {
+            .err => |e| {
+                defer e.deinit(self.allocator);
+                try self.printCompileError(e);
+                return error.CompileFailed;
+            },
+            .ok => {},
+        }
+        const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
         // Phase 2: Create VM and materialize constants
@@ -74,7 +83,7 @@ pub const Moonquakes = struct {
         defer vm.deinit();
 
         const proto = try pipeline.materialize(&raw_proto, &vm.gc, self.allocator);
-        defer pipeline.freeProto(self.allocator, proto);
+        // Note: ProtoObject is GC-managed, no manual free needed
 
         // Phase 3: Execute
         const result = Mnemonics.execute(&vm, proto) catch |err| {
@@ -136,14 +145,23 @@ pub const Moonquakes = struct {
         try stdout.print("\n", .{});
 
         // Compile
-        const raw_proto = try pipeline.compile(self.allocator, source);
+        const compile_result = pipeline.compile(self.allocator, source, .{});
+        switch (compile_result) {
+            .err => |e| {
+                defer e.deinit(self.allocator);
+                try stdout.print("Compile error at line {d}: {s}\n", .{ e.line, e.message });
+                return error.CompileFailed;
+            },
+            .ok => {},
+        }
+        const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
         var vm = try VM.init(self.allocator);
         defer vm.deinit();
 
         const proto = try pipeline.materialize(&raw_proto, &vm.gc, self.allocator);
-        defer pipeline.freeProto(self.allocator, proto);
+        // Note: ProtoObject is GC-managed, no manual free needed
 
         try self.dumpProto(proto);
         try stdout.print("\n", .{});
@@ -173,6 +191,14 @@ pub const Moonquakes = struct {
         var stderr_writer = std.fs.File.stderr().writer(&.{});
         const stderr = &stderr_writer.interface;
         stderr.print("{s}\n", .{translated_error}) catch {};
+    }
+
+    /// Print compile error to stderr
+    fn printCompileError(self: *Moonquakes, e: pipeline.CompileError) !void {
+        _ = self;
+        var stderr_writer = std.fs.File.stderr().writer(&.{});
+        const stderr = &stderr_writer.interface;
+        stderr.print("[string]:{d}: {s}\n", .{ e.line, e.message }) catch {};
     }
 };
 

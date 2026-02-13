@@ -689,18 +689,25 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
 
     // Compile the source
-    var error_msg: [256]u8 = undefined;
-    const raw_proto = pipeline.compileWithError(vm.allocator, source, &error_msg) catch {
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            // Get error message (null-terminated in buffer)
-            const msg_len = std.mem.indexOfScalar(u8, &error_msg, 0) orelse 0;
-            const msg = if (msg_len > 0) error_msg[0..msg_len] else "syntax error";
-            const err_str = try vm.gc.allocString(msg);
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    };
+    const compile_result = pipeline.compile(vm.allocator, source, .{});
+    switch (compile_result) {
+        .err => |e| {
+            defer e.deinit(vm.allocator);
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                // Format: "[string]:line: message"
+                const msg = std.fmt.allocPrint(vm.allocator, "[string]:{d}: {s}", .{
+                    e.line, e.message,
+                }) catch "syntax error";
+                defer vm.allocator.free(msg);
+                const err_str = try vm.gc.allocString(msg);
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
     // Materialize to Proto and create closure
@@ -768,19 +775,26 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     };
     defer vm.allocator.free(source);
 
-    // Compile the source
-    var error_msg: [256]u8 = undefined;
-    const raw_proto = pipeline.compileWithError(vm.allocator, source, &error_msg) catch {
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            // Get error message (null-terminated in buffer)
-            const msg_len = std.mem.indexOfScalar(u8, &error_msg, 0) orelse 0;
-            const msg = if (msg_len > 0) error_msg[0..msg_len] else "syntax error";
-            const err_str = try vm.gc.allocString(msg);
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    };
+    // Compile the source with filename as source name
+    const compile_result = pipeline.compile(vm.allocator, source, .{ .source_name = filename });
+    switch (compile_result) {
+        .err => |e| {
+            defer e.deinit(vm.allocator);
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                // Format: "filename:line: message"
+                const msg = std.fmt.allocPrint(vm.allocator, "{s}:{d}: {s}", .{
+                    filename, e.line, e.message,
+                }) catch "syntax error";
+                defer vm.allocator.free(msg);
+                const err_str = try vm.gc.allocString(msg);
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
     // Materialize to Proto and create closure
@@ -836,10 +850,20 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     defer vm.allocator.free(source);
 
     // Compile the source
-    const raw_proto = pipeline.compile(vm.allocator, source) catch {
-        vm.lua_error_msg = try vm.gc.allocString("syntax error");
-        return RuntimeError.RuntimeError;
-    };
+    const compile_result = pipeline.compile(vm.allocator, source, .{ .source_name = filename });
+    switch (compile_result) {
+        .err => |e| {
+            defer e.deinit(vm.allocator);
+            const msg = std.fmt.allocPrint(vm.allocator, "{s}:{d}: {s}", .{
+                filename, e.line, e.message,
+            }) catch "syntax error";
+            defer vm.allocator.free(msg);
+            vm.lua_error_msg = try vm.gc.allocString(msg);
+            return RuntimeError.RuntimeError;
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(vm.allocator, raw_proto);
 
     // Materialize to Proto and create closure

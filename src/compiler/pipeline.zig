@@ -11,78 +11,84 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 pub const materialize = @import("materialize.zig").materialize;
 
-/// Compile source to RawProto (no GC needed)
-pub fn compile(allocator: std.mem.Allocator, source: []const u8) !RawProto {
-    return compileWithSource(allocator, source, "[string]", null);
-}
+// ============================================================================
+// Compile API Types
+// ============================================================================
 
-/// Compile source to RawProto with optional error message output
-/// If error_msg_out is provided and compilation fails, it will contain the error message
-pub fn compileWithError(allocator: std.mem.Allocator, source: []const u8, error_msg_out: ?*[256]u8) !RawProto {
-    return compileWithSource(allocator, source, "[string]", error_msg_out);
-}
+/// Compilation error with structured information
+pub const CompileError = struct {
+    line: u32,
+    message: []const u8, // Allocated by provided allocator
 
-/// Compile source with source name and optional error output
-pub fn compileWithSource(
+    pub fn deinit(self: *const CompileError, allocator: std.mem.Allocator) void {
+        if (self.message.len > 0) {
+            allocator.free(self.message);
+        }
+    }
+};
+
+/// Result of compilation: either success with RawProto or error with details
+pub const CompileResult = union(enum) {
+    ok: RawProto,
+    err: CompileError,
+
+    pub fn deinit(self: *CompileResult, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .ok => |raw| freeRawProto(allocator, raw),
+            .err => |*e| e.deinit(allocator),
+        }
+    }
+};
+
+/// Compilation options
+pub const CompileOptions = struct {
+    source_name: []const u8 = "[string]",
+};
+
+// ============================================================================
+// Compile API
+// ============================================================================
+
+/// Compile source to RawProto or CompileError
+///
+/// Pure function - no side effects, no GC dependencies.
+/// Caller must handle the result and call deinit when done.
+pub fn compile(
     allocator: std.mem.Allocator,
     source: []const u8,
-    source_name: []const u8,
-    error_msg_out: ?*[256]u8,
-) !RawProto {
+    options: CompileOptions,
+) CompileResult {
     var lx = lexer.Lexer.init(source);
     var builder = parser.ProtoBuilder.init(allocator, null);
-    builder.source = source_name;
+    builder.source = options.source_name;
     defer builder.deinit();
 
     var p = parser.Parser.init(&lx, &builder);
     defer p.deinit();
+
     p.parseChunk() catch |err| {
-        // Copy error message if output buffer provided
-        if (error_msg_out) |out| {
-            // Format: source:line: message
-            const line = p.getCurrentLine();
-            const msg = p.getErrorMsg();
-            var buf_pos: usize = 0;
+        const line: u32 = @intCast(p.current.line);
+        const parser_msg = p.getErrorMsg();
 
-            // Copy source name
-            if (source_name.len > 0 and buf_pos + source_name.len + 1 < 256) {
-                @memcpy(out[buf_pos .. buf_pos + source_name.len], source_name);
-                buf_pos += source_name.len;
-                out[buf_pos] = ':';
-                buf_pos += 1;
-            }
+        const message = if (parser_msg.len > 0)
+            allocator.dupe(u8, parser_msg) catch ""
+        else
+            allocator.dupe(u8, @errorName(err)) catch "";
 
-            // Format line number
-            var line_buf: [16]u8 = undefined;
-            const line_str = std.fmt.bufPrint(&line_buf, "{d}", .{line}) catch "?";
-            if (buf_pos + line_str.len + 2 < 256) {
-                @memcpy(out[buf_pos .. buf_pos + line_str.len], line_str);
-                buf_pos += line_str.len;
-                out[buf_pos] = ':';
-                buf_pos += 1;
-                out[buf_pos] = ' ';
-                buf_pos += 1;
-            }
-
-            // Copy message
-            if (msg.len > 0 and buf_pos + msg.len < 256) {
-                @memcpy(out[buf_pos .. buf_pos + msg.len], msg);
-                buf_pos += msg.len;
-            } else if (msg.len == 0) {
-                // Fallback to error name
-                const name = @errorName(err);
-                if (buf_pos + name.len < 256) {
-                    @memcpy(out[buf_pos .. buf_pos + name.len], name);
-                    buf_pos += name.len;
-                }
-            }
-            out[buf_pos] = 0; // null terminate
-        }
-        return err;
+        return .{ .err = .{ .line = line, .message = message } };
     };
 
-    return try builder.toRawProto(allocator, 0);
+    const raw = builder.toRawProto(allocator, 0) catch |err| {
+        const message = allocator.dupe(u8, @errorName(err)) catch "";
+        return .{ .err = .{ .line = 0, .message = message } };
+    };
+
+    return .{ .ok = raw };
 }
+
+// ============================================================================
+// Memory Management
+// ============================================================================
 
 /// Free RawProto and all nested protos
 pub fn freeRawProto(allocator: std.mem.Allocator, raw: RawProto) void {
