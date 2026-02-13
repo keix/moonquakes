@@ -45,6 +45,7 @@ pub const MetamethodKeys = struct {
     pairs: *StringObject,
     name: *StringObject,
     gc: *StringObject,
+    mode: *StringObject,
 
     pub fn init(gc: *GC) !MetamethodKeys {
         return .{
@@ -74,6 +75,7 @@ pub const MetamethodKeys = struct {
             .pairs = try gc.allocString("__pairs"),
             .name = try gc.allocString("__name"),
             .gc = try gc.allocString("__gc"),
+            .mode = try gc.allocString("__mode"),
         };
     }
 };
@@ -157,6 +159,9 @@ pub const VM = struct {
     /// Uses markProto() (not markConstants()) to ensure nested protos are marked.
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
+
+        // Prepare for new GC cycle (clears weak tables list)
+        self.gc.beginCollection();
 
         // === Mark phase: traverse from roots ===
 

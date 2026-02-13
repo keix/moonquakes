@@ -40,6 +40,7 @@ pub const MetaEvent = enum {
     metatable, // __metatable
     name, // __name
     pairs, // __pairs
+    mode, // __mode (weak table mode)
 
     /// Get the metamethod key string for this event
     pub fn key(self: MetaEvent) []const u8 {
@@ -72,6 +73,7 @@ pub const MetaEvent = enum {
             .metatable => "__metatable",
             .name => "__name",
             .pairs => "__pairs",
+            .mode => "__mode",
         };
     }
 };
