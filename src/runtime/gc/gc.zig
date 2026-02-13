@@ -9,6 +9,7 @@ const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
+const UserdataObject = object.UserdataObject;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
@@ -292,6 +293,34 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new userdata object
+    /// data_size: size of the raw data block in bytes
+    /// num_user_values: number of user values (0-255)
+    pub fn allocUserdata(self: *GC, data_size: usize, num_user_values: u8) !*UserdataObject {
+        const extra = @as(usize, num_user_values) * @sizeOf(TValue) + data_size;
+        const obj = try self.allocObject(UserdataObject, extra);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.userdata, self.objects);
+        obj.size = data_size;
+        obj.nuvalue = num_user_values;
+        obj.metatable = null;
+
+        // Initialize user values to nil
+        const uvals = obj.userValues();
+        for (uvals) |*uv| {
+            uv.* = TValue.nil;
+        }
+
+        // Zero-initialize data block
+        @memset(obj.dataSlice(), 0);
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Check if GC should run (policy decision)
     pub fn shouldCollect(self: *GC, additional_bytes: usize) bool {
         return self.bytes_allocated + additional_bytes > self.next_gc;
@@ -421,7 +450,15 @@ pub const GC = struct {
                 }
             },
             .userdata => {
-                // Basic userdata has no references
+                const ud: *UserdataObject = @fieldParentPtr("header", obj);
+                // Mark metatable if present
+                if (ud.metatable) |mt| {
+                    markObject(self, &mt.header);
+                }
+                // Mark user values
+                for (ud.userValues()) |uv| {
+                    self.markValue(uv);
+                }
             },
             .proto => {
                 const proto: *ProtoObject = @fieldParentPtr("header", obj);
@@ -645,7 +682,11 @@ pub const GC = struct {
                 self.allocator.free(memory);
             },
             .userdata => {
-                // TODO: Implement when userdata is available
+                const ud_obj: *UserdataObject = @fieldParentPtr("header", obj);
+                const size = UserdataObject.allocationSize(ud_obj.size, ud_obj.nuvalue);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(ud_obj))[0..size];
+                self.allocator.free(memory);
             },
             .proto => {
                 const proto_obj: *ProtoObject = @fieldParentPtr("header", obj);

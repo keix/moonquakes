@@ -92,11 +92,17 @@ pub const VM = struct {
     callstack: [35]CallInfo, // Support up to 35 nested calls
     callstack_size: u8,
     globals: *TableObject,
+    registry: *TableObject, // Global registry table (for debug.getregistry)
     allocator: std.mem.Allocator,
     gc: GC, // Garbage collector (replaces arena)
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
     mm_keys: MetamethodKeys, // Pre-allocated metamethod strings
     lua_error_msg: ?*StringObject = null, // Stored Lua error message for pcall
+
+    // Debug hook fields (for debug.sethook/gethook)
+    hook_func: ?*ClosureObject = null, // Hook function
+    hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
+    hook_count: u32 = 0, // Count for count hook
 
     pub fn init(allocator: std.mem.Allocator) !VM {
         // Initialize GC first so we can allocate strings and tables
@@ -104,6 +110,9 @@ pub const VM = struct {
 
         // Create globals table via GC
         const globals = try gc.allocTable();
+
+        // Create registry table via GC
+        const registry = try gc.allocTable();
 
         // Pre-allocate metamethod key strings (avoids allocation on every lookup)
         const mm_keys = try MetamethodKeys.init(&gc);
@@ -121,6 +130,7 @@ pub const VM = struct {
             .callstack = undefined,
             .callstack_size = 0,
             .globals = globals,
+            .registry = registry,
             .allocator = allocator,
             .gc = gc,
             .open_upvalues = null,
@@ -212,6 +222,9 @@ pub const VM = struct {
         // 3. Mark global environment
         self.gc.mark(&self.globals.header);
 
+        // 3b. Mark registry table
+        self.gc.mark(&self.registry.header);
+
         // 4. Mark open upvalues (captured variables still pointing to stack)
         var upval = self.open_upvalues;
         while (upval) |uv| {
@@ -222,6 +235,11 @@ pub const VM = struct {
         // 5. Mark lua_error_msg (stored error message for pcall)
         if (self.lua_error_msg) |msg| {
             self.gc.mark(&msg.header);
+        }
+
+        // 6. Mark debug hook function (if set)
+        if (self.hook_func) |hook| {
+            self.gc.mark(&hook.header);
         }
 
         // === Sweep phase ===

@@ -6,6 +6,7 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const UserdataObject = object.UserdataObject;
 
 /// TValue: Lua value representation
 /// - Immediate values: nil, boolean, integer, number
@@ -59,6 +60,10 @@ pub const TValue = union(enum) {
         return self == .object and (self.object.type == .closure or self.object.type == .native_closure);
     }
 
+    pub fn isUserdata(self: TValue) bool {
+        return self == .object and self.object.type == .userdata;
+    }
+
     // ===== Object accessors =====
 
     pub fn asString(self: TValue) ?*StringObject {
@@ -85,6 +90,13 @@ pub const TValue = union(enum) {
     pub fn asNativeClosure(self: TValue) ?*NativeClosureObject {
         if (self == .object and self.object.type == .native_closure) {
             return object.getObject(NativeClosureObject, self.object);
+        }
+        return null;
+    }
+
+    pub fn asUserdata(self: TValue) ?*UserdataObject {
+        if (self == .object and self.object.type == .userdata) {
+            return object.getObject(UserdataObject, self.object);
         }
         return null;
     }
@@ -131,6 +143,10 @@ pub const TValue = union(enum) {
 
     pub fn fromNativeClosure(nc: *NativeClosureObject) TValue {
         return .{ .object = &nc.header };
+    }
+
+    pub fn fromUserdata(ud: *UserdataObject) TValue {
+        return .{ .object = &ud.header };
     }
 
     // ===== Formatting =====

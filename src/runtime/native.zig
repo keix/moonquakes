@@ -153,6 +153,7 @@ pub const NativeFnId = enum(u8) {
     debug_getregistry,
     debug_getupvalue,
     debug_getuservalue,
+    debug_newuserdata,
     debug_sethook,
     debug_setlocal,
     debug_setmetatable,

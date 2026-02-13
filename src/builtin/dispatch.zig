@@ -234,6 +234,7 @@ fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(debug_table, gc, "getregistry", .debug_getregistry);
     try registerNative(debug_table, gc, "getupvalue", .debug_getupvalue);
     try registerNative(debug_table, gc, "getuservalue", .debug_getuservalue);
+    try registerNative(debug_table, gc, "newuserdata", .debug_newuserdata);
     try registerNative(debug_table, gc, "sethook", .debug_sethook);
     try registerNative(debug_table, gc, "setlocal", .debug_setlocal);
     try registerNative(debug_table, gc, "setmetatable", .debug_setmetatable);
@@ -447,6 +448,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .debug_getregistry => try debug.nativeDebugGetregistry(vm, func_reg, nargs, nresults),
         .debug_getupvalue => try debug.nativeDebugGetupvalue(vm, func_reg, nargs, nresults),
         .debug_getuservalue => try debug.nativeDebugGetuservalue(vm, func_reg, nargs, nresults),
+        .debug_newuserdata => try debug.nativeDebugNewuserdata(vm, func_reg, nargs, nresults),
         .debug_sethook => try debug.nativeDebugSethook(vm, func_reg, nargs, nresults),
         .debug_setlocal => try debug.nativeDebugSetlocal(vm, func_reg, nargs, nresults),
         .debug_setmetatable => try debug.nativeDebugSetmetatable(vm, func_reg, nargs, nresults),

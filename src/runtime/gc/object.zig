@@ -257,6 +257,59 @@ pub const ProtoObject = struct {
     allocator: std.mem.Allocator,
 };
 
+/// Userdata Object - GC-managed arbitrary data block
+///
+/// Full userdata in Lua 5.4:
+/// - Raw memory block of arbitrary size
+/// - Optional metatable for metamethod dispatch
+/// - Up to 255 "user values" (TValues associated with the userdata)
+///
+/// Memory layout: [UserdataObject header][nuvalue * TValue][size bytes]
+pub const UserdataObject = struct {
+    const TValue = @import("../value.zig").TValue;
+
+    header: GCObject,
+    /// Size of the raw data block in bytes
+    size: usize,
+    /// Number of user values (0-255)
+    nuvalue: u8,
+    /// Optional metatable for metamethod dispatch
+    metatable: ?*TableObject,
+
+    /// Get the user values array (stored inline after struct)
+    pub fn userValues(self: *UserdataObject) []TValue {
+        const base = @intFromPtr(self);
+        const offset = @sizeOf(UserdataObject);
+        const ptr: [*]TValue = @ptrFromInt(base + offset);
+        return ptr[0..self.nuvalue];
+    }
+
+    /// Get the user values array (const version)
+    pub fn userValuesConst(self: *const UserdataObject) []const TValue {
+        const base = @intFromPtr(self);
+        const offset = @sizeOf(UserdataObject);
+        const ptr: [*]const TValue = @ptrFromInt(base + offset);
+        return ptr[0..self.nuvalue];
+    }
+
+    /// Get pointer to the raw data block (stored after user values)
+    pub fn data(self: *UserdataObject) [*]u8 {
+        const base = @intFromPtr(self);
+        const offset = @sizeOf(UserdataObject) + self.nuvalue * @sizeOf(TValue);
+        return @ptrFromInt(base + offset);
+    }
+
+    /// Get data as a slice
+    pub fn dataSlice(self: *UserdataObject) []u8 {
+        return self.data()[0..self.size];
+    }
+
+    /// Calculate total allocation size for a userdata
+    pub fn allocationSize(data_size: usize, num_user_values: u8) usize {
+        return @sizeOf(UserdataObject) + @as(usize, num_user_values) * @sizeOf(TValue) + data_size;
+    }
+};
+
 /// Utility functions for working with GC objects
 /// Get the concrete object from a GCObject header
 ///
