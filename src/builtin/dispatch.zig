@@ -98,8 +98,9 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     try registerNative(globals, gc, "dofile", .dofile);
     try registerNative(globals, gc, "warn", .warn);
 
-    // _G is a self-reference to the globals table itself
+    // _G and _ENV are self-references to the globals table itself
     try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
+    try setStringKey(globals, gc, "_ENV", TValue.fromTable(globals));
     // _VERSION is a version string constant
     const version_str = try gc.allocString(ver.version_string);
     try setStringKey(globals, gc, "_VERSION", TValue.fromString(version_str));

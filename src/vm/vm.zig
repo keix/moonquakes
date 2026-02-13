@@ -165,12 +165,28 @@ pub const VM = struct {
 
         // === Mark phase: traverse from roots ===
 
-        // 1. Mark VM stack (active portion)
-        // vm.top is the authoritative stack boundary; only slots below vm.top are scanned.
-        // Native functions MUST extend vm.top before using temporary slots.
-        // Using maxstacksize is unsafe because slots above vm.top may contain
-        // stale object pointers from previous calls.
-        self.gc.markStack(self.stack[0..self.top]);
+        // 1. Mark VM stack
+        // Calculate the maximum stack extent across all active frames.
+        // We need to mark up to the highest frame_max because:
+        // - vm.top may be lower than frame_max for variable results (nresults < 0)
+        // - Each frame's local variables must be protected during GC
+        var stack_extent = self.top;
+
+        // Check base_ci's extent
+        const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
+        if (base_frame_max > stack_extent) {
+            stack_extent = base_frame_max;
+        }
+
+        // Check each call frame's extent
+        for (self.callstack[0..self.callstack_size]) |frame| {
+            const frame_max = frame.base + frame.func.maxstacksize;
+            if (frame_max > stack_extent) {
+                stack_extent = frame_max;
+            }
+        }
+
+        self.gc.markStack(self.stack[0..stack_extent]);
 
         // 2. Mark call frames
         // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.

@@ -1330,8 +1330,20 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         // Format based on specifier
         switch (spec) {
             's' => {
-                // String
-                const str = if (arg.asString()) |s| s.asSlice() else "nil";
+                // String - convert any value to string (like tostring)
+                var str_buf: [64]u8 = undefined;
+                const str = if (arg.asString()) |s|
+                    s.asSlice()
+                else if (arg.isNil())
+                    "nil"
+                else if (arg.isBoolean())
+                    if (arg.boolean) "true" else "false"
+                else if (arg.toInteger()) |int_val|
+                    std.fmt.bufPrint(&str_buf, "{d}", .{int_val}) catch "?"
+                else if (arg.toNumber()) |num_val|
+                    std.fmt.bufPrint(&str_buf, "{d}", .{num_val}) catch "?"
+                else
+                    "?";
                 const effective_str = if (precision) |p| str[0..@min(p, str.len)] else str;
                 try padAndAppend(allocator, &result, effective_str, width, left_justify, ' ');
             },

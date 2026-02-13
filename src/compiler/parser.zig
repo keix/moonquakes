@@ -384,15 +384,37 @@ pub const ProtoBuilder = struct {
         try self.code.append(self.allocator, instr);
     }
 
+    /// For large constant indices (>255), loads upvalue to temp and uses LOADK + GETTABLE
     pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
-        const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
-        try self.code.append(self.allocator, instr);
+        if (key_const <= 255) {
+            const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
+            try self.code.append(self.allocator, instr);
+        } else {
+            // Load upvalue to temp, load key to another temp, then GETTABLE
+            const upval_temp = self.allocTemp();
+            try self.emitGETUPVAL(upval_temp, upval);
+            const key_temp = self.allocTemp();
+            try self.emitLoadK(key_temp, key_const);
+            const instr = Instruction.initABC(.GETTABLE, dst, upval_temp, key_temp);
+            try self.code.append(self.allocator, instr);
+        }
     }
 
     /// Emit SETTABUP instruction: UpValue[A][K[B]] := R[C]
+    /// For large constant indices (>255), loads upvalue to temp and uses LOADK + SETTABLE
     pub fn emitSETTABUP(self: *ProtoBuilder, upval: u8, key_const: u32, src: u8) !void {
-        const instr = Instruction.initABC(.SETTABUP, upval, @intCast(key_const), src);
-        try self.code.append(self.allocator, instr);
+        if (key_const <= 255) {
+            const instr = Instruction.initABC(.SETTABUP, upval, @intCast(key_const), src);
+            try self.code.append(self.allocator, instr);
+        } else {
+            // Load upvalue to temp, load key to another temp, then SETTABLE
+            const upval_temp = self.allocTemp();
+            try self.emitGETUPVAL(upval_temp, upval);
+            const key_temp = self.allocTemp();
+            try self.emitLoadK(key_temp, key_const);
+            const instr = Instruction.initABC(.SETTABLE, upval_temp, key_temp, src);
+            try self.code.append(self.allocator, instr);
+        }
     }
 
     pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
@@ -494,9 +516,18 @@ pub const ProtoBuilder = struct {
     }
 
     /// Emit SETFIELD instruction: R[A][K[B]] := R[C]
+    /// For large constant indices (>255), uses LOADK + SETTABLE instead
     pub fn emitSETFIELD(self: *ProtoBuilder, table: u8, key_const: u32, src: u8) !void {
-        const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
-        try self.code.append(self.allocator, instr);
+        if (key_const <= 255) {
+            const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
+            try self.code.append(self.allocator, instr);
+        } else {
+            // For large constant index, load key into temp register and use SETTABLE
+            const temp = self.allocTemp();
+            try self.emitLoadK(temp, key_const);
+            const instr = Instruction.initABC(.SETTABLE, table, temp, src);
+            try self.code.append(self.allocator, instr);
+        }
         // Update maxstacksize to include all referenced registers
         self.updateMaxStack(table + 1);
         self.updateMaxStack(src + 1);
@@ -513,26 +544,57 @@ pub const ProtoBuilder = struct {
     }
 
     /// Emit SETI instruction: R[A][B] := R[C] (B is integer immediate)
-    pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u8, src: u8) !void {
-        const instr = Instruction.initABC(.SETI, table, index, src);
-        try self.code.append(self.allocator, instr);
+    /// For indices > 255, uses LOADI + SETTABLE instead
+    pub fn emitSETI(self: *ProtoBuilder, table: u8, index: u32, src: u8) !void {
+        if (index <= 255) {
+            const instr = Instruction.initABC(.SETI, table, @intCast(index), src);
+            try self.code.append(self.allocator, instr);
+        } else {
+            // For large index, load it into a temp register and use SETTABLE
+            const temp = self.allocTemp();
+            const index_i17: i17 = @intCast(index);
+            const loadi = Instruction.initAsBx(.LOADI, temp, index_i17);
+            try self.code.append(self.allocator, loadi);
+            const settable = Instruction.initABC(.SETTABLE, table, temp, src);
+            try self.code.append(self.allocator, settable);
+        }
         // Update maxstacksize to include all referenced registers
         self.updateMaxStack(table + 1);
         self.updateMaxStack(src + 1);
     }
 
     /// Emit GETFIELD instruction: R[A] := R[B][K[C]]
+    /// For large constant indices (>255), uses LOADK + GETTABLE instead
     pub fn emitGETFIELD(self: *ProtoBuilder, dst: u8, table: u8, key_const: u32) !void {
-        const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
-        try self.code.append(self.allocator, instr);
+        if (key_const <= 255) {
+            const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
+            try self.code.append(self.allocator, instr);
+        } else {
+            // For large constant index, load key into temp register and use GETTABLE
+            const temp = self.allocTemp();
+            try self.emitLoadK(temp, key_const);
+            const instr = Instruction.initABC(.GETTABLE, dst, table, temp);
+            try self.code.append(self.allocator, instr);
+        }
         self.updateMaxStack(dst + 1);
     }
 
     /// Emit SELF instruction: R[A+1] := R[B]; R[A] := R[B][K[C]]
     /// Prepares for method call: method goes to R[A], object goes to R[A+1]
+    /// For large constant indices (>255), uses MOVE + LOADK + GETTABLE instead
     pub fn emitSELF(self: *ProtoBuilder, dst: u8, obj: u8, method_const: u32) !void {
-        const instr = Instruction.initABC(.SELF, dst, obj, @intCast(method_const));
-        try self.code.append(self.allocator, instr);
+        if (method_const <= 255) {
+            const instr = Instruction.initABC(.SELF, dst, obj, @intCast(method_const));
+            try self.code.append(self.allocator, instr);
+        } else {
+            // SELF puts obj in R[A+1] and method in R[A]
+            // Emulate with: MOVE R[A+1], R[B]; LOADK temp, K[C]; GETTABLE R[A], R[B], temp
+            try self.emitMOVE(dst + 1, obj);
+            const temp = self.allocTemp();
+            try self.emitLoadK(temp, method_const);
+            const instr = Instruction.initABC(.GETTABLE, dst, obj, temp);
+            try self.code.append(self.allocator, instr);
+        }
         self.updateMaxStack(dst + 2); // SELF uses two registers: dst and dst+1
     }
 
@@ -670,23 +732,31 @@ pub const ProtoBuilder = struct {
                 try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             } else {
-                // Parse as hex integer
-                const value = std.fmt.parseInt(i64, hex_part, 16) catch return error.InvalidNumber;
-                const idx: u16 = @intCast(self.integers.items.len);
-                try self.integers.append(self.allocator, value);
-                try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
-                return @intCast(self.const_refs.items.len - 1);
+                // Parse as hex integer, fall back to float on overflow
+                if (std.fmt.parseInt(i64, hex_part, 16)) |value| {
+                    const idx: u16 = @intCast(self.integers.items.len);
+                    try self.integers.append(self.allocator, value);
+                    try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
+                    return @intCast(self.const_refs.items.len - 1);
+                } else |_| {
+                    // Overflow: parse hex as float
+                    const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
+                    const idx: u16 = @intCast(self.numbers.items.len);
+                    try self.numbers.append(self.allocator, value);
+                    try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
+                    return @intCast(self.const_refs.items.len - 1);
+                }
             }
         }
 
-        // Try parsing as decimal integer first
+        // Try parsing as decimal integer first, fall back to float on overflow
         if (std.fmt.parseInt(i64, lexeme, 10)) |value| {
             const idx: u16 = @intCast(self.integers.items.len);
             try self.integers.append(self.allocator, value);
             try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         } else |_| {
-            // Try parsing as float
+            // Try parsing as float (handles both floats and overflowed integers)
             const value = std.fmt.parseFloat(f64, lexeme) catch return error.InvalidNumber;
             const idx: u16 = @intCast(self.numbers.items.len);
             try self.numbers.append(self.allocator, value);
@@ -1147,6 +1217,25 @@ pub const Parser = struct {
                 try self.proto.emitMOVE(expected_reg, expr_reg);
             }
             count += 1;
+
+            // Check if this is the last expression and it's a function call
+            // If so, we need to expand its return values
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) {
+                // This is the last expression
+                if (self.proto.code.items.len > 0) {
+                    const last_idx = self.proto.code.items.len - 1;
+                    const last_inst = self.proto.code.items[last_idx];
+                    if (last_inst.getOpCode() == .CALL) {
+                        // Patch CALL to return variable results (C=0)
+                        const a = last_inst.getA();
+                        const b = last_inst.getB();
+                        self.proto.code.items[last_idx] = Instruction.initABC(.CALL, a, b, 0);
+                        // RETURN with B=0 returns from first_reg to top
+                        try self.proto.emit(.RETURN, first_reg, 0, 0);
+                        return;
+                    }
+                }
+            }
         }
 
         try self.proto.emitReturn(first_reg, count);
@@ -1702,6 +1791,26 @@ pub const Parser = struct {
                 return error.ExpectedRightParen;
             }
             self.advance(); // consume ')'
+            // Lua semantic: (f()) forces single return value
+            // If the inner expression was a function call:
+            // 1. Patch CALL to return exactly 1 result (C=2)
+            // 2. Emit barrier MOVEs to prevent parseMultipleAssignment from expanding the CALL
+            if (self.proto.code.items.len > 0) {
+                const last_idx = self.proto.code.items.len - 1;
+                const last_inst = self.proto.code.items[last_idx];
+                if (last_inst.getOpCode() == .CALL) {
+                    const a = last_inst.getA();
+                    const b = last_inst.getB();
+                    // Patch CALL to return exactly 1 result (C=2)
+                    self.proto.code.items[last_idx] = Instruction.initABC(.CALL, a, b, 2);
+                    // Emit two MOVEs as barrier (parseMultipleAssignment looks through one MOVE)
+                    const barrier_reg = self.proto.allocTemp();
+                    try self.proto.emitMOVE(barrier_reg, a);
+                    const final_reg = self.proto.allocTemp();
+                    try self.proto.emitMOVE(final_reg, barrier_reg);
+                    return final_reg;
+                }
+            }
             return result;
         }
 
@@ -1767,7 +1876,14 @@ pub const Parser = struct {
                 (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
             if (is_call_with_parens or is_call_no_parens) {
-                return try self.parseFunctionCallExpr();
+                const result_reg = try self.parseFunctionCallExpr();
+                // Handle chained calls: func()(), func()()(), etc.
+                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                    const arg_count = try self.parseCallArgs(result_reg);
+                    try self.proto.emitCallVararg(result_reg, arg_count, 1);
+                    // result_reg now contains the result of the chained call
+                }
+                return result_reg;
             }
             // Check if it's a variable/parameter (includes loop variables) or upvalue
             const var_name = self.current.lexeme;
@@ -1991,7 +2107,7 @@ pub const Parser = struct {
         try self.proto.emitNEWTABLE(table_reg);
 
         // List index counter (Lua arrays start at 1)
-        var list_index: u8 = 1;
+        var list_index: u32 = 1;
 
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
@@ -2068,7 +2184,53 @@ pub const Parser = struct {
                 const base_reg = self.proto.next_reg;
                 const value_reg = try self.parseExpr();
 
-                // Emit SETI: table[index] = value
+                // Check if this is the last element and if the last instruction was a CALL
+                // If so, we need to handle multi-return expansion
+                // Last element check: either at '}' or at separator followed by '}'
+                const is_last_element = if (self.current.kind == .Symbol)
+                    std.mem.eql(u8, self.current.lexeme, "}") or
+                        ((std.mem.eql(u8, self.current.lexeme, ",") or
+                            std.mem.eql(u8, self.current.lexeme, ";")) and
+                            self.peek().kind == .Symbol and
+                            std.mem.eql(u8, self.peek().lexeme, "}"))
+                else
+                    false;
+
+                if (is_last_element and self.proto.code.items.len > 0) {
+                    const last_instr = self.proto.code.items[self.proto.code.items.len - 1];
+                    const last_op = last_instr.getOpCode();
+                    if (last_op == .CALL) {
+                        const a = last_instr.getA();
+                        // Only use variable-result optimization if CALL register
+                        // is immediately after table_reg. For indexed calls like
+                        // op[2](...), intermediate registers are used and SETLIST
+                        // would copy wrong values.
+                        if (a == table_reg + 1) {
+                            // Patch CALL to return variable results (C=0)
+                            const b = last_instr.getB();
+                            self.proto.code.items[self.proto.code.items.len - 1] =
+                                Instruction.initABC(.CALL, a, b, 0);
+
+                            // Use SETLIST to assign all return values starting at list_index
+                            try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);
+                            try self.proto.emitExtraArg(@intCast(list_index));
+
+                            // Consume trailing separator if present (e.g., "f();}" or "f(),}")
+                            if (self.current.kind == .Symbol and
+                                (std.mem.eql(u8, self.current.lexeme, ",") or
+                                    std.mem.eql(u8, self.current.lexeme, ";")))
+                            {
+                                self.advance(); // consume separator
+                            }
+
+                            // Don't increment list_index - SETLIST handles variable count
+                            self.proto.next_reg = base_reg;
+                            break; // Exit loop since this is the last element
+                        }
+                    }
+                }
+
+                // Normal case: emit SETI for single value
                 try self.proto.emitSETI(table_reg, list_index, value_reg);
                 list_index += 1;
 

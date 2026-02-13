@@ -50,6 +50,22 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         }
     }
 
+    // Check for built-in modules (return global table if it exists)
+    const builtin_modules = [_][]const u8{ "debug", "string", "table", "math", "io", "os", "coroutine", "utf8", "package" };
+    for (builtin_modules) |builtin| {
+        if (std.mem.eql(u8, modname, builtin)) {
+            // Return the global table
+            if (vm.globals.get(mod_key)) |global_val| {
+                // Cache it
+                try loaded_table.?.set(mod_key, global_val);
+                if (nresults > 0) {
+                    vm.stack[vm.base + func_reg] = global_val;
+                }
+                return;
+            }
+        }
+    }
+
     // Search for module file
     // Try: modname.lua, modname/init.lua
     var filename_buf: [512]u8 = undefined;
