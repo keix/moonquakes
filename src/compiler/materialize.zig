@@ -44,6 +44,8 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
     // Duplicate code and upvalues using GC's allocator (ProtoObject owns its own copies)
     const code = try gc.allocator.dupe(Instruction, raw.code);
     const upvalues = try gc.allocator.dupe(Upvaldesc, raw.upvalues);
+    const source = try gc.allocator.dupe(u8, raw.source);
+    const lineinfo = try gc.allocator.dupe(u32, raw.lineinfo);
 
     // Allocate via GC - ProtoObject is now GC-managed
     return gc.allocProto(
@@ -55,6 +57,8 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
         raw.maxstacksize,
         raw.nups,
         upvalues,
+        source,
+        lineinfo,
     );
 }
 

@@ -255,6 +255,12 @@ pub const ProtoObject = struct {
     /// Allocator used to allocate k, code, protos, upvalues arrays
     /// Needed for deallocation during GC sweep
     allocator: std.mem.Allocator,
+
+    // Debug/error info
+    /// Source name (e.g., "@file.lua" or "[string \"...\"]")
+    source: []const u8 = "",
+    /// Line number for each instruction
+    lineinfo: []const u32 = &.{},
 };
 
 /// Userdata Object - GC-managed arbitrary data block

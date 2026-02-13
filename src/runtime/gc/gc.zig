@@ -236,6 +236,8 @@ pub const GC = struct {
         maxstacksize: u8,
         nups: u8,
         upvalues: []const Upvaldesc,
+        source: []const u8,
+        lineinfo: []const u32,
     ) !*ProtoObject {
         const obj = try self.allocObject(ProtoObject, 0);
 
@@ -250,12 +252,16 @@ pub const GC = struct {
         obj.nups = nups;
         obj.upvalues = upvalues;
         obj.allocator = self.allocator;
+        obj.source = source;
+        obj.lineinfo = lineinfo;
 
         // Track memory for arrays (allocated by materialize)
         self.bytes_allocated += k.len * @sizeOf(TValue);
         self.bytes_allocated += code.len * @sizeOf(Instruction);
         self.bytes_allocated += protos.len * @sizeOf(*ProtoObject);
         self.bytes_allocated += upvalues.len * @sizeOf(Upvaldesc);
+        self.bytes_allocated += source.len;
+        self.bytes_allocated += lineinfo.len * @sizeOf(u32);
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -707,6 +713,14 @@ pub const GC = struct {
                     self.bytes_allocated -= proto_obj.upvalues.len * @sizeOf(Upvaldesc);
                     self.allocator.free(proto_obj.upvalues);
                 }
+                if (proto_obj.source.len > 0) {
+                    self.bytes_allocated -= proto_obj.source.len;
+                    self.allocator.free(proto_obj.source);
+                }
+                if (proto_obj.lineinfo.len > 0) {
+                    self.bytes_allocated -= proto_obj.lineinfo.len * @sizeOf(u32);
+                    self.allocator.free(proto_obj.lineinfo);
+                }
                 // Free the ProtoObject itself
                 const size = @sizeOf(ProtoObject);
                 self.bytes_allocated -= size;
@@ -979,6 +993,8 @@ test "markValue marks closure" {
         1,
         0,
         &[_]Upvaldesc{},
+        "",
+        &[_]u32{},
     );
 
     // Allocate a closure

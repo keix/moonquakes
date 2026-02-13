@@ -68,6 +68,7 @@ const ParseError = error{
     InvalidAttribute,
     ExpectedLabel,
     UndefinedLabel,
+    AssignToConst,
 };
 
 const StatementError = std.mem.Allocator.Error || ParseError;
@@ -75,6 +76,7 @@ const StatementError = std.mem.Allocator.Error || ParseError;
 /// Free a RawProto and all its owned memory
 pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
     allocator.free(proto.code);
+    allocator.free(proto.lineinfo);
     allocator.free(proto.booleans);
     allocator.free(proto.integers);
     allocator.free(proto.numbers);
@@ -90,6 +92,9 @@ pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
         freeRawProto(allocator, @constCast(nested));
     }
     allocator.free(proto.protos);
+    if (proto.source.len > 0) {
+        allocator.free(proto.source);
+    }
     allocator.destroy(proto);
 }
 
@@ -103,6 +108,7 @@ const FunctionEntry = struct {
 const VariableEntry = struct {
     name: []const u8,
     reg: u8,
+    is_const: bool = false,
 };
 
 /// Number of registers used by numeric for loop (idx, limit, step, user_var)
@@ -122,6 +128,9 @@ const PendingGoto = struct {
 
 pub const ProtoBuilder = struct {
     code: std.ArrayList(Instruction),
+    lineinfo: std.ArrayList(u32), // Line number for each instruction
+    current_line: u32 = 1, // Current source line being compiled
+    source: []const u8 = "", // Source name (e.g., "@file.lua")
     // Type-specific constant arrays (unmaterialized)
     booleans: std.ArrayList(bool),
     integers: std.ArrayList(i64),
@@ -150,6 +159,7 @@ pub const ProtoBuilder = struct {
     pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
         return .{
             .code = .{},
+            .lineinfo = .{},
             .booleans = .{},
             .integers = .{},
             .numbers = .{},
@@ -185,6 +195,7 @@ pub const ProtoBuilder = struct {
         }
 
         self.code.deinit(self.allocator);
+        self.lineinfo.deinit(self.allocator);
         self.booleans.deinit(self.allocator);
         self.integers.deinit(self.allocator);
         self.numbers.deinit(self.allocator);
@@ -259,57 +270,68 @@ pub const ProtoBuilder = struct {
     pub fn emit(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8) !void {
         const instr = Instruction.initABC(op, a, b, c);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitWithK(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8, k: bool) !void {
         const instr = Instruction.initABCk(op, a, b, c, k);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitExtraArg(self: *ProtoBuilder, ax: u25) !void {
         const instr = Instruction.initAx(.EXTRAARG, ax);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitAdd(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.ADD, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitBAND(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BAND, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitBOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BOR, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitBXOR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.BXOR, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitBNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.BNOT, dst, src, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitSHL(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SHL, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitSHR(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SHR, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit CALL instruction. B = nargs + 1, C = nresults + 1
     pub fn emitCall(self: *ProtoBuilder, func_reg: u8, nargs: u8, nresults: u8) !void {
         const instr = Instruction.initABC(.CALL, func_reg, nargs + 1, nresults + 1);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit TAILCALL instruction for tail call optimization
@@ -319,6 +341,7 @@ pub const ProtoBuilder = struct {
         const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
         const instr = Instruction.initABC(.TAILCALL, func_reg, b, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit CALL with variable args (B=0) or variable results (C=0)
@@ -328,6 +351,7 @@ pub const ProtoBuilder = struct {
         const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
         const instr = Instruction.initABC(.CALL, func_reg, b, c);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub const VARARG_SENTINEL: u8 = 255;
@@ -342,46 +366,55 @@ pub const ProtoBuilder = struct {
         const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
         const instr = Instruction.initABC(.PCALL, result_reg, b, c);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitDiv(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.DIV, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitIDIV(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.IDIV, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitEQ(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.EQ, negate, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitLT(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.LT, negate, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitLE(self: *ProtoBuilder, left: u8, right: u8, negate: u8) !void {
         const instr = Instruction.initABC(.LE, negate, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitFORPREP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORPREP, base_reg, jump_target);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitGETTABLE(self: *ProtoBuilder, dst: u8, table: u8, key: u8) !void {
         const instr = Instruction.initABC(.GETTABLE, dst, table, key);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// For large constant indices (>255), loads upvalue to temp and uses LOADK + GETTABLE
@@ -389,6 +422,7 @@ pub const ProtoBuilder = struct {
         if (key_const <= 255) {
             const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // Load upvalue to temp, load key to another temp, then GETTABLE
             const upval_temp = self.allocTemp();
@@ -397,6 +431,7 @@ pub const ProtoBuilder = struct {
             try self.emitLoadK(key_temp, key_const);
             const instr = Instruction.initABC(.GETTABLE, dst, upval_temp, key_temp);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
     }
 
@@ -406,6 +441,7 @@ pub const ProtoBuilder = struct {
         if (key_const <= 255) {
             const instr = Instruction.initABC(.SETTABUP, upval, @intCast(key_const), src);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // Load upvalue to temp, load key to another temp, then SETTABLE
             const upval_temp = self.allocTemp();
@@ -414,17 +450,20 @@ pub const ProtoBuilder = struct {
             try self.emitLoadK(key_temp, key_const);
             const instr = Instruction.initABC(.SETTABLE, upval_temp, key_temp, src);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
     }
 
     pub fn emitJMP(self: *ProtoBuilder, offset: i25) !void {
         const instr = Instruction.initsJ(.JMP, offset);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitLoadK(self: *ProtoBuilder, reg: u8, const_idx: u32) !void {
         const instr = Instruction.initABx(.LOADK, reg, @intCast(const_idx));
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         self.updateMaxStack(reg + 1);
     }
 
@@ -432,6 +471,7 @@ pub const ProtoBuilder = struct {
     pub fn emitClosure(self: *ProtoBuilder, reg: u8, proto_idx: u32) !void {
         const instr = Instruction.initABx(.CLOSURE, reg, @intCast(proto_idx));
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         self.updateMaxStack(reg + 1);
     }
 
@@ -440,41 +480,50 @@ pub const ProtoBuilder = struct {
         if (value and !skip) {
             const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else if (!value and !skip) {
             const instr = Instruction.initABC(.LOADFALSE, dst, 0, 0);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else if (!value and skip) {
             const instr = Instruction.initABC(.LFALSESKIP, dst, 0, 0);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // value=true, skip=true: Load true and skip next instruction
             const instr = Instruction.initABC(.LOADTRUE, dst, 0, 0);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
             const skip_instr = Instruction.initsJ(.JMP, 1); // Skip exactly 1 instruction
             try self.code.append(self.allocator, skip_instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
     }
 
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
         const instr = Instruction.initABC(.LOADNIL, dst, count - 1, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         self.updateMaxStack(dst + count);
     }
 
     pub fn emitMod(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MOD, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitMOVE(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit GETUPVAL instruction: R[A] := UpValue[B]
     pub fn emitGETUPVAL(self: *ProtoBuilder, dst: u8, upval_idx: u8) !void {
         const instr = Instruction.initABC(.GETUPVAL, dst, upval_idx, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         self.updateMaxStack(dst + 1);
     }
 
@@ -482,36 +531,42 @@ pub const ProtoBuilder = struct {
     pub fn emitSETUPVAL(self: *ProtoBuilder, src: u8, upval_idx: u8) !void {
         const instr = Instruction.initABC(.SETUPVAL, src, upval_idx, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit NOT instruction: R[A] := not R[B]
     pub fn emitNOT(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.NOT, dst, src, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit UNM instruction: R[A] := -R[B]
     pub fn emitUNM(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.UNM, dst, src, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit LEN instruction: R[A] := #R[B]
     pub fn emitLEN(self: *ProtoBuilder, dst: u8, src: u8) !void {
         const instr = Instruction.initABC(.LEN, dst, src, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit CONCAT instruction: R[A] := R[B] .. ... .. R[C]
     pub fn emitCONCAT(self: *ProtoBuilder, dst: u8, start: u8, end: u8) !void {
         const instr = Instruction.initABC(.CONCAT, dst, start, end);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit NEWTABLE instruction: R[A] := {}
     pub fn emitNEWTABLE(self: *ProtoBuilder, dst: u8) !void {
         const instr = Instruction.initABC(.NEWTABLE, dst, 0, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         self.updateMaxStack(dst + 1);
     }
 
@@ -521,12 +576,14 @@ pub const ProtoBuilder = struct {
         if (key_const <= 255) {
             const instr = Instruction.initABC(.SETFIELD, table, @intCast(key_const), src);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // For large constant index, load key into temp register and use SETTABLE
             const temp = self.allocTemp();
             try self.emitLoadK(temp, key_const);
             const instr = Instruction.initABC(.SETTABLE, table, temp, src);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
         // Update maxstacksize to include all referenced registers
         self.updateMaxStack(table + 1);
@@ -537,6 +594,7 @@ pub const ProtoBuilder = struct {
     pub fn emitSETTABLE(self: *ProtoBuilder, table: u8, key: u8, src: u8) !void {
         const instr = Instruction.initABC(.SETTABLE, table, key, src);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         // Update maxstacksize to include all referenced registers
         self.updateMaxStack(table + 1);
         self.updateMaxStack(key + 1);
@@ -549,14 +607,17 @@ pub const ProtoBuilder = struct {
         if (index <= 255) {
             const instr = Instruction.initABC(.SETI, table, @intCast(index), src);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // For large index, load it into a temp register and use SETTABLE
             const temp = self.allocTemp();
             const index_i17: i17 = @intCast(index);
             const loadi = Instruction.initAsBx(.LOADI, temp, index_i17);
             try self.code.append(self.allocator, loadi);
+            try self.lineinfo.append(self.allocator, self.current_line);
             const settable = Instruction.initABC(.SETTABLE, table, temp, src);
             try self.code.append(self.allocator, settable);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
         // Update maxstacksize to include all referenced registers
         self.updateMaxStack(table + 1);
@@ -569,12 +630,14 @@ pub const ProtoBuilder = struct {
         if (key_const <= 255) {
             const instr = Instruction.initABC(.GETFIELD, dst, table, @intCast(key_const));
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // For large constant index, load key into temp register and use GETTABLE
             const temp = self.allocTemp();
             try self.emitLoadK(temp, key_const);
             const instr = Instruction.initABC(.GETTABLE, dst, table, temp);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
         self.updateMaxStack(dst + 1);
     }
@@ -586,6 +649,7 @@ pub const ProtoBuilder = struct {
         if (method_const <= 255) {
             const instr = Instruction.initABC(.SELF, dst, obj, @intCast(method_const));
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         } else {
             // SELF puts obj in R[A+1] and method in R[A]
             // Emulate with: MOVE R[A+1], R[B]; LOADK temp, K[C]; GETTABLE R[A], R[B], temp
@@ -594,6 +658,7 @@ pub const ProtoBuilder = struct {
             try self.emitLoadK(temp, method_const);
             const instr = Instruction.initABC(.GETTABLE, dst, obj, temp);
             try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
         }
         self.updateMaxStack(dst + 2); // SELF uses two registers: dst and dst+1
     }
@@ -601,17 +666,20 @@ pub const ProtoBuilder = struct {
     pub fn emitMul(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.MUL, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitPOW(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.POW, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitPatchableFORLOOP(self: *ProtoBuilder, base_reg: u8) !u32 {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, 0); // placeholder
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         return @intCast(addr);
     }
 
@@ -619,6 +687,7 @@ pub const ProtoBuilder = struct {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.FORPREP, base_reg, 0); // placeholder
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         return @intCast(addr);
     }
 
@@ -627,6 +696,7 @@ pub const ProtoBuilder = struct {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.TFORPREP, base_reg, 0); // placeholder
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         return @intCast(addr);
     }
 
@@ -634,6 +704,7 @@ pub const ProtoBuilder = struct {
     pub fn emitTFORCALL(self: *ProtoBuilder, base_reg: u8, nvars: u8) !void {
         const instr = Instruction.initABC(.TFORCALL, base_reg, 0, nvars);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Generic for loop: TFORLOOP A sBx - check and loop
@@ -641,6 +712,7 @@ pub const ProtoBuilder = struct {
         const addr = self.code.items.len;
         const instr = Instruction.initAsBx(.TFORLOOP, base_reg, 0); // placeholder
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         return @intCast(addr);
     }
 
@@ -648,6 +720,7 @@ pub const ProtoBuilder = struct {
         const addr = self.code.items.len;
         const instr = Instruction.initsJ(.JMP, 0); // placeholder
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
         return @intCast(addr);
     }
 
@@ -655,23 +728,27 @@ pub const ProtoBuilder = struct {
         // B = count + 1 (B=1 means 0 values, B=2 means 1 value, etc.)
         const instr = Instruction.initABC(.RETURN, reg, count + 1, 0);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitSub(self: *ProtoBuilder, dst: u8, left: u8, right: u8) !void {
         const instr = Instruction.initABC(.SUB, dst, left, right);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     /// Emit TESTSET instruction: if (R[B].toBoolean() == k) R[A] := R[B] else pc++
     pub fn emitTESTSET(self: *ProtoBuilder, dst: u8, src: u8, k: bool) !void {
         const instr = Instruction.initABCk(.TESTSET, dst, src, 0, k);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn emitTEST(self: *ProtoBuilder, reg: u8, condition: bool) !void {
         const k: u8 = if (condition) 1 else 0;
         const instr = Instruction.initABC(.TEST, reg, 0, k);
         try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
     }
 
     pub fn patchFORInstr(self: *ProtoBuilder, addr: u32, target: u32) void {
@@ -894,6 +971,10 @@ pub const ProtoBuilder = struct {
         try self.variables.append(self.allocator, .{ .name = name, .reg = reg });
     }
 
+    pub fn addConstVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
+        try self.variables.append(self.allocator, .{ .name = name, .reg = reg, .is_const = true });
+    }
+
     pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
         // Search in reverse order so inner scope shadows outer
         var i = self.variables.items.len;
@@ -905,6 +986,23 @@ pub const ProtoBuilder = struct {
             }
         }
         return null;
+    }
+
+    pub fn isVariableConst(self: *ProtoBuilder, name: []const u8) bool {
+        // Search in reverse order so inner scope shadows outer
+        var i = self.variables.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = self.variables.items[i];
+            if (std.mem.eql(u8, entry.name, name)) {
+                return entry.is_const;
+            }
+        }
+        // Check parent scopes for upvalues
+        if (self.parent) |parent| {
+            return parent.isVariableConst(name);
+        }
+        return false;
     }
 
     /// Result of variable resolution - either local register or upvalue index
@@ -955,6 +1053,7 @@ pub const ProtoBuilder = struct {
     pub fn toRawProto(self: *ProtoBuilder, allocator: std.mem.Allocator, num_params: u8) !RawProto {
         // Always allocate via allocator (even for len=0) to ensure ownership
         const code_slice = try allocator.dupe(Instruction, self.code.items);
+        const lineinfo_slice = try allocator.dupe(u32, self.lineinfo.items);
         const booleans_slice = try allocator.dupe(bool, self.booleans.items);
         const integers_slice = try allocator.dupe(i64, self.integers.items);
         const numbers_slice = try allocator.dupe(f64, self.numbers.items);
@@ -970,6 +1069,9 @@ pub const ProtoBuilder = struct {
 
         // Duplicate upvalues
         const upvalues_slice = try allocator.dupe(Upvaldesc, self.upvalues.items);
+
+        // Duplicate source name
+        const source_slice = try allocator.dupe(u8, self.source);
 
         // Transfer ownership: clear functions list so deinit() won't double-free
         // The output RawProto now owns all nested protos via protos_slice
@@ -990,6 +1092,8 @@ pub const ProtoBuilder = struct {
             .maxstacksize = self.maxstacksize,
             .nups = @intCast(self.upvalues.items.len),
             .upvalues = upvalues_slice,
+            .source = source_slice,
+            .lineinfo = lineinfo_slice,
         };
     }
 };
@@ -1000,6 +1104,9 @@ pub const Parser = struct {
     proto: *ProtoBuilder,
     break_jumps: std.ArrayList(u32),
     loop_depth: usize,
+    /// Error message buffer for detailed parse error reporting
+    error_msg: [256]u8 = undefined,
+    error_len: usize = 0,
 
     pub fn init(lx: *Lexer, proto: *ProtoBuilder) Parser {
         var p = Parser{
@@ -1013,12 +1120,29 @@ pub const Parser = struct {
         return p;
     }
 
+    /// Get the error message as a slice (empty if no error)
+    pub fn getErrorMsg(self: *const Parser) []const u8 {
+        return self.error_msg[0..self.error_len];
+    }
+
+    /// Get the current line number (from current token)
+    pub fn getCurrentLine(self: *const Parser) u32 {
+        return @intCast(self.current.line);
+    }
+
+    /// Set error message with format string
+    fn setError(self: *Parser, comptime fmt: []const u8, args: anytype) void {
+        self.error_len = (std.fmt.bufPrint(&self.error_msg, fmt, args) catch &self.error_msg).len;
+    }
+
     pub fn deinit(self: *Parser) void {
         self.break_jumps.deinit(self.proto.allocator);
     }
 
     fn advance(self: *Parser) void {
         self.current = self.lexer.nextToken();
+        // Update current_line for code emission
+        self.proto.current_line = @intCast(self.current.line);
     }
 
     fn peek(self: *Parser) Token {
@@ -1413,6 +1537,12 @@ pub const Parser = struct {
             }
             self.advance(); // consume '='
 
+            // Check for const variable assignment
+            if (self.proto.isVariableConst(name)) {
+                self.setError("attempt to assign to const variable '{s}'", .{name});
+                return error.AssignToConst;
+            }
+
             const value_reg = try self.parseExpr();
 
             if (try self.proto.resolveVariable(name)) |loc| {
@@ -1457,6 +1587,17 @@ pub const Parser = struct {
             }
             targets[target_count] = try self.parseAssignTarget();
             target_count += 1;
+        }
+
+        // Check for const variable assignments
+        for (targets[0..target_count]) |target| {
+            if (target == .variable) {
+                const var_name = target.variable;
+                if (self.proto.isVariableConst(var_name)) {
+                    self.setError("attempt to assign to const variable '{s}'", .{var_name});
+                    return error.AssignToConst;
+                }
+            }
         }
 
         // Expect '='
@@ -1683,6 +1824,17 @@ pub const Parser = struct {
             }
             targets[target_count] = try self.parseAssignTarget();
             target_count += 1;
+        }
+
+        // Check for const variable assignments
+        for (targets[0..target_count]) |target| {
+            if (target == .variable) {
+                const var_name = target.variable;
+                if (self.proto.isVariableConst(var_name)) {
+                    self.setError("attempt to assign to const variable '{s}'", .{var_name});
+                    return error.AssignToConst;
+                }
+            }
         }
 
         // Expect '='
@@ -3237,9 +3389,10 @@ pub const Parser = struct {
             return self.parseLocalFunction();
         }
 
-        // Parse variable names (comma-separated) with optional <close> attribute
+        // Parse variable names (comma-separated) with optional <close>/<const> attribute
         var var_names: [256][]const u8 = undefined;
         var var_is_close: [256]bool = undefined;
+        var var_is_const: [256]bool = undefined;
         var var_count: u8 = 0;
 
         // First identifier
@@ -3248,32 +3401,37 @@ pub const Parser = struct {
         }
         var_names[var_count] = self.current.lexeme;
         var_is_close[var_count] = false;
+        var_is_const[var_count] = false;
         self.advance();
 
-        // Check for <close> attribute
+        // Check for <close>/<const> attribute
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "<")) {
             self.advance(); // consume '<'
             if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "close")) {
                 var_is_close[var_count] = true;
+                var_is_const[var_count] = true; // close variables are also const
                 self.advance(); // consume 'close'
                 if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
                     return error.ExpectedCloseBracket;
                 }
                 self.advance(); // consume '>'
             } else if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "const")) {
-                // <const> attribute - for now, just parse and ignore
+                var_is_const[var_count] = true;
                 self.advance(); // consume 'const'
                 if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
                     return error.ExpectedCloseBracket;
                 }
                 self.advance(); // consume '>'
             } else {
+                // Unknown attribute
+                const attr_name = if (self.current.kind == .Identifier) self.current.lexeme else "?";
+                self.setError("unknown attribute '{s}'", .{attr_name});
                 return error.InvalidAttribute;
             }
         }
         var_count += 1;
 
-        // Additional identifiers after comma (note: <close> only valid for single variable)
+        // Additional identifiers after comma (note: <close>/<const> only valid for single variable)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
@@ -3281,6 +3439,7 @@ pub const Parser = struct {
             }
             var_names[var_count] = self.current.lexeme;
             var_is_close[var_count] = false;
+            var_is_const[var_count] = false;
             var_count += 1;
             self.advance();
         }
@@ -3380,7 +3539,11 @@ pub const Parser = struct {
         // Add all variables to scope (visible after initializers)
         i = 0;
         while (i < var_count) : (i += 1) {
-            try self.proto.addVariable(var_names[i], first_reg + i);
+            if (var_is_const[i]) {
+                try self.proto.addConstVariable(var_names[i], first_reg + i);
+            } else {
+                try self.proto.addVariable(var_names[i], first_reg + i);
+            }
         }
 
         // Emit TBC opcode for close variables
@@ -4246,8 +4409,22 @@ pub const Parser = struct {
         var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
-        // Create RawProto container
+        // Create RawProto container with safe default values
+        // This ensures cleanup won't crash if parsing fails before proto is filled
         const proto_ptr = try self.proto.allocator.create(RawProto);
+        proto_ptr.* = .{
+            .code = &.{},
+            .booleans = &.{},
+            .integers = &.{},
+            .numbers = &.{},
+            .strings = &.{},
+            .native_ids = &.{},
+            .const_refs = &.{},
+            .protos = &.{},
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 0,
+        };
 
         // Add function to parent's function list for recursive calls
         try self.proto.addFunction(func_name, proto_ptr);
@@ -4345,8 +4522,23 @@ pub const Parser = struct {
         var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
-        // Create RawProto container
+        // Create RawProto container with safe default values
+        // This ensures cleanup won't crash if parsing fails before proto is filled
         const proto_ptr = try self.proto.allocator.create(RawProto);
+        errdefer self.proto.allocator.destroy(proto_ptr);
+        proto_ptr.* = .{
+            .code = &.{},
+            .booleans = &.{},
+            .integers = &.{},
+            .numbers = &.{},
+            .strings = &.{},
+            .native_ids = &.{},
+            .const_refs = &.{},
+            .protos = &.{},
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 0,
+        };
 
         // Parse parameters
         var param_count: u8 = 0;

@@ -25,6 +25,9 @@ pub const Proto = struct {
     maxstacksize: u8,
     nups: u8 = 0, // Number of upvalues
     upvalues: []const Upvaldesc = &.{}, // Upvalue descriptors
+    // Debug/error info
+    source: []const u8 = "", // Source name (e.g., "@file.lua" or "[string \"...\"]")
+    lineinfo: []const u32 = &.{}, // Line number for each instruction
 };
 
 /// Constant reference - type tag + index into type-specific array
@@ -65,4 +68,7 @@ pub const RawProto = struct {
     maxstacksize: u8,
     nups: u8 = 0,
     upvalues: []const Upvaldesc = &.{},
+    // Debug/error info
+    source: []const u8 = "",
+    lineinfo: []const u32 = &.{},
 };

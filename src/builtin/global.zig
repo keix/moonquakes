@@ -689,10 +689,14 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
 
     // Compile the source
-    const raw_proto = pipeline.compile(vm.allocator, source) catch {
+    var error_msg: [256]u8 = undefined;
+    const raw_proto = pipeline.compileWithError(vm.allocator, source, &error_msg) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("syntax error");
+            // Get error message (null-terminated in buffer)
+            const msg_len = std.mem.indexOfScalar(u8, &error_msg, 0) orelse 0;
+            const msg = if (msg_len > 0) error_msg[0..msg_len] else "syntax error";
+            const err_str = try vm.gc.allocString(msg);
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -765,10 +769,14 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     defer vm.allocator.free(source);
 
     // Compile the source
-    const raw_proto = pipeline.compile(vm.allocator, source) catch {
+    var error_msg: [256]u8 = undefined;
+    const raw_proto = pipeline.compileWithError(vm.allocator, source, &error_msg) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("syntax error");
+            // Get error message (null-terminated in buffer)
+            const msg_len = std.mem.indexOfScalar(u8, &error_msg, 0) orelse 0;
+            const msg = if (msg_len > 0) error_msg[0..msg_len] else "syntax error";
+            const err_str = try vm.gc.allocString(msg);
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
