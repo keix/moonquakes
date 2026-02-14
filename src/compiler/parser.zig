@@ -2057,10 +2057,12 @@ pub const Parser = struct {
             }
 
             // Handle field/index access and method calls: t.field, t[key], t:method(), or chained
+            // Note: ':' followed by ':' is a label (::label::), not a method call
             while (self.current.kind == .Symbol and
                 (std.mem.eql(u8, self.current.lexeme, ".") or
                     std.mem.eql(u8, self.current.lexeme, "[") or
-                    std.mem.eql(u8, self.current.lexeme, ":")))
+                    (std.mem.eql(u8, self.current.lexeme, ":") and
+                        !(self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")))))
             {
                 if (std.mem.eql(u8, self.current.lexeme, ".")) {
                     self.advance(); // consume '.'
@@ -2944,6 +2946,10 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
+        // Close upvalues for the loop variable before FORLOOP
+        // This ensures closures capture the value, not the register
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
+
         // FORLOOP: increment and check, jump back if continuing
         const forloop_addr = try self.proto.emitPatchableFORLOOP(base_reg);
 
@@ -2952,6 +2958,9 @@ pub const Parser = struct {
 
         // Patch FORLOOP to jump back to loop start
         self.proto.patchFORInstr(forloop_addr, loop_start);
+
+        // Close upvalues when loop exits (after FORLOOP falls through)
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -3069,6 +3078,9 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
+        // Close upvalues for loop variables before TFORCALL (end of iteration)
+        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
+
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
         try self.proto.emitTFORCALL(base_reg, var_count);
@@ -3081,6 +3093,9 @@ pub const Parser = struct {
 
         // Patch TFORLOOP to jump back to loop start
         self.proto.patchFORInstr(tforloop_addr, loop_start);
+
+        // Close upvalues when loop exits (after TFORLOOP falls through)
+        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4284,11 +4299,11 @@ pub const Parser = struct {
                 try func_builder.addVariable(next_param, param_count);
                 param_count += 1;
             }
-
-            // Parameters occupy registers 0..param_count-1
-            func_builder.next_reg = param_count;
-            func_builder.locals_top = param_count;
         }
+
+        // Parameters (including implicit self) occupy registers 0..param_count-1
+        func_builder.next_reg = param_count;
+        func_builder.locals_top = param_count;
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             return error.ExpectedRightParen;

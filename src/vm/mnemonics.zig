@@ -825,13 +825,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .UNM => {
             const a = inst.getA();
             const b = inst.getB();
-            const vb = &vm.stack[vm.base + b];
+            const vb = vm.stack[vm.base + b];
             if (vb.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = -vb.integer };
             } else if (vb.toNumber()) |n| {
                 vm.stack[vm.base + a] = .{ .number = -n };
             } else {
-                return error.ArithmeticError;
+                // Try __unm metamethod
+                const mm = try metamethod.getMetamethod(vb, .unm, &vm.gc) orelse {
+                    return error.ArithmeticError;
+                };
+                return try callUnaryMetamethod(vm, mm, vb, a);
             }
             return .Continue;
         },
@@ -2504,6 +2508,46 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
 
         try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
         // Result is at temp, move to result_reg
+        vm.stack[vm.base + result_reg] = vm.stack[temp];
+        vm.top = temp;
+        return .Continue;
+    }
+
+    return error.NotAFunction;
+}
+
+/// Call a unary metamethod and store result
+fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !ExecuteResult {
+    const temp = vm.top;
+
+    // If metamethod is a closure, push call frame
+    if (mm.asClosure()) |closure| {
+        const proto = closure.proto;
+        const new_base = temp;
+
+        // Set up parameter at new_base
+        vm.stack[new_base] = arg;
+
+        // Fill remaining parameters with nil if needed
+        var i: u32 = 1;
+        while (i < proto.numparams) : (i += 1) {
+            vm.stack[new_base + i] = .nil;
+        }
+
+        vm.top = new_base + proto.maxstacksize;
+
+        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        return .LoopContinue;
+    }
+
+    // For native closures, call directly
+    if (mm.isObject() and mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.object);
+        vm.stack[temp] = mm;
+        vm.stack[temp + 1] = arg;
+        vm.top = temp + 2;
+
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 1, 1);
         vm.stack[vm.base + result_reg] = vm.stack[temp];
         vm.top = temp;
         return .Continue;
