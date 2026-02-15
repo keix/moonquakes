@@ -3,20 +3,124 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const metamethod = @import("../vm/metamethod.zig");
+const pipeline = @import("../compiler/pipeline.zig");
+const call = @import("../vm/call.zig");
 
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.10
-/// debug.debug() - Enters interactive mode, reads and executes each string
-/// Note: Not implemented - would require stdin interaction which is complex
-/// in the current architecture. Returns immediately.
+/// debug.debug() - Enters interactive mode with the user
+/// Reads and executes each line entered by the user.
+/// The session ends when the user enters a line containing only "cont".
+/// Note: Commands are not lexically nested within any function,
+/// so they have no direct access to local variables.
 pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
     _ = func_reg;
     _ = nargs;
     _ = nresults;
-    // Interactive debugging not implemented
-    // Would need to: read from stdin, compile, execute, handle errors
+
+    const stdin_file = std.fs.File.stdin();
+    var stdout_writer = std.fs.File.stdout().writer(&.{});
+    const stdout = &stdout_writer.interface;
+    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    const stderr = &stderr_writer.interface;
+
+    var buf: [4096]u8 = undefined;
+
+    while (true) {
+        // Print prompt
+        stdout.writeAll("lua_debug> ") catch return;
+
+        // Read line from stdin (character by character until newline)
+        var pos: usize = 0;
+        while (pos < buf.len - 1) {
+            var char_buf: [1]u8 = undefined;
+            const bytes_read = stdin_file.read(&char_buf) catch break;
+            if (bytes_read == 0) {
+                // EOF
+                if (pos == 0) return;
+                break;
+            }
+            if (char_buf[0] == '\n') break;
+            buf[pos] = char_buf[0];
+            pos += 1;
+        }
+        const line = buf[0..pos];
+
+        // Trim whitespace
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+
+        // Check for "cont" to exit
+        if (std.mem.eql(u8, trimmed, "cont")) break;
+
+        // Skip empty lines
+        if (trimmed.len == 0) continue;
+
+        // Compile the input
+        const compile_result = pipeline.compile(vm.gc.allocator, trimmed, .{});
+        switch (compile_result) {
+            .err => |e| {
+                defer e.deinit(vm.gc.allocator);
+                stderr.print("syntax error: {s}\n", .{e.message}) catch {};
+                continue;
+            },
+            .ok => {},
+        }
+        const raw_proto = compile_result.ok;
+        defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+
+        // Materialize and execute
+        vm.gc.inhibitGC();
+        const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
+            vm.gc.allowGC();
+            stderr.writeAll("error: failed to materialize chunk\n") catch {};
+            continue;
+        };
+
+        const closure = vm.gc.allocClosure(proto) catch {
+            vm.gc.allowGC();
+            stderr.writeAll("error: failed to create closure\n") catch {};
+            continue;
+        };
+        vm.gc.allowGC();
+
+        // Execute the chunk using call.callValue (same pattern as dofile)
+        const func_val = TValue.fromClosure(closure);
+        const result = call.callValue(vm, func_val, &[_]TValue{}) catch {
+            stderr.writeAll("error: runtime error\n") catch {};
+            continue;
+        };
+
+        // Print non-nil result
+        if (!result.isNil()) {
+            printValue(stdout, result) catch {};
+            stdout.writeAll("\n") catch {};
+        }
+    }
+}
+
+/// Helper to print a TValue
+fn printValue(writer: anytype, val: TValue) !void {
+    switch (val) {
+        .nil => try writer.writeAll("nil"),
+        .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
+        .integer => |i| try writer.print("{d}", .{i}),
+        .number => |n| try writer.print("{d}", .{n}),
+        .object => |obj| {
+            switch (obj.type) {
+                .string => {
+                    const str: *object.StringObject = @fieldParentPtr("header", obj);
+                    try writer.writeAll(str.asSlice());
+                },
+                .table => try writer.print("table: 0x{x}", .{@intFromPtr(obj)}),
+                .closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .native_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
+                .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
+                .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
+            }
+        },
+    }
 }
 
 /// debug.gethook([thread]) - Returns current hook settings
