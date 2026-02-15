@@ -29,16 +29,17 @@ nix develop
 ```
 
 ## Build
-Moonquakes is built with Zig.
-
-For development and debugging:
-```
-zig build
-```
-
+Moonquakes is built with Zig.  
 For normal use and evaluation, build with optimizations enabled:
 ```sh
 zig build -Doptimize=ReleaseSafe
+```
+
+## Running Moonquakes
+
+After building:
+```
+./zig-out/bin/moonquakes
 ```
 
 ## Architecture

@@ -151,6 +151,7 @@ fn runUntilReturn(
     }
 
     // Execute until we return to saved depth
+    var direct_result: ?TValue = null;
     while (vm.callstack_size > saved_depth) {
         const ci = &vm.callstack[vm.callstack_size - 1];
         const inst = ci.fetch() catch {
@@ -171,12 +172,21 @@ fn runUntilReturn(
         switch (try mnemonics.do(vm, inst)) {
             .Continue => {},
             .LoopContinue => {},
-            .ReturnVM => break,
+            .ReturnVM => |ret| {
+                // Top-level return: extract value from ReturnVM and pop frame
+                direct_result = switch (ret) {
+                    .none => TValue.nil,
+                    .single => |v| v,
+                    .multiple => |vs| if (vs.len > 0) vs[0] else TValue.nil,
+                };
+                mnemonics.popCallInfo(vm);
+                break;
+            },
         }
     }
 
-    // Get result before restoring frame state
-    const result = vm.stack[result_slot];
+    // Get result: either from direct return or from result_slot
+    const result = direct_result orelse vm.stack[result_slot];
 
     // GC SAFETY: Restore caller's frame state
     vm.base = saved_base;

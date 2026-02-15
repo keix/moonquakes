@@ -2,10 +2,12 @@
 //!
 //! CLI entry point for Moonquakes interpreter.
 //! Uses launcher directly for script execution with arg support.
+//! Starts REPL when no arguments are provided.
 
 const std = @import("std");
 const launcher = @import("../launcher.zig");
 const ver = @import("../version.zig");
+const REPL = @import("repl.zig").REPL;
 
 pub const version = ver.version;
 
@@ -18,13 +20,20 @@ pub const CLI = struct {
 
     pub fn run(self: *CLI, args: []const [:0]const u8) !void {
         if (args.len < 2) {
-            try self.printUsage();
+            // No arguments - start REPL
+            var repl = try REPL.init(self.allocator);
+            defer repl.deinit();
+            try repl.run();
             return;
         }
 
         const arg = args[1];
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             try self.printVersion();
+            return;
+        }
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try self.printUsage();
             return;
         }
 
@@ -64,13 +73,17 @@ pub const CLI = struct {
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         const stdout = &stdout_writer.interface;
         try stdout.writeAll(
-            \\Usage: moonquakes [options] <lua_file> [script_args...]
+            \\Usage: moonquakes [options] [script [args...]]
             \\
             \\Options:
             \\  -v, --version  Print version
+            \\  -h, --help     Print this help
+            \\
+            \\If no script is given, start interactive mode (REPL).
             \\
             \\Example:
-            \\  moonquakes script.lua arg1 arg2
+            \\  moonquakes              # Start REPL
+            \\  moonquakes script.lua   # Run script
             \\
         );
     }

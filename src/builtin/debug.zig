@@ -9,7 +9,6 @@ const call = @import("../vm/call.zig");
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.10
-
 /// debug.debug() - Enters interactive mode with the user
 /// Reads and executes each line entered by the user.
 /// The session ends when the user enters a line containing only "cont".
