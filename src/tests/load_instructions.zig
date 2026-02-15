@@ -30,11 +30,12 @@ test "LOADI: load signed immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -45,11 +46,12 @@ test "LOADI: load negative signed immediate" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -100 });
 }
@@ -60,11 +62,12 @@ test "LOADF: load signed immediate as float" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 42.0 });
 }
@@ -75,11 +78,12 @@ test "LOADFALSE: load false" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -90,11 +94,12 @@ test "LOADTRUE: load true" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -106,11 +111,12 @@ test "LFALSESKIP: load false and skip" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be false)
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -126,11 +132,12 @@ test "LOADNIL: single register" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue.nil);
 }
@@ -150,11 +157,12 @@ test "LOADNIL: multiple registers" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     const expected = [_]TValue{ .nil, .nil, .nil };
     try expectMultipleResults(result, &expected);
@@ -173,11 +181,12 @@ test "LOADNIL: range in middle of stack" {
         Instruction.initABC(.RETURN, 0, 6, 0), // return R0, R1, R2, R3, R4
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },

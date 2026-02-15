@@ -3,6 +3,7 @@ const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const GC = @import("../runtime/gc/gc.zig").GC;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const object = @import("../runtime/gc/object.zig");
@@ -14,6 +15,49 @@ const Instruction = opcodes.Instruction;
 // Re-export types that tests may need
 pub const GCObject = object.GCObject;
 pub const UpvaldescType = Upvaldesc;
+
+/// Test context that manages GC and VM lifecycle together
+/// This simplifies test setup by handling the GC -> VM dependency
+///
+/// IMPORTANT: Must be used as a pointer (var ctx = ...; ctx.fixup())
+/// or use the create() helper which handles this automatically.
+pub const TestContext = struct {
+    gc: GC,
+    vm: VM,
+
+    /// Initialize a TestContext. After assignment, caller MUST call fixup()
+    /// to correct the vm.gc pointer after the struct moves to its final location.
+    pub fn init() !TestContext {
+        var gc = GC.init(testing.allocator);
+        try gc.initMetamethodKeys();
+
+        const vm = try VM.init(&gc);
+
+        return .{
+            .gc = gc,
+            .vm = vm,
+        };
+    }
+
+    /// Fix the vm.gc pointer after the struct has moved to its final location.
+    /// This MUST be called immediately after assignment (var ctx = try init(); ctx.fixup();)
+    pub fn fixup(self: *TestContext) void {
+        self.vm.gc = &self.gc;
+    }
+
+    pub fn deinit(self: *TestContext) void {
+        self.vm.deinit();
+        self.gc.deinit();
+    }
+};
+
+/// Create a test context with properly initialized pointers.
+/// This is the recommended way to create a TestContext in tests.
+pub fn createTestContext() !TestContext {
+    var ctx = try TestContext.init();
+    ctx.fixup();
+    return ctx;
+}
 
 /// Create a test ProtoObject via GC
 /// This is the test-friendly version of gc.allocProto
@@ -132,11 +176,6 @@ pub fn createTestProtoFull(
         "", // source
         &[_]u32{}, // lineinfo
     );
-}
-
-/// Helper function to create a VM with proper cleanup
-pub fn createTestVM() !VM {
-    return VM.init(testing.allocator);
 }
 
 /// Verify register state at specific position
@@ -336,17 +375,18 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try createTestProto(&vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));
+    const proto = try createTestProto(&ctx.vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));
 
     // Set initial registers
     for (initial_regs, 0..) |val, i| {
-        vm.stack[i] = val;
+        ctx.vm.stack[i] = val;
     }
 
-    var inst_test = InstructionTest.init(&vm, proto, @as(u8, @intCast(initial_regs.len)));
+    var inst_test = InstructionTest.init(&ctx.vm, proto, @as(u8, @intCast(initial_regs.len)));
     const trace = try inst_test.expectSuccess(@as(u8, @intCast(expected_regs.len)));
 
     // Verify expected registers
@@ -355,7 +395,7 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
     }
 
     // Verify VM state
-    try expectVMState(&vm, expected_base, expected_top);
+    try expectVMState(&ctx.vm, expected_base, expected_top);
 }
 
 /// Stack growth verification

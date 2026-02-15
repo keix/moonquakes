@@ -12,13 +12,14 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "CLOSE opcode - no-op behavior" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Initialize some registers
-    vm.stack[0] = .{ .integer = 42 };
-    vm.stack[1] = .{ .number = 3.14 };
-    vm.stack[2] = .{ .boolean = true };
+    ctx.vm.stack[0] = .{ .integer = 42 };
+    ctx.vm.stack[1] = .{ .number = 3.14 };
+    ctx.vm.stack[2] = .{ .boolean = true };
 
     const inst = Instruction.initABC(.CLOSE, 1, 0, 0); // close from R[1] upward
 
@@ -27,15 +28,15 @@ test "CLOSE opcode - no-op behavior" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 3);
 
-    const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const initial_trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
-    final_trace.updateFinal(&vm, 3);
+    final_trace.updateFinal(&ctx.vm, 3);
 
     // CLOSE should be a no-op for now - all registers should be unchanged
     try final_trace.expectRegisterUnchanged(0);
@@ -44,12 +45,13 @@ test "CLOSE opcode - no-op behavior" {
 }
 
 test "TBC opcode - nil value (no-op)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Initialize registers - nil is a valid TBC target that does nothing
-    vm.stack[0] = .{ .integer = 42 };
-    vm.stack[1] = .nil; // nil doesn't require __close
+    ctx.vm.stack[0] = .{ .integer = 42 };
+    ctx.vm.stack[1] = .nil; // nil doesn't require __close
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
 
@@ -58,20 +60,21 @@ test "TBC opcode - nil value (no-op)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 42 }));
 }
 
 test "TBC opcode - false value (no-op)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // false is also a valid TBC target that does nothing
-    vm.stack[0] = .{ .integer = 100 };
-    vm.stack[1] = .{ .boolean = false };
+    ctx.vm.stack[0] = .{ .integer = 100 };
+    ctx.vm.stack[1] = .{ .boolean = false };
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
 
@@ -80,20 +83,21 @@ test "TBC opcode - false value (no-op)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 100 }));
 }
 
 test "SETUPVAL opcode - no-op behavior" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Initialize some registers
-    vm.stack[0] = .{ .integer = 123 };
-    vm.stack[1] = .{ .boolean = false };
+    ctx.vm.stack[0] = .{ .integer = 123 };
+    ctx.vm.stack[1] = .{ .boolean = false };
 
     const inst = Instruction.initABC(.SETUPVAL, 0, 1, 0); // UpValue[1] := R[0]
 
@@ -102,15 +106,15 @@ test "SETUPVAL opcode - no-op behavior" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 3);
 
-    const initial_trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    const initial_trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     var final_trace = initial_trace;
-    final_trace.updateFinal(&vm, 3);
+    final_trace.updateFinal(&ctx.vm, 3);
 
     // SETUPVAL should be a no-op for now - all registers should be unchanged
     try final_trace.expectRegisterUnchanged(0);
@@ -119,11 +123,12 @@ test "SETUPVAL opcode - no-op behavior" {
 }
 
 test "SETTABUP opcode - global variable assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Allocate string through GC
-    const myvar_str = try vm.gc.allocString("myvar");
+    const myvar_str = try ctx.vm.gc.allocString("myvar");
 
     // Create constant for variable name
     const constants = [_]TValue{
@@ -131,7 +136,7 @@ test "SETTABUP opcode - global variable assignment" {
     };
 
     // Initialize register with value to set
-    vm.stack[1] = .{ .integer = 42 };
+    ctx.vm.stack[1] = .{ .integer = 42 };
 
     const inst = Instruction.initABC(.SETTABUP, 0, 0, 1); // _ENV[K[0]] := R[1]
 
@@ -140,23 +145,24 @@ test "SETTABUP opcode - global variable assignment" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify the global variable was set
-    const global_val = vm.globals.get(myvar_str).?;
+    const global_val = ctx.vm.globals.get(myvar_str).?;
     try testing.expect(global_val.eql(.{ .integer = 42 }));
 }
 
 test "SETTABUP opcode - multiple global assignments" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Allocate strings through GC
-    const var1_str = try vm.gc.allocString("var1");
-    const var2_str = try vm.gc.allocString("var2");
-    const var3_str = try vm.gc.allocString("var3");
+    const var1_str = try ctx.vm.gc.allocString("var1");
+    const var2_str = try ctx.vm.gc.allocString("var2");
+    const var3_str = try ctx.vm.gc.allocString("var3");
 
     // Create constants for variable names
     const constants = [_]TValue{
@@ -166,9 +172,9 @@ test "SETTABUP opcode - multiple global assignments" {
     };
 
     // Initialize registers with values to set
-    vm.stack[0] = .{ .integer = 10 };
-    vm.stack[1] = .{ .number = 3.14 };
-    vm.stack[2] = .{ .boolean = true };
+    ctx.vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[1] = .{ .number = 3.14 };
+    ctx.vm.stack[2] = .{ .boolean = true };
 
     const code = [_]Instruction{
         Instruction.initABC(.SETTABUP, 0, 0, 0), // _ENV[K[0]] := R[0]
@@ -177,14 +183,14 @@ test "SETTABUP opcode - multiple global assignments" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Verify all global variables were set correctly
-    const var1 = vm.globals.get(var1_str).?;
-    const var2 = vm.globals.get(var2_str).?;
-    const var3 = vm.globals.get(var3_str).?;
+    const var1 = ctx.vm.globals.get(var1_str).?;
+    const var2 = ctx.vm.globals.get(var2_str).?;
+    const var3 = ctx.vm.globals.get(var3_str).?;
 
     try testing.expect(var1.eql(.{ .integer = 10 }));
     try testing.expect(var2.eql(.{ .number = 3.14 }));
@@ -192,15 +198,16 @@ test "SETTABUP opcode - multiple global assignments" {
 }
 
 test "SETTABUP opcode - invalid key type" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Create constant with non-string key
     const constants = [_]TValue{
         .{ .integer = 123 }, // K[0] - invalid key type
     };
 
-    vm.stack[1] = .{ .integer = 42 };
+    ctx.vm.stack[1] = .{ .integer = 42 };
 
     const inst = Instruction.initABC(.SETTABUP, 0, 0, 1); // _ENV[K[0]] := R[1]
 
@@ -209,28 +216,29 @@ test "SETTABUP opcode - invalid key type" {
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
 
     // Should fail with InvalidTableKey error
-    const result = Mnemonics.execute(&vm, proto);
+    const result = Mnemonics.execute(&ctx.vm, proto);
     try testing.expectError(error.InvalidTableKey, result);
 }
 
 test "All new opcodes - integration test" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Allocate string through GC
-    const result_str = try vm.gc.allocString("result");
+    const result_str = try ctx.vm.gc.allocString("result");
 
     const constants = [_]TValue{
         TValue.fromString(result_str), // K[0]
     };
 
     // Initialize registers
-    vm.stack[0] = .{ .integer = 999 };
-    vm.stack[1] = .{ .number = 2.71 };
-    vm.stack[2] = .nil; // TBC target (nil is valid without __close)
+    ctx.vm.stack[0] = .{ .integer = 999 };
+    ctx.vm.stack[1] = .{ .number = 2.71 };
+    ctx.vm.stack[2] = .nil; // TBC target (nil is valid without __close)
 
     const code = [_]Instruction{
         // Test all four new opcodes in sequence
@@ -241,18 +249,19 @@ test "All new opcodes - integration test" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try test_utils.ReturnTest.expectNone(result);
 
     // Only SETTABUP should have side effects
-    const global_val = vm.globals.get(result_str).?;
+    const global_val = ctx.vm.globals.get(result_str).?;
     try testing.expect(global_val.eql(.{ .integer = 999 }));
 }
 
 test "CLOSURE opcode - create closure without upvalues" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Child proto: simple function that returns 42
     const child_code = [_]Instruction{
@@ -260,7 +269,7 @@ test "CLOSURE opcode - create closure without upvalues" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R[0]
     };
 
-    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 0, &[_]Upvaldesc{});
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&ctx.vm, &[_]TValue{}, &child_code, 0, false, 1, 0, &[_]Upvaldesc{});
 
     // Parent proto: create closure and return it
     const parent_code = [_]Instruction{
@@ -268,9 +277,9 @@ test "CLOSURE opcode - create closure without upvalues" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R[0]
     };
 
-    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 1, &[_]*ProtoObject{child_proto});
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&ctx.vm, &[_]TValue{}, &parent_code, 0, false, 1, &[_]*ProtoObject{child_proto});
 
-    const result = try Mnemonics.execute(&vm, parent_proto);
+    const result = try Mnemonics.execute(&ctx.vm, parent_proto);
 
     // Should return a closure
     switch (result) {
@@ -285,8 +294,9 @@ test "CLOSURE opcode - create closure without upvalues" {
 }
 
 test "CLOSURE opcode - create closure with upvalue from stack" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Child proto: function that reads upvalue
     // function() return upval end
@@ -299,7 +309,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&ctx.vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 100
@@ -311,9 +321,9 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&ctx.vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const result = try Mnemonics.execute(&vm, parent_proto);
+    const result = try Mnemonics.execute(&ctx.vm, parent_proto);
 
     // Should return a closure with one upvalue
     switch (result) {
@@ -332,8 +342,9 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
 }
 
 test "CLOSE opcode - closes open upvalues" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Child proto: function that reads upvalue
     const child_code = [_]Instruction{
@@ -345,7 +356,7 @@ test "CLOSE opcode - closes open upvalues" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&ctx.vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 200
@@ -359,9 +370,9 @@ test "CLOSE opcode - closes open upvalues" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&ctx.vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const result = try Mnemonics.execute(&vm, parent_proto);
+    const result = try Mnemonics.execute(&ctx.vm, parent_proto);
 
     switch (result) {
         .single => |val| {
@@ -379,12 +390,13 @@ test "CLOSE opcode - closes open upvalues" {
     }
 
     // VM's open_upvalues list should be empty after CLOSE
-    try testing.expect(vm.open_upvalues == null);
+    try testing.expect(ctx.vm.open_upvalues == null);
 }
 
 test "GETUPVAL and SETUPVAL with closure" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Child proto: function that modifies upvalue and returns it
     // function() upval = upval + 1; return upval end
@@ -400,7 +412,7 @@ test "GETUPVAL and SETUPVAL with closure" {
         .{ .instack = true, .idx = 0 }, // capture parent's R[0]
     };
 
-    const child_proto = try test_utils.createTestProtoWithUpvalues(&vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
+    const child_proto = try test_utils.createTestProtoWithUpvalues(&ctx.vm, &[_]TValue{}, &child_code, 0, false, 1, 1, &child_upvalues);
 
     // Parent proto:
     // local x = 10
@@ -412,9 +424,9 @@ test "GETUPVAL and SETUPVAL with closure" {
         Instruction.initABC(.RETURN1, 1, 0, 0), // return R[1]
     };
 
-    const parent_proto = try test_utils.createTestProtoWithChildProtos(&vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
+    const parent_proto = try test_utils.createTestProtoWithChildProtos(&ctx.vm, &[_]TValue{}, &parent_code, 0, false, 2, &[_]*ProtoObject{child_proto});
 
-    const result = try Mnemonics.execute(&vm, parent_proto);
+    const result = try Mnemonics.execute(&ctx.vm, parent_proto);
 
     switch (result) {
         .single => |val| {

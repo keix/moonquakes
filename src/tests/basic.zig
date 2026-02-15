@@ -32,11 +32,12 @@ test "basic: 1 + 2 = 3" {
         Instruction.initABC(.RETURN, 2, 2, 0),
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 

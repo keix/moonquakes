@@ -29,6 +29,7 @@ pub const RunOptions = launcher.RunOptions;
 
 // Core types for embedding
 pub const VM = @import("vm/vm.zig").VM;
+pub const GC = @import("runtime/gc/gc.zig").GC;
 pub const Mnemonics = @import("vm/mnemonics.zig");
 pub const ReturnValue = @import("vm/execution.zig").ReturnValue;
 pub const TValue = @import("runtime/value.zig").TValue;
@@ -52,7 +53,12 @@ pub const Moonquakes = struct {
 
     /// Execute compiled bytecode with a fresh VM
     pub fn run(self: *Moonquakes, proto: *const Proto) !ReturnValue {
-        var vm = try VM.init(self.allocator);
+        // Create GC (global state) and VM (thread state)
+        var gc = GC.init(self.allocator);
+        defer gc.deinit();
+        try gc.initMetamethodKeys();
+
+        var vm = try VM.init(&gc);
         defer vm.deinit();
 
         return Mnemonics.execute(&vm, proto) catch |err| {
@@ -78,11 +84,15 @@ pub const Moonquakes = struct {
         const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
-        // Phase 2: Create VM and materialize constants
-        var vm = try VM.init(self.allocator);
+        // Phase 2: Create GC and VM, then materialize constants
+        var gc = GC.init(self.allocator);
+        defer gc.deinit();
+        try gc.initMetamethodKeys();
+
+        var vm = try VM.init(&gc);
         defer vm.deinit();
 
-        const proto = try pipeline.materialize(&raw_proto, &vm.gc, self.allocator);
+        const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);
         // Note: ProtoObject is GC-managed, no manual free needed
 
         // Phase 3: Execute
@@ -157,10 +167,14 @@ pub const Moonquakes = struct {
         const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
-        var vm = try VM.init(self.allocator);
+        var gc = GC.init(self.allocator);
+        defer gc.deinit();
+        try gc.initMetamethodKeys();
+
+        var vm = try VM.init(&gc);
         defer vm.deinit();
 
-        const proto = try pipeline.materialize(&raw_proto, &vm.gc, self.allocator);
+        const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);
         // Note: ProtoObject is GC-managed, no manual free needed
 
         try self.dumpProto(proto);

@@ -32,11 +32,12 @@ test "return: no values (RETURN with B=1)" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectNoResult(result);
 }
@@ -51,11 +52,12 @@ test "return: single value (RETURN with B=2)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -74,11 +76,12 @@ test "return: multiple values (RETURN with B=4)" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2 (B=4 means 3 values)
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },
@@ -93,11 +96,12 @@ test "return: RETURN0 - no values" {
         Instruction.initABC(.RETURN0, 0, 0, 0), // return nothing
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try testing.expect(result == .none);
 }
@@ -112,11 +116,12 @@ test "return: RETURN1 - single value" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R0
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }

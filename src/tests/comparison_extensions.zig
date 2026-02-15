@@ -9,8 +9,9 @@ const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 
 test "EQK: equality with constant - skip on match" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 42 (should skip)
     const constants = [_]TValue{
@@ -24,12 +25,12 @@ test "EQK: equality with constant - skip on match" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip LOADTRUE R[0], execute LOADFALSE R[0]
     try testing.expect(result == .single);
@@ -37,8 +38,9 @@ test "EQK: equality with constant - skip on match" {
 }
 
 test "EQK: equality with constant - no skip on mismatch" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 100 (should not skip)
     const constants = [_]TValue{
@@ -51,12 +53,12 @@ test "EQK: equality with constant - no skip on mismatch" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should execute LOADTRUE R[0]
     try testing.expect(result == .single);
@@ -64,8 +66,9 @@ test "EQK: equality with constant - no skip on mismatch" {
 }
 
 test "EQI: equality with immediate integer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] == 42 where R[1] = 42 (should skip)
     const instructions = [_]Instruction{
@@ -75,12 +78,12 @@ test "EQI: equality with immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -88,8 +91,9 @@ test "EQI: equality with immediate integer" {
 }
 
 test "LTI: less than immediate integer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] < 50 where R[1] = 42 (should skip)
     const instructions = [_]Instruction{
@@ -99,12 +103,12 @@ test "LTI: less than immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -112,8 +116,9 @@ test "LTI: less than immediate integer" {
 }
 
 test "LEI: less than or equal immediate integer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] <= 42 where R[1] = 42 (should skip)
     const instructions = [_]Instruction{
@@ -123,12 +128,12 @@ test "LEI: less than or equal immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -136,8 +141,9 @@ test "LEI: less than or equal immediate integer" {
 }
 
 test "GTI: greater than immediate integer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] > 30 where R[1] = 42 (should skip)
     const instructions = [_]Instruction{
@@ -147,12 +153,12 @@ test "GTI: greater than immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -160,8 +166,9 @@ test "GTI: greater than immediate integer" {
 }
 
 test "GEI: greater than or equal immediate integer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] >= 42 where R[1] = 42 (should skip)
     const instructions = [_]Instruction{
@@ -171,12 +178,12 @@ test "GEI: greater than or equal immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    vm.stack[vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -184,8 +191,9 @@ test "GEI: greater than or equal immediate integer" {
 }
 
 test "Comparison extensions: negative immediate values" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] > -10 where R[1] = 5 (should skip)
     // Using signed immediate -10 (encoded as 256-10=246 in unsigned byte)
@@ -198,12 +206,12 @@ test "Comparison extensions: negative immediate values" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 5
-    vm.stack[vm.base + 1] = .{ .integer = 5 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 5 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -211,8 +219,9 @@ test "Comparison extensions: negative immediate values" {
 }
 
 test "Comparison extensions: floating point values" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test R[1] < 100 where R[1] = 3.14 (should skip)
     const instructions = [_]Instruction{
@@ -222,12 +231,12 @@ test "Comparison extensions: floating point values" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 3.14
-    vm.stack[vm.base + 1] = .{ .number = 3.14 };
+    ctx.vm.stack[ctx.vm.base + 1] = .{ .number = 3.14 };
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);

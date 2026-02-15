@@ -10,23 +10,24 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "TAILCALL - basic structure" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // This test verifies the TAILCALL opcode structure
     // Full tail call testing requires closures, so we use the parser tests
 
     // Test that TAILCALL with non-function value raises error
-    vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[0] = .{ .integer = 10 };
 
     const code = [_]Instruction{
         // TAILCALL R0, 1, 0: return R0() with 0 args
         Instruction.initABC(.TAILCALL, 0, 1, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
 
     // Should fail because integer is not a function
-    const result = Mnemonics.execute(&vm, proto);
+    const result = Mnemonics.execute(&ctx.vm, proto);
     try testing.expectError(error.NotAFunction, result);
 }

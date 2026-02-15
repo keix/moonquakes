@@ -26,11 +26,12 @@ test "unary: -5 = -5" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -5 });
 }
@@ -46,11 +47,12 @@ test "unary: -3.5 = -3.5" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = -3.5 });
 }
@@ -66,11 +68,12 @@ test "unary: not true = false" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -86,11 +89,12 @@ test "unary: not nil = true" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -106,11 +110,12 @@ test "unary: not 0 = false" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -129,21 +134,23 @@ test "unary: -5 + 3 = -2" {
         Instruction.initABC(.RETURN, 3, 2, 0), // return R3
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -2 });
 }
 
 test "unary: #\"hello\" = 5 (string length)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Allocate string through GC
-    const hello_str = try vm.gc.allocString("hello");
+    const hello_str = try ctx.vm.gc.allocString("hello");
 
     const constants = [_]TValue{
         TValue.fromString(hello_str),
@@ -155,19 +162,20 @@ test "unary: #\"hello\" = 5 (string length)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 5 });
 }
 
 test "unary: #\"\" = 0 (empty string length)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Allocate empty string through GC
-    const empty_str = try vm.gc.allocString("");
+    const empty_str = try ctx.vm.gc.allocString("");
 
     const constants = [_]TValue{
         TValue.fromString(empty_str),
@@ -179,9 +187,9 @@ test "unary: #\"\" = 0 (empty string length)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 0 });
 }

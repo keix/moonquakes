@@ -16,8 +16,9 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "comparison: 5 == 5 = true" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 },
@@ -37,15 +38,15 @@ test "comparison: 5 == 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
 
     // Added: ComparisonTest helper could be used for simpler verification
     // However, this test is complex so we verify manually
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
-    trace.updateFinal(&vm, 3);
+    trace.updateFinal(&ctx.vm, 3);
 
     // Existing verification
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -56,12 +57,13 @@ test "comparison: 5 == 5 = true" {
     try trace.expectRegisterChanged(2, TValue{ .boolean = true }); // EQ didn't skip, so true was set
 
     // VM final state
-    try test_utils.expectVMState(&vm, 0, 3);
+    try test_utils.expectVMState(&ctx.vm, 0, 3);
 }
 
 test "comparison: 5 == 3 = false" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 },
@@ -81,15 +83,16 @@ test "comparison: 5 == 3 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "comparison: 3 < 5 = true" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 3 },
@@ -109,15 +112,16 @@ test "comparison: 3 < 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: 5 < 3 = false" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 },
@@ -136,15 +140,16 @@ test "comparison: 5 < 3 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "comparison: 3 <= 5 = true" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 3 },
@@ -163,15 +168,16 @@ test "comparison: 3 <= 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: 5 <= 5 = true" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 },
@@ -190,15 +196,16 @@ test "comparison: 5 <= 5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: mixed types 3 < 3.5 = true" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 3 },
@@ -217,15 +224,16 @@ test "comparison: mixed types 3 < 3.5 = true" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "comparison: different types nil == false = false" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .nil,
@@ -244,15 +252,16 @@ test "comparison: different types nil == false = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 1 },
@@ -271,16 +280,17 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // In Lua 5.3+, 1 == 1.0 is true
     try expectSingleResult(result, TValue{ .boolean = true });
 }
 
 test "EQ instruction: integer != non-integer float (42 != 42.5)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 42 },
@@ -299,16 +309,17 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // 42 != 42.5, so should return false
     try expectSingleResult(result, TValue{ .boolean = false });
 }
 
 test "EQ instruction: negative integer == float (-100 == -100.0)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = -100 },
@@ -327,8 +338,8 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // -100 == -100.0 should be true in Lua 5.3+
     try expectSingleResult(result, TValue{ .boolean = true });
@@ -336,22 +347,25 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
 
 // Added: Concise test using ComparisonTest helper
 test "comparison: EQ with skip behavior verification" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Test 1: Equal values with A=0 (should skip)
-    try test_utils.ComparisonTest.expectSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
+    try test_utils.ComparisonTest.expectSkip(&ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
         TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
 
     // Test 2: Different values with A=0 (should not skip)
-    vm.deinit();
-    vm = try VM.init(testing.allocator);
-    try test_utils.ComparisonTest.expectNoSkip(&vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
+    ctx.deinit();
+    ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    try test_utils.ComparisonTest.expectNoSkip(&ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
 }
 
 test "comparison: LT with side effect verification" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Verify that comparison instruction itself doesn't modify values
     const code = [_]Instruction{
@@ -370,15 +384,15 @@ test "comparison: LT with side effect verification" {
         .{ .integer = 200 },
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
 
     // Initialize R2, R3 to track changes
-    vm.stack[2] = .nil;
-    vm.stack[3] = .nil;
+    ctx.vm.stack[2] = .nil;
+    ctx.vm.stack[3] = .nil;
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 4);
-    const result = try Mnemonics.execute(&vm, proto);
-    trace.updateFinal(&vm, 4);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 4);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
+    trace.updateFinal(&ctx.vm, 4);
 
     // Verify registers
     try trace.expectRegisterChanged(0, TValue{ .integer = 10 });

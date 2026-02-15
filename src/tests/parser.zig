@@ -9,7 +9,7 @@ const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const test_utils = @import("test_utils.zig");
 
-fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
+fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
     var lx = lexer.Lexer.init(source);
     var proto_builder = parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
@@ -20,158 +20,170 @@ fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !R
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
     // Note: raw_proto memory managed by arena, no explicit free needed
 
-    const proto = try materialize(&raw_proto, &vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
     // Note: proto memory managed by arena, no explicit free needed
 
-    return Mnemonics.execute(vm, proto);
+    return Mnemonics.execute(&ctx.vm, proto);
 }
 
 test "parser: return 42" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 42");
+    const result = try parseAndExecute(&ctx, allocator, "return 42");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
 }
 
 test "parser: return 1 + 2" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 1 + 2");
+    const result = try parseAndExecute(&ctx, allocator, "return 1 + 2");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 3 });
 }
 
 test "parser: return 2 * 3" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 2 * 3");
+    const result = try parseAndExecute(&ctx, allocator, "return 2 * 3");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 6 });
 }
 
 test "parser: return 1 + 2 * 3 (precedence)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 1 + 2 * 3");
+    const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 * 3");
     // Should be 1 + (2 * 3) = 1 + 6 = 7, not (1 + 2) * 3 = 9
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 7 });
 }
 
 test "parser: return 2 * 3 + 1 (precedence reverse)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 2 * 3 + 1");
+    const result = try parseAndExecute(&ctx, allocator, "return 2 * 3 + 1");
     // Should be (2 * 3) + 1 = 6 + 1 = 7
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 7 });
 }
 
 test "parser: return 1 + 2 + 3 (left associative)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 1 + 2 + 3");
+    const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 + 3");
     // Should be ((1 + 2) + 3) = (3 + 3) = 6
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 6 });
 }
 
 test "parser: return 2 * 3 * 4 (left associative)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 2 * 3 * 4");
+    const result = try parseAndExecute(&ctx, allocator, "return 2 * 3 * 4");
     // Should be ((2 * 3) * 4) = (6 * 4) = 24
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 24 });
 }
 
 test "parser: return 1 + 2 + 3 * 4 (complex)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 1 + 2 + 3 * 4");
+    const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 + 3 * 4");
     // Should be ((1 + 2) + (3 * 4)) = (3 + 12) = 15
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
 }
 
 test "parser: return 0 + 0" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 0 + 0");
+    const result = try parseAndExecute(&ctx, allocator, "return 0 + 0");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0 });
 }
 
 test "parser: return 5 * 0" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 5 * 0");
+    const result = try parseAndExecute(&ctx, allocator, "return 5 * 0");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0 });
 }
 
 test "parser: return 100 + 200" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 100 + 200");
+    const result = try parseAndExecute(&ctx, allocator, "return 100 + 200");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 300 });
 }
 
 test "parser: local x = 42" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local x = 42
         \\return x
     );
@@ -179,39 +191,42 @@ test "parser: local x = 42" {
 }
 
 test "parser: return + 5 (unexpected token)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = parseAndExecute(&vm, allocator, "return + 5");
+    const result = parseAndExecute(&ctx, allocator, "return + 5");
     try testing.expectError(error.ExpectedExpression, result);
 }
 
 test "parser: return (no expression)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Bare return is valid - returns no values
-    const result = try parseAndExecute(&vm, allocator, "return");
+    const result = try parseAndExecute(&ctx, allocator, "return");
     try testing.expectEqual(ReturnValue.none, result);
 }
 
 test "parser: return \"hello\" (string literal)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return \"hello\"");
+    const result = try parseAndExecute(&ctx, allocator, "return \"hello\"");
     // Verify result is a single string value
     try testing.expect(result == .single);
     try testing.expect(result.single.isString());
@@ -221,38 +236,41 @@ test "parser: return \"hello\" (string literal)" {
 }
 
 test "parser: return 6 / 2 (division)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 6 / 2");
+    const result = try parseAndExecute(&ctx, allocator, "return 6 / 2");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .number = 3.0 });
 }
 
 test "parser: return 5 - 3 (subtraction)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator, "return 5 - 3");
+    const result = try parseAndExecute(&ctx, allocator, "return 5 - 3");
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 2 });
 }
 
 test "parser: local variable assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local x = 10
         \\x = 20
         \\return x
@@ -261,14 +279,15 @@ test "parser: local variable assignment" {
 }
 
 test "parser: local variable assignment with expression" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local x = 5
         \\x = x + 10
         \\return x
@@ -277,14 +296,15 @@ test "parser: local variable assignment with expression" {
 }
 
 test "parser: table field assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local t = {}
         \\t.x = 42
         \\return t.x
@@ -293,14 +313,15 @@ test "parser: table field assignment" {
 }
 
 test "parser: table nested field assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local t = { inner = {} }
         \\t.inner.value = 100
         \\return t.inner.value
@@ -309,14 +330,15 @@ test "parser: table nested field assignment" {
 }
 
 test "parser: table index assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local t = {}
         \\local key = "x"
         \\t[key] = 42
@@ -326,14 +348,15 @@ test "parser: table index assignment" {
 }
 
 test "parser: mixed field and index assignment" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const result = try parseAndExecute(&vm, allocator,
+    const result = try parseAndExecute(&ctx, allocator,
         \\local t = { data = {} }
         \\local key = "value"
         \\t.data[key] = 50

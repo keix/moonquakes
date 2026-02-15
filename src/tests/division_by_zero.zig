@@ -19,8 +19,9 @@ fn expectError(result: anyerror!ReturnValue, expected_error: anyerror) !void {
 }
 
 test "DIV: division by zero (integer)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 10 },
@@ -34,15 +35,16 @@ test "DIV: division by zero (integer)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "DIV: division by zero (float)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .number = 10.5 },
@@ -56,15 +58,16 @@ test "DIV: division by zero (float)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "IDIV: integer division by zero" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 20 },
@@ -78,15 +81,16 @@ test "IDIV: integer division by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "MOD: modulo by zero" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 15 },
@@ -100,15 +104,16 @@ test "MOD: modulo by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "DIVK: division by zero constant" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 25 },
@@ -121,15 +126,16 @@ test "DIVK: division by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "IDIVK: integer division by zero constant" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 30 },
@@ -142,15 +148,16 @@ test "IDIVK: integer division by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "MODK: modulo by zero constant" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 35 },
@@ -163,15 +170,16 @@ test "MODK: modulo by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     try expectError(result, error.ArithmeticError);
 }
 
 test "Division operations with non-zero divisors should succeed" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 20 },
@@ -187,8 +195,8 @@ test "Division operations with non-zero divisors should succeed" {
         Instruction.initABC(.RETURN, 2, 4, 0), // return R2, R3, R4
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);

@@ -9,7 +9,7 @@ const Mnemonics = @import("../vm/mnemonics.zig");
 const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const test_utils = @import("test_utils.zig");
 
-fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
+fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, source: []const u8) !ReturnValue {
     var lx = lexer.Lexer.init(source);
     var proto_builder = parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
@@ -18,9 +18,9 @@ fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !R
     try p.parseChunk();
 
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
-    const proto = try materialize(&raw_proto, &vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
 
-    return Mnemonics.execute(vm, proto);
+    return Mnemonics.execute(&ctx.vm, proto);
 }
 
 // =============================================================================
@@ -28,8 +28,9 @@ fn parseAndExecute(vm: *VM, allocator: std.mem.Allocator, source: []const u8) !R
 // =============================================================================
 
 test "local: single variable" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -41,13 +42,14 @@ test "local: single variable" {
         \\end
         \\return test()
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 10 });
 }
 
 test "local: two variables return first" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -60,13 +62,14 @@ test "local: two variables return first" {
         \\end
         \\return test()
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 10 });
 }
 
 test "local: two variables return second" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -79,13 +82,14 @@ test "local: two variables return second" {
         \\end
         \\return test()
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 20 });
 }
 
 test "local: expression in initializer" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -98,13 +102,14 @@ test "local: expression in initializer" {
         \\end
         \\return test()
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 30 });
 }
 
 test "local: computed value" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -118,7 +123,7 @@ test "local: computed value" {
         \\end
         \\return test()
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 30 });
 }
 
@@ -127,8 +132,9 @@ test "local: computed value" {
 // =============================================================================
 
 test "local: with parameter" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -140,13 +146,14 @@ test "local: with parameter" {
         \\end
         \\return add(10)
     ;
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
 }
 
 test "local: multiple params and locals" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -160,7 +167,7 @@ test "local: multiple params and locals" {
         \\return calc(10, 3)
     ;
     // sum = 13, diff = 7, result = 91
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 91 });
 }
 
@@ -169,8 +176,9 @@ test "local: multiple params and locals" {
 // =============================================================================
 
 test "local: registers not reused incorrectly" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -186,13 +194,14 @@ test "local: registers not reused incorrectly" {
         \\return test()
     ;
     // 111 + 222 + 333 = 666
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 666 });
 }
 
 test "local: complex expression does not overwrite locals" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -208,6 +217,6 @@ test "local: complex expression does not overwrite locals" {
     ;
     // a=2, b=3
     // 2*3 + 2 - 3 = 6 + 2 - 3 = 5
-    const result = try parseAndExecute(&vm, arena.allocator(), source);
+    const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 5 });
 }

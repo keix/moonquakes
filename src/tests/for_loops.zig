@@ -17,8 +17,9 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "FORPREP minimal test" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 }, // init
@@ -32,15 +33,16 @@ test "FORPREP minimal test" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be 5-1=4)
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 4.0 }); // init - step = 5 - 1 = 4
 }
 
 test "for loop: simple integer loop 1 to 3" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 1 }, // init (R0)
@@ -65,14 +67,14 @@ test "for loop: simple integer loop 1 to 3" {
         Instruction.initABC(.RETURN, 4, 2, 0), // return R4
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
 
     // Added: Comprehensive state tracking
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
-    trace.updateFinal(&vm, 5);
+    trace.updateFinal(&ctx.vm, 5);
 
     // Existing verification
     try expectSingleResult(result, TValue{ .integer = 6 }); // 1+2+3 = 6
@@ -89,8 +91,9 @@ test "for loop: simple integer loop 1 to 3" {
 // Added: Critical edge case tests for potential bugs
 
 test "for loop: negative step (countdown)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 }, // init (R0)
@@ -110,10 +113,10 @@ test "for loop: negative step (countdown)" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try Mnemonics.execute(&vm, proto);
-    trace.updateFinal(&vm, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
+    trace.updateFinal(&ctx.vm, 5);
 
     // Should execute: 5, 4, 3, 2, 1 = 15
     try expectSingleResult(result, TValue{ .integer = 15 });
@@ -124,8 +127,9 @@ test "for loop: negative step (countdown)" {
 }
 
 test "for loop: zero iterations (start > limit with positive step)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 5 }, // init (R0) - starts above limit!
@@ -145,29 +149,30 @@ test "for loop: zero iterations (start > limit with positive step)" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
 
     // Set up R3 to verify it never gets set
-    vm.stack[3] = .nil;
+    ctx.vm.stack[3] = .nil;
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try Mnemonics.execute(&vm, proto);
-    trace.updateFinal(&vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
+    trace.updateFinal(&ctx.vm, 5);
 
     // Should not execute any iterations
     try expectSingleResult(result, TValue{ .integer = 99 }); // unchanged
 
     // R3 should remain nil (control variable never set)
     try trace.expectRegisterUnchanged(3);
-    try test_utils.expectRegister(&vm, 3, .nil);
+    try test_utils.expectRegister(&ctx.vm, 3, .nil);
 
     // R4 should remain 99 (accumulator unchanged)
     try trace.expectRegisterChanged(4, TValue{ .integer = 99 });
 }
 
 test "for loop: float loop variables with integer path detection" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .number = 1.0 }, // init (R0) - float that could be integer
@@ -187,16 +192,16 @@ test "for loop: float loop variables with integer path detection" {
         Instruction.initABC(.RETURN, 0, 5, 0), // return all registers
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    const loop_trace = test_utils.ForLoopTrace.capture(&vm, 0);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const loop_trace = test_utils.ForLoopTrace.capture(&ctx.vm, 0);
     _ = loop_trace; // Will use after execution
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 5);
-    const result = try Mnemonics.execute(&vm, proto);
-    trace.updateFinal(&vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
+    trace.updateFinal(&ctx.vm, 5);
 
     // Check if VM optimized to integer path or stayed float
-    const final_loop = test_utils.ForLoopTrace.capture(&vm, 0);
+    const final_loop = test_utils.ForLoopTrace.capture(&ctx.vm, 0);
 
     // These values might be converted to integers or stay as floats
     // This test exposes whether the VM does this optimization
@@ -212,8 +217,9 @@ test "for loop: float loop variables with integer path detection" {
 }
 
 test "for loop: step of zero should error" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 1 }, // init
@@ -231,8 +237,8 @@ test "for loop: step of zero should error" {
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
-    const result = Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
+    const result = Mnemonics.execute(&ctx.vm, proto);
 
     // Step of zero should cause an error
     // FIXED: VM now checks for zero step in FORPREP
@@ -240,8 +246,9 @@ test "for loop: step of zero should error" {
 }
 
 test "for loop: overflow behavior" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const max = std.math.maxInt(i64);
     const constants = [_]TValue{
@@ -262,16 +269,17 @@ test "for loop: overflow behavior" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Should execute 3 times: max-2, max-1, max
     try expectSingleResult(result, TValue{ .integer = 3 });
 }
 
 test "for loop: side effects on unused registers" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     const constants = [_]TValue{
         .{ .integer = 1 },
@@ -291,19 +299,19 @@ test "for loop: side effects on unused registers" {
         Instruction.initABC(.RETURN, 0, 11, 0), // return R0..R10
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 11);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 11);
 
     // Initialize extra registers with specific values
-    vm.stack[5] = TValue{ .integer = 555 };
-    vm.stack[6] = TValue{ .boolean = true };
-    vm.stack[7] = TValue{ .number = 3.14 };
-    vm.stack[8] = .nil;
-    vm.stack[9] = TValue{ .integer = 999 };
-    vm.stack[10] = TValue{ .boolean = false };
+    ctx.vm.stack[5] = TValue{ .integer = 555 };
+    ctx.vm.stack[6] = TValue{ .boolean = true };
+    ctx.vm.stack[7] = TValue{ .number = 3.14 };
+    ctx.vm.stack[8] = .nil;
+    ctx.vm.stack[9] = TValue{ .integer = 999 };
+    ctx.vm.stack[10] = TValue{ .boolean = false };
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&vm, 11);
-    const result = try Mnemonics.execute(&vm, proto);
-    trace.updateFinal(&vm, 11);
+    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 11);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
+    trace.updateFinal(&ctx.vm, 11);
 
     // Use result to avoid unused warning
     try testing.expect(result == .multiple);

@@ -10,13 +10,14 @@ const test_utils = @import("test_utils.zig");
 
 test "closure constant loading" {
     // First, test if we can load a closure constant
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const func_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &[_]Instruction{}, 0, false, 1);
+    const func_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &[_]Instruction{}, 0, false, 1);
 
     // Create closure via GC
-    const func_closure = try vm.gc.allocClosure(func_proto);
+    const func_closure = try ctx.vm.gc.allocClosure(func_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -27,9 +28,9 @@ test "closure constant loading" {
         Instruction.initABx(.LOADK, 0, 0), // R[0] = closure
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 1);
+    const main_proto = try test_utils.createTestProto(&ctx.vm, &main_constants, &main_code, 0, false, 1);
 
-    const result = try Mnemonics.execute(&vm, main_proto);
+    const result = try Mnemonics.execute(&ctx.vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue.fromClosure(func_closure));
 }
@@ -44,13 +45,14 @@ test "simple function call without arguments" {
         .{ .integer = 42 },
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const func_proto = try test_utils.createTestProto(&vm, &func_constants, &func_code, 0, false, 1);
+    const func_proto = try test_utils.createTestProto(&ctx.vm, &func_constants, &func_code, 0, false, 1);
 
     // Create closure via GC
-    const func_closure = try vm.gc.allocClosure(func_proto);
+    const func_closure = try ctx.vm.gc.allocClosure(func_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -66,9 +68,9 @@ test "simple function call without arguments" {
         // Return the result
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 2);
+    const main_proto = try test_utils.createTestProto(&ctx.vm, &main_constants, &main_code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&vm, main_proto);
+    const result = try Mnemonics.execute(&ctx.vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
 }
@@ -80,13 +82,14 @@ test "function call with arguments" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R[2]
     };
 
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const add_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &add_code, 2, false, 3);
+    const add_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &add_code, 2, false, 3);
 
     // Create closure via GC
-    const add_closure = try vm.gc.allocClosure(add_proto);
+    const add_closure = try ctx.vm.gc.allocClosure(add_proto);
 
     // Build constants at runtime
     var main_constants = [_]TValue{
@@ -103,9 +106,9 @@ test "function call with arguments" {
         Instruction.initABC(.CALL, 0, 3, 2), // R[0] = R[0](R[1], R[2])
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const main_proto = try test_utils.createTestProto(&vm, &main_constants, &main_code, 0, false, 3);
+    const main_proto = try test_utils.createTestProto(&ctx.vm, &main_constants, &main_code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&vm, main_proto);
+    const result = try Mnemonics.execute(&ctx.vm, main_proto);
 
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
 }
