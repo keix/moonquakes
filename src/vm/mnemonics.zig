@@ -348,8 +348,6 @@ fn handleProtectedError(vm: *VM, err: anyerror) bool {
 /// Main VM execution loop.
 /// Executes instructions until RETURN from main chunk.
 pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
-    vm.gc.setVM(vm);
-
     setupMainFrame(vm, proto);
 
     while (true) {

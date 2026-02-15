@@ -27,8 +27,8 @@ test "ADDI: positive immediate with integer" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -51,8 +51,8 @@ test "ADDI: negative immediate with integer" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -72,8 +72,8 @@ test "ADDI: with float number" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -93,8 +93,8 @@ test "ADDI: maximum positive immediate" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -117,8 +117,8 @@ test "ADDI: maximum negative immediate" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -140,8 +140,8 @@ test "ADDI: loop counter optimization" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);

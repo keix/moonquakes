@@ -2,8 +2,11 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const Proto = @import("../compiler/proto.zig").Proto;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
-const GC = @import("../runtime/gc/gc.zig").GC;
+const gc_mod = @import("../runtime/gc/gc.zig");
+const GC = gc_mod.GC;
+const RootProvider = gc_mod.RootProvider;
 const object = @import("../runtime/gc/object.zig");
+const call = @import("call.zig");
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
@@ -45,19 +48,11 @@ pub const VM = struct {
     hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
     hook_count: u32 = 0, // Count for count hook
 
-    /// Initialize a VM with a shared GC.
+    /// Initialize a VM in-place with a shared GC.
     /// GC must be initialized and have mm_keys set up before calling this.
-    pub fn init(gc: *GC) !VM {
-        // Create globals table via GC
-        const globals = try gc.allocTable();
-
-        // Create registry table via GC
-        const registry = try gc.allocTable();
-
-        // Initialize global environment (needs GC for string allocation)
-        try builtin.initGlobalEnvironment(globals, gc);
-
-        var vm = VM{
+    /// The VM is automatically registered as a GC root provider.
+    pub fn init(self: *VM, gc: *GC) !void {
+        self.* = .{
             .stack = undefined,
             .stack_last = 256 - 1,
             .top = 0,
@@ -66,129 +61,35 @@ pub const VM = struct {
             .base_ci = undefined,
             .callstack = undefined,
             .callstack_size = 0,
-            .globals = globals,
-            .registry = registry,
+            .globals = try gc.allocTable(),
+            .registry = try gc.allocTable(),
             .gc = gc,
             .open_upvalues = null,
         };
-        for (&vm.stack) |*v| {
+
+        for (&self.stack) |*v| {
             v.* = .nil;
         }
 
-        return vm;
+        // Initialize global environment (needs GC for string allocation)
+        try builtin.initGlobalEnvironment(self.globals, gc);
+
+        // Register as GC root provider (self is now at its final address)
+        try gc.addRootProvider(self.rootProvider());
     }
 
     pub fn deinit(self: *VM) void {
-        // VM does not own the GC - GC outlives individual VMs (coroutines)
-        // Clear VM-specific state only
-        _ = self;
+        // Unregister from GC before destruction
+        self.gc.removeRootProvider(self.rootProvider());
     }
 
-    /// GC SAFETY CONTRACT: VM Root Marking
-    ///
-    /// GC ROOTS - objects that keep other objects alive:
-    /// | Root                  | Description                                      |
-    /// |-----------------------|--------------------------------------------------|
-    /// | stack[0..top]         | VM stack - locals, temporaries, arguments        |
-    /// | base_ci               | Main chunk frame (separate from callstack[])     |
-    /// | callstack[0..size]    | Active call frames                               |
-    /// | globals               | Global environment table                         |
-    /// | open_upvalues         | Captured variables still on stack                |
-    /// | lua_error_msg         | Stored error message for pcall                   |
-    ///
-    /// CRITICAL: base_ci is NOT in callstack[] - it's the main chunk's frame.
-    /// When inside a function call, base_ci still references the main proto which
-    /// contains nested function prototypes. If not marked, nested function constants
-    /// (strings, native closures) will be collected while still referenced.
-    ///
-    /// Uses markProto() (not markConstants()) to ensure nested protos are marked.
+    /// Run garbage collection manually.
     pub fn collectGarbage(self: *VM) void {
         const before = self.gc.bytes_allocated;
 
-        // Prepare for new GC cycle (clears weak tables list)
-        self.gc.beginCollection();
-
-        // === Mark phase: traverse from roots ===
-
-        // 1. Mark VM stack
-        // Calculate the maximum stack extent across all active frames.
-        // We need to mark up to the highest frame_max because:
-        // - vm.top may be lower than frame_max for variable results (nresults < 0)
-        // - Each frame's local variables must be protected during GC
-        var stack_extent = self.top;
-
-        // Check base_ci's extent
-        const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
-        if (base_frame_max > stack_extent) {
-            stack_extent = base_frame_max;
-        }
-
-        // Check each call frame's extent
-        for (self.callstack[0..self.callstack_size]) |frame| {
-            const frame_max = frame.base + frame.func.maxstacksize;
-            if (frame_max > stack_extent) {
-                stack_extent = frame_max;
-            }
-        }
-
-        self.gc.markStack(self.stack[0..stack_extent]);
-
-        // 2. Mark call frames
-        // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
-        // When inside a function call, base_ci still holds the main proto which
-        // contains nested function protos. These must be marked or their
-        // constants (strings, native closures) will be collected.
-        if (self.base_ci.closure) |closure| {
-            self.gc.mark(&closure.header);
-        } else {
-            // Main chunk: mark proto and all nested protos recursively
-            self.gc.markProtoObject(@constCast(self.base_ci.func));
-        }
-
-        // Mark function call frames on the callstack
-        for (self.callstack[0..self.callstack_size]) |frame| {
-            if (frame.closure) |closure| {
-                self.gc.mark(&closure.header);
-            } else {
-                self.gc.markProtoObject(@constCast(frame.func));
-            }
-        }
-
-        // 3. Mark global environment
-        self.gc.mark(&self.globals.header);
-
-        // 3b. Mark registry table
-        self.gc.mark(&self.registry.header);
-
-        // 4. Mark open upvalues (captured variables still pointing to stack)
-        var upval = self.open_upvalues;
-        while (upval) |uv| {
-            self.gc.mark(&uv.header);
-            upval = uv.next_open;
-        }
-
-        // 5. Mark lua_error_msg (stored error message for pcall)
-        if (self.lua_error_msg) |msg| {
-            self.gc.mark(&msg.header);
-        }
-
-        // 6. Mark debug hook function (if set)
-        if (self.hook_func) |hook| {
-            self.gc.mark(&hook.header);
-        }
-
-        // 7. Mark shared metatables (global state for primitive types)
-        if (self.gc.shared_mt.string) |mt| self.gc.mark(&mt.header);
-        if (self.gc.shared_mt.number) |mt| self.gc.mark(&mt.header);
-        if (self.gc.shared_mt.boolean) |mt| self.gc.mark(&mt.header);
-        if (self.gc.shared_mt.function) |mt| self.gc.mark(&mt.header);
-        if (self.gc.shared_mt.nil) |mt| self.gc.mark(&mt.header);
-
-        // === Sweep phase ===
         self.gc.collect();
 
         // Debug output (disabled in ReleaseFast)
-        // TODO: Consider making this configurable via runtime flag or environment variable
         if (@import("builtin").mode != .ReleaseFast) {
             std.log.info("GC: {} -> {} bytes, next at {}", .{ before, self.gc.bytes_allocated, self.gc.next_gc });
         }
@@ -245,6 +146,11 @@ pub const VM = struct {
         try builtin.invoke(id, self, func_reg, nargs, nresults);
     }
 
+    /// Create a RootProvider for this VM instance
+    pub fn rootProvider(self: *VM) RootProvider {
+        return RootProvider.init(VM, self, &vmRootProviderVTable);
+    }
+
     /// Reserve temporary stack slots for native functions.
     /// MUST be called before any GC-triggering operation (allocString, allocTable, etc.)
     /// when using stack slots beyond the function's arguments.
@@ -258,3 +164,89 @@ pub const VM = struct {
         if (self.top < needed) self.top = needed;
     }
 };
+
+/// VTable for VM's RootProvider implementation
+const vmRootProviderVTable = RootProvider.VTable{
+    .markRoots = vmMarkRoots,
+    .callValue = vmCallValue,
+};
+
+/// Mark all VM roots for GC
+/// Called by GC during mark phase via RootProvider interface
+fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
+    const self: *VM = @ptrCast(@alignCast(ctx));
+
+    // 1. Mark VM stack
+    // Calculate the maximum stack extent across all active frames.
+    // We need to mark up to the highest frame_max because:
+    // - vm.top may be lower than frame_max for variable results (nresults < 0)
+    // - Each frame's local variables must be protected during GC
+    var stack_extent = self.top;
+
+    // Check base_ci's extent
+    const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
+    if (base_frame_max > stack_extent) {
+        stack_extent = base_frame_max;
+    }
+
+    // Check each call frame's extent
+    for (self.callstack[0..self.callstack_size]) |frame| {
+        const frame_max = frame.base + frame.func.maxstacksize;
+        if (frame_max > stack_extent) {
+            stack_extent = frame_max;
+        }
+    }
+
+    gc.markStack(self.stack[0..stack_extent]);
+
+    // 2. Mark call frames
+    // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
+    // When inside a function call, base_ci still holds the main proto which
+    // contains nested function protos. These must be marked or their
+    // constants (strings, native closures) will be collected.
+    if (self.base_ci.closure) |closure| {
+        gc.mark(&closure.header);
+    } else {
+        // Main chunk: mark proto and all nested protos recursively
+        gc.markProtoObject(@constCast(self.base_ci.func));
+    }
+
+    // Mark function call frames on the callstack
+    for (self.callstack[0..self.callstack_size]) |frame| {
+        if (frame.closure) |closure| {
+            gc.mark(&closure.header);
+        } else {
+            gc.markProtoObject(@constCast(frame.func));
+        }
+    }
+
+    // 3. Mark global environment
+    gc.mark(&self.globals.header);
+
+    // 3b. Mark registry table
+    gc.mark(&self.registry.header);
+
+    // 4. Mark open upvalues (captured variables still pointing to stack)
+    var upval = self.open_upvalues;
+    while (upval) |uv| {
+        gc.mark(&uv.header);
+        upval = uv.next_open;
+    }
+
+    // 5. Mark lua_error_msg (stored error message for pcall)
+    if (self.lua_error_msg) |msg| {
+        gc.mark(&msg.header);
+    }
+
+    // 6. Mark debug hook function (if set)
+    if (self.hook_func) |hook| {
+        gc.mark(&hook.header);
+    }
+}
+
+/// Call a Lua value (used for __gc finalizers)
+/// Called by GC via RootProvider interface
+fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
+    const self: *VM = @ptrCast(@alignCast(ctx));
+    return call.callValue(self, func.*, args);
+}

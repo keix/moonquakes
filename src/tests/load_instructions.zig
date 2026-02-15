@@ -30,8 +30,8 @@ test "LOADI: load signed immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -46,8 +46,8 @@ test "LOADI: load negative signed immediate" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -62,8 +62,8 @@ test "LOADF: load signed immediate as float" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -78,8 +78,8 @@ test "LOADFALSE: load false" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -94,8 +94,8 @@ test "LOADTRUE: load true" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -111,8 +111,8 @@ test "LFALSESKIP: load false and skip" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be false)
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -132,8 +132,8 @@ test "LOADNIL: single register" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
@@ -157,8 +157,8 @@ test "LOADNIL: multiple registers" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -181,8 +181,8 @@ test "LOADNIL: range in middle of stack" {
         Instruction.initABC(.RETURN, 0, 6, 0), // return R0, R1, R2, R3, R4
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);

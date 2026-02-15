@@ -29,7 +29,7 @@ pub const REPL = struct {
 
         const vm = try allocator.create(VM);
         errdefer allocator.destroy(vm);
-        vm.* = try VM.init(gc);
+        try vm.init(gc);
 
         return Self{
             .allocator = allocator,

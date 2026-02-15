@@ -28,8 +28,8 @@ fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, s
 // =============================================================================
 
 test "local: single variable" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -47,8 +47,8 @@ test "local: single variable" {
 }
 
 test "local: two variables return first" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -67,8 +67,8 @@ test "local: two variables return first" {
 }
 
 test "local: two variables return second" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -87,8 +87,8 @@ test "local: two variables return second" {
 }
 
 test "local: expression in initializer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -107,8 +107,8 @@ test "local: expression in initializer" {
 }
 
 test "local: computed value" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -132,8 +132,8 @@ test "local: computed value" {
 // =============================================================================
 
 test "local: with parameter" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -151,8 +151,8 @@ test "local: with parameter" {
 }
 
 test "local: multiple params and locals" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -176,8 +176,8 @@ test "local: multiple params and locals" {
 // =============================================================================
 
 test "local: registers not reused incorrectly" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -199,8 +199,8 @@ test "local: registers not reused incorrectly" {
 }
 
 test "local: complex expression does not overwrite locals" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

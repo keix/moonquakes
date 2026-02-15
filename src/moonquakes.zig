@@ -58,7 +58,8 @@ pub const Moonquakes = struct {
         defer gc.deinit();
         try gc.initMetamethodKeys();
 
-        var vm = try VM.init(&gc);
+        var vm: VM = undefined;
+        try vm.init(&gc);
         defer vm.deinit();
 
         return Mnemonics.execute(&vm, proto) catch |err| {
@@ -89,7 +90,8 @@ pub const Moonquakes = struct {
         defer gc.deinit();
         try gc.initMetamethodKeys();
 
-        var vm = try VM.init(&gc);
+        var vm: VM = undefined;
+        try vm.init(&gc);
         defer vm.deinit();
 
         const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);
@@ -171,7 +173,8 @@ pub const Moonquakes = struct {
         defer gc.deinit();
         try gc.initMetamethodKeys();
 
-        var vm = try VM.init(&gc);
+        var vm: VM = undefined;
+        try vm.init(&gc);
         defer vm.deinit();
 
         const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);

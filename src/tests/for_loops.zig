@@ -17,8 +17,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "FORPREP minimal test" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -40,8 +40,8 @@ test "FORPREP minimal test" {
 }
 
 test "for loop: simple integer loop 1 to 3" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -91,8 +91,8 @@ test "for loop: simple integer loop 1 to 3" {
 // Added: Critical edge case tests for potential bugs
 
 test "for loop: negative step (countdown)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -127,8 +127,8 @@ test "for loop: negative step (countdown)" {
 }
 
 test "for loop: zero iterations (start > limit with positive step)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -170,8 +170,8 @@ test "for loop: zero iterations (start > limit with positive step)" {
 }
 
 test "for loop: float loop variables with integer path detection" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -217,8 +217,8 @@ test "for loop: float loop variables with integer path detection" {
 }
 
 test "for loop: step of zero should error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -246,8 +246,8 @@ test "for loop: step of zero should error" {
 }
 
 test "for loop: overflow behavior" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const max = std.math.maxInt(i64);
@@ -277,8 +277,8 @@ test "for loop: overflow behavior" {
 }
 
 test "for loop: side effects on unused registers" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{

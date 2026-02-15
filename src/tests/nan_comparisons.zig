@@ -34,8 +34,8 @@ test "LT with NaN: NaN < 5.0 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -64,8 +64,8 @@ test "LT with NaN: 5.0 < NaN = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -94,8 +94,8 @@ test "LE with NaN: NaN <= 5.0 = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -124,8 +124,8 @@ test "LE with NaN: NaN <= NaN = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -154,8 +154,8 @@ test "EQ with NaN: NaN == NaN = false" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -179,8 +179,8 @@ test "Arithmetic with NaN propagation" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);

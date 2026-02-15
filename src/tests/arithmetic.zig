@@ -37,8 +37,8 @@ test "arithmetic: 10 - 3 * 2 = 4" {
         Instruction.initABC(.RETURN, 4, 2, 0), // return R4
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
@@ -78,8 +78,8 @@ test "arithmetic: 10 / 3 with side effect verification" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 6);
@@ -126,8 +126,8 @@ test "arithmetic: 10 // 3 = 3" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -164,8 +164,8 @@ test "arithmetic: 10 % 3 = 1" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -202,8 +202,8 @@ test "arithmetic: 2 ^ 3 = 8 (power operation)" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -235,8 +235,8 @@ test "arithmetic: 5 ^ 2 with integer inputs" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);

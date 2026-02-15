@@ -16,8 +16,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "comparison: 5 == 5 = true" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -61,8 +61,8 @@ test "comparison: 5 == 5 = true" {
 }
 
 test "comparison: 5 == 3 = false" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -90,8 +90,8 @@ test "comparison: 5 == 3 = false" {
 }
 
 test "comparison: 3 < 5 = true" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -119,8 +119,8 @@ test "comparison: 3 < 5 = true" {
 }
 
 test "comparison: 5 < 3 = false" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -147,8 +147,8 @@ test "comparison: 5 < 3 = false" {
 }
 
 test "comparison: 3 <= 5 = true" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -175,8 +175,8 @@ test "comparison: 3 <= 5 = true" {
 }
 
 test "comparison: 5 <= 5 = true" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -203,8 +203,8 @@ test "comparison: 5 <= 5 = true" {
 }
 
 test "comparison: mixed types 3 < 3.5 = true" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -231,8 +231,8 @@ test "comparison: mixed types 3 < 3.5 = true" {
 }
 
 test "comparison: different types nil == false = false" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -259,8 +259,8 @@ test "comparison: different types nil == false = false" {
 }
 
 test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -288,8 +288,8 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
 }
 
 test "EQ instruction: integer != non-integer float (42 != 42.5)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -317,8 +317,8 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
 }
 
 test "EQ instruction: negative integer == float (-100 == -100.0)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -347,8 +347,8 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
 
 // Added: Concise test using ComparisonTest helper
 test "comparison: EQ with skip behavior verification" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test 1: Equal values with A=0 (should skip)
@@ -357,14 +357,13 @@ test "comparison: EQ with skip behavior verification" {
 
     // Test 2: Different values with A=0 (should not skip)
     ctx.deinit();
-    ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    try ctx.init();
     try test_utils.ComparisonTest.expectNoSkip(&ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
 }
 
 test "comparison: LT with side effect verification" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Verify that comparison instruction itself doesn't modify values

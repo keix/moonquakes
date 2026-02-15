@@ -10,8 +10,8 @@ const test_utils = @import("test_utils.zig");
 
 test "closure constant loading" {
     // First, test if we can load a closure constant
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const func_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &[_]Instruction{}, 0, false, 1);
@@ -45,8 +45,8 @@ test "simple function call without arguments" {
         .{ .integer = 42 },
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const func_proto = try test_utils.createTestProto(&ctx.vm, &func_constants, &func_code, 0, false, 1);
@@ -82,8 +82,8 @@ test "function call with arguments" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R[2]
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const add_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &add_code, 2, false, 3);

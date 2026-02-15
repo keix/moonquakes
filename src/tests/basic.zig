@@ -32,8 +32,8 @@ test "basic: 1 + 2 = 3" {
         Instruction.initABC(.RETURN, 2, 2, 0),
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);

@@ -21,8 +21,8 @@ test "manual multi-proto execution - simple call and return" {
     //     return z
     // end
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Proto for add function
@@ -71,8 +71,8 @@ test "manual multi-proto execution - simple call and return" {
 }
 
 test "VM call stack push and pop" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create test protos via GC
@@ -130,8 +130,8 @@ test "VM call stack push and pop" {
 }
 
 test "VM call stack overflow" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const dummy_code = [_]Instruction{
@@ -165,8 +165,8 @@ test "VM call stack overflow" {
 test "nested function call with register tracking" {
     // Test a deeper call: main -> add -> multiply
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // multiply(a, b) returns a * b

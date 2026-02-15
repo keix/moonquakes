@@ -17,8 +17,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "ADDK: integer + integer constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -39,8 +39,8 @@ test "ADDK: integer + integer constant" {
 }
 
 test "ADDK: number + number constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -61,8 +61,8 @@ test "ADDK: number + number constant" {
 }
 
 test "SUBK: integer - integer constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -83,8 +83,8 @@ test "SUBK: integer - integer constant" {
 }
 
 test "MULK: integer * integer constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -105,8 +105,8 @@ test "MULK: integer * integer constant" {
 }
 
 test "DIVK: number / number constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -127,8 +127,8 @@ test "DIVK: number / number constant" {
 }
 
 test "IDIVK: integer // constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -149,8 +149,8 @@ test "IDIVK: integer // constant" {
 }
 
 test "MODK: integer % constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -171,8 +171,8 @@ test "MODK: integer % constant" {
 }
 
 test "Constant arithmetic: mixed types" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -193,8 +193,8 @@ test "Constant arithmetic: mixed types" {
 }
 
 test "Constant arithmetic: chain operations" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -217,8 +217,8 @@ test "Constant arithmetic: chain operations" {
 }
 
 test "MODK: Lua-style negative modulo" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -239,8 +239,8 @@ test "MODK: Lua-style negative modulo" {
 }
 
 test "IDIVK: Lua-style floor division with negative" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -261,8 +261,8 @@ test "IDIVK: Lua-style floor division with negative" {
 }
 
 test "POWK: power with constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -283,8 +283,8 @@ test "POWK: power with constant" {
 }
 
 test "POWK: integer base with constant exponent" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{

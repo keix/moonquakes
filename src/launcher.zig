@@ -73,7 +73,8 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     defer gc.deinit();
     try gc.initMetamethodKeys();
 
-    var vm = try VM.init(&gc);
+    var vm: VM = undefined;
+    try vm.init(&gc);
     defer vm.deinit();
 
     // Phase 3: Inject execution context (arg table, etc.)

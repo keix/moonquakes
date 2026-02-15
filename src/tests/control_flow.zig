@@ -16,8 +16,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "control flow: JMP forward" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -39,8 +39,8 @@ test "control flow: JMP forward" {
 }
 
 test "control flow: JMP 0 goes to next instruction" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -66,8 +66,8 @@ test "control flow: JMP 0 goes to next instruction" {
 }
 
 test "control flow: JMP out of bounds should error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -88,8 +88,8 @@ test "control flow: JMP out of bounds should error" {
 }
 
 test "control flow: JMP backward (real loop)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -118,8 +118,8 @@ test "control flow: JMP backward (real loop)" {
 }
 
 test "control flow: TEST with true value" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -143,8 +143,8 @@ test "control flow: TEST with true value" {
 }
 
 test "control flow: TEST with false value" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -168,8 +168,8 @@ test "control flow: TEST with false value" {
 }
 
 test "control flow: TEST with k=true (inverted)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -193,8 +193,8 @@ test "control flow: TEST with k=true (inverted)" {
 }
 
 test "control flow: TESTSET with true value" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -218,8 +218,8 @@ test "control flow: TESTSET with true value" {
 }
 
 test "control flow: if-then-else simulation" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{

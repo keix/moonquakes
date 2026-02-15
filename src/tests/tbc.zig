@@ -11,8 +11,8 @@ const object = @import("../runtime/gc/object.zig");
 const test_utils = @import("test_utils.zig");
 
 test "TBC with nil - no error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     ctx.vm.stack[0] = .nil;
@@ -31,8 +31,8 @@ test "TBC with nil - no error" {
 }
 
 test "TBC with false - no error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     ctx.vm.stack[0] = .{ .boolean = false };
@@ -51,8 +51,8 @@ test "TBC with false - no error" {
 }
 
 test "TBC with value without __close - error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Integer doesn't have __close metamethod
@@ -70,8 +70,8 @@ test "TBC with value without __close - error" {
 }
 
 test "TBC with table without __close - error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Table without metatable doesn't have __close
@@ -90,8 +90,8 @@ test "TBC with table without __close - error" {
 }
 
 test "CLOSE triggers TBC __close" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create a table with __close metamethod

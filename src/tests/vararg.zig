@@ -17,8 +17,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "VARARGPREP continues execution" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // VARARGPREP A: prepare vararg function with A fixed parameters
@@ -37,8 +37,8 @@ test "VARARGPREP continues execution" {
 }
 
 test "VARARG loads first vararg with C=2" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // VARARG A C: load C-1 varargs into R[A]...
@@ -84,8 +84,8 @@ test "VARARG loads first vararg with C=2" {
 }
 
 test "VARARG with no varargs returns nil" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // When function is called with only fixed params, varargs should be empty
@@ -120,8 +120,8 @@ test "VARARG with no varargs returns nil" {
 }
 
 test "vararg function with no fixed params" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // function(...) return ... end

@@ -16,8 +16,8 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "concat: \"hello\" .. \"world\" = \"helloworld\"" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate strings through GC
@@ -55,8 +55,8 @@ test "concat: \"hello\" .. \"world\" = \"helloworld\"" {
 }
 
 test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate strings through GC
@@ -104,8 +104,8 @@ test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
 }
 
 test "concat: \"number: \" .. 42 = \"number: 42\"" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate strings through GC
@@ -142,8 +142,8 @@ test "concat: \"number: \" .. 42 = \"number: 42\"" {
 }
 
 test "concat: 1 .. 2 .. 3 = \"123\"" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate expected string through GC
@@ -191,8 +191,8 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
 }
 
 test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate strings through GC
@@ -230,8 +230,8 @@ test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
 }
 
 test "concat: empty concatenation (single string)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC

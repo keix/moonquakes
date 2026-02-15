@@ -8,8 +8,8 @@ const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 
 test "LOADKX with EXTRAARG loads large constant index" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create constants array with value at large index
@@ -37,8 +37,8 @@ test "LOADKX with EXTRAARG loads large constant index" {
 }
 
 test "GETI with nil table returns error" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{.nil};
@@ -58,8 +58,8 @@ test "GETI with nil table returns error" {
 }
 
 test "GETFIELD with nil table returns nil (shared metatable support)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC
@@ -86,8 +86,8 @@ test "GETFIELD with nil table returns nil (shared metatable support)" {
 }
 
 test "Multiple LOADKX operations" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC

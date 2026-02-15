@@ -19,8 +19,8 @@ fn expectError(result: anyerror!ReturnValue, expected_error: anyerror) !void {
 }
 
 test "DIV: division by zero (integer)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -42,8 +42,8 @@ test "DIV: division by zero (integer)" {
 }
 
 test "DIV: division by zero (float)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -65,8 +65,8 @@ test "DIV: division by zero (float)" {
 }
 
 test "IDIV: integer division by zero" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -88,8 +88,8 @@ test "IDIV: integer division by zero" {
 }
 
 test "MOD: modulo by zero" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -111,8 +111,8 @@ test "MOD: modulo by zero" {
 }
 
 test "DIVK: division by zero constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -133,8 +133,8 @@ test "DIVK: division by zero constant" {
 }
 
 test "IDIVK: integer division by zero constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -155,8 +155,8 @@ test "IDIVK: integer division by zero constant" {
 }
 
 test "MODK: modulo by zero constant" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -177,8 +177,8 @@ test "MODK: modulo by zero constant" {
 }
 
 test "Division operations with non-zero divisors should succeed" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
