@@ -67,7 +67,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Check for __name metamethod on tables
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.mm_keys.name)) |name_val| {
+            if (mt.get(vm.mm_keys.get(.name))) |name_val| {
                 if (name_val.asString()) |name_str| {
                     vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
                     return;
@@ -272,7 +272,7 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     // Check for __pairs metamethod
     if (table_arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.mm_keys.pairs)) |pairs_mm| {
+            if (mt.get(vm.mm_keys.get(.pairs))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
                 const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
@@ -385,7 +385,7 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
             // Check for __metatable field (protects metatable from modification)
-            if (mt.get(vm.mm_keys.metatable)) |protected| {
+            if (mt.get(vm.mm_keys.get(.metatable))) |protected| {
                 result = protected;
             } else {
                 result = TValue.fromTable(mt);
@@ -414,7 +414,7 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
-        if (current_mt.get(vm.mm_keys.metatable) != null) {
+        if (current_mt.get(vm.mm_keys.get(.metatable)) != null) {
             return error.ProtectedMetatable;
         }
     }

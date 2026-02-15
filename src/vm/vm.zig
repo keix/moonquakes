@@ -11,74 +11,14 @@ const UpvalueObject = object.UpvalueObject;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
+const metamethod = @import("metamethod.zig");
 
 // Execution ABI: CallInfo (frame)
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 
-/// Pre-allocated metamethod key strings for fast lookup
-/// These are allocated once at VM startup and never collected
-pub const MetamethodKeys = struct {
-    add: *StringObject,
-    sub: *StringObject,
-    mul: *StringObject,
-    div: *StringObject,
-    mod: *StringObject,
-    pow: *StringObject,
-    unm: *StringObject,
-    idiv: *StringObject,
-    band: *StringObject,
-    bor: *StringObject,
-    bxor: *StringObject,
-    bnot: *StringObject,
-    shl: *StringObject,
-    shr: *StringObject,
-    eq: *StringObject,
-    lt: *StringObject,
-    le: *StringObject,
-    concat: *StringObject,
-    len: *StringObject,
-    index: *StringObject,
-    newindex: *StringObject,
-    call: *StringObject,
-    metatable: *StringObject,
-    pairs: *StringObject,
-    name: *StringObject,
-    gc: *StringObject,
-    mode: *StringObject,
-
-    pub fn init(gc: *GC) !MetamethodKeys {
-        return .{
-            .add = try gc.allocString("__add"),
-            .sub = try gc.allocString("__sub"),
-            .mul = try gc.allocString("__mul"),
-            .div = try gc.allocString("__div"),
-            .mod = try gc.allocString("__mod"),
-            .pow = try gc.allocString("__pow"),
-            .unm = try gc.allocString("__unm"),
-            .idiv = try gc.allocString("__idiv"),
-            .band = try gc.allocString("__band"),
-            .bor = try gc.allocString("__bor"),
-            .bxor = try gc.allocString("__bxor"),
-            .bnot = try gc.allocString("__bnot"),
-            .shl = try gc.allocString("__shl"),
-            .shr = try gc.allocString("__shr"),
-            .eq = try gc.allocString("__eq"),
-            .lt = try gc.allocString("__lt"),
-            .le = try gc.allocString("__le"),
-            .concat = try gc.allocString("__concat"),
-            .len = try gc.allocString("__len"),
-            .index = try gc.allocString("__index"),
-            .newindex = try gc.allocString("__newindex"),
-            .call = try gc.allocString("__call"),
-            .metatable = try gc.allocString("__metatable"),
-            .pairs = try gc.allocString("__pairs"),
-            .name = try gc.allocString("__name"),
-            .gc = try gc.allocString("__gc"),
-            .mode = try gc.allocString("__mode"),
-        };
-    }
-};
+// Re-export MetamethodKeys from metamethod.zig
+pub const MetamethodKeys = metamethod.MetamethodKeys;
 
 /// VM represents an execution thread (Lua "thread"/coroutine state).
 /// The name VM is kept intentionally as a clean-room abstraction.

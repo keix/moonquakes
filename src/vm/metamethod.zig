@@ -78,6 +78,28 @@ pub const MetaEvent = enum {
     }
 };
 
+/// Pre-allocated metamethod key strings
+/// These are interned once at VM initialization and never allocated again
+/// This is critical for performance - metamethod lookup must not allocate
+pub const MetamethodKeys = struct {
+    strings: [@typeInfo(MetaEvent).@"enum".fields.len]*StringObject,
+
+    pub fn init(gc: *GC) !MetamethodKeys {
+        var keys: MetamethodKeys = undefined;
+        inline for (@typeInfo(MetaEvent).@"enum".fields, 0..) |field, i| {
+            const event: MetaEvent = @enumFromInt(field.value);
+            keys.strings[i] = try gc.allocString(event.key());
+        }
+        return keys;
+    }
+
+    /// Get the pre-allocated string for a metamethod event
+    /// This is O(1) and allocation-free
+    pub fn get(self: *const MetamethodKeys, event: MetaEvent) *StringObject {
+        return self.strings[@intFromEnum(event)];
+    }
+};
+
 /// Get the metatable for a value
 /// Returns null if the value has no metatable
 pub fn getMetatable(value: TValue) ?*TableObject {
@@ -90,11 +112,12 @@ pub fn getMetatable(value: TValue) ?*TableObject {
 
 /// Look up a metamethod in a value's metatable
 /// Returns the metamethod value if found, null otherwise
-pub fn getMetamethod(value: TValue, event: MetaEvent, gc: *GC) !?TValue {
+/// NOTE: This function does NOT allocate - it uses pre-interned keys
+pub fn getMetamethod(value: TValue, event: MetaEvent, keys: *const MetamethodKeys) ?TValue {
     const mt = getMetatable(value) orelse return null;
 
-    // Get the metamethod key string
-    const key_str = try gc.allocString(event.key());
+    // Use pre-allocated key string - no allocation!
+    const key_str = keys.get(event);
 
     // Look up the metamethod
     return mt.get(key_str);
@@ -102,11 +125,12 @@ pub fn getMetamethod(value: TValue, event: MetaEvent, gc: *GC) !?TValue {
 
 /// Try to get a metamethod from either operand (for binary operations)
 /// Lua checks the first operand first, then the second
-pub fn getBinMetamethod(a: TValue, b: TValue, event: MetaEvent, gc: *GC) !?TValue {
+/// NOTE: This function does NOT allocate
+pub fn getBinMetamethod(a: TValue, b: TValue, event: MetaEvent, keys: *const MetamethodKeys) ?TValue {
     // Try first operand
-    if (try getMetamethod(a, event, gc)) |mm| {
+    if (getMetamethod(a, event, keys)) |mm| {
         return mm;
     }
     // Try second operand
-    return try getMetamethod(b, event, gc);
+    return getMetamethod(b, event, keys);
 }
