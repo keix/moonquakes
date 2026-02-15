@@ -29,7 +29,7 @@ fn createTableWithAddMM(vm: *VM, value: i64) !*object.TableObject {
 
     // Store value in table
     const value_key = try vm.gc.allocString("value");
-    try table.set(value_key, .{ .integer = value }, &vm.gc);
+    try table.set(TValue.fromString(value_key), .{ .integer = value }, &vm.gc);
 
     // Set metatable (simplified - full test would need closure)
     table.metatable = mt;

@@ -68,7 +68,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Check for __name metamethod on tables
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.gc.mm_keys.get(.name))) |name_val| {
+            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.name)))) |name_val| {
                 if (name_val.asString()) |name_str| {
                     vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
                     return;
@@ -236,19 +236,17 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         const value = entry.value_ptr.*;
 
         if (found_current) {
-            // Return this key-value pair
-            vm.stack[vm.base + func_reg] = TValue.fromString(@constCast(key));
+            // Return this key-value pair (key is already TValue)
+            vm.stack[vm.base + func_reg] = key;
             if (nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = value;
             }
             return;
         }
 
-        // Check if this is the current key
-        if (index_arg.asString()) |index_str| {
-            if (key == index_str) {
-                found_current = true;
-            }
+        // Check if this is the current key (using TValue equality)
+        if (key.eql(index_arg)) {
+            found_current = true;
         }
     }
 
@@ -273,7 +271,7 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     // Check for __pairs metamethod
     if (table_arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.gc.mm_keys.get(.pairs))) |pairs_mm| {
+            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.pairs)))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
                 const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
@@ -352,13 +350,8 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     const next_index = current_index + 1;
 
-    // Convert integer index to string key (tables store integer keys as strings)
-    var key_buffer: [32]u8 = undefined;
-    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{next_index}) catch {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    const key = try vm.gc.allocString(key_slice);
+    // Use integer key directly (Lua 5.4 supports any TValue as key)
+    const key = TValue{ .integer = next_index };
     const value = table.get(key);
 
     if (value == null or value.?.isNil()) {
@@ -388,7 +381,7 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // Use metamethod.getMetatable which handles both individual and shared metatables
     if (metamethod.getMetatable(arg, &vm.gc.shared_mt)) |mt| {
         // Check for __metatable field (protects metatable from modification/inspection)
-        if (mt.get(vm.gc.mm_keys.get(.metatable))) |protected| {
+        if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.metatable)))) |protected| {
             result = protected;
         } else {
             result = TValue.fromTable(mt);
@@ -415,7 +408,7 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
-        if (current_mt.get(vm.gc.mm_keys.get(.metatable)) != null) {
+        if (current_mt.get(TValue.fromString(vm.gc.mm_keys.get(.metatable))) != null) {
             return error.ProtectedMetatable;
         }
     }
@@ -453,12 +446,8 @@ pub fn nativeRawget(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     };
 
     // Direct table access without metamethods
-    // Currently only supports string keys
-    const key = key_arg.asString() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    vm.stack[vm.base + func_reg] = table.get(key) orelse .nil;
+    // Supports any TValue as key (Lua 5.4 semantics)
+    vm.stack[vm.base + func_reg] = table.get(key_arg) orelse .nil;
 }
 
 /// rawset(table, index, value) - Sets the real value of table[index] without metamethods
@@ -478,12 +467,8 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     };
 
     // Direct table set without metamethods
-    // Currently only supports string keys
-    const key = key_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    try table.set(key, value_arg);
+    // Supports any TValue as key (Lua 5.4 semantics)
+    try table.set(key_arg, value_arg);
 
     // Return the table
     if (nresults > 0) {
@@ -511,10 +496,8 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Table length: count sequential integer keys from 1
     if (arg.asTable()) |table| {
         var len: i64 = 0;
-        var key_buffer: [32]u8 = undefined;
         while (true) {
-            const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
-            const key = vm.gc.allocString(key_slice) catch break;
+            const key = TValue{ .integer = len + 1 };
             const val = table.get(key) orelse break;
             if (val == .nil) break;
             len += 1;
@@ -665,6 +648,8 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 /// chunk: string or function returning strings
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    const serializer = @import("../compiler/serializer.zig");
+
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
@@ -688,6 +673,26 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
         return;
     };
+
+    // Check if this is binary bytecode
+    if (serializer.isBytecode(source)) {
+        // Load from bytecode
+        vm.gc.inhibitGC();
+        defer vm.gc.allowGC();
+
+        const proto = serializer.loadProto(source, vm.gc, vm.gc.allocator) catch {
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("invalid bytecode");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+
+        const closure = try vm.gc.allocClosure(proto);
+        vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+        return;
+    }
 
     // Compile the source
     const compile_result = pipeline.compile(vm.gc.allocator, source, .{});

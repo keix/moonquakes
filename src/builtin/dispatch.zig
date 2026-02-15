@@ -25,7 +25,7 @@ const modules = @import("modules.zig");
 /// This ensures the key is properly managed by GC and can be marked during collection
 fn setStringKey(tbl: *TableObject, gc: *GC, name: []const u8, value: TValue) !void {
     const key_str = try gc.allocString(name);
-    try tbl.set(key_str, value);
+    try tbl.set(TValue.fromString(key_str), value);
 }
 
 /// Register a native function in a table using NativeClosureObject

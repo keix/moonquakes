@@ -8,25 +8,16 @@ const call = @import("../vm/call.zig");
 /// Corresponds to Lua manual chapter "Table Manipulation"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.6
 /// Helper: Get the length of a table (count sequential integer keys from 1)
-fn getTableLength(table: *TableObject, vm: anytype) i64 {
+fn getTableLength(table: *TableObject) i64 {
     var len: i64 = 0;
-    var key_buffer: [32]u8 = undefined;
     while (true) {
-        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
-        const key = vm.gc.allocString(key_slice) catch break;
+        const key = TValue{ .integer = len + 1 };
         const val = table.get(key) orelse break;
         // Also check if value is nil (key exists but value is nil)
         if (val == .nil) break;
         len += 1;
     }
     return len;
-}
-
-/// Helper: Get string key for an integer index
-fn getIntKey(vm: anytype, index: i64) !*object.StringObject {
-    var key_buffer: [32]u8 = undefined;
-    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{index}) catch return error.FormatError;
-    return vm.gc.allocString(key_slice);
 }
 
 /// table.insert(list, [pos,] value) - Inserts element into table
@@ -39,12 +30,12 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
 
-    const len = getTableLength(table, vm);
+    const len = getTableLength(table);
 
     if (nargs == 2) {
         // table.insert(list, value): insert at end
         const value = vm.stack[vm.base + func_reg + 2];
-        const key = try getIntKey(vm, len + 1);
+        const key = TValue{ .integer = len + 1 };
         try table.set(key, value);
     } else {
         // table.insert(list, pos, value): insert at pos, shift elements
@@ -57,14 +48,14 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         // Shift elements from len down to pos
         var i: i64 = len;
         while (i >= pos) : (i -= 1) {
-            const src_key = try getIntKey(vm, i);
-            const dst_key = try getIntKey(vm, i + 1);
+            const src_key = TValue{ .integer = i };
+            const dst_key = TValue{ .integer = i + 1 };
             const val = table.get(src_key) orelse .nil;
             try table.set(dst_key, val);
         }
 
         // Insert the new value at pos
-        const key = try getIntKey(vm, pos);
+        const key = TValue{ .integer = pos };
         try table.set(key, value);
     }
 
@@ -80,7 +71,7 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
 
-    const len = getTableLength(table, vm);
+    const len = getTableLength(table);
 
     // Determine position (default is last element)
     const pos: i64 = if (nargs >= 2) blk: {
@@ -97,20 +88,20 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // Get the element to remove (to return it)
-    const remove_key = try getIntKey(vm, pos);
+    const remove_key = TValue{ .integer = pos };
     const removed_value = table.get(remove_key) orelse .nil;
 
     // Shift elements down from pos+1 to len
     var i: i64 = pos;
     while (i < len) : (i += 1) {
-        const src_key = try getIntKey(vm, i + 1);
-        const dst_key = try getIntKey(vm, i);
+        const src_key = TValue{ .integer = i + 1 };
+        const dst_key = TValue{ .integer = i };
         const val = table.get(src_key) orelse .nil;
         try table.set(dst_key, val);
     }
 
     // Remove the last element (now duplicated)
-    const last_key = try getIntKey(vm, len);
+    const last_key = TValue{ .integer = len };
     try table.set(last_key, .nil);
 
     // Return the removed value
@@ -145,7 +136,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         break :blk null;
     } else null;
 
-    const len = getTableLength(table, vm);
+    const len = getTableLength(table);
     if (len <= 1) return; // Already sorted
 
     // Collect all elements into a temporary array
@@ -155,7 +146,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     var i: i64 = 1;
     while (i <= len) : (i += 1) {
-        const key = try getIntKey(vm, i);
+        const key = TValue{ .integer = i };
         const val = table.get(key) orelse .nil;
         elements.appendAssumeCapacity(val);
     }
@@ -186,7 +177,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     // Write sorted elements back to table
     i = 1;
     for (elements.items) |val| {
-        const key = try getIntKey(vm, i);
+        const key = TValue{ .integer = i };
         try table.set(key, val);
         i += 1;
     }
@@ -252,7 +243,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
 
-    const len = getTableLength(table, vm);
+    const len = getTableLength(table);
 
     // Get separator (default empty string)
     const sep: []const u8 = if (nargs >= 2) blk: {
@@ -303,10 +294,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
             };
         }
 
-        const key = getIntKey(vm, i) catch {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
-        };
+        const key = TValue{ .integer = i };
         const val = table.get(key) orelse .nil;
 
         // Convert value to string
@@ -391,8 +379,8 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         // Copy backwards to avoid overwriting source before reading
         var i: i64 = count - 1;
         while (i >= 0) : (i -= 1) {
-            const src_key = try getIntKey(vm, f + i);
-            const dst_key = try getIntKey(vm, t + i);
+            const src_key = TValue{ .integer = f + i };
+            const dst_key = TValue{ .integer = t + i };
             const val = src_table.get(src_key) orelse .nil;
             try dst_table.set(dst_key, val);
         }
@@ -400,8 +388,8 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         // Copy forwards
         var i: i64 = 0;
         while (i < count) : (i += 1) {
-            const src_key = try getIntKey(vm, f + i);
-            const dst_key = try getIntKey(vm, t + i);
+            const src_key = TValue{ .integer = f + i };
+            const dst_key = TValue{ .integer = t + i };
             const val = src_table.get(src_key) orelse .nil;
             try dst_table.set(dst_key, val);
         }
@@ -425,13 +413,13 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         const val = vm.stack[vm.base + func_reg + 1 + i];
-        const key = try getIntKey(vm, @as(i64, i) + 1);
+        const key = TValue{ .integer = @as(i64, i) + 1 };
         try table.set(key, val);
     }
 
     // Set the "n" field to the count of arguments
     const n_key = try vm.gc.allocString("n");
-    try table.set(n_key, .{ .integer = @intCast(nargs) });
+    try table.set(TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
 
     // Return the table
     vm.stack[vm.base + func_reg] = TValue.fromTable(table);
@@ -446,7 +434,7 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
 
-    const len = getTableLength(table, vm);
+    const len = getTableLength(table);
 
     // Get start index (default 1)
     const start: i64 = if (nargs >= 2) blk: {
@@ -469,10 +457,7 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     // Store values in result registers
     var i: u32 = 0;
     while (i < actual_count) : (i += 1) {
-        const key = getIntKey(vm, start + @as(i64, i)) catch {
-            vm.stack[vm.base + func_reg + i] = .nil;
-            continue;
-        };
+        const key = TValue{ .integer = start + @as(i64, i) };
         const val = table.get(key) orelse .nil;
         vm.stack[vm.base + func_reg + i] = val;
     }

@@ -848,9 +848,9 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const key_s = try vm.gc.allocString("s");
     const key_p = try vm.gc.allocString("p");
     const key_pos = try vm.gc.allocString("pos");
-    try state_table.set(key_s, str_arg);
-    try state_table.set(key_p, pat_arg);
-    try state_table.set(key_pos, .{ .integer = 0 });
+    try state_table.set(TValue.fromString(key_s), str_arg);
+    try state_table.set(TValue.fromString(key_p), pat_arg);
+    try state_table.set(TValue.fromString(key_pos), .{ .integer = 0 });
 
     // Return iterator function
     const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .string_gmatch_iterator });
@@ -888,7 +888,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get string from state table
     const key_s = try vm.gc.allocString("s");
-    const str_val = state_table.get(key_s) orelse {
+    const str_val = state_table.get(TValue.fromString(key_s)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -900,7 +900,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get pattern from state table
     const key_p = try vm.gc.allocString("p");
-    const pat_val = state_table.get(key_p) orelse {
+    const pat_val = state_table.get(TValue.fromString(key_p)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -912,7 +912,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get current position from state table
     const key_pos = try vm.gc.allocString("pos");
-    const pos_val = state_table.get(key_pos) orelse {
+    const pos_val = state_table.get(TValue.fromString(key_pos)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -948,7 +948,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try state_table.set(key_pos, .{ .integer = @as(i64, @intCast(next_pos)) });
+            try state_table.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {
@@ -1105,7 +1105,7 @@ fn getGsubReplacement(
             str[matcher.match_start..matcher.match_end];
 
         const key = try vm.gc.allocString(key_str);
-        if (repl_table.get(key)) |val| {
+        if (repl_table.get(TValue.fromString(key))) |val| {
             if (val.asString()) |s| {
                 return s.asSlice();
             }
@@ -1515,13 +1515,40 @@ fn padAndAppend(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: [
 
 /// string.dump(function [, strip]) - Returns binary representation of function
 pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.dump
-    // Returns binary chunk (bytecode) that can be loaded back with load()
-    // Requires access to bytecode generation/serialization
+    const serializer = @import("../compiler/serializer.zig");
+
+    if (nresults == 0) return;
+
+    if (nargs < 1) return error.BadArgument;
+
+    // First argument must be a function (closure)
+    const func_arg = vm.stack[vm.base + func_reg + 1];
+    const closure = func_arg.asClosure() orelse {
+        // Native functions cannot be dumped
+        if (func_arg.asNativeClosure() != null) {
+            return error.BadArgument; // "unable to dump given function"
+        }
+        return error.BadArgument;
+    };
+
+    // Check for strip option (second argument)
+    const strip = if (nargs >= 2) blk: {
+        const strip_arg = vm.stack[vm.base + func_reg + 2];
+        break :blk strip_arg.isBoolean() and strip_arg.boolean;
+    } else false;
+
+    // Get the proto from the closure
+    const proto = closure.getProto();
+
+    // Dump the proto to bytecode
+    const dump = serializer.dumpProto(proto, vm.gc.allocator, strip) catch {
+        return error.RuntimeError;
+    };
+    defer vm.gc.allocator.free(dump);
+
+    // Allocate string for the result
+    const result_str = try vm.gc.allocString(dump);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
 /// Pack format parser state

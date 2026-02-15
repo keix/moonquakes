@@ -90,27 +90,50 @@ pub const StringObject = struct {
 
 /// Table Object - GC-managed Lua table
 ///
-/// Uses StringObject pointers as keys for GC safety.
-/// Array part will be added later.
+/// Supports any TValue as key (Lua 5.4 compatible).
+/// Keys can be: strings, numbers, booleans, tables, functions, userdata.
+/// nil cannot be a key (Lua semantics).
 pub const TableObject = struct {
     const TValue = @import("../value.zig").TValue;
 
-    /// Custom hash context for StringObject pointer keys
-    /// Uses pre-computed hash and pointer equality (assumes interned strings)
-    pub const StringKeyContext = struct {
-        pub fn hash(_: StringKeyContext, key: *const StringObject) u64 {
-            return key.hash;
+    /// Custom hash context for TValue keys
+    /// Supports all Lua key types: strings, numbers, booleans, objects
+    pub const TValueKeyContext = struct {
+        pub fn hash(_: TValueKeyContext, key: TValue) u64 {
+            return switch (key) {
+                .nil => 0, // nil can't be a key, but need a hash for HashMap
+                .boolean => |b| if (b) 1 else 2,
+                .integer => |i| @bitCast(i),
+                .number => |n| blk: {
+                    // Check if float is actually an integer value
+                    if (n == @floor(n) and n >= -9007199254740992 and n <= 9007199254740992) {
+                        // Use same hash as integer for int-representable floats
+                        const as_int: i64 = @intFromFloat(n);
+                        break :blk @bitCast(as_int);
+                    }
+                    break :blk @bitCast(n);
+                },
+                .object => |obj| blk: {
+                    if (obj.type == .string) {
+                        // Use string's pre-computed hash for consistency
+                        const str: *StringObject = @fieldParentPtr("header", obj);
+                        break :blk str.hash;
+                    }
+                    // For other objects, use pointer as hash
+                    break :blk @intFromPtr(obj);
+                },
+            };
         }
 
-        pub fn eql(_: StringKeyContext, a: *const StringObject, b: *const StringObject) bool {
-            return a == b; // Pointer equality (interned strings)
+        pub fn eql(_: TValueKeyContext, a: TValue, b: TValue) bool {
+            return a.eql(b);
         }
     };
 
     pub const HashMap = std.HashMap(
-        *const StringObject,
         TValue,
-        StringKeyContext,
+        TValue,
+        TValueKeyContext,
         std.hash_map.default_max_load_percentage,
     );
 
@@ -140,14 +163,21 @@ pub const TableObject = struct {
         return self.weak_mode == .weak_values or self.weak_mode == .weak_both;
     }
 
-    /// Get a value by StringObject key
-    pub fn get(self: *const TableObject, key: *const StringObject) ?TValue {
+    /// Get a value by TValue key
+    pub fn get(self: *const TableObject, key: TValue) ?TValue {
         return self.hash_part.get(key);
     }
 
-    /// Set a value by StringObject key
-    pub fn set(self: *TableObject, key: *const StringObject, value: TValue) !void {
-        try self.hash_part.put(key, value);
+    /// Set a value by TValue key
+    /// Note: nil keys are not allowed (Lua semantics)
+    pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
+        if (key.isNil()) return error.InvalidTableKey;
+        // Setting to nil removes the entry
+        if (value.isNil()) {
+            _ = self.hash_part.remove(key);
+        } else {
+            try self.hash_part.put(key, value);
+        }
     }
 
     /// Clean up internal data structures (called by GC during sweep)

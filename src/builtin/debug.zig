@@ -133,7 +133,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             const result_table = try vm.gc.allocTable();
             if (want_source) {
                 const what_key = try vm.gc.allocString("what");
-                try result_table.set(what_key, TValue.fromString(try vm.gc.allocString("C")));
+                try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc.allocString("C")));
             }
             vm.stack[vm.base + func_reg] = TValue.fromTable(result_table);
             return;
@@ -175,47 +175,47 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         if (want_name) {
             if (func_name) |name| {
                 const name_key = try vm.gc.allocString("name");
-                try result_table.set(name_key, TValue.fromString(try vm.gc.allocString(name)));
+                try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc.allocString(name)));
                 const namewhat_key = try vm.gc.allocString("namewhat");
-                try result_table.set(namewhat_key, TValue.fromString(try vm.gc.allocString("field")));
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc.allocString("field")));
             }
         }
 
         if (want_source) {
             const what_key = try vm.gc.allocString("what");
-            try result_table.set(what_key, TValue.fromString(try vm.gc.allocString("Lua")));
+            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc.allocString("Lua")));
             const source_key = try vm.gc.allocString("source");
-            try result_table.set(source_key, TValue.fromString(try vm.gc.allocString("?")));
+            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc.allocString("?")));
             const short_src_key = try vm.gc.allocString("short_src");
-            try result_table.set(short_src_key, TValue.fromString(try vm.gc.allocString("?")));
+            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc.allocString("?")));
             const linedefined_key = try vm.gc.allocString("linedefined");
-            try result_table.set(linedefined_key, .{ .integer = 0 });
+            try result_table.set(TValue.fromString(linedefined_key), .{ .integer = 0 });
             const lastlinedefined_key = try vm.gc.allocString("lastlinedefined");
-            try result_table.set(lastlinedefined_key, .{ .integer = 0 });
+            try result_table.set(TValue.fromString(lastlinedefined_key), .{ .integer = 0 });
         }
 
         if (want_line) {
             const currentline_key = try vm.gc.allocString("currentline");
-            try result_table.set(currentline_key, .{ .integer = -1 });
+            try result_table.set(TValue.fromString(currentline_key), .{ .integer = -1 });
         }
 
         if (want_tailcall) {
             const istailcall_key = try vm.gc.allocString("istailcall");
-            try result_table.set(istailcall_key, .{ .boolean = false });
+            try result_table.set(TValue.fromString(istailcall_key), .{ .boolean = false });
         }
 
         if (want_upvalue) {
             const nups_key = try vm.gc.allocString("nups");
-            try result_table.set(nups_key, .{ .integer = @intCast(proto.upvalues.len) });
+            try result_table.set(TValue.fromString(nups_key), .{ .integer = @intCast(proto.upvalues.len) });
             const nparams_key = try vm.gc.allocString("nparams");
-            try result_table.set(nparams_key, .{ .integer = @intCast(proto.numparams) });
+            try result_table.set(TValue.fromString(nparams_key), .{ .integer = @intCast(proto.numparams) });
             const isvararg_key = try vm.gc.allocString("isvararg");
-            try result_table.set(isvararg_key, .{ .boolean = proto.is_vararg });
+            try result_table.set(TValue.fromString(isvararg_key), .{ .boolean = proto.is_vararg });
         }
 
         if (want_func) {
             const func_key = try vm.gc.allocString("func");
-            try result_table.set(func_key, TValue.fromClosure(closure));
+            try result_table.set(TValue.fromString(func_key), TValue.fromClosure(closure));
         }
     }
 

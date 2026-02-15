@@ -107,7 +107,7 @@ test "CLOSE triggers TBC __close" {
     // without a full Lua closure, so we just verify the structure
 
     table.metatable = mt;
-    try table.set(closed_key, .{ .boolean = false });
+    try table.set(TValue.fromString(closed_key), .{ .boolean = false });
 
     // For now, just verify TBC accepts table with __close
     // Full integration test is in the Lua test file

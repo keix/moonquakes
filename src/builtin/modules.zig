@@ -29,19 +29,19 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Get or create _loaded cache table in globals
     const loaded_key = try vm.gc.allocString(LOADED_KEY);
-    var loaded_table = if (vm.globals.get(loaded_key)) |v|
+    var loaded_table = if (vm.globals.get(TValue.fromString(loaded_key))) |v|
         v.asTable()
     else
         null;
 
     if (loaded_table == null) {
         loaded_table = try vm.gc.allocTable();
-        try vm.globals.set(loaded_key, TValue.fromTable(loaded_table.?));
+        try vm.globals.set(TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
     }
 
     // Check if module is already loaded
     const mod_key = try vm.gc.allocString(modname);
-    if (loaded_table.?.get(mod_key)) |cached| {
+    if (loaded_table.?.get(TValue.fromString(mod_key))) |cached| {
         if (!cached.isNil()) {
             if (nresults > 0) {
                 vm.stack[vm.base + func_reg] = cached;
@@ -55,9 +55,9 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     for (builtin_modules) |builtin| {
         if (std.mem.eql(u8, modname, builtin)) {
             // Return the global table
-            if (vm.globals.get(mod_key)) |global_val| {
+            if (vm.globals.get(TValue.fromString(mod_key))) |global_val| {
                 // Cache it
-                try loaded_table.?.set(mod_key, global_val);
+                try loaded_table.?.set(TValue.fromString(mod_key), global_val);
                 if (nresults > 0) {
                     vm.stack[vm.base + func_reg] = global_val;
                 }
@@ -152,7 +152,7 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Cache the result (use true if module returns nil)
     const cache_value = if (result.isNil()) TValue{ .boolean = true } else result;
-    try loaded_table.?.set(mod_key, cache_value);
+    try loaded_table.?.set(TValue.fromString(mod_key), cache_value);
 
     // Return the result
     if (nresults > 0) {

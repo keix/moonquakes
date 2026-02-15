@@ -203,7 +203,7 @@ pub fn getMetamethod(value: TValue, event: MetaEvent, keys: *const MetamethodKey
     const key_str = keys.get(event);
 
     // Look up the metamethod
-    return mt.get(key_str);
+    return mt.get(TValue.fromString(key_str));
 }
 
 /// Try to get a metamethod from either operand (for binary operations)
