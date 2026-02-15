@@ -17,8 +17,9 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 }
 
 test "VARARGPREP continues execution" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // VARARGPREP A: prepare vararg function with A fixed parameters
     // In our implementation, this is mostly a no-op since CALL handles setup
@@ -29,15 +30,16 @@ test "VARARGPREP continues execution" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &code, 2, true, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 2, true, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
 
 test "VARARG loads first vararg with C=2" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // VARARG A C: load C-1 varargs into R[A]...
     // C=2 means load 1 value
@@ -50,10 +52,10 @@ test "VARARG loads first vararg with C=2" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const inner_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &inner_code, 1, true, 4);
+    const inner_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &inner_code, 1, true, 4);
 
     // Create closure via GC
-    const inner_closure = try vm.gc.allocClosure(inner_proto);
+    const inner_closure = try ctx.vm.gc.allocClosure(inner_proto);
 
     // Main code: call the vararg function with args (10, 20, 30)
     // The function has 1 fixed param, so varargs are (20, 30)
@@ -73,8 +75,8 @@ test "VARARG loads first vararg with C=2" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return result
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // Function receives (10, 20, 30), fixed param is 10, varargs are (20, 30)
     // VARARG with C=2 loads first vararg = 20
@@ -82,8 +84,9 @@ test "VARARG loads first vararg with C=2" {
 }
 
 test "VARARG with no varargs returns nil" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // When function is called with only fixed params, varargs should be empty
     const inner_code = [_]Instruction{
@@ -92,10 +95,10 @@ test "VARARG with no varargs returns nil" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const inner_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &inner_code, 1, true, 4);
+    const inner_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &inner_code, 1, true, 4);
 
     // Create closure via GC
-    const inner_closure = try vm.gc.allocClosure(inner_proto);
+    const inner_closure = try ctx.vm.gc.allocClosure(inner_proto);
 
     var constants = [_]TValue{
         TValue.fromClosure(inner_closure),
@@ -109,16 +112,17 @@ test "VARARG with no varargs returns nil" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return result
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // No varargs passed, so first vararg should be nil
     try expectSingleResult(result, .nil);
 }
 
 test "vararg function with no fixed params" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // function(...) return ... end
     const inner_code = [_]Instruction{
@@ -127,10 +131,10 @@ test "vararg function with no fixed params" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const inner_proto = try test_utils.createTestProto(&vm, &[_]TValue{}, &inner_code, 0, true, 3);
+    const inner_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &inner_code, 0, true, 3);
 
     // Create closure via GC
-    const inner_closure = try vm.gc.allocClosure(inner_proto);
+    const inner_closure = try ctx.vm.gc.allocClosure(inner_proto);
 
     var constants = [_]TValue{
         TValue.fromClosure(inner_closure),
@@ -146,8 +150,8 @@ test "vararg function with no fixed params" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &constants, &code, 0, false, 4);
-    const result = try Mnemonics.execute(&vm, proto);
+    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
 
     // All args are varargs, first one is 100
     try expectSingleResult(result, TValue{ .integer = 100 });

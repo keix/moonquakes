@@ -250,11 +250,11 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         };
         defer file.close();
 
-        const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+        const content = file.readToEndAlloc(vm.gc.allocator, 10 * 1024 * 1024) catch {
             vm.stack[vm.base + func_reg] = .nil;
             return;
         };
-        defer vm.allocator.free(content);
+        defer vm.gc.allocator.free(content);
 
         // Create file handle
         const file_table = try vm.gc.allocTable();
@@ -357,11 +357,11 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     };
     defer file.close();
 
-    const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+    const content = file.readToEndAlloc(vm.gc.allocator, 10 * 1024 * 1024) catch {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
-    defer vm.allocator.free(content);
+    defer vm.gc.allocator.free(content);
 
     // Create state table with content and position
     const state_table = try vm.gc.allocTable();
@@ -514,7 +514,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         defer file.close();
 
         // Read entire file content
-        const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch {
+        const content = file.readToEndAlloc(vm.gc.allocator, 10 * 1024 * 1024) catch {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 const err_str = try vm.gc.allocString("cannot read file");
@@ -522,7 +522,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
             }
             return;
         };
-        defer vm.allocator.free(content);
+        defer vm.gc.allocator.free(content);
 
         // Create file handle table
         const file_table = try vm.gc.allocTable();
@@ -609,11 +609,11 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         // Try to read existing content
         var initial_content: []const u8 = "";
         var owned_content: ?[]u8 = null;
-        defer if (owned_content) |c| vm.allocator.free(c);
+        defer if (owned_content) |c| vm.gc.allocator.free(c);
 
         if (std.fs.cwd().openFile(filename, .{})) |file| {
             defer file.close();
-            if (file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024)) |content| {
+            if (file.readToEndAlloc(vm.gc.allocator, 10 * 1024 * 1024)) |content| {
                 owned_content = content;
                 initial_content = content;
             } else |_| {}
@@ -787,7 +787,7 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     const cmd = cmd_str.asSlice();
 
     // Run the command and capture output
-    const result = runCommand(vm.allocator, cmd) catch {
+    const result = runCommand(vm.gc.allocator, cmd) catch {
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = .nil;
         }
@@ -826,7 +826,7 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
     const output_str = try vm.gc.allocString(result.output);
     try file_table.set(output_key, TValue.fromString(output_str));
-    vm.allocator.free(result.output);
+    vm.gc.allocator.free(result.output);
 
     // Store exit code
     const exitcode_key = try vm.gc.allocString(FILE_EXITCODE_KEY);
@@ -927,7 +927,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(index_table);
 
     // Both tables protected, safe to set __index
-    try mt.set(vm.mm_keys.get(.index), TValue.fromTable(index_table));
+    try mt.set(vm.gc.mm_keys.get(.index), TValue.fromTable(index_table));
 
     // Native closure must be protected before allocating its key string
     const read_nc = try vm.gc.allocNativeClosure(.{ .id = .file_read });
@@ -1756,12 +1756,12 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         "";
 
     // Build new content by appending all arguments
-    var new_content = std.ArrayList(u8).initCapacity(vm.allocator, current_output.len + 256) catch {
+    var new_content = std.ArrayList(u8).initCapacity(vm.gc.allocator, current_output.len + 256) catch {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
-    defer new_content.deinit(vm.allocator);
-    new_content.appendSlice(vm.allocator, current_output) catch {
+    defer new_content.deinit(vm.gc.allocator);
+    new_content.appendSlice(vm.gc.allocator, current_output) catch {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -1784,7 +1784,7 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         // Get the string result
         const result = vm.stack[vm.base + tmp_reg];
         if (result.asString()) |str_val| {
-            try new_content.appendSlice(vm.allocator, str_val.asSlice());
+            try new_content.appendSlice(vm.gc.allocator, str_val.asSlice());
         }
 
         vm.top -= 2;

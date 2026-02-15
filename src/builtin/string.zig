@@ -49,7 +49,7 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .string => arg,
             .table, .userdata => ret: {
                 // Check for __tostring metamethod
-                if (metamethod.getMetamethod(arg, .tostring, &vm.mm_keys, &vm.gc.shared_mt)) |mm| {
+                if (metamethod.getMetamethod(arg, .tostring, &vm.gc.mm_keys, &vm.gc.shared_mt)) |mm| {
                     if (mm.asClosure()) |closure| {
                         // Save and restore vm.top since executeSyncMM modifies it
                         const saved_top = vm.top;
@@ -156,8 +156,8 @@ pub fn nativeStringUpper(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const str = str_obj.asSlice();
 
     // Allocate buffer for uppercase string
-    const buf = try vm.allocator.alloc(u8, str.len);
-    defer vm.allocator.free(buf);
+    const buf = try vm.gc.allocator.alloc(u8, str.len);
+    defer vm.gc.allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[i] = std.ascii.toUpper(c);
@@ -180,8 +180,8 @@ pub fn nativeStringLower(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const str = str_obj.asSlice();
 
     // Allocate buffer for lowercase string
-    const buf = try vm.allocator.alloc(u8, str.len);
-    defer vm.allocator.free(buf);
+    const buf = try vm.gc.allocator.alloc(u8, str.len);
+    defer vm.gc.allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[i] = std.ascii.toLower(c);
@@ -258,8 +258,8 @@ pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     }
 
     // Allocate buffer for characters
-    const buf = try vm.allocator.alloc(u8, nargs);
-    defer vm.allocator.free(buf);
+    const buf = try vm.gc.allocator.alloc(u8, nargs);
+    defer vm.gc.allocator.free(buf);
 
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
@@ -316,8 +316,8 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const result_len = str.len * count + sep.len * (count - 1);
 
     // Allocate buffer
-    const buf = try vm.allocator.alloc(u8, result_len);
-    defer vm.allocator.free(buf);
+    const buf = try vm.gc.allocator.alloc(u8, result_len);
+    defer vm.gc.allocator.free(buf);
 
     // Build result
     var pos: usize = 0;
@@ -353,8 +353,8 @@ pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     }
 
     // Allocate buffer for reversed string
-    const buf = try vm.allocator.alloc(u8, str.len);
-    defer vm.allocator.free(buf);
+    const buf = try vm.gc.allocator.alloc(u8, str.len);
+    defer vm.gc.allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[str.len - 1 - i] = c;
@@ -1012,7 +1012,7 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     }
 
     // Build result string
-    const allocator = vm.allocator;
+    const allocator = vm.gc.allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len);
     defer result.deinit(allocator);
 
@@ -1195,7 +1195,7 @@ fn expandGsubCaptures(
     if (!has_escapes) return repl;
 
     // Expand escapes
-    const allocator = vm.allocator;
+    const allocator = vm.gc.allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, repl.len);
     defer result.deinit(allocator);
 
@@ -1257,7 +1257,7 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const fmt = fmt_str.asSlice();
 
     // Build result string
-    const allocator = vm.allocator;
+    const allocator = vm.gc.allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, fmt.len * 2);
     defer result.deinit(allocator);
 
@@ -1660,7 +1660,7 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     };
     const fmt = fmt_obj.asSlice();
 
-    const allocator = vm.allocator;
+    const allocator = vm.gc.allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer result.deinit(allocator);
 

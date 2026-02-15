@@ -263,7 +263,7 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
         const val = vm.stack[vm.base + r];
 
         // Get __close metamethod
-        if (metamethod.getMetamethod(val, .close, &vm.mm_keys, &vm.gc.shared_mt)) |mm| {
+        if (metamethod.getMetamethod(val, .close, &vm.gc.mm_keys, &vm.gc.shared_mt)) |mm| {
             // Call __close(val, nil) - second arg is error object (nil for normal close)
             const saved_top = vm.top;
 
@@ -832,7 +832,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .number = -n };
             } else {
                 // Try __unm metamethod
-                const mm = metamethod.getMetamethod(vb, .unm, &vm.mm_keys, &vm.gc.shared_mt) orelse {
+                const mm = metamethod.getMetamethod(vb, .unm, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
                     return error.ArithmeticError;
                 };
                 return try callUnaryMetamethod(vm, mm, vb, a);
@@ -935,8 +935,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                const result_buf = try vm.allocator.alloc(u8, total_len);
-                defer vm.allocator.free(result_buf);
+                const result_buf = try vm.gc.allocator.alloc(u8, total_len);
+                defer vm.gc.allocator.free(result_buf);
                 var offset: usize = 0;
 
                 for (b..c + 1) |i| {
@@ -2083,7 +2083,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Check that value has __close metamethod
-            if (metamethod.getMetamethod(val, .close, &vm.mm_keys, &vm.gc.shared_mt) == null) {
+            if (metamethod.getMetamethod(val, .close, &vm.gc.mm_keys, &vm.gc.shared_mt) == null) {
                 return error.NoCloseMetamethod;
             }
 
@@ -2187,7 +2187,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
                 // No metamethod found - arithmetic error
                 return error.ArithmeticError;
             };
@@ -2238,7 +2238,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2284,7 +2284,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2486,7 +2486,7 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     }
 
     // Try metamethod
-    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
+    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
         return error.ArithmeticError;
     };
 
@@ -2603,7 +2603,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
         return null; // Continue
     };
 
-    const index_mm = mt.get(vm.mm_keys.get(.index)) orelse {
+    const index_mm = mt.get(vm.gc.mm_keys.get(.index)) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null; // Continue
     };
@@ -2672,7 +2672,7 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
     };
 
     // Look up __index in the metatable
-    const index_mm = mt.get(vm.mm_keys.get(.index)) orelse {
+    const index_mm = mt.get(vm.gc.mm_keys.get(.index)) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null;
     };
@@ -2748,7 +2748,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         return null; // Continue
     };
 
-    const newindex_mm = mt.get(vm.mm_keys.get(.newindex)) orelse {
+    const newindex_mm = mt.get(vm.gc.mm_keys.get(.newindex)) orelse {
         // No __newindex, just set the value
         try table.set(key, value);
         return null; // Continue
@@ -2813,7 +2813,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
     const mt = table.metatable orelse return null;
 
-    const call_mm = mt.get(vm.mm_keys.get(.call)) orelse return null;
+    const call_mm = mt.get(vm.gc.mm_keys.get(.call)) orelse return null;
 
     // __call must be a function
     if (call_mm.asClosure()) |closure| {
@@ -2861,7 +2861,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
     const mt = table.metatable orelse return null;
 
-    const len_mm = mt.get(vm.mm_keys.get(.len)) orelse return null;
+    const len_mm = mt.get(vm.gc.mm_keys.get(.len)) orelse return null;
 
     // __len is a Lua function
     if (len_mm.asClosure()) |closure| {
@@ -2912,7 +2912,7 @@ fn canConcatPrimitive(val: TValue) bool {
 fn getConcatMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.mm_keys.get(.concat));
+    return mt.get(vm.gc.mm_keys.get(.concat));
 }
 
 /// Concat with __concat metamethod fallback
@@ -2968,7 +2968,7 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
 fn getEqMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.mm_keys.get(.eq));
+    return mt.get(vm.gc.mm_keys.get(.eq));
 }
 
 /// Equality with __eq metamethod fallback
@@ -3027,7 +3027,7 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLtMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.mm_keys.get(.lt));
+    return mt.get(vm.gc.mm_keys.get(.lt));
 }
 
 /// Less-than with __lt metamethod fallback
@@ -3071,7 +3071,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLeMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.mm_keys.get(.le));
+    return mt.get(vm.gc.mm_keys.get(.le));
 }
 
 /// Less-or-equal with __le metamethod fallback

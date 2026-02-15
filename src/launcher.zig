@@ -68,15 +68,19 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(allocator, raw_proto);
 
-    // Phase 2: Create VM
-    var vm = try VM.init(allocator);
+    // Phase 2: Create GC (global state) and VM (thread state)
+    var gc = GC.init(allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+
+    var vm = try VM.init(&gc);
     defer vm.deinit();
 
     // Phase 3: Inject execution context (arg table, etc.)
-    try injectArg(vm.globals, &vm.gc, options);
+    try injectArg(vm.globals, vm.gc, options);
 
     // Phase 4: Materialize constants (returns GC-managed ProtoObject)
-    const proto = try pipeline.materialize(&raw_proto, &vm.gc, allocator);
+    const proto = try pipeline.materialize(&raw_proto, vm.gc, allocator);
     // No defer needed - ProtoObject is GC-managed
 
     // Phase 5: Execute

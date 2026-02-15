@@ -18,6 +18,7 @@ const call = @import("../../vm/call.zig");
 const metamethod = @import("../../vm/metamethod.zig");
 const MetaEvent = metamethod.MetaEvent;
 const SharedMetatables = metamethod.SharedMetatables;
+const MetamethodKeys = metamethod.MetamethodKeys;
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
@@ -73,6 +74,10 @@ pub const GC = struct {
     /// Set via debug.setmetatable(), used by metamethod resolution.
     shared_mt: SharedMetatables = .{},
 
+    /// Pre-allocated metamethod key strings (interned, shared across all coroutines)
+    /// Initialized via initMetamethodKeys() after GC creation.
+    mm_keys: MetamethodKeys = undefined,
+
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
@@ -84,6 +89,12 @@ pub const GC = struct {
             .gc_inhibit = 0,
             .weak_tables = .{},
         };
+    }
+
+    /// Initialize metamethod keys (must be called after GC creation)
+    /// This interns all metamethod strings (__add, __sub, etc.)
+    pub fn initMetamethodKeys(self: *GC) !void {
+        self.mm_keys = try MetamethodKeys.init(self);
     }
 
     /// GC INHIBITION API
@@ -490,11 +501,7 @@ pub const GC = struct {
 
     /// Parse __mode string from metatable to determine weak table mode
     fn parseWeakMode(self: *GC, metatable: *TableObject) TableObject.WeakMode {
-        const VM = @import("../../vm/vm.zig").VM;
-        const vm_ptr = self.vm orelse return .none;
-        const vm: *VM = @ptrCast(@alignCast(vm_ptr));
-
-        const mode_val = metatable.get(vm.mm_keys.get(.mode)) orelse return .none;
+        const mode_val = metatable.get(self.mm_keys.get(.mode)) orelse return .none;
         const mode_str = mode_val.asString() orelse return .none;
 
         var has_k = false;
@@ -630,7 +637,7 @@ pub const GC = struct {
                 const table: *TableObject = @fieldParentPtr("header", obj);
                 if (table.metatable) |mt| {
                     // Look up __gc in metatable
-                    if (mt.get(vm.mm_keys.get(.gc))) |gc_fn| {
+                    if (mt.get(self.mm_keys.get(.gc))) |gc_fn| {
                         // Call __gc(table)
                         // Errors in finalizers are ignored (standard Lua behavior)
                         _ = call.callValue(vm, gc_fn, &[_]TValue{TValue.fromTable(table)}) catch {};

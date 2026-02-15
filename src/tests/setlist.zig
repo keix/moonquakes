@@ -10,16 +10,17 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "SETLIST basic - set array elements" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Create a table
-    const table = try vm.gc.allocTable();
-    vm.stack[0] = TValue.fromTable(table);
+    const table = try ctx.vm.gc.allocTable();
+    ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
-    vm.stack[1] = .{ .integer = 10 };
-    vm.stack[2] = .{ .integer = 20 };
-    vm.stack[3] = .{ .integer = 30 };
+    ctx.vm.stack[1] = .{ .integer = 10 };
+    ctx.vm.stack[2] = .{ .integer = 20 };
+    ctx.vm.stack[3] = .{ .integer = 30 };
 
     const code = [_]Instruction{
         // SETLIST R0, 3, 1: set table[1]=R1, table[2]=R2, table[3]=R3
@@ -27,16 +28,16 @@ test "SETLIST basic - set array elements" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return table
     };
 
-    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try testing.expect(result == .single);
 
     // Check table contents
     const result_table = result.single.asTable().?;
-    const key1 = try vm.gc.allocString("1");
-    const key2 = try vm.gc.allocString("2");
-    const key3 = try vm.gc.allocString("3");
+    const key1 = try ctx.vm.gc.allocString("1");
+    const key2 = try ctx.vm.gc.allocString("2");
+    const key3 = try ctx.vm.gc.allocString("3");
 
     const v1 = result_table.get(key1).?;
     const v2 = result_table.get(key2).?;
@@ -48,16 +49,17 @@ test "SETLIST basic - set array elements" {
 }
 
 test "SETLIST with B=0 - variable count from top" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Create a table
-    const table = try vm.gc.allocTable();
-    vm.stack[0] = TValue.fromTable(table);
+    const table = try ctx.vm.gc.allocTable();
+    ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
-    vm.stack[1] = .{ .integer = 100 };
-    vm.stack[2] = .{ .integer = 200 };
-    vm.top = 3; // Set top to indicate 2 values
+    ctx.vm.stack[1] = .{ .integer = 100 };
+    ctx.vm.stack[2] = .{ .integer = 200 };
+    ctx.vm.top = 3; // Set top to indicate 2 values
 
     const code = [_]Instruction{
         // SETLIST R0, 0, 1: B=0 means use top, set table[1]=R1, table[2]=R2
@@ -65,14 +67,14 @@ test "SETLIST with B=0 - variable count from top" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
-    const key1 = try vm.gc.allocString("1");
-    const key2 = try vm.gc.allocString("2");
+    const key1 = try ctx.vm.gc.allocString("1");
+    const key2 = try ctx.vm.gc.allocString("2");
 
     const v1 = result_table.get(key1).?;
     const v2 = result_table.get(key2).?;
@@ -82,19 +84,20 @@ test "SETLIST with B=0 - variable count from top" {
 }
 
 test "SETLIST with offset mode (k=1, C=0)" {
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
     // Create a table with first element already set
-    const table = try vm.gc.allocTable();
-    const key1 = try vm.gc.allocString("1");
+    const table = try ctx.vm.gc.allocTable();
+    const key1 = try ctx.vm.gc.allocString("1");
     try table.set(key1, .{ .integer = 1 });
 
-    vm.stack[0] = TValue.fromTable(table);
+    ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set starting at index 2
-    vm.stack[1] = .{ .integer = 2 };
-    vm.stack[2] = .{ .integer = 3 };
-    vm.top = 3;
+    ctx.vm.stack[1] = .{ .integer = 2 };
+    ctx.vm.stack[2] = .{ .integer = 3 };
+    ctx.vm.top = 3;
 
     const code = [_]Instruction{
         // SETLIST with k=1, C=0, EXTRAARG=2: start at index 2
@@ -103,14 +106,14 @@ test "SETLIST with offset mode (k=1, C=0)" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = try Mnemonics.execute(&ctx.vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
-    const key2 = try vm.gc.allocString("2");
-    const key3 = try vm.gc.allocString("3");
+    const key2 = try ctx.vm.gc.allocString("2");
+    const key3 = try ctx.vm.gc.allocString("3");
 
     // Original index 1 should be preserved
     const v1 = result_table.get(key1).?;

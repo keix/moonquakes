@@ -22,6 +22,9 @@ pub const MetamethodKeys = metamethod.MetamethodKeys;
 
 /// VM represents an execution thread (Lua "thread"/coroutine state).
 /// The name VM is kept intentionally as a clean-room abstraction.
+///
+/// Architecture: VM (thread) references GC (global state) via pointer.
+/// Multiple VMs (coroutines) can share the same GC.
 pub const VM = struct {
     stack: [256]TValue,
     stack_last: u32,
@@ -33,10 +36,8 @@ pub const VM = struct {
     callstack_size: u8,
     globals: *TableObject,
     registry: *TableObject, // Global registry table (for debug.getregistry)
-    allocator: std.mem.Allocator,
-    gc: GC, // Garbage collector (replaces arena)
+    gc: *GC, // Pointer to shared GC (global state)
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
-    mm_keys: MetamethodKeys, // Pre-allocated metamethod strings
     lua_error_msg: ?*StringObject = null, // Stored Lua error message for pcall
 
     // Debug hook fields (for debug.sethook/gethook)
@@ -44,21 +45,17 @@ pub const VM = struct {
     hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
     hook_count: u32 = 0, // Count for count hook
 
-    pub fn init(allocator: std.mem.Allocator) !VM {
-        // Initialize GC first so we can allocate strings and tables
-        var gc = GC.init(allocator);
-
+    /// Initialize a VM with a shared GC.
+    /// GC must be initialized and have mm_keys set up before calling this.
+    pub fn init(gc: *GC) !VM {
         // Create globals table via GC
         const globals = try gc.allocTable();
 
         // Create registry table via GC
         const registry = try gc.allocTable();
 
-        // Pre-allocate metamethod key strings (avoids allocation on every lookup)
-        const mm_keys = try MetamethodKeys.init(&gc);
-
         // Initialize global environment (needs GC for string allocation)
-        try builtin.initGlobalEnvironment(globals, &gc);
+        try builtin.initGlobalEnvironment(globals, gc);
 
         var vm = VM{
             .stack = undefined,
@@ -71,10 +68,8 @@ pub const VM = struct {
             .callstack_size = 0,
             .globals = globals,
             .registry = registry,
-            .allocator = allocator,
             .gc = gc,
             .open_upvalues = null,
-            .mm_keys = mm_keys,
         };
         for (&vm.stack) |*v| {
             v.* = .nil;
@@ -84,9 +79,9 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
-        // All tables are now GC-managed, so just clean up the GC
-        // GC.deinit() will free all allocated objects (tables, strings, closures)
-        self.gc.deinit();
+        // VM does not own the GC - GC outlives individual VMs (coroutines)
+        // Clear VM-specific state only
+        _ = self;
     }
 
     /// GC SAFETY CONTRACT: VM Root Marking

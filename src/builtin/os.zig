@@ -317,7 +317,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Execute command using /bin/sh -c
     const result = std.process.Child.run(.{
-        .allocator = vm.allocator,
+        .allocator = vm.gc.allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
     }) catch {
         // Command failed to execute
@@ -331,8 +331,8 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         }
         return;
     };
-    defer vm.allocator.free(result.stdout);
-    defer vm.allocator.free(result.stderr);
+    defer vm.gc.allocator.free(result.stdout);
+    defer vm.gc.allocator.free(result.stderr);
 
     // Check termination type
     switch (result.term) {

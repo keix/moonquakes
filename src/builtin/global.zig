@@ -68,7 +68,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Check for __name metamethod on tables
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.mm_keys.get(.name))) |name_val| {
+            if (mt.get(vm.gc.mm_keys.get(.name))) |name_val| {
                 if (name_val.asString()) |name_str| {
                     vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
                     return;
@@ -273,7 +273,7 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     // Check for __pairs metamethod
     if (table_arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(vm.mm_keys.get(.pairs))) |pairs_mm| {
+            if (mt.get(vm.gc.mm_keys.get(.pairs))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
                 const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
@@ -388,7 +388,7 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // Use metamethod.getMetatable which handles both individual and shared metatables
     if (metamethod.getMetatable(arg, &vm.gc.shared_mt)) |mt| {
         // Check for __metatable field (protects metatable from modification/inspection)
-        if (mt.get(vm.mm_keys.get(.metatable))) |protected| {
+        if (mt.get(vm.gc.mm_keys.get(.metatable))) |protected| {
             result = protected;
         } else {
             result = TValue.fromTable(mt);
@@ -415,7 +415,7 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
-        if (current_mt.get(vm.mm_keys.get(.metatable)) != null) {
+        if (current_mt.get(vm.gc.mm_keys.get(.metatable)) != null) {
             return error.ProtectedMetatable;
         }
     }
@@ -690,17 +690,17 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.allocator, source, .{});
+    const compile_result = pipeline.compile(vm.gc.allocator, source, .{});
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.allocator);
+            defer e.deinit(vm.gc.allocator);
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 // Format: "[string]:line: message"
-                const msg = std.fmt.allocPrint(vm.allocator, "[string]:{d}: {s}", .{
+                const msg = std.fmt.allocPrint(vm.gc.allocator, "[string]:{d}: {s}", .{
                     e.line, e.message,
                 }) catch "syntax error";
-                defer vm.allocator.free(msg);
+                defer vm.gc.allocator.free(msg);
                 const err_str = try vm.gc.allocString(msg);
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
@@ -709,14 +709,14 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
     vm.gc.inhibitGC();
     defer vm.gc.allowGC();
 
-    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
             const err_str = try vm.gc.allocString("failed to materialize chunk");
@@ -766,7 +766,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     };
     defer file.close();
 
-    const source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+    const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
             const err_str = try vm.gc.allocString("cannot read file");
@@ -774,20 +774,20 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
         return;
     };
-    defer vm.allocator.free(source);
+    defer vm.gc.allocator.free(source);
 
     // Compile the source with filename as source name
-    const compile_result = pipeline.compile(vm.allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc.allocator, source, .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.allocator);
+            defer e.deinit(vm.gc.allocator);
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 // Format: "filename:line: message"
-                const msg = std.fmt.allocPrint(vm.allocator, "{s}:{d}: {s}", .{
+                const msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
                     filename, e.line, e.message,
                 }) catch "syntax error";
-                defer vm.allocator.free(msg);
+                defer vm.gc.allocator.free(msg);
                 const err_str = try vm.gc.allocString(msg);
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
@@ -796,14 +796,14 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
     vm.gc.inhibitGC();
     defer vm.gc.allowGC();
 
-    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
             const err_str = try vm.gc.allocString("failed to materialize chunk");
@@ -844,34 +844,34 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     };
     defer file.close();
 
-    const source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+    const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
         vm.lua_error_msg = try vm.gc.allocString("cannot read file");
         return RuntimeError.RuntimeError;
     };
-    defer vm.allocator.free(source);
+    defer vm.gc.allocator.free(source);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc.allocator, source, .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.allocator);
-            const msg = std.fmt.allocPrint(vm.allocator, "{s}:{d}: {s}", .{
+            defer e.deinit(vm.gc.allocator);
+            const msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
                 filename, e.line, e.message,
             }) catch "syntax error";
-            defer vm.allocator.free(msg);
+            defer vm.gc.allocator.free(msg);
             vm.lua_error_msg = try vm.gc.allocString(msg);
             return RuntimeError.RuntimeError;
         },
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is executed (proto is not rooted otherwise)
     vm.gc.inhibitGC();
 
-    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
         vm.gc.allowGC();
         vm.lua_error_msg = try vm.gc.allocString("failed to materialize chunk");
         return RuntimeError.RuntimeError;

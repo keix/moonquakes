@@ -9,6 +9,8 @@ const lexer = @import("../compiler/lexer.zig");
 const parser = @import("../compiler/parser.zig");
 const materialize = @import("../compiler/materialize.zig").materialize;
 
+const test_utils = @import("test_utils.zig");
+
 fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(expected));
@@ -26,12 +28,13 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !ReturnValu
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
 
     // Create VM and materialize
-    var vm = try VM.init(testing.allocator);
-    defer vm.deinit();
+    var ctx = try test_utils.TestContext.init();
+    ctx.fixup();
+    defer ctx.deinit();
 
-    const proto = try materialize(&raw_proto, &vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
 
-    return Mnemonics.execute(&vm, proto);
+    return Mnemonics.execute(&ctx.vm, proto);
 }
 
 fn testParserExpression(source: []const u8, expected: TValue) !void {

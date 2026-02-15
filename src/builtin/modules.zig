@@ -82,7 +82,7 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
         if (std.fs.cwd().openFile(filename, .{})) |file| {
             found_file = file;
-            found_source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch null;
+            found_source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch null;
             if (found_source == null) {
                 file.close();
                 found_file = null;
@@ -99,7 +99,7 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
         if (std.fs.cwd().openFile(filename, .{})) |file| {
             found_file = file;
-            found_source = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch null;
+            found_source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch null;
             if (found_source == null) {
                 file.close();
                 found_file = null;
@@ -112,28 +112,28 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         return RuntimeError.RuntimeError;
     }
     defer found_file.?.close();
-    defer vm.allocator.free(found_source.?);
+    defer vm.gc.allocator.free(found_source.?);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.allocator, found_source.?, .{});
+    const compile_result = pipeline.compile(vm.gc.allocator, found_source.?, .{});
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.allocator);
+            defer e.deinit(vm.gc.allocator);
             // Format error message: "module:line: message"
-            const err_msg = std.fmt.allocPrint(vm.allocator, "{s}:{d}: {s}", .{
+            const err_msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
                 "module", e.line, e.message,
             }) catch "syntax error in module";
             vm.lua_error_msg = vm.gc.allocString(err_msg) catch null;
-            vm.allocator.free(err_msg);
+            vm.gc.allocator.free(err_msg);
             return RuntimeError.RuntimeError;
         },
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
 
     // Materialize to Proto
-    const proto = pipeline.materialize(&raw_proto, &vm.gc, vm.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
         vm.lua_error_msg = try vm.gc.allocString("failed to load module");
         return RuntimeError.RuntimeError;
     };
