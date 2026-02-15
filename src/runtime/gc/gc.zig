@@ -148,6 +148,12 @@ pub const GC = struct {
     /// Register a root provider for GC marking
     /// Multiple providers can be registered (VM, REPL, test harnesses, etc.)
     pub fn addRootProvider(self: *GC, provider: RootProvider) !void {
+        // Debug: check for duplicate registration
+        if (builtin.mode == .Debug) {
+            for (self.root_providers.items) |p| {
+                std.debug.assert(!(p.ptr == provider.ptr and p.vtable == provider.vtable));
+            }
+        }
         try self.root_providers.append(self.allocator, provider);
     }
 
@@ -408,11 +414,6 @@ pub const GC = struct {
         return obj;
     }
 
-    /// Check if GC should run (policy decision)
-    pub fn shouldCollect(self: *GC, additional_bytes: usize) bool {
-        return self.bytes_allocated + additional_bytes > self.next_gc;
-    }
-
     /// Prepare for a new GC cycle (called before VM marks roots)
     pub fn beginCollection(self: *GC) void {
         // Clear weak tables list from previous cycle
@@ -494,7 +495,12 @@ pub const GC = struct {
                 // Handle weak tables differently
                 if (table.weak_mode != .none) {
                     // Track weak table for cleanup after sweep
-                    self.weak_tables.append(self.allocator, table) catch {};
+                    self.weak_tables.append(self.allocator, table) catch {
+                        // OOM: weak table tracking lost, but GC can continue
+                        if (builtin.mode == .Debug) {
+                            std.debug.print("GC: failed to track weak table\n", .{});
+                        }
+                    };
 
                     // For weak values only: mark all keys but not values
                     if (table.weak_mode == .weak_values) {
@@ -692,8 +698,10 @@ pub const GC = struct {
     }
 
     /// Run __gc finalizers for all unmarked tables that have them
+    /// Note: Uses the first registered provider for callValue.
+    /// In single-VM scenarios this is always the main VM.
+    /// Multi-VM would need a dedicated finalizer executor.
     fn runFinalizers(self: *GC) void {
-        // Need at least one provider to call finalizers
         if (self.root_providers.items.len == 0) return;
         const provider = self.root_providers.items[0];
 
@@ -817,7 +825,7 @@ pub const GC = struct {
     }
 
     /// Force garbage collection (for debugging/testing)
-    /// Note: Only runs sweep phase. Mark roots manually before calling.
+    /// Runs a full GC cycle: mark all roots via providers, then sweep.
     pub fn forceGC(self: *GC) void {
         self.collect();
     }
