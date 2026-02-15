@@ -15,6 +15,7 @@ const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 const call = @import("../../vm/call.zig");
+const MetaEvent = @import("../../vm/metamethod.zig").MetaEvent;
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
@@ -486,7 +487,7 @@ pub const GC = struct {
         const vm_ptr = self.vm orelse return .none;
         const vm: *VM = @ptrCast(@alignCast(vm_ptr));
 
-        const mode_val = metatable.get(vm.mm_keys.mode) orelse return .none;
+        const mode_val = metatable.get(vm.mm_keys.get(.mode)) orelse return .none;
         const mode_str = mode_val.asString() orelse return .none;
 
         var has_k = false;
@@ -622,7 +623,7 @@ pub const GC = struct {
                 const table: *TableObject = @fieldParentPtr("header", obj);
                 if (table.metatable) |mt| {
                     // Look up __gc in metatable
-                    if (mt.get(vm.mm_keys.gc)) |gc_fn| {
+                    if (mt.get(vm.mm_keys.get(.gc))) |gc_fn| {
                         // Call __gc(table)
                         // Errors in finalizers are ignored (standard Lua behavior)
                         _ = call.callValue(vm, gc_fn, &[_]TValue{TValue.fromTable(table)}) catch {};

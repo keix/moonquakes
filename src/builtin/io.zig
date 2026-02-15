@@ -927,7 +927,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(index_table);
 
     // Both tables protected, safe to set __index
-    try mt.set(vm.mm_keys.index, TValue.fromTable(index_table));
+    try mt.set(vm.mm_keys.get(.index), TValue.fromTable(index_table));
 
     // Native closure must be protected before allocating its key string
     const read_nc = try vm.gc.allocNativeClosure(.{ .id = .file_read });
