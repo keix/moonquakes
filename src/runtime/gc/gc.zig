@@ -438,8 +438,8 @@ pub const GC = struct {
                     if (table.weak_mode == .weak_values) {
                         var iter = table.hash_part.iterator();
                         while (iter.next()) |entry| {
-                            const key: *StringObject = @constCast(entry.key_ptr.*);
-                            markObject(self, &key.header);
+                            // Keys can be any TValue now - mark if object
+                            self.markValue(entry.key_ptr.*);
                             // Skip marking values - they are weak
                         }
                     }
@@ -449,8 +449,8 @@ pub const GC = struct {
                     // Strong table: mark all keys and values
                     var iter = table.hash_part.iterator();
                     while (iter.next()) |entry| {
-                        const key: *StringObject = @constCast(entry.key_ptr.*);
-                        markObject(self, &key.header);
+                        // Mark both key and value (keys can be any TValue)
+                        self.markValue(entry.key_ptr.*);
                         self.markValue(entry.value_ptr.*);
                     }
                 }
@@ -501,7 +501,7 @@ pub const GC = struct {
 
     /// Parse __mode string from metatable to determine weak table mode
     fn parseWeakMode(self: *GC, metatable: *TableObject) TableObject.WeakMode {
-        const mode_val = metatable.get(self.mm_keys.get(.mode)) orelse return .none;
+        const mode_val = metatable.get(TValue.fromString(self.mm_keys.get(.mode))) orelse return .none;
         const mode_str = mode_val.asString() orelse return .none;
 
         var has_k = false;
@@ -529,10 +529,16 @@ pub const GC = struct {
 
             var iter = table.hash_part.iterator();
             while (iter.next()) |entry| {
-                const key: *StringObject = @constCast(entry.key_ptr.*);
+                const key = entry.key_ptr.*;
+
+                // Check if key is marked (only objects can be unmarked)
+                const key_marked = switch (key) {
+                    .object => |obj| obj.marked,
+                    else => true, // Non-objects (nil, bool, int, number) are always "marked"
+                };
 
                 // If key is marked, mark the value (unless weak values)
-                if (key.header.marked and !table.hasWeakValues()) {
+                if (key_marked and !table.hasWeakValues()) {
                     const value = entry.value_ptr.*;
                     if (value == .object and !value.object.marked) {
                         markObject(self, value.object);
@@ -556,17 +562,19 @@ pub const GC = struct {
     /// Remove entries from a weak table where key or value was collected
     fn cleanWeakTableEntries(self: *GC, table: *TableObject) void {
         // Collect keys to remove (can't remove during iteration)
-        var to_remove: std.ArrayListUnmanaged(*const StringObject) = .{};
+        var to_remove: std.ArrayListUnmanaged(TValue) = .{};
         defer to_remove.deinit(self.allocator);
 
         var iter = table.hash_part.iterator();
         while (iter.next()) |entry| {
             var remove = false;
-            const key: *StringObject = @constCast(entry.key_ptr.*);
+            const key = entry.key_ptr.*;
 
-            // Check weak key
-            if (table.hasWeakKeys() and !key.header.marked) {
-                remove = true;
+            // Check weak key (only objects can be collected)
+            if (table.hasWeakKeys()) {
+                if (key == .object and !key.object.marked) {
+                    remove = true;
+                }
             }
 
             // Check weak value (only for collectable values)
@@ -578,7 +586,7 @@ pub const GC = struct {
             }
 
             if (remove) {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch {};
+                to_remove.append(self.allocator, key) catch {};
             }
         }
 
@@ -637,7 +645,7 @@ pub const GC = struct {
                 const table: *TableObject = @fieldParentPtr("header", obj);
                 if (table.metatable) |mt| {
                     // Look up __gc in metatable
-                    if (mt.get(self.mm_keys.get(.gc))) |gc_fn| {
+                    if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
                         // Call __gc(table)
                         // Errors in finalizers are ignored (standard Lua behavior)
                         _ = call.callValue(vm, gc_fn, &[_]TValue{TValue.fromTable(table)}) catch {};
@@ -973,7 +981,7 @@ test "table marks its contents" {
 
     // Put string in table
     const key = try gc.allocString("key");
-    try table.set(key, TValue.fromString(str));
+    try table.set(TValue.fromString(key), TValue.fromString(str));
 
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 4), stats_before.object_count);
@@ -989,7 +997,7 @@ test "table marks its contents" {
     try std.testing.expectEqual(@as(usize, 3), stats_after.object_count);
 
     // Verify string is still accessible through table
-    const retrieved = table.get(key);
+    const retrieved = table.get(TValue.fromString(key));
     try std.testing.expect(retrieved != null);
     try std.testing.expectEqualStrings("value in table", retrieved.?.asString().?.asSlice());
 }

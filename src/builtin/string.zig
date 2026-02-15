@@ -848,9 +848,9 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const key_s = try vm.gc.allocString("s");
     const key_p = try vm.gc.allocString("p");
     const key_pos = try vm.gc.allocString("pos");
-    try state_table.set(key_s, str_arg);
-    try state_table.set(key_p, pat_arg);
-    try state_table.set(key_pos, .{ .integer = 0 });
+    try state_table.set(TValue.fromString(key_s), str_arg);
+    try state_table.set(TValue.fromString(key_p), pat_arg);
+    try state_table.set(TValue.fromString(key_pos), .{ .integer = 0 });
 
     // Return iterator function
     const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .string_gmatch_iterator });
@@ -888,7 +888,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get string from state table
     const key_s = try vm.gc.allocString("s");
-    const str_val = state_table.get(key_s) orelse {
+    const str_val = state_table.get(TValue.fromString(key_s)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -900,7 +900,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get pattern from state table
     const key_p = try vm.gc.allocString("p");
-    const pat_val = state_table.get(key_p) orelse {
+    const pat_val = state_table.get(TValue.fromString(key_p)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -912,7 +912,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get current position from state table
     const key_pos = try vm.gc.allocString("pos");
-    const pos_val = state_table.get(key_pos) orelse {
+    const pos_val = state_table.get(TValue.fromString(key_pos)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -948,7 +948,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try state_table.set(key_pos, .{ .integer = @as(i64, @intCast(next_pos)) });
+            try state_table.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {
@@ -1105,7 +1105,7 @@ fn getGsubReplacement(
             str[matcher.match_start..matcher.match_end];
 
         const key = try vm.gc.allocString(key_str);
-        if (repl_table.get(key)) |val| {
+        if (repl_table.get(TValue.fromString(key))) |val| {
             if (val.asString()) |s| {
                 return s.asSlice();
             }

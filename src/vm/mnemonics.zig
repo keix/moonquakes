@@ -884,10 +884,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Default: count sequential integer keys from 1
                 // Stop at first nil or missing key (Lua sequence semantics)
                 var len: i64 = 0;
-                var key_buffer: [32]u8 = undefined;
                 while (true) {
-                    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{len + 1}) catch break;
-                    const key = vm.gc.allocString(key_slice) catch break;
+                    const key = TValue{ .integer = len + 1 };
                     const val = table.get(key) orelse break;
                     if (val == .nil) break;
                     len += 1;
@@ -1685,7 +1683,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                const value = vm.globals.get(key) orelse .nil;
+                const value = vm.globals.get(TValue.fromString(key)) orelse .nil;
                 vm.stack[vm.base + a] = value;
             } else {
                 return error.InvalidTableKey;
@@ -1702,7 +1700,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                try vm.globals.set(key, value);
+                try vm.globals.set(TValue.fromString(key), value);
             } else {
                 return error.InvalidTableKey;
             }
@@ -1748,17 +1746,26 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
-                } else if (key_val.isInteger()) {
-                    var key_buffer: [32]u8 = undefined;
-                    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
-                        return error.InvalidTableKey;
-                    };
-                    const key = try vm.gc.allocString(key_slice);
-                    if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
-                        return result;
-                    }
                 } else {
-                    return error.InvalidTableOperation;
+                    // Integer, number, boolean, etc. - use TValue key directly
+                    if (table.get(key_val)) |value| {
+                        vm.stack[vm.base + a] = value;
+                    } else {
+                        // Check __index metamethod
+                        if (table.metatable) |mt| {
+                            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.index)))) |index_mm| {
+                                if (index_mm.asTable()) |index_table| {
+                                    vm.stack[vm.base + a] = index_table.get(key_val) orelse .nil;
+                                } else {
+                                    vm.stack[vm.base + a] = .nil;
+                                }
+                            } else {
+                                vm.stack[vm.base + a] = .nil;
+                            }
+                        } else {
+                            vm.stack[vm.base + a] = .nil;
+                        }
+                    }
                 }
             } else {
                 // Non-table value: check for shared metatable with __index
@@ -1766,17 +1773,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
                     }
-                } else if (key_val.isInteger()) {
-                    var key_buffer: [32]u8 = undefined;
-                    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
-                        return error.InvalidTableKey;
-                    };
-                    const key = try vm.gc.allocString(key_slice);
-                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
-                        return result;
-                    }
                 } else {
-                    return error.InvalidTableOperation;
+                    // Non-table with non-string key - return nil
+                    vm.stack[vm.base + a] = .nil;
                 }
             }
             return .Continue;
@@ -1795,17 +1794,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
                         return result;
                     }
-                } else if (key_val.isInteger()) {
-                    var key_buffer: [32]u8 = undefined;
-                    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
-                        return error.InvalidTableOperation;
-                    };
-                    const key = try vm.gc.allocString(key_slice);
-                    if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
-                        return result;
-                    }
                 } else {
-                    return error.InvalidTableOperation;
+                    // Integer, number, boolean, etc. - use TValue key directly
+                    try table.set(key_val, value);
                 }
             } else {
                 return error.InvalidTableOperation;
@@ -1820,13 +1811,26 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
 
             if (table_val.asTable()) |table| {
-                var key_buffer: [32]u8 = undefined;
-                const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{c}) catch {
-                    return error.InvalidTableKey;
-                };
-                const key = try vm.gc.allocString(key_slice);
-                if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
-                    return result;
+                const key = TValue{ .integer = @intCast(c) };
+                // Fast path: direct lookup
+                if (table.get(key)) |value| {
+                    vm.stack[vm.base + a] = value;
+                } else {
+                    // Slow path: check __index metamethod
+                    // Note: For integer keys, we still call metamethod with integer key
+                    if (table.metatable) |mt| {
+                        if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.index)))) |index_mm| {
+                            if (index_mm.asTable()) |index_table| {
+                                vm.stack[vm.base + a] = index_table.get(key) orelse .nil;
+                            } else {
+                                vm.stack[vm.base + a] = .nil;
+                            }
+                        } else {
+                            vm.stack[vm.base + a] = .nil;
+                        }
+                    } else {
+                        vm.stack[vm.base + a] = .nil;
+                    }
                 }
             } else {
                 return error.InvalidTableOperation;
@@ -1842,14 +1846,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const value = vm.stack[vm.base + c];
 
             if (table_val.asTable()) |table| {
-                var key_buffer: [32]u8 = undefined;
-                const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{b}) catch {
-                    return error.InvalidTableKey;
-                };
-                const key = try vm.gc.allocString(key_slice);
-                if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
-                    return result;
-                }
+                const key = TValue{ .integer = @intCast(b) };
+                // Direct set (SETI typically doesn't trigger __newindex for existing keys)
+                try table.set(key, value);
             } else {
                 return error.InvalidTableOperation;
             }
@@ -2124,21 +2123,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
 
             // Set values R[A+1], R[A+2], ..., R[A+n] into table
-            var key_buffer: [32]u8 = undefined;
             for (0..n) |i| {
                 const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
                 const index: i64 = start_index + @as(i64, @intCast(i));
 
-                // Convert integer index to string key
-                const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{index}) catch {
-                    return error.InvalidTableOperation;
-                };
-                const key = try vm.gc.allocString(key_slice);
+                // Use integer key directly (Lua 5.4 semantics)
+                const key = TValue{ .integer = index };
 
-                // Use dispatchNewindexMM to handle potential metamethods
-                if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
-                    return result;
-                }
+                // Set value in table (handles __newindex if needed)
+                // Note: SETLIST uses raw set, not dispatchNewindexMM
+                try table.set(key, value);
             }
 
             return .Continue;
@@ -2592,7 +2586,7 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
 /// If __index is a function, calls it with (table, key)
 fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
     // Fast path: key exists in table
-    if (table.get(key)) |value| {
+    if (table.get(TValue.fromString(key))) |value| {
         vm.stack[vm.base + result_reg] = value;
         return null; // Continue
     }
@@ -2603,14 +2597,14 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
         return null; // Continue
     };
 
-    const index_mm = mt.get(vm.gc.mm_keys.get(.index)) orelse {
+    const index_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.index))) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null; // Continue
     };
 
     // __index is a table: recursively look up
     if (index_mm.asTable()) |index_table| {
-        if (index_table.get(key)) |value| {
+        if (index_table.get(TValue.fromString(key))) |value| {
             vm.stack[vm.base + result_reg] = value;
         } else {
             // Recursive __index lookup on the index table
@@ -2672,14 +2666,14 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
     };
 
     // Look up __index in the metatable
-    const index_mm = mt.get(vm.gc.mm_keys.get(.index)) orelse {
+    const index_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.index))) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null;
     };
 
     // __index is a table: look up the key
     if (index_mm.asTable()) |index_table| {
-        if (index_table.get(key)) |found| {
+        if (index_table.get(TValue.fromString(key))) |found| {
             vm.stack[vm.base + result_reg] = found;
         } else {
             // Recursive lookup in index table's metatable
@@ -2735,22 +2729,23 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 /// If __newindex is a table, set the key in that table
 /// If __newindex is a function, call it with (table, key, value)
 fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringObject, table_val: TValue, value: TValue) !?ExecuteResult {
+    const key_val = TValue.fromString(key);
     // Fast path: key already exists in table - just update it
-    if (table.get(key) != null) {
-        try table.set(key, value);
+    if (table.get(key_val) != null) {
+        try table.set(key_val, value);
         return null; // Continue
     }
 
     // Check for __newindex metamethod
     const mt = table.metatable orelse {
         // No metatable, just set the value
-        try table.set(key, value);
+        try table.set(key_val, value);
         return null; // Continue
     };
 
-    const newindex_mm = mt.get(vm.gc.mm_keys.get(.newindex)) orelse {
+    const newindex_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.newindex))) orelse {
         // No __newindex, just set the value
-        try table.set(key, value);
+        try table.set(key_val, value);
         return null; // Continue
     };
 
@@ -2800,7 +2795,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
     }
 
     // __newindex is not a valid type, just set normally
-    try table.set(key, value);
+    try table.set(TValue.fromString(key), value);
     return null;
 }
 
@@ -2813,7 +2808,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
     const mt = table.metatable orelse return null;
 
-    const call_mm = mt.get(vm.gc.mm_keys.get(.call)) orelse return null;
+    const call_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.call))) orelse return null;
 
     // __call must be a function
     if (call_mm.asClosure()) |closure| {
@@ -2861,7 +2856,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
     const mt = table.metatable orelse return null;
 
-    const len_mm = mt.get(vm.gc.mm_keys.get(.len)) orelse return null;
+    const len_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.len))) orelse return null;
 
     // __len is a Lua function
     if (len_mm.asClosure()) |closure| {
@@ -2912,7 +2907,7 @@ fn canConcatPrimitive(val: TValue) bool {
 fn getConcatMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.gc.mm_keys.get(.concat));
+    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.concat)));
 }
 
 /// Concat with __concat metamethod fallback
@@ -2968,7 +2963,7 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
 fn getEqMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.gc.mm_keys.get(.eq));
+    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.eq)));
 }
 
 /// Equality with __eq metamethod fallback
@@ -3027,7 +3022,7 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLtMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.gc.mm_keys.get(.lt));
+    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.lt)));
 }
 
 /// Less-than with __lt metamethod fallback
@@ -3071,7 +3066,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLeMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(vm.gc.mm_keys.get(.le));
+    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.le)));
 }
 
 /// Less-or-equal with __le metamethod fallback
@@ -3161,7 +3156,7 @@ fn getBitwiseMM(vm: *VM, val: TValue, comptime event: BitwiseMetaEvent) !?TValue
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
     const key = try vm.gc.allocString(event.toKey());
-    return mt.get(key);
+    return mt.get(TValue.fromString(key));
 }
 
 /// Binary bitwise with metamethod fallback

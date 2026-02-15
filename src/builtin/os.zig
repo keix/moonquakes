@@ -54,39 +54,39 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // year
         const year_key = try vm.gc.allocString("year");
-        try table.set(year_key, .{ .integer = dt.year });
+        try table.set(TValue.fromString(year_key), .{ .integer = dt.year });
 
         // month (1-12)
         const month_key = try vm.gc.allocString("month");
-        try table.set(month_key, .{ .integer = dt.month });
+        try table.set(TValue.fromString(month_key), .{ .integer = dt.month });
 
         // day (1-31)
         const day_key = try vm.gc.allocString("day");
-        try table.set(day_key, .{ .integer = dt.day });
+        try table.set(TValue.fromString(day_key), .{ .integer = dt.day });
 
         // hour (0-23)
         const hour_key = try vm.gc.allocString("hour");
-        try table.set(hour_key, .{ .integer = dt.hour });
+        try table.set(TValue.fromString(hour_key), .{ .integer = dt.hour });
 
         // min (0-59)
         const min_key = try vm.gc.allocString("min");
-        try table.set(min_key, .{ .integer = dt.min });
+        try table.set(TValue.fromString(min_key), .{ .integer = dt.min });
 
         // sec (0-59)
         const sec_key = try vm.gc.allocString("sec");
-        try table.set(sec_key, .{ .integer = dt.sec });
+        try table.set(TValue.fromString(sec_key), .{ .integer = dt.sec });
 
         // wday (1-7, Sunday is 1)
         const wday_key = try vm.gc.allocString("wday");
-        try table.set(wday_key, .{ .integer = dt.wday });
+        try table.set(TValue.fromString(wday_key), .{ .integer = dt.wday });
 
         // yday (1-366)
         const yday_key = try vm.gc.allocString("yday");
-        try table.set(yday_key, .{ .integer = dt.yday });
+        try table.set(TValue.fromString(yday_key), .{ .integer = dt.yday });
 
         // isdst (daylight saving, always false for now)
         const isdst_key = try vm.gc.allocString("isdst");
-        try table.set(isdst_key, .{ .boolean = false });
+        try table.set(TValue.fromString(isdst_key), .{ .boolean = false });
 
         vm.stack[vm.base + func_reg] = TValue.fromTable(table);
         return;

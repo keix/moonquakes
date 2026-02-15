@@ -33,15 +33,12 @@ test "SETLIST basic - set array elements" {
     const result = try Mnemonics.execute(&ctx.vm, proto);
     try testing.expect(result == .single);
 
-    // Check table contents
+    // Check table contents (SETLIST now uses integer keys)
     const result_table = result.single.asTable().?;
-    const key1 = try ctx.vm.gc.allocString("1");
-    const key2 = try ctx.vm.gc.allocString("2");
-    const key3 = try ctx.vm.gc.allocString("3");
 
-    const v1 = result_table.get(key1).?;
-    const v2 = result_table.get(key2).?;
-    const v3 = result_table.get(key3).?;
+    const v1 = result_table.get(TValue{ .integer = 1 }).?;
+    const v2 = result_table.get(TValue{ .integer = 2 }).?;
+    const v3 = result_table.get(TValue{ .integer = 3 }).?;
 
     try testing.expect(v1.eql(.{ .integer = 10 }));
     try testing.expect(v2.eql(.{ .integer = 20 }));
@@ -73,11 +70,9 @@ test "SETLIST with B=0 - variable count from top" {
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
-    const key1 = try ctx.vm.gc.allocString("1");
-    const key2 = try ctx.vm.gc.allocString("2");
 
-    const v1 = result_table.get(key1).?;
-    const v2 = result_table.get(key2).?;
+    const v1 = result_table.get(TValue{ .integer = 1 }).?;
+    const v2 = result_table.get(TValue{ .integer = 2 }).?;
 
     try testing.expect(v1.eql(.{ .integer = 100 }));
     try testing.expect(v2.eql(.{ .integer = 200 }));
@@ -88,10 +83,9 @@ test "SETLIST with offset mode (k=1, C=0)" {
     ctx.fixup();
     defer ctx.deinit();
 
-    // Create a table with first element already set
+    // Create a table with first element already set (using integer key)
     const table = try ctx.vm.gc.allocTable();
-    const key1 = try ctx.vm.gc.allocString("1");
-    try table.set(key1, .{ .integer = 1 });
+    try table.set(TValue{ .integer = 1 }, .{ .integer = 1 });
 
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set starting at index 2
@@ -112,16 +106,14 @@ test "SETLIST with offset mode (k=1, C=0)" {
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
-    const key2 = try ctx.vm.gc.allocString("2");
-    const key3 = try ctx.vm.gc.allocString("3");
 
     // Original index 1 should be preserved
-    const v1 = result_table.get(key1).?;
+    const v1 = result_table.get(TValue{ .integer = 1 }).?;
     try testing.expect(v1.eql(.{ .integer = 1 }));
 
     // New values at indices 2 and 3
-    const v2 = result_table.get(key2).?;
-    const v3 = result_table.get(key3).?;
+    const v2 = result_table.get(TValue{ .integer = 2 }).?;
+    const v3 = result_table.get(TValue{ .integer = 3 }).?;
     try testing.expect(v2.eql(.{ .integer = 2 }));
     try testing.expect(v3.eql(.{ .integer = 3 }));
 }

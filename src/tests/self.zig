@@ -26,7 +26,7 @@ test "SELF - prepare method call" {
     ctx.vm.stack[0] = TValue.fromTable(table);
 
     // Add a method to the table
-    try table.set(method_key, .{ .integer = 42 }); // placeholder value as "method"
+    try table.set(TValue.fromString(method_key), .{ .integer = 42 }); // placeholder value as "method"
 
     const constants = [_]TValue{
         TValue.fromString(method_key), // K[0] = "getValue"

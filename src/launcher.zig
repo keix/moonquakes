@@ -36,7 +36,7 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
     // arg[0] = script name
     const key_0 = try gc.allocString("0");
     const script_str = try gc.allocString(options.script_name);
-    try arg_table.set(key_0, TValue.fromString(script_str));
+    try arg_table.set(TValue.fromString(key_0), TValue.fromString(script_str));
 
     // arg[1], arg[2], ... = script arguments
     var key_buffer: [32]u8 = undefined;
@@ -44,12 +44,12 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
         const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{i + 1}) catch continue;
         const key_str = try gc.allocString(key_slice);
         const arg_str = try gc.allocString(arg);
-        try arg_table.set(key_str, TValue.fromString(arg_str));
+        try arg_table.set(TValue.fromString(key_str), TValue.fromString(arg_str));
     }
 
     // Set arg global
     const arg_key = try gc.allocString("arg");
-    try globals.set(arg_key, TValue.fromTable(arg_table));
+    try globals.set(TValue.fromString(arg_key), TValue.fromTable(arg_table));
 }
 
 /// Full execution pipeline with options
