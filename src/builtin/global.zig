@@ -648,6 +648,8 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 /// chunk: string or function returning strings
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    const serializer = @import("../compiler/serializer.zig");
+
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
@@ -671,6 +673,26 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
         return;
     };
+
+    // Check if this is binary bytecode
+    if (serializer.isBytecode(source)) {
+        // Load from bytecode
+        vm.gc.inhibitGC();
+        defer vm.gc.allowGC();
+
+        const proto = serializer.loadProto(source, vm.gc, vm.gc.allocator) catch {
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc.allocString("invalid bytecode");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+
+        const closure = try vm.gc.allocClosure(proto);
+        vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+        return;
+    }
 
     // Compile the source
     const compile_result = pipeline.compile(vm.gc.allocator, source, .{});

@@ -1515,13 +1515,40 @@ fn padAndAppend(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: [
 
 /// string.dump(function [, strip]) - Returns binary representation of function
 pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = vm;
-    _ = func_reg;
-    _ = nargs;
-    _ = nresults;
-    // TODO: Implement string.dump
-    // Returns binary chunk (bytecode) that can be loaded back with load()
-    // Requires access to bytecode generation/serialization
+    const serializer = @import("../compiler/serializer.zig");
+
+    if (nresults == 0) return;
+
+    if (nargs < 1) return error.BadArgument;
+
+    // First argument must be a function (closure)
+    const func_arg = vm.stack[vm.base + func_reg + 1];
+    const closure = func_arg.asClosure() orelse {
+        // Native functions cannot be dumped
+        if (func_arg.asNativeClosure() != null) {
+            return error.BadArgument; // "unable to dump given function"
+        }
+        return error.BadArgument;
+    };
+
+    // Check for strip option (second argument)
+    const strip = if (nargs >= 2) blk: {
+        const strip_arg = vm.stack[vm.base + func_reg + 2];
+        break :blk strip_arg.isBoolean() and strip_arg.boolean;
+    } else false;
+
+    // Get the proto from the closure
+    const proto = closure.getProto();
+
+    // Dump the proto to bytecode
+    const dump = serializer.dumpProto(proto, vm.gc.allocator, strip) catch {
+        return error.RuntimeError;
+    };
+    defer vm.gc.allocator.free(dump);
+
+    // Allocate string for the result
+    const result_str = try vm.gc.allocString(dump);
+    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
 /// Pack format parser state
