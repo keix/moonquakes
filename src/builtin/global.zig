@@ -4,6 +4,7 @@ const string = @import("string.zig");
 const call = @import("../vm/call.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const RuntimeError = @import("error.zig").RuntimeError;
+const metamethod = @import("../vm/metamethod.zig");
 
 /// Lua 5.4 Global Functions (Basic Functions)
 /// Corresponds to Lua manual chapter "Basic Functions"
@@ -376,23 +377,23 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 /// getmetatable(object) - Returns the metatable of the given object
 /// If object has a metatable with __metatable field, returns that value
 /// Otherwise returns the metatable, or nil if no metatable
+/// Supports: tables (individual), userdata (individual), and primitives (shared)
 pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nargs;
 
     const arg = vm.stack[vm.base + func_reg + 1];
 
     var result: TValue = .nil;
-    if (arg.asTable()) |table| {
-        if (table.metatable) |mt| {
-            // Check for __metatable field (protects metatable from modification)
-            if (mt.get(vm.mm_keys.get(.metatable))) |protected| {
-                result = protected;
-            } else {
-                result = TValue.fromTable(mt);
-            }
+
+    // Use metamethod.getMetatable which handles both individual and shared metatables
+    if (metamethod.getMetatable(arg, &vm.gc.shared_mt)) |mt| {
+        // Check for __metatable field (protects metatable from modification/inspection)
+        if (mt.get(vm.mm_keys.get(.metatable))) |protected| {
+            result = protected;
+        } else {
+            result = TValue.fromTable(mt);
         }
     }
-    // TODO: Support metatables for strings (shared string metatable)
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = result;

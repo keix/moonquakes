@@ -263,7 +263,7 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
         const val = vm.stack[vm.base + r];
 
         // Get __close metamethod
-        if (metamethod.getMetamethod(val, .close, &vm.mm_keys)) |mm| {
+        if (metamethod.getMetamethod(val, .close, &vm.mm_keys, &vm.gc.shared_mt)) |mm| {
             // Call __close(val, nil) - second arg is error object (nil for normal close)
             const saved_top = vm.top;
 
@@ -832,7 +832,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .number = -n };
             } else {
                 // Try __unm metamethod
-                const mm = metamethod.getMetamethod(vb, .unm, &vm.mm_keys) orelse {
+                const mm = metamethod.getMetamethod(vb, .unm, &vm.mm_keys, &vm.gc.shared_mt) orelse {
                     return error.ArithmeticError;
                 };
                 return try callUnaryMetamethod(vm, mm, vb, a);
@@ -1761,7 +1761,23 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return error.InvalidTableOperation;
                 }
             } else {
-                return error.InvalidTableOperation;
+                // Non-table value: check for shared metatable with __index
+                if (key_val.asString()) |key| {
+                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
+                        return result;
+                    }
+                } else if (key_val.isInteger()) {
+                    var key_buffer: [32]u8 = undefined;
+                    const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{key_val.integer}) catch {
+                        return error.InvalidTableKey;
+                    };
+                    const key = try vm.gc.allocString(key_slice);
+                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
+                        return result;
+                    }
+                } else {
+                    return error.InvalidTableOperation;
+                }
             }
             return .Continue;
         },
@@ -1856,7 +1872,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return error.InvalidTableOperation;
                 }
             } else {
-                return error.InvalidTableOperation;
+                // Non-table value: check for shared metatable with __index
+                if (key_val.asString()) |key| {
+                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
+                        return result;
+                    }
+                } else {
+                    return error.InvalidTableOperation;
+                }
             }
             return .Continue;
         },
@@ -1909,7 +1932,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return error.InvalidTableOperation;
                 }
             } else {
-                return error.InvalidTableOperation;
+                // Non-table value: check for shared metatable with __index
+                if (key_val.asString()) |key| {
+                    if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
+                        return result;
+                    }
+                } else {
+                    return error.InvalidTableOperation;
+                }
             }
             return .Continue;
         },
@@ -2053,7 +2083,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Check that value has __close metamethod
-            if (metamethod.getMetamethod(val, .close, &vm.mm_keys) == null) {
+            if (metamethod.getMetamethod(val, .close, &vm.mm_keys, &vm.gc.shared_mt) == null) {
                 return error.NoCloseMetamethod;
             }
 
@@ -2157,7 +2187,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys) orelse {
+            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
                 // No metamethod found - arithmetic error
                 return error.ArithmeticError;
             };
@@ -2208,7 +2238,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2254,7 +2284,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2456,7 +2486,7 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     }
 
     // Try metamethod
-    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys) orelse {
+    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.mm_keys, &vm.gc.shared_mt) orelse {
         return error.ArithmeticError;
     };
 
@@ -2624,6 +2654,75 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
         vm.stack[vm.base + result_reg] = vm.stack[temp];
         vm.top = temp;
         return null; // Continue
+    }
+
+    // __index is not a valid type
+    vm.stack[vm.base + result_reg] = .nil;
+    return null;
+}
+
+/// Dispatch __index metamethod for non-table values (strings, numbers, etc.)
+/// Uses shared metatables from gc.shared_mt
+fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, result_reg: u8) !?ExecuteResult {
+    // Get shared metatable for this value type
+    const mt = vm.gc.shared_mt.getForValue(value) orelse {
+        // No shared metatable - return nil
+        vm.stack[vm.base + result_reg] = .nil;
+        return null;
+    };
+
+    // Look up __index in the metatable
+    const index_mm = mt.get(vm.mm_keys.get(.index)) orelse {
+        vm.stack[vm.base + result_reg] = .nil;
+        return null;
+    };
+
+    // __index is a table: look up the key
+    if (index_mm.asTable()) |index_table| {
+        if (index_table.get(key)) |found| {
+            vm.stack[vm.base + result_reg] = found;
+        } else {
+            // Recursive lookup in index table's metatable
+            return try dispatchIndexMM(vm, index_table, key, index_mm, result_reg);
+        }
+        return null;
+    }
+
+    // __index is a function: call it with (value, key)
+    if (index_mm.asClosure()) |closure| {
+        const proto = closure.proto;
+        const new_base = vm.top;
+
+        // Set up parameters: value, key
+        vm.stack[new_base] = value;
+        vm.stack[new_base + 1] = TValue.fromString(key);
+
+        // Fill remaining parameters with nil if needed
+        var i: u32 = 2;
+        while (i < proto.numparams) : (i += 1) {
+            vm.stack[new_base + i] = .nil;
+        }
+
+        vm.top = new_base + proto.maxstacksize;
+
+        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        return .LoopContinue;
+    }
+
+    // __index is a native function
+    if (index_mm.isObject() and index_mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, index_mm.object);
+        const temp = vm.top;
+
+        vm.stack[temp] = index_mm;
+        vm.stack[temp + 1] = value;
+        vm.stack[temp + 2] = TValue.fromString(key);
+        vm.top = temp + 3;
+
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+        vm.stack[vm.base + result_reg] = vm.stack[temp];
+        vm.top = temp;
+        return null;
     }
 
     // __index is not a valid type

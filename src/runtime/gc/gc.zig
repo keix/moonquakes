@@ -15,7 +15,9 @@ const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
 const TValue = @import("../value.zig").TValue;
 const call = @import("../../vm/call.zig");
-const MetaEvent = @import("../../vm/metamethod.zig").MetaEvent;
+const metamethod = @import("../../vm/metamethod.zig");
+const MetaEvent = metamethod.MetaEvent;
+const SharedMetatables = metamethod.SharedMetatables;
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
@@ -65,6 +67,11 @@ pub const GC = struct {
     /// List of weak tables found during mark phase
     /// Used for cleanup after sweep
     weak_tables: std.ArrayListUnmanaged(*TableObject),
+
+    /// Shared metatables for primitive types (string, number, etc.)
+    /// These are global state, shared across all threads/coroutines.
+    /// Set via debug.setmetatable(), used by metamethod resolution.
+    shared_mt: SharedMetatables = .{},
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{

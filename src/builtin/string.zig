@@ -49,7 +49,7 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .string => arg,
             .table, .userdata => ret: {
                 // Check for __tostring metamethod
-                if (metamethod.getMetamethod(arg, .tostring, &vm.mm_keys)) |mm| {
+                if (metamethod.getMetamethod(arg, .tostring, &vm.mm_keys, &vm.gc.shared_mt)) |mm| {
                     if (mm.asClosure()) |closure| {
                         // Save and restore vm.top since executeSyncMM modifies it
                         const saved_top = vm.top;

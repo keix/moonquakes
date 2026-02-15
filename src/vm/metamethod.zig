@@ -81,6 +81,10 @@ pub const MetaEvent = enum {
 /// Pre-allocated metamethod key strings
 /// These are interned once at VM initialization and never allocated again
 /// This is critical for performance - metamethod lookup must not allocate
+///
+/// TODO: Consider moving to GC (global state) when implementing coroutines.
+/// Currently in VM, but mm_keys are just pointers to interned strings in GC,
+/// so sharing works correctly. Moving to GC would be cleaner architecturally.
 pub const MetamethodKeys = struct {
     strings: [@typeInfo(MetaEvent).@"enum".fields.len]*StringObject,
 
@@ -100,21 +104,100 @@ pub const MetamethodKeys = struct {
     }
 };
 
+/// Shared metatables for primitive types (string, number, boolean, etc.)
+/// These are global to the VM state and set via debug.setmetatable()
+/// Unlike table metatables, these are shared across all values of that type
+///
+/// Stored in GC (global state) so coroutines share the same metatables.
+pub const SharedMetatables = struct {
+    string: ?*TableObject = null,
+    number: ?*TableObject = null,
+    boolean: ?*TableObject = null,
+    function: ?*TableObject = null, // For closures/native closures
+    nil: ?*TableObject = null, // Lua 5.4 supports this via debug.setmetatable
+
+    /// Get shared metatable for a primitive type based on value
+    pub fn getForValue(self: *const SharedMetatables, value: TValue) ?*TableObject {
+        if (value.isNil()) {
+            return self.nil;
+        }
+        if (value.isBoolean()) {
+            return self.boolean;
+        }
+        if (value.isInteger() or value.isNumber()) {
+            return self.number;
+        }
+        if (value.asString()) |_| {
+            return self.string;
+        }
+        if (value.asClosure()) |_| {
+            return self.function;
+        }
+        if (value.isObject()) {
+            const obj = value.object;
+            if (obj.type == .native_closure) {
+                return self.function;
+            }
+        }
+        return null;
+    }
+
+    /// Set shared metatable for a primitive type
+    /// Returns true if the type supports shared metatables (non-table types)
+    pub fn setForValue(self: *SharedMetatables, value: TValue, mt: ?*TableObject) bool {
+        if (value.isNil()) {
+            self.nil = mt;
+            return true;
+        }
+        if (value.isBoolean()) {
+            self.boolean = mt;
+            return true;
+        }
+        if (value.isInteger() or value.isNumber()) {
+            self.number = mt;
+            return true;
+        }
+        if (value.asString()) |_| {
+            self.string = mt;
+            return true;
+        }
+        if (value.asClosure()) |_| {
+            self.function = mt;
+            return true;
+        }
+        if (value.isObject()) {
+            const obj = value.object;
+            if (obj.type == .native_closure) {
+                self.function = mt;
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 /// Get the metatable for a value
-/// Returns null if the value has no metatable
-pub fn getMetatable(value: TValue) ?*TableObject {
+/// - Tables: return table's individual metatable
+/// - Userdata: return userdata's individual metatable
+/// - Primitives: return shared metatable from GC
+pub fn getMetatable(value: TValue, shared: *const SharedMetatables) ?*TableObject {
+    // Tables have their own metatables
     if (value.asTable()) |table| {
         return table.metatable;
     }
-    // TODO: Support shared metatables for strings, numbers, etc.
-    return null;
+    // Userdata has its own metatable
+    if (value.asUserdata()) |ud| {
+        return ud.metatable;
+    }
+    // Primitive types use shared metatables
+    return shared.getForValue(value);
 }
 
 /// Look up a metamethod in a value's metatable
 /// Returns the metamethod value if found, null otherwise
 /// NOTE: This function does NOT allocate - it uses pre-interned keys
-pub fn getMetamethod(value: TValue, event: MetaEvent, keys: *const MetamethodKeys) ?TValue {
-    const mt = getMetatable(value) orelse return null;
+pub fn getMetamethod(value: TValue, event: MetaEvent, keys: *const MetamethodKeys, shared: *const SharedMetatables) ?TValue {
+    const mt = getMetatable(value, shared) orelse return null;
 
     // Use pre-allocated key string - no allocation!
     const key_str = keys.get(event);
@@ -126,11 +209,11 @@ pub fn getMetamethod(value: TValue, event: MetaEvent, keys: *const MetamethodKey
 /// Try to get a metamethod from either operand (for binary operations)
 /// Lua checks the first operand first, then the second
 /// NOTE: This function does NOT allocate
-pub fn getBinMetamethod(a: TValue, b: TValue, event: MetaEvent, keys: *const MetamethodKeys) ?TValue {
+pub fn getBinMetamethod(a: TValue, b: TValue, event: MetaEvent, keys: *const MetamethodKeys, shared: *const SharedMetatables) ?TValue {
     // Try first operand
-    if (getMetamethod(a, event, keys)) |mm| {
+    if (getMetamethod(a, event, keys, shared)) |mm| {
         return mm;
     }
     // Try second operand
-    return getMetamethod(b, event, keys);
+    return getMetamethod(b, event, keys, shared);
 }

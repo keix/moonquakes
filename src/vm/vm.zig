@@ -182,6 +182,13 @@ pub const VM = struct {
             self.gc.mark(&hook.header);
         }
 
+        // 7. Mark shared metatables (global state for primitive types)
+        if (self.gc.shared_mt.string) |mt| self.gc.mark(&mt.header);
+        if (self.gc.shared_mt.number) |mt| self.gc.mark(&mt.header);
+        if (self.gc.shared_mt.boolean) |mt| self.gc.mark(&mt.header);
+        if (self.gc.shared_mt.function) |mt| self.gc.mark(&mt.header);
+        if (self.gc.shared_mt.nil) |mt| self.gc.mark(&mt.header);
+
         // === Sweep phase ===
         self.gc.collect();
 

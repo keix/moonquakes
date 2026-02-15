@@ -2,6 +2,7 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
+const metamethod = @import("../vm/metamethod.zig");
 
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
@@ -321,21 +322,63 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 
 /// debug.getmetatable(value) - Returns metatable of given value
 /// Unlike getmetatable(), this bypasses __metatable protection
+/// Works for all types including primitives (returns shared metatables)
 pub fn nativeDebugGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nargs;
 
     const value = vm.stack[vm.base + func_reg + 1];
 
     // Get metatable directly, bypassing __metatable protection
-    const result: TValue = if (value.asTable()) |table|
-        if (table.metatable) |mt| TValue.fromTable(mt) else TValue.nil
-    else if (value.asUserdata()) |ud|
-        if (ud.metatable) |mt| TValue.fromTable(mt) else TValue.nil
+    // Uses metamethod.getMetatable which handles both individual and shared metatables
+    const result: TValue = if (metamethod.getMetatable(value, &vm.gc.shared_mt)) |mt|
+        TValue.fromTable(mt)
     else
         TValue.nil;
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = result;
+    }
+}
+
+/// debug.setmetatable(value, table) - Sets metatable for given value
+/// Unlike setmetatable(), this works for all types:
+/// - Tables/userdata: sets individual metatable
+/// - Primitives (string, number, boolean, function, nil): sets shared metatable
+/// Returns the value (first argument)
+pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = nargs;
+
+    const value = vm.stack[vm.base + func_reg + 1];
+    const mt_arg = vm.stack[vm.base + func_reg + 2];
+
+    // Get the metatable (nil clears it)
+    const new_mt: ?*object.TableObject = if (mt_arg.isNil())
+        null
+    else if (mt_arg.asTable()) |mt|
+        mt
+    else {
+        // Invalid metatable argument - should be table or nil
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = value;
+        }
+        return;
+    };
+
+    // Try to set metatable based on value type
+    if (value.asTable()) |table| {
+        // Table: set individual metatable (no protection check in debug.setmetatable)
+        table.metatable = new_mt;
+    } else if (value.asUserdata()) |ud| {
+        // Userdata: set individual metatable
+        ud.metatable = new_mt;
+    } else {
+        // Primitive type: set shared metatable
+        _ = vm.gc.shared_mt.setForValue(value, new_mt);
+    }
+
+    // Return the original value
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = value;
     }
 }
 
@@ -568,35 +611,6 @@ pub fn nativeDebugSetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
-    }
-}
-
-/// debug.setmetatable(value, table) - Sets metatable for given value
-/// Unlike setmetatable(), this bypasses __metatable protection
-/// Returns the value
-pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nargs;
-
-    const value = vm.stack[vm.base + func_reg + 1];
-    const mt_arg = vm.stack[vm.base + func_reg + 2];
-
-    // Get the metatable to set (or nil to clear)
-    const new_mt: ?*@import("../runtime/gc/object.zig").TableObject =
-        if (mt_arg.isNil()) null else mt_arg.asTable();
-
-    // Set metatable on table
-    if (value.asTable()) |table| {
-        table.metatable = new_mt;
-    }
-    // Set metatable on userdata
-    else if (value.asUserdata()) |ud| {
-        ud.metatable = new_mt;
-    }
-    // Invalid value type is silently ignored (Lua behavior)
-
-    // Return the original value
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = value;
     }
 }
 
