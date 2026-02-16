@@ -10,8 +10,8 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "SELF - prepare method call" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create a table with a method

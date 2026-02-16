@@ -9,8 +9,8 @@ const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 
 test "EQK: equality with constant - skip on match" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 42 (should skip)
@@ -38,8 +38,8 @@ test "EQK: equality with constant - skip on match" {
 }
 
 test "EQK: equality with constant - no skip on mismatch" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 100 (should not skip)
@@ -66,8 +66,8 @@ test "EQK: equality with constant - no skip on mismatch" {
 }
 
 test "EQI: equality with immediate integer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] == 42 where R[1] = 42 (should skip)
@@ -91,8 +91,8 @@ test "EQI: equality with immediate integer" {
 }
 
 test "LTI: less than immediate integer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] < 50 where R[1] = 42 (should skip)
@@ -116,8 +116,8 @@ test "LTI: less than immediate integer" {
 }
 
 test "LEI: less than or equal immediate integer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] <= 42 where R[1] = 42 (should skip)
@@ -141,8 +141,8 @@ test "LEI: less than or equal immediate integer" {
 }
 
 test "GTI: greater than immediate integer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] > 30 where R[1] = 42 (should skip)
@@ -166,8 +166,8 @@ test "GTI: greater than immediate integer" {
 }
 
 test "GEI: greater than or equal immediate integer" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] >= 42 where R[1] = 42 (should skip)
@@ -191,8 +191,8 @@ test "GEI: greater than or equal immediate integer" {
 }
 
 test "Comparison extensions: negative immediate values" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] > -10 where R[1] = 5 (should skip)
@@ -219,8 +219,8 @@ test "Comparison extensions: negative immediate values" {
 }
 
 test "Comparison extensions: floating point values" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test R[1] < 100 where R[1] = 3.14 (should skip)

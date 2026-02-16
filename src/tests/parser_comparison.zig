@@ -28,8 +28,8 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !ReturnValu
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
 
     // Create VM and materialize
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);

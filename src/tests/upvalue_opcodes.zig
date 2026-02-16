@@ -12,8 +12,8 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "CLOSE opcode - no-op behavior" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Initialize some registers
@@ -45,8 +45,8 @@ test "CLOSE opcode - no-op behavior" {
 }
 
 test "TBC opcode - nil value (no-op)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Initialize registers - nil is a valid TBC target that does nothing
@@ -68,8 +68,8 @@ test "TBC opcode - nil value (no-op)" {
 }
 
 test "TBC opcode - false value (no-op)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // false is also a valid TBC target that does nothing
@@ -91,8 +91,8 @@ test "TBC opcode - false value (no-op)" {
 }
 
 test "SETUPVAL opcode - no-op behavior" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Initialize some registers
@@ -123,8 +123,8 @@ test "SETUPVAL opcode - no-op behavior" {
 }
 
 test "SETTABUP opcode - global variable assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC
@@ -155,8 +155,8 @@ test "SETTABUP opcode - global variable assignment" {
 }
 
 test "SETTABUP opcode - multiple global assignments" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate strings through GC
@@ -198,8 +198,8 @@ test "SETTABUP opcode - multiple global assignments" {
 }
 
 test "SETTABUP opcode - invalid key type" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create constant with non-string key
@@ -224,8 +224,8 @@ test "SETTABUP opcode - invalid key type" {
 }
 
 test "All new opcodes - integration test" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC
@@ -259,8 +259,8 @@ test "All new opcodes - integration test" {
 }
 
 test "CLOSURE opcode - create closure without upvalues" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Child proto: simple function that returns 42
@@ -294,8 +294,8 @@ test "CLOSURE opcode - create closure without upvalues" {
 }
 
 test "CLOSURE opcode - create closure with upvalue from stack" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Child proto: function that reads upvalue
@@ -342,8 +342,8 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
 }
 
 test "CLOSE opcode - closes open upvalues" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Child proto: function that reads upvalue
@@ -394,8 +394,8 @@ test "CLOSE opcode - closes open upvalues" {
 }
 
 test "GETUPVAL and SETUPVAL with closure" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Child proto: function that modifies upvalue and returns it

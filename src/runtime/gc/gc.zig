@@ -24,6 +24,37 @@ const MetamethodKeys = metamethod.MetamethodKeys;
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
 const GC_THRESHOLD = 64 * 1024; // 64KB initial threshold
 
+/// Type-safe interface for root providers (VM, REPL, test harnesses, etc.)
+/// Replaces the unsafe ?*anyopaque pattern with a proper vtable-based interface.
+/// GC can have multiple root providers, each responsible for marking its own roots.
+pub const RootProvider = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        /// Mark all roots owned by this provider (stack, globals, etc.)
+        markRoots: *const fn (ctx: *anyopaque, gc: *GC) void,
+        /// Call a Lua value (for __gc finalizers). Returns first result or nil.
+        callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+    };
+
+    /// Type-safe constructor - prevents mismatched ptr/vtable pairs
+    pub fn init(comptime T: type, ptr: *T, vtable: *const VTable) RootProvider {
+        return .{
+            .ptr = @ptrCast(ptr),
+            .vtable = vtable,
+        };
+    }
+
+    pub fn markRoots(self: RootProvider, gc: *GC) void {
+        self.vtable.markRoots(self.ptr, gc);
+    }
+
+    pub fn callValue(self: RootProvider, func: *const TValue, args: []const TValue) !TValue {
+        return self.vtable.callValue(self.ptr, func, args);
+    }
+};
+
 /// Moonquakes Mark & Sweep Garbage Collector
 ///
 /// This is a simple, non-incremental mark-and-sweep collector.
@@ -45,17 +76,10 @@ pub const GC = struct {
     /// Threshold for triggering next collection
     next_gc: usize,
 
-    /// Reference to VM for root marking during GC
-    /// Uses anyopaque to avoid circular import dependency
-    ///
-    /// TODO: Refactor to use RootProvider interface for better type safety
-    /// Current design (gc.setVM) mirrors Lua's approach and works, but:
-    /// - `?*anyopaque` lacks type safety and has unclear responsibility boundaries
-    /// Ideal future design:
-    /// - GC knows only a `RootProvider` interface (markStack, markGlobals)
-    /// - VM implements RootProvider
-    /// - GC calls provider.markRoots() without knowing VM internals
-    vm: ?*anyopaque,
+    /// Root providers for marking during GC
+    /// Each provider is responsible for marking its own roots (stack, globals, etc.)
+    /// Multiple providers supported for VM, REPL, test harnesses, etc.
+    root_providers: std.ArrayListUnmanaged(RootProvider),
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
@@ -85,7 +109,7 @@ pub const GC = struct {
             .strings = std.StringHashMap(*StringObject).init(allocator),
             .bytes_allocated = 0,
             .next_gc = GC_THRESHOLD,
-            .vm = null,
+            .root_providers = .{},
             .gc_inhibit = 0,
             .weak_tables = .{},
         };
@@ -121,9 +145,30 @@ pub const GC = struct {
         }
     }
 
-    /// Set VM reference for automatic GC triggering
-    pub fn setVM(self: *GC, vm: *anyopaque) void {
-        self.vm = vm;
+    /// Register a root provider for GC marking
+    /// Multiple providers can be registered (VM, REPL, test harnesses, etc.)
+    pub fn addRootProvider(self: *GC, provider: RootProvider) !void {
+        // Debug: check for duplicate registration
+        if (builtin.mode == .Debug) {
+            for (self.root_providers.items) |p| {
+                std.debug.assert(!(p.ptr == provider.ptr and p.vtable == provider.vtable));
+            }
+        }
+        try self.root_providers.append(self.allocator, provider);
+    }
+
+    /// Remove a root provider (e.g., when VM is destroyed)
+    /// Matches by both ptr and vtable to ensure correct provider removal.
+    pub fn removeRootProvider(self: *GC, provider: RootProvider) void {
+        var i: usize = 0;
+        while (i < self.root_providers.items.len) {
+            const p = self.root_providers.items[i];
+            if (p.ptr == provider.ptr and p.vtable == provider.vtable) {
+                _ = self.root_providers.swapRemove(i);
+                return; // Each provider should only be registered once
+            }
+            i += 1;
+        }
     }
 
     pub fn deinit(self: *GC) void {
@@ -132,6 +177,9 @@ pub const GC = struct {
 
         // Clear weak tables list
         self.weak_tables.deinit(self.allocator);
+
+        // Clear root providers list
+        self.root_providers.deinit(self.allocator);
 
         // Free all remaining objects without mark/sweep
         // (no need to determine liveness at program exit)
@@ -166,15 +214,35 @@ pub const GC = struct {
         return ptr;
     }
 
-    /// Try to run GC if VM reference is available and not inhibited
+    /// Try to run GC if root providers are registered and not inhibited
     fn tryCollect(self: *GC) void {
         // Don't run GC if inhibited (during materialization, etc.)
         if (self.gc_inhibit > 0) return;
-        if (self.vm) |vm_ptr| {
-            const VM = @import("../../vm/vm.zig").VM;
-            const vm: *VM = @ptrCast(@alignCast(vm_ptr));
-            vm.collectGarbage();
+        // Don't run GC if no root providers registered
+        if (self.root_providers.items.len == 0) return;
+
+        self.collect();
+    }
+
+    /// Run a full GC cycle: mark all roots via providers, then sweep
+    pub fn collect(self: *GC) void {
+        // Prepare for new GC cycle
+        self.beginCollection();
+
+        // Mark phase: each provider marks its roots
+        for (self.root_providers.items) |provider| {
+            provider.markRoots(self);
         }
+
+        // Mark shared metatables (global GC state)
+        if (self.shared_mt.string) |mt| self.mark(&mt.header);
+        if (self.shared_mt.number) |mt| self.mark(&mt.header);
+        if (self.shared_mt.boolean) |mt| self.mark(&mt.header);
+        if (self.shared_mt.function) |mt| self.mark(&mt.header);
+        if (self.shared_mt.nil) |mt| self.mark(&mt.header);
+
+        // Finish: ephemeron propagation, weak table cleanup, sweep
+        self.finishCollection();
     }
 
     /// Allocate a new string object
@@ -346,19 +414,14 @@ pub const GC = struct {
         return obj;
     }
 
-    /// Check if GC should run (policy decision)
-    pub fn shouldCollect(self: *GC, additional_bytes: usize) bool {
-        return self.bytes_allocated + additional_bytes > self.next_gc;
-    }
-
     /// Prepare for a new GC cycle (called before VM marks roots)
     pub fn beginCollection(self: *GC) void {
         // Clear weak tables list from previous cycle
         self.weak_tables.clearRetainingCapacity();
     }
 
-    /// Complete collection: ephemeron propagation, sweep, cleanup (called after VM marks roots)
-    pub fn collect(self: *GC) void {
+    /// Complete collection: ephemeron propagation, sweep, cleanup (called after marking)
+    fn finishCollection(self: *GC) void {
         // Propagate ephemerons until stable
         // For weak-key tables, values are only marked if their keys are marked
         while (self.propagateEphemerons()) {}
@@ -432,7 +495,12 @@ pub const GC = struct {
                 // Handle weak tables differently
                 if (table.weak_mode != .none) {
                     // Track weak table for cleanup after sweep
-                    self.weak_tables.append(self.allocator, table) catch {};
+                    self.weak_tables.append(self.allocator, table) catch {
+                        // OOM: weak table tracking lost, but GC can continue
+                        if (builtin.mode == .Debug) {
+                            std.debug.print("GC: failed to track weak table\n", .{});
+                        }
+                    };
 
                     // For weak values only: mark all keys but not values
                     if (table.weak_mode == .weak_values) {
@@ -630,10 +698,12 @@ pub const GC = struct {
     }
 
     /// Run __gc finalizers for all unmarked tables that have them
+    /// Note: Uses the first registered provider for callValue.
+    /// In single-VM scenarios this is always the main VM.
+    /// Multi-VM would need a dedicated finalizer executor.
     fn runFinalizers(self: *GC) void {
-        const VM = @import("../../vm/vm.zig").VM;
-        const vm_ptr = self.vm orelse return;
-        const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+        if (self.root_providers.items.len == 0) return;
+        const provider = self.root_providers.items[0];
 
         // Inhibit GC during finalizer execution to prevent recursive collection
         self.gc_inhibit += 1;
@@ -648,7 +718,8 @@ pub const GC = struct {
                     if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
                         // Call __gc(table)
                         // Errors in finalizers are ignored (standard Lua behavior)
-                        _ = call.callValue(vm, gc_fn, &[_]TValue{TValue.fromTable(table)}) catch {};
+                        const table_val = TValue.fromTable(table);
+                        _ = provider.callValue(&gc_fn, &[_]TValue{table_val}) catch {};
                     }
                 }
             }
@@ -754,7 +825,7 @@ pub const GC = struct {
     }
 
     /// Force garbage collection (for debugging/testing)
-    /// Note: Only runs sweep phase. Mark roots manually before calling.
+    /// Runs a full GC cycle: mark all roots via providers, then sweep.
     pub fn forceGC(self: *GC) void {
         self.collect();
     }

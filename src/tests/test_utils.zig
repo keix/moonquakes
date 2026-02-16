@@ -18,31 +18,17 @@ pub const UpvaldescType = Upvaldesc;
 
 /// Test context that manages GC and VM lifecycle together
 /// This simplifies test setup by handling the GC -> VM dependency
-///
-/// IMPORTANT: Must be used as a pointer (var ctx = ...; ctx.fixup())
-/// or use the create() helper which handles this automatically.
 pub const TestContext = struct {
     gc: GC,
     vm: VM,
 
-    /// Initialize a TestContext. After assignment, caller MUST call fixup()
-    /// to correct the vm.gc pointer after the struct moves to its final location.
-    pub fn init() !TestContext {
-        var gc = GC.init(testing.allocator);
-        try gc.initMetamethodKeys();
-
-        const vm = try VM.init(&gc);
-
-        return .{
-            .gc = gc,
-            .vm = vm,
-        };
-    }
-
-    /// Fix the vm.gc pointer after the struct has moved to its final location.
-    /// This MUST be called immediately after assignment (var ctx = try init(); ctx.fixup();)
-    pub fn fixup(self: *TestContext) void {
-        self.vm.gc = &self.gc;
+    /// Initialize a TestContext in-place.
+    /// GC and VM are automatically set up with proper references.
+    pub fn init(self: *TestContext) !void {
+        self.gc = GC.init(testing.allocator);
+        errdefer self.gc.deinit();
+        try self.gc.initMetamethodKeys();
+        try self.vm.init(&self.gc);
     }
 
     pub fn deinit(self: *TestContext) void {
@@ -50,14 +36,6 @@ pub const TestContext = struct {
         self.gc.deinit();
     }
 };
-
-/// Create a test context with properly initialized pointers.
-/// This is the recommended way to create a TestContext in tests.
-pub fn createTestContext() !TestContext {
-    var ctx = try TestContext.init();
-    ctx.fixup();
-    return ctx;
-}
 
 /// Create a test ProtoObject via GC
 /// This is the test-friendly version of gc.allocProto
@@ -375,8 +353,8 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    var ctx = try TestContext.init();
-    ctx.fixup();
+    var ctx: TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try createTestProto(&ctx.vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));

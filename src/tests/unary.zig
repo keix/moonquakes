@@ -26,8 +26,8 @@ test "unary: -5 = -5" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -47,8 +47,8 @@ test "unary: -3.5 = -3.5" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -68,8 +68,8 @@ test "unary: not true = false" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -89,8 +89,8 @@ test "unary: not nil = true" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -110,8 +110,8 @@ test "unary: not 0 = false" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -134,8 +134,8 @@ test "unary: -5 + 3 = -2" {
         Instruction.initABC(.RETURN, 3, 2, 0), // return R3
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
@@ -145,8 +145,8 @@ test "unary: -5 + 3 = -2" {
 }
 
 test "unary: #\"hello\" = 5 (string length)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate string through GC
@@ -170,8 +170,8 @@ test "unary: #\"hello\" = 5 (string length)" {
 }
 
 test "unary: #\"\" = 0 (empty string length)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Allocate empty string through GC

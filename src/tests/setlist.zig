@@ -10,8 +10,8 @@ const Instruction = opcodes.Instruction;
 const test_utils = @import("test_utils.zig");
 
 test "SETLIST basic - set array elements" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create a table
@@ -46,8 +46,8 @@ test "SETLIST basic - set array elements" {
 }
 
 test "SETLIST with B=0 - variable count from top" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create a table
@@ -79,8 +79,8 @@ test "SETLIST with B=0 - variable count from top" {
 }
 
 test "SETLIST with offset mode (k=1, C=0)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Create a table with first element already set (using integer key)

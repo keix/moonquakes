@@ -41,8 +41,8 @@ fn createTableWithAddMM(vm: *VM, value: i64) !*object.TableObject {
 test "MMBINI - add with immediate (basic structure)" {
     // This test verifies the MMBINI opcode structure
     // Full metamethod testing requires more complex setup
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test that MMBINI with non-table value raises error
@@ -62,8 +62,8 @@ test "MMBINI - add with immediate (basic structure)" {
 }
 
 test "MMBINK - add with constant (basic structure)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const constants = [_]TValue{
@@ -87,8 +87,8 @@ test "MMBINK - add with constant (basic structure)" {
 }
 
 test "MMBINI operand order with k flag" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // With k=0: R[A] op sB

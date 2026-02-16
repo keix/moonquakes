@@ -20,8 +20,8 @@ test "MOVE with stack verification" {
         .{ .integer = 42 },
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
@@ -61,8 +61,8 @@ test "LOADK with comprehensive state tracking" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -106,8 +106,8 @@ test "ADD instruction with side effect verification" {
 }
 
 test "Arithmetic operation helper usage" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test integer addition
@@ -115,16 +115,15 @@ test "Arithmetic operation helper usage" {
 
     // Reset VM
     ctx.deinit();
-    ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    try ctx.init();
 
     // Test float multiplication
     try test_utils.testArithmeticOp(&ctx.vm, Instruction.initABC(.MUL, 2, 0, 1), TValue{ .number = 2.5 }, TValue{ .number = 4.0 }, TValue{ .number = 10.0 }, &[_]TValue{});
 }
 
 test "EQ comparison with skip verification" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     // Test equal values with A=0 (skip if equal)
@@ -133,8 +132,7 @@ test "EQ comparison with skip verification" {
 
     // Reset VM
     ctx.deinit();
-    ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    try ctx.init();
 
     // Test unequal values with A=0 (don't skip if unequal)
     try test_utils.ComparisonTest.expectNoSkip(&ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
@@ -142,8 +140,7 @@ test "EQ comparison with skip verification" {
 
     // Reset VM
     ctx.deinit();
-    ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    try ctx.init();
 
     // Test equal values with A=1 (don't skip if equal, because A=1 negates)
     try test_utils.ComparisonTest.expectNoSkip(&ctx.vm, Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) == (A==0) then skip
@@ -170,8 +167,8 @@ test "FORPREP/FORLOOP with state tracking" {
         .{ .integer = 1 }, // step
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);

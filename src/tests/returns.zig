@@ -32,8 +32,8 @@ test "return: no values (RETURN with B=1)" {
         Instruction.initABC(.RETURN, 0, 1, 0), // return nothing
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -52,8 +52,8 @@ test "return: single value (RETURN with B=2)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
@@ -76,8 +76,8 @@ test "return: multiple values (RETURN with B=4)" {
         Instruction.initABC(.RETURN, 0, 4, 0), // return R0, R1, R2 (B=4 means 3 values)
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
@@ -96,8 +96,8 @@ test "return: RETURN0 - no values" {
         Instruction.initABC(.RETURN0, 0, 0, 0), // return nothing
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
@@ -116,8 +116,8 @@ test "return: RETURN1 - single value" {
         Instruction.initABC(.RETURN1, 0, 0, 0), // return R0
     };
 
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);

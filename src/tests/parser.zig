@@ -27,8 +27,8 @@ fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, s
 }
 
 test "parser: return 42" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -40,8 +40,8 @@ test "parser: return 42" {
 }
 
 test "parser: return 1 + 2" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -53,8 +53,8 @@ test "parser: return 1 + 2" {
 }
 
 test "parser: return 2 * 3" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -66,8 +66,8 @@ test "parser: return 2 * 3" {
 }
 
 test "parser: return 1 + 2 * 3 (precedence)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -80,8 +80,8 @@ test "parser: return 1 + 2 * 3 (precedence)" {
 }
 
 test "parser: return 2 * 3 + 1 (precedence reverse)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -94,8 +94,8 @@ test "parser: return 2 * 3 + 1 (precedence reverse)" {
 }
 
 test "parser: return 1 + 2 + 3 (left associative)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -108,8 +108,8 @@ test "parser: return 1 + 2 + 3 (left associative)" {
 }
 
 test "parser: return 2 * 3 * 4 (left associative)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -122,8 +122,8 @@ test "parser: return 2 * 3 * 4 (left associative)" {
 }
 
 test "parser: return 1 + 2 + 3 * 4 (complex)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -136,8 +136,8 @@ test "parser: return 1 + 2 + 3 * 4 (complex)" {
 }
 
 test "parser: return 0 + 0" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -149,8 +149,8 @@ test "parser: return 0 + 0" {
 }
 
 test "parser: return 5 * 0" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -162,8 +162,8 @@ test "parser: return 5 * 0" {
 }
 
 test "parser: return 100 + 200" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -175,8 +175,8 @@ test "parser: return 100 + 200" {
 }
 
 test "parser: local x = 42" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -191,8 +191,8 @@ test "parser: local x = 42" {
 }
 
 test "parser: return + 5 (unexpected token)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -204,8 +204,8 @@ test "parser: return + 5 (unexpected token)" {
 }
 
 test "parser: return (no expression)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -218,8 +218,8 @@ test "parser: return (no expression)" {
 }
 
 test "parser: return \"hello\" (string literal)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -236,8 +236,8 @@ test "parser: return \"hello\" (string literal)" {
 }
 
 test "parser: return 6 / 2 (division)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -249,8 +249,8 @@ test "parser: return 6 / 2 (division)" {
 }
 
 test "parser: return 5 - 3 (subtraction)" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -262,8 +262,8 @@ test "parser: return 5 - 3 (subtraction)" {
 }
 
 test "parser: local variable assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -279,8 +279,8 @@ test "parser: local variable assignment" {
 }
 
 test "parser: local variable assignment with expression" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -296,8 +296,8 @@ test "parser: local variable assignment with expression" {
 }
 
 test "parser: table field assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -313,8 +313,8 @@ test "parser: table field assignment" {
 }
 
 test "parser: table nested field assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -330,8 +330,8 @@ test "parser: table nested field assignment" {
 }
 
 test "parser: table index assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -348,8 +348,8 @@ test "parser: table index assignment" {
 }
 
 test "parser: mixed field and index assignment" {
-    var ctx = try test_utils.TestContext.init();
-    ctx.fixup();
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
     defer ctx.deinit();
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
