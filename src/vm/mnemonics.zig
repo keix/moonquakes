@@ -307,9 +307,10 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject) void {
     vm.top = proto.maxstacksize;
 }
 
-/// Find the nearest protected frame and handle the error.
+/// Handle a LuaException by unwinding to the nearest protected frame.
 /// Returns true if error was handled by a protected frame, false otherwise.
-fn handleProtectedError(vm: *VM, err: anyerror) bool {
+/// The error value is taken from vm.lua_error_value (set by vm.raise()).
+fn handleLuaException(vm: *VM) bool {
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
@@ -323,19 +324,11 @@ fn handleProtectedError(vm: *VM, err: anyerror) bool {
                 popCallInfo(vm);
             }
 
+            // Place (false, error_value) in return slots
             vm.stack[ret_base] = .{ .boolean = false };
-            vm.stack[ret_base + 1] = .nil;
+            vm.stack[ret_base + 1] = vm.lua_error_value;
+            vm.lua_error_value = .nil; // Clear after use
             vm.top = ret_base + 2;
-
-            if (vm.lua_error_msg) |msg| {
-                vm.stack[ret_base + 1] = TValue.fromString(msg);
-                vm.lua_error_msg = null;
-            } else {
-                const err_str = vm.gc.allocString(@errorName(err)) catch {
-                    return true;
-                };
-                vm.stack[ret_base + 1] = TValue.fromString(err_str);
-            }
 
             return true;
         }
@@ -353,12 +346,12 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     while (true) {
         const ci = vm.ci.?;
         const inst = ci.fetch() catch |err| {
-            if (handleProtectedError(vm, err)) continue;
+            if (err == error.LuaException and handleLuaException(vm)) continue;
             return err;
         };
 
         const result = do(vm, inst) catch |err| {
-            if (handleProtectedError(vm, err)) continue;
+            if (err == error.LuaException and handleLuaException(vm)) continue;
             return err;
         };
 
@@ -2377,20 +2370,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                         vm.stack[vm.base + a] = .{ .boolean = true };
                         break :blk nresults + 1; // true + results
-                    } else |_| blk: {
-                        // Failure: set false and error message
-                        vm.stack[vm.base + a] = .{ .boolean = false };
-                        vm.stack[vm.base + a + 1] = .nil; // Safe placeholder
+                    } else |err| blk: {
+                        // Only catch LuaException; other errors (OOM) propagate
+                        if (err != error.LuaException) return err;
 
-                        // Now safe to access stored message or allocate
-                        if (vm.lua_error_msg) |msg| {
-                            vm.stack[vm.base + a + 1] = TValue.fromString(msg);
-                            vm.lua_error_msg = null;
-                        } else {
-                            const err_str = try vm.gc.allocString("error");
-                            vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
-                        }
-                        break :blk 2; // false + error message
+                        // Failure: set false and error value
+                        vm.stack[vm.base + a] = .{ .boolean = false };
+                        vm.stack[vm.base + a + 1] = vm.lua_error_value;
+                        vm.lua_error_value = .nil;
+                        break :blk 2; // false + error value
                     };
                     // GC SAFETY: Clear stale slots and restore top
                     const result_end = vm.base + a + result_count;

@@ -52,8 +52,7 @@ pub const REPL = struct {
         const stdout = &stdout_writer.interface;
 
         // Print welcome banner
-        try stdout.print("Moonquakes {s} - An interpretation of Lua.\n", .{ver.version});
-        try stdout.writeAll("Copyright (c) 2026 KEI SAWAMURA. Licensed under the MIT License.\n");
+        try ver.printIdentity(stdout);
 
         var buf: [8192]u8 = undefined;
 

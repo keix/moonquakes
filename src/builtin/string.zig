@@ -4,6 +4,7 @@ const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const object = @import("../runtime/gc/object.zig");
+const VM = @import("../vm/vm.zig").VM;
 
 /// Lua 5.4 String Library
 /// Corresponds to Lua manual chapter "String Manipulation"
@@ -1514,21 +1515,23 @@ fn padAndAppend(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: [
 }
 
 /// string.dump(function [, strip]) - Returns binary representation of function
-pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeStringDump(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const serializer = @import("../compiler/serializer.zig");
 
     if (nresults == 0) return;
 
-    if (nargs < 1) return error.BadArgument;
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'dump' (function expected)");
+    }
 
     // First argument must be a function (closure)
     const func_arg = vm.stack[vm.base + func_reg + 1];
     const closure = func_arg.asClosure() orelse {
         // Native functions cannot be dumped
         if (func_arg.asNativeClosure() != null) {
-            return error.BadArgument; // "unable to dump given function"
+            return vm.raiseString("unable to dump given function");
         }
-        return error.BadArgument;
+        return vm.raiseString("bad argument #1 to 'dump' (function expected)");
     };
 
     // Check for strip option (second argument)
@@ -1542,7 +1545,7 @@ pub fn nativeStringDump(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
     // Dump the proto to bytecode
     const dump = serializer.dumpProto(proto, vm.gc.allocator, strip) catch {
-        return error.RuntimeError;
+        return vm.raiseString("unable to dump given function");
     };
     defer vm.gc.allocator.free(dump);
 

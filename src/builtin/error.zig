@@ -1,13 +1,14 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const VM = @import("../vm/vm.zig").VM;
 
 /// Expression Layer: assert() function
 /// Lua signature: assert(v [, message])
 /// If v is false or nil, raises an error with optional message
-pub fn nativeAssert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs == 0) {
         // assert() with no arguments - assertion failed
-        return raiseError(vm, "assertion failed!");
+        return vm.raiseString("assertion failed!");
     }
 
     const value = vm.stack[vm.base + func_reg + 1];
@@ -21,12 +22,12 @@ pub fn nativeAssert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     if (!is_truthy) {
         // Get optional message from second argument
-        const message = if (nargs >= 2) blk: {
+        if (nargs >= 2) {
             const msg_arg = vm.stack[vm.base + func_reg + 2];
-            break :blk if (msg_arg.asString()) |s| s.asSlice() else "assertion failed!";
-        } else "assertion failed!";
-
-        return raiseError(vm, message);
+            // Lua's assert can throw any value as error
+            return vm.raise(msg_arg);
+        }
+        return vm.raiseString("assertion failed!");
     }
 
     // Return the first argument if assertion succeeds
@@ -37,31 +38,16 @@ pub fn nativeAssert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// Expression Layer: error() function
 /// Lua signature: error(message [, level])
-/// Raises an error with the given message
-pub fn nativeError(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+/// Raises an error with the given message (can be any value)
+pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults; // error() never returns
 
-    const message = if (nargs > 0) blk: {
-        const msg_arg = vm.stack[vm.base + func_reg + 1];
-        break :blk if (msg_arg.asString()) |s| s.asSlice() else "error";
-    } else "error";
+    // Lua's error() can throw any value, not just strings
+    const error_value = if (nargs > 0)
+        vm.stack[vm.base + func_reg + 1]
+    else
+        .nil;
 
     // TODO: Handle optional level parameter for stack unwinding
-    // For now, we raise the error at the current level
-    return raiseError(vm, message);
+    return vm.raise(error_value);
 }
-
-/// Internal helper: Raise a Lua error with message
-/// This bridges from Expression Layer to Sugar Layer error translation
-fn raiseError(vm: anytype, message: []const u8) !void {
-    // Store error message in VM for pcall to retrieve
-    vm.lua_error_msg = vm.gc.allocString(message) catch null;
-
-    // Return a VM error that will be caught by protected call handler
-    return RuntimeError.RuntimeError;
-}
-
-/// Error type for user-level errors raised by assert/error functions
-pub const RuntimeError = error{
-    RuntimeError, // Generic runtime error from user code
-};
