@@ -102,7 +102,7 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
     try setStringKey(globals, gc, "_ENV", TValue.fromTable(globals));
     // _VERSION is a version string constant
-    const version_str = try gc.allocString(ver.version_string);
+    const version_str = try gc.allocString(ver.name ++ " " ++ ver.version);
     try setStringKey(globals, gc, "_VERSION", TValue.fromString(version_str));
 }
 

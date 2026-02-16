@@ -2,7 +2,7 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
-const RuntimeError = @import("error.zig").RuntimeError;
+const VM = @import("../vm/vm.zig").VM;
 
 // Module cache key for package.loaded equivalent
 const LOADED_KEY = "_loaded";
@@ -13,18 +13,16 @@ const LOADED_KEY = "_loaded";
 /// require(modname) - Loads the given module
 /// Minimal implementation: searches for modname.lua in current directory
 /// Caches results in a global _loaded table
-pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
-        vm.lua_error_msg = try vm.gc.allocString("bad argument #1 to 'require' (string expected)");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("bad argument #1 to 'require' (string expected)");
     }
 
     const modname_arg = vm.stack[vm.base + func_reg + 1];
     const modname = if (modname_arg.asString()) |str_obj|
         str_obj.asSlice()
     else {
-        vm.lua_error_msg = try vm.gc.allocString("bad argument #1 to 'require' (string expected)");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("bad argument #1 to 'require' (string expected)");
     };
 
     // Get or create _loaded cache table in globals
@@ -108,8 +106,7 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     }
 
     if (found_file == null or found_source == null) {
-        vm.lua_error_msg = try vm.gc.allocString("module not found");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("module not found");
     }
     defer found_file.?.close();
     defer vm.gc.allocator.free(found_source.?);
@@ -122,10 +119,9 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
             // Format error message: "module:line: message"
             const err_msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
                 "module", e.line, e.message,
-            }) catch "syntax error in module";
-            vm.lua_error_msg = vm.gc.allocString(err_msg) catch null;
-            vm.gc.allocator.free(err_msg);
-            return RuntimeError.RuntimeError;
+            }) catch return vm.raiseString("syntax error in module");
+            defer vm.gc.allocator.free(err_msg);
+            return vm.raiseString(err_msg);
         },
         .ok => {},
     }
@@ -134,21 +130,15 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Materialize to Proto
     const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
-        vm.lua_error_msg = try vm.gc.allocString("failed to load module");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("failed to load module");
     };
 
     // Create closure and execute
     const closure = try vm.gc.allocClosure(proto);
     const func_val = TValue.fromClosure(closure);
 
-    // Execute the module
-    const result = call.callValue(vm, func_val, &[_]TValue{}) catch |err| {
-        if (vm.lua_error_msg == null) {
-            vm.lua_error_msg = try vm.gc.allocString(@errorName(err));
-        }
-        return RuntimeError.RuntimeError;
-    };
+    // Execute the module - LuaException propagates up, OOM is fatal
+    const result = try call.callValue(vm, func_val, &[_]TValue{});
 
     // Cache the result (use true if module returns nil)
     const cache_value = if (result.isNil()) TValue{ .boolean = true } else result;
@@ -161,7 +151,7 @@ pub fn nativeRequire(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 }
 
 /// package.loadlib(libname, funcname) - Dynamically links with C library libname
-pub fn nativePackageLoadlib(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = vm;
     _ = func_reg;
     _ = nargs;
@@ -171,7 +161,7 @@ pub fn nativePackageLoadlib(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 }
 
 /// package.searchpath(name, path [, sep [, rep]]) - Searches for name in given path
-pub fn nativePackageSearchpath(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativePackageSearchpath(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = vm;
     _ = func_reg;
     _ = nargs;

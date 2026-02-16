@@ -1,9 +1,9 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const VM = @import("../vm/vm.zig").VM;
 const string = @import("string.zig");
 const call = @import("../vm/call.zig");
 const pipeline = @import("../compiler/pipeline.zig");
-const RuntimeError = @import("error.zig").RuntimeError;
 const metamethod = @import("../vm/metamethod.zig");
 
 /// Lua 5.4 Global Functions (Basic Functions)
@@ -98,8 +98,8 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
-/// Returns: (true, results...) on success, (false, error_message) on failure
-pub fn nativePcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+/// Returns: (true, results...) on success, (false, error_value) on failure
+pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
         if (nresults > 1) {
@@ -118,7 +118,7 @@ pub fn nativePcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
         args[i] = vm.stack[vm.base + func_reg + 2 + @as(u32, @intCast(i))];
     }
 
-    // Call in protected mode
+    // Call in protected mode - only catch LuaException
     const result = call.callValue(vm, func_val, args[0..arg_count]);
 
     if (result) |ret_val| {
@@ -127,24 +127,22 @@ pub fn nativePcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
         if (nresults > 1) {
             vm.stack[vm.base + func_reg + 1] = ret_val;
         }
-    } else |err| {
-        // Error: return (false, error_message)
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        if (nresults > 1) {
-            if (vm.lua_error_msg) |msg| {
-                vm.stack[vm.base + func_reg + 1] = TValue.fromString(msg);
-                vm.lua_error_msg = null;
-            } else {
-                const err_str = try vm.gc.allocString(@errorName(err));
-                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    } else |err| switch (err) {
+        error.LuaException => {
+            // Lua error: return (false, error_value)
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                vm.lua_error_value = .nil;
             }
-        }
+        },
+        else => return err, // OOM etc. propagate up
     }
 }
 
 /// xpcall(f, msgh [, arg1, ...]) - Calls function f with error handler msgh
 /// Returns: (true, results...) on success, (false, handler_result) on failure
-pub fn nativeXpcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
         if (nresults > 1) {
@@ -164,7 +162,7 @@ pub fn nativeXpcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         args[i] = vm.stack[vm.base + func_reg + 3 + @as(u32, @intCast(i))];
     }
 
-    // Call in protected mode
+    // Call in protected mode - only catch LuaException
     const result = call.callValue(vm, func_val, args[0..arg_count]);
 
     if (result) |ret_val| {
@@ -173,39 +171,34 @@ pub fn nativeXpcall(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         if (nresults > 1) {
             vm.stack[vm.base + func_reg + 1] = ret_val;
         }
-    } else |_| {
-        // Get original error message
-        var error_msg: TValue = .nil;
-        if (vm.lua_error_msg) |msg| {
-            error_msg = TValue.fromString(msg);
-            vm.lua_error_msg = null;
-        } else {
-            const err_str = try vm.gc.allocString("error");
-            error_msg = TValue.fromString(err_str);
-        }
+    } else |err| switch (err) {
+        error.LuaException => {
+            // Get error value and call handler
+            const error_value = vm.lua_error_value;
+            vm.lua_error_value = .nil;
 
-        // Call error handler with the error message
-        var handler_args = [1]TValue{error_msg};
-        const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| {
-            // Handler itself failed - return original error
+            // Call error handler with the error value
+            var handler_args = [1]TValue{error_value};
+            const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| switch (handler_err) {
+                error.LuaException => {
+                    // Handler itself raised - return handler's error
+                    vm.stack[vm.base + func_reg] = .{ .boolean = false };
+                    if (nresults > 1) {
+                        vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                        vm.lua_error_value = .nil;
+                    }
+                    return;
+                },
+                else => return handler_err, // OOM etc. propagate up
+            };
+
+            // Return (false, handler_result)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
-                if (vm.lua_error_msg) |msg| {
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(msg);
-                    vm.lua_error_msg = null;
-                } else {
-                    const err_str = try vm.gc.allocString(@errorName(handler_err));
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-                }
+                vm.stack[vm.base + func_reg + 1] = handler_result;
             }
-            return;
-        };
-
-        // Return (false, handler_result)
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = handler_result;
-        }
+        },
+        else => return err, // OOM etc. propagate up
     }
 }
 
@@ -395,7 +388,7 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
 /// setmetatable(table, metatable) - Sets the metatable for the given table
 /// Returns the table. Raises error if metatable has __metatable field (protected).
-pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nargs;
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
@@ -403,13 +396,13 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     const table = table_arg.asTable() orelse {
         // setmetatable only works on tables
-        return error.InvalidTableOperation;
+        return vm.raiseString("bad argument #1 to 'setmetatable' (table expected)");
     };
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
         if (current_mt.get(TValue.fromString(vm.gc.mm_keys.get(.metatable))) != null) {
-            return error.ProtectedMetatable;
+            return vm.raiseString("cannot change a protected metatable");
         }
     }
 
@@ -419,7 +412,7 @@ pub fn nativeSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     } else if (mt_arg.asTable()) |new_mt| {
         table.metatable = new_mt;
     } else {
-        return error.InvalidTableOperation;
+        return vm.raiseString("bad argument #2 to 'setmetatable' (nil or table expected)");
     }
 
     // Return the table
@@ -824,34 +817,27 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
 /// dofile([filename]) - Executes a Lua file
 /// Returns: all values returned by the chunk
-pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         // dofile() without args reads from stdin - not implemented
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc.allocString("dofile: stdin not supported");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
+        return vm.raiseString("dofile: stdin not supported");
     }
 
     const filename_arg = vm.stack[vm.base + func_reg + 1];
     const filename = if (filename_arg.asString()) |str_obj|
         str_obj.asSlice()
     else {
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("bad argument #1 to 'dofile' (string expected)");
     };
 
     // Read file contents
     const file = std.fs.cwd().openFile(filename, .{}) catch {
-        vm.lua_error_msg = try vm.gc.allocString("cannot open file");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("cannot open file");
     };
     defer file.close();
 
     const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
-        vm.lua_error_msg = try vm.gc.allocString("cannot read file");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("cannot read file");
     };
     defer vm.gc.allocator.free(source);
 
@@ -864,8 +850,7 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 filename, e.line, e.message,
             }) catch "syntax error";
             defer vm.gc.allocator.free(msg);
-            vm.lua_error_msg = try vm.gc.allocString(msg);
-            return RuntimeError.RuntimeError;
+            return vm.raiseString(msg);
         },
         .ok => {},
     }
@@ -878,8 +863,7 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
         vm.gc.allowGC();
-        vm.lua_error_msg = try vm.gc.allocString("failed to materialize chunk");
-        return RuntimeError.RuntimeError;
+        return vm.raiseString("failed to materialize chunk");
     };
 
     // Create closure - proto is now safe since GC is inhibited
@@ -889,14 +873,8 @@ pub fn nativeDofile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Allow GC again before execution (closure is now rooted when called)
     vm.gc.allowGC();
 
-    // Execute the chunk
-    const result = call.callValue(vm, func_val, &[_]TValue{}) catch |err| {
-        // Propagate error
-        if (vm.lua_error_msg == null) {
-            vm.lua_error_msg = try vm.gc.allocString(@errorName(err));
-        }
-        return RuntimeError.RuntimeError;
-    };
+    // Execute the chunk - errors propagate directly
+    const result = try call.callValue(vm, func_val, &[_]TValue{});
 
     // Return the result
     if (nresults > 0) {

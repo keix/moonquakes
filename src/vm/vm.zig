@@ -41,7 +41,7 @@ pub const VM = struct {
     registry: *TableObject, // Global registry table (for debug.getregistry)
     gc: *GC, // Pointer to shared GC (global state)
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
-    lua_error_msg: ?*StringObject = null, // Stored Lua error message for pcall
+    lua_error_value: TValue = .nil, // Stored Lua error value for pcall (any TValue)
 
     // Debug hook fields (for debug.sethook/gethook)
     hook_func: ?*ClosureObject = null, // Hook function
@@ -106,6 +106,27 @@ pub const VM = struct {
             self.open_upvalues = uv.next_open;
             uv.close();
         }
+    }
+
+    /// Lua exception type - the only "catchable" error in protected calls
+    pub const LuaException = error{LuaException};
+
+    /// Raise a Lua exception with the given error value.
+    /// The value is stored in lua_error_value and LuaException is returned.
+    /// pcall/xpcall will catch this and convert it to (false, value).
+    ///
+    /// Usage: return vm.raise(error_value);
+    pub fn raise(self: *VM, value: TValue) LuaException {
+        self.lua_error_value = value;
+        return error.LuaException;
+    }
+
+    /// Raise a Lua exception with a string message.
+    /// Convenience wrapper that allocates the string.
+    /// Returns OutOfMemory if allocation fails (not caught by pcall).
+    pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfMemory}) {
+        const str = self.gc.allocString(message) catch return error.OutOfMemory;
+        return self.raise(TValue.fromString(str));
     }
 
     /// Get existing open upvalue for stack slot, or create a new one
@@ -233,10 +254,8 @@ fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
         upval = uv.next_open;
     }
 
-    // 5. Mark lua_error_msg (stored error message for pcall)
-    if (self.lua_error_msg) |msg| {
-        gc.mark(&msg.header);
-    }
+    // 5. Mark lua_error_value (stored error value for pcall)
+    gc.markValue(self.lua_error_value);
 
     // 6. Mark debug hook function (if set)
     if (self.hook_func) |hook| {
