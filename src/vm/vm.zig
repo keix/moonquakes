@@ -43,6 +43,10 @@ pub const VM = struct {
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
     lua_error_value: TValue = .nil, // Stored Lua error value for pcall (any TValue)
 
+    // Temporary roots for values not yet on stack (REPL, embedder API)
+    temp_roots: [8]TValue = [_]TValue{.nil} ** 8,
+    temp_roots_count: u8 = 0,
+
     // Debug hook fields (for debug.sethook/gethook)
     hook_func: ?*ClosureObject = null, // Hook function
     hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
@@ -81,6 +85,29 @@ pub const VM = struct {
     pub fn deinit(self: *VM) void {
         // Unregister from GC before destruction
         self.gc.removeRootProvider(self.rootProvider());
+    }
+
+    /// Push a value to temporary roots (protected from GC).
+    /// Used by REPL and embedder API for values not yet on stack.
+    /// Returns false if temp root stack is full.
+    pub fn pushTempRoot(self: *VM, value: TValue) bool {
+        if (self.temp_roots_count >= self.temp_roots.len) return false;
+        self.temp_roots[self.temp_roots_count] = value;
+        self.temp_roots_count += 1;
+        return true;
+    }
+
+    /// Pop n values from temporary roots.
+    pub fn popTempRoots(self: *VM, n: u8) void {
+        if (n > self.temp_roots_count) {
+            self.temp_roots_count = 0;
+        } else {
+            self.temp_roots_count -= n;
+        }
+        // Clear popped slots to avoid stale references
+        for (self.temp_roots[self.temp_roots_count..]) |*slot| {
+            slot.* = .nil;
+        }
     }
 
     /// Run garbage collection manually.
@@ -260,6 +287,11 @@ fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
     // 6. Mark debug hook function (if set)
     if (self.hook_func) |hook| {
         gc.mark(&hook.header);
+    }
+
+    // 7. Mark temporary roots (REPL, embedder API)
+    for (self.temp_roots[0..self.temp_roots_count]) |val| {
+        gc.markValue(val);
     }
 }
 
