@@ -55,7 +55,15 @@ pub const CLI = struct {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
                 try stderr.print("Error: file not found: {s}\n", .{file_path});
-                return;
+                std.process.exit(1);
+            },
+            error.LuaException => {
+                // Error message already printed by launcher
+                std.process.exit(1);
+            },
+            error.CompileFailed => {
+                // Error message already printed by launcher
+                std.process.exit(1);
             },
             else => return err,
         };

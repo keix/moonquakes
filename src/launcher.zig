@@ -85,7 +85,17 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     // No defer needed - ProtoObject is GC-managed
 
     // Phase 5: Execute
-    const result = try Mnemonics.execute(&vm, proto);
+    const result = Mnemonics.execute(&vm, proto) catch |err| {
+        if (err == error.LuaException) {
+            // Print Lua error message before VM is destroyed
+            if (vm.lua_error_value.asString()) |err_str| {
+                std.debug.print("[string]:?: {s}\n", .{err_str.asSlice()});
+            } else {
+                std.debug.print("[string]:?: (error object is not a string)\n", .{});
+            }
+        }
+        return err;
+    };
 
     // Convert to owned values before VM is destroyed
     return owned.toOwnedReturnValue(allocator, result);

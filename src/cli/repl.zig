@@ -16,6 +16,7 @@ pub const REPL = struct {
     allocator: std.mem.Allocator,
     gc: *GC,
     vm: *VM,
+    prompt_key: *object.StringObject,
 
     const Self = @This();
 
@@ -31,10 +32,15 @@ pub const REPL = struct {
         errdefer allocator.destroy(vm);
         try vm.init(gc);
 
+        // Pre-intern _PROMPT key (rooted via registry)
+        const prompt_key = try gc.allocString("_PROMPT");
+        try vm.registry.set(TValue.fromString(prompt_key), TValue.fromString(prompt_key));
+
         return Self{
             .allocator = allocator,
             .gc = gc,
             .vm = vm,
+            .prompt_key = prompt_key,
         };
     }
 
@@ -87,8 +93,8 @@ pub const REPL = struct {
 
     /// Get prompt from _PROMPT global or return null for default
     fn getPrompt(self: *Self) ?[]const u8 {
-        const prompt_key = self.gc.allocString("_PROMPT") catch return null;
-        const prompt_val = self.vm.globals.get(TValue.fromString(prompt_key)) orelse return null;
+        // Use pre-interned key (rooted in registry) to avoid GC issues
+        const prompt_val = self.vm.globals.get(TValue.fromString(self.prompt_key)) orelse return null;
         if (prompt_val.asString()) |str| {
             return str.asSlice();
         }
@@ -142,11 +148,27 @@ pub const REPL = struct {
             self.gc.allowGC();
             return null;
         };
+
+        // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
+        if (proto.nups > 0) {
+            const env_upval = self.gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals)) catch {
+                self.gc.allowGC();
+                return null;
+            };
+            closure.upvalues[0] = env_upval;
+        }
+
+        // Root the closure before allowing GC
+        const func_val = TValue.fromClosure(closure);
+        _ = self.vm.pushTempRoot(func_val);
         self.gc.allowGC();
 
-        // Execute
-        const func_val = TValue.fromClosure(closure);
-        const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch return null;
+        // Execute (closure protected by temp root)
+        const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
+            self.vm.popTempRoots(1);
+            return null;
+        };
+        self.vm.popTempRoots(1);
 
         return result;
     }
@@ -183,14 +205,29 @@ pub const REPL = struct {
             stderr.writeAll("error: failed to create closure\n") catch {};
             return null;
         };
+
+        // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
+        if (proto.nups > 0) {
+            const env_upval = self.gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals)) catch {
+                self.gc.allowGC();
+                stderr.writeAll("error: failed to create _ENV upvalue\n") catch {};
+                return null;
+            };
+            closure.upvalues[0] = env_upval;
+        }
+
+        // Root the closure before allowing GC
+        const func_val = TValue.fromClosure(closure);
+        _ = self.vm.pushTempRoot(func_val);
         self.gc.allowGC();
 
-        // Execute
-        const func_val = TValue.fromClosure(closure);
+        // Execute (closure protected by temp root)
         _ = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
+            self.vm.popTempRoots(1);
             stderr.writeAll("error: runtime error\n") catch {};
             return null;
         };
+        self.vm.popTempRoots(1);
 
         return true;
     }
