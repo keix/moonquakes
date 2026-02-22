@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for Moonquakes identity.
 
-pub const version = "0.1.0";
+pub const version = "0.1.1";
 pub const name = "Moonquakes";
 pub const tagline = "An interpretation of Lua.";
 pub const copyright =
