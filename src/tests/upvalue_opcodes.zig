@@ -220,7 +220,7 @@ test "SETTABUP opcode - invalid key type" {
 
     // Should fail with InvalidTableKey error
     const result = Mnemonics.execute(&ctx.vm, proto);
-    try testing.expectError(error.InvalidTableKey, result);
+    try testing.expectError(error.LuaException, result);
 }
 
 test "All new opcodes - integration test" {

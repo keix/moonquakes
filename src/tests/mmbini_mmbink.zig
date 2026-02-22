@@ -58,7 +58,7 @@ test "MMBINI - add with immediate (basic structure)" {
 
     // Should fail because integer has no __add metamethod
     const result = Mnemonics.execute(&ctx.vm, proto);
-    try testing.expectError(error.ArithmeticError, result);
+    try testing.expectError(error.LuaException, result);
 }
 
 test "MMBINK - add with constant (basic structure)" {
@@ -83,7 +83,7 @@ test "MMBINK - add with constant (basic structure)" {
 
     // Should fail because integer has no __add metamethod
     const result = Mnemonics.execute(&ctx.vm, proto);
-    try testing.expectError(error.ArithmeticError, result);
+    try testing.expectError(error.LuaException, result);
 }
 
 test "MMBINI operand order with k flag" {
@@ -105,7 +105,7 @@ test "MMBINI operand order with k flag" {
 
     const proto_k0 = try test_utils.createTestProto(&ctx.vm, &.{}, &code_k0, 0, false, 3);
 
-    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&ctx.vm, proto_k0));
+    try testing.expectError(error.LuaException, Mnemonics.execute(&ctx.vm, proto_k0));
 
     // k=1: 5 + R[0], C=6 (add event)
     const code_k1 = [_]Instruction{
@@ -115,5 +115,5 @@ test "MMBINI operand order with k flag" {
 
     const proto_k1 = try test_utils.createTestProto(&ctx.vm, &.{}, &code_k1, 0, false, 3);
 
-    try testing.expectError(error.ArithmeticError, Mnemonics.execute(&ctx.vm, proto_k1));
+    try testing.expectError(error.LuaException, Mnemonics.execute(&ctx.vm, proto_k1));
 }

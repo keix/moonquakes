@@ -46,14 +46,15 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
     const vc = &vm.stack[vm.base + c];
 
     // Try integer arithmetic first for add, sub, mul
+    // Use wrapping arithmetic per Lua 5.4 semantics (two's complement)
     if (tag == .add or tag == .sub or tag == .mul) {
         if (vb.isInteger() and vc.isInteger()) {
             const ib = vb.integer;
             const ic = vc.integer;
             const res = switch (tag) {
-                .add => ib + ic,
-                .sub => ib - ic,
-                .mul => ib * ic,
+                .add => ib +% ic,
+                .sub => ib -% ic,
+                .mul => ib *% ic,
                 else => unreachable,
             };
             vm.stack[vm.base + a] = .{ .integer = res };
@@ -65,8 +66,9 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
     const nb = vb.toNumber() orelse return error.ArithmeticError;
     const nc = vc.toNumber() orelse return error.ArithmeticError;
 
-    // Check for division by zero
-    if ((tag == .div or tag == .idiv or tag == .mod) and nc == 0) {
+    // Check for division by zero (only for integer division and modulo)
+    // Regular division returns inf/-inf/nan per IEEE 754
+    if ((tag == .idiv or tag == .mod) and nc == 0) {
         return error.ArithmeticError;
     }
 
@@ -291,10 +293,10 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
     }
 }
 
-fn setupMainFrame(vm: *VM, proto: *const ProtoObject) void {
+fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObject) void {
     vm.base_ci = CallInfo{
         .func = proto,
-        .closure = null,
+        .closure = main_closure,
         .pc = proto.code.ptr,
         .savedpc = null,
         .base = 0,
@@ -310,7 +312,7 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject) void {
 /// Handle a LuaException by unwinding to the nearest protected frame.
 /// Returns true if error was handled by a protected frame, false otherwise.
 /// The error value is taken from vm.lua_error_value (set by vm.raise()).
-fn handleLuaException(vm: *VM) bool {
+pub fn handleLuaException(vm: *VM) bool {
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
@@ -341,7 +343,26 @@ fn handleLuaException(vm: *VM) bool {
 /// Main VM execution loop.
 /// Executes instructions until RETURN from main chunk.
 pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
-    setupMainFrame(vm, proto);
+    // Create main closure with _ENV upvalue pointing to globals
+    // Inhibit GC during allocation sequence to prevent collection of
+    // intermediate objects (main_closure) before they're fully rooted
+    vm.gc.inhibitGC();
+    const proto_mut = @constCast(proto);
+    const main_closure = vm.gc.allocClosure(proto_mut) catch |err| {
+        vm.gc.allowGC();
+        return err;
+    };
+    if (proto.nups > 0) {
+        // Main chunk's upvalue[0] is _ENV = globals
+        const env_upval = vm.gc.allocClosedUpvalue(TValue.fromTable(vm.globals)) catch |err| {
+            vm.gc.allowGC();
+            return err;
+        };
+        main_closure.upvalues[0] = env_upval;
+    }
+    vm.gc.allowGC();
+
+    setupMainFrame(vm, proto, main_closure);
 
     while (true) {
         const ci = vm.ci.?;
@@ -352,6 +373,29 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 
         const result = do(vm, inst) catch |err| {
             if (err == error.LuaException and handleLuaException(vm)) continue;
+            // Convert VM errors to LuaException for pcall catchability
+            if (err == error.ArithmeticError or
+                err == error.NotATable or
+                err == error.NotAFunction or
+                err == error.InvalidTableKey or
+                err == error.InvalidTableOperation or
+                err == error.FormatError)
+            {
+                const msg = switch (err) {
+                    error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.NotATable => "attempt to index a non-table value",
+                    error.NotAFunction => "attempt to call a non-function value",
+                    error.InvalidTableKey => "table index is nil or NaN",
+                    error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.FormatError => "bad argument to string format",
+                    else => "runtime error",
+                };
+                vm.lua_error_value = TValue.fromString(vm.gc.allocString(msg) catch {
+                    return err;
+                });
+                if (handleLuaException(vm)) continue;
+                return error.LuaException;
+            }
             return err;
         };
 
@@ -433,14 +477,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const imm = @as(i8, @bitCast(@as(u8, sc)));
 
+            // Wrapping arithmetic per Lua 5.4 semantics
             if (vb.isInteger()) {
-                const add_result = @addWithOverflow(vb.integer, @as(i64, imm));
-                if (add_result[1] == 0) {
-                    vm.stack[vm.base + a] = .{ .integer = add_result[0] };
-                } else {
-                    const n = @as(f64, @floatFromInt(vb.integer)) + @as(f64, @floatFromInt(imm));
-                    vm.stack[vm.base + a] = .{ .number = n };
-                }
+                vm.stack[vm.base + a] = .{ .integer = vb.integer +% @as(i64, imm) };
             } else if (vb.toNumber()) |n| {
                 vm.stack[vm.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
             } else {
@@ -500,8 +539,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
+            // Wrapping arithmetic per Lua 5.4 semantics
             if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer + vc.integer };
+                vm.stack[vm.base + a] = .{ .integer = vb.integer +% vc.integer };
             } else {
                 const nb = vb.toNumber() orelse return error.ArithmeticError;
                 const nc = vc.toNumber() orelse return error.ArithmeticError;
@@ -517,8 +557,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
+            // Wrapping arithmetic per Lua 5.4 semantics
             if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer - vc.integer };
+                vm.stack[vm.base + a] = .{ .integer = vb.integer -% vc.integer };
             } else {
                 const nb = vb.toNumber() orelse return error.ArithmeticError;
                 const nc = vc.toNumber() orelse return error.ArithmeticError;
@@ -534,8 +575,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
+            // Wrapping arithmetic per Lua 5.4 semantics
             if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer * vc.integer };
+                vm.stack[vm.base + a] = .{ .integer = vb.integer *% vc.integer };
             } else {
                 const nb = vb.toNumber() orelse return error.ArithmeticError;
                 const nc = vc.toNumber() orelse return error.ArithmeticError;
@@ -553,7 +595,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const nb = vb.toNumber() orelse return error.ArithmeticError;
             const nc = vc.toNumber() orelse return error.ArithmeticError;
-            if (nc == 0) return error.ArithmeticError;
+            // Division by zero returns inf/-inf/nan per IEEE 754
             vm.stack[vm.base + a] = .{ .number = nb / nc };
             return .Continue;
         },
@@ -1670,11 +1712,18 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            _ = b;
+
+            // Get environment table from upvalue or fall back to globals
+            const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
+                if (b < closure.upvalues.len) {
+                    break :blk closure.upvalues[b].get().asTable() orelse vm.globals;
+                }
+                break :blk vm.globals;
+            } else vm.globals;
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                const value = vm.globals.get(TValue.fromString(key)) orelse .nil;
+                const value = env_table.get(TValue.fromString(key)) orelse .nil;
                 vm.stack[vm.base + a] = value;
             } else {
                 return error.InvalidTableKey;
@@ -1686,12 +1735,19 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            _ = a;
+
+            // Get environment table from upvalue or fall back to globals
+            const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
+                if (a < closure.upvalues.len) {
+                    break :blk closure.upvalues[a].get().asTable() orelse vm.globals;
+                }
+                break :blk vm.globals;
+            } else vm.globals;
 
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                try vm.globals.set(TValue.fromString(key), value);
+                try env_table.set(TValue.fromString(key), value);
             } else {
                 return error.InvalidTableKey;
             }
@@ -1765,8 +1821,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         return result;
                     }
                 } else {
-                    // Non-table with non-string key - return nil
-                    vm.stack[vm.base + a] = .nil;
+                    // Non-table with non-string key - cannot index this value
+                    return error.NotATable;
                 }
             }
             return .Continue;
@@ -2475,8 +2531,10 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
 }
 
 /// Check if both values can be used for arithmetic (fast path)
+/// Lua 5.4: numbers and strings (coercible to numbers) are allowed
 fn canDoArith(a: TValue, b: TValue) bool {
-    return (a.isInteger() or a.isNumber()) and (b.isInteger() or b.isNumber());
+    return (a.isInteger() or a.isNumber() or a.isString()) and
+        (b.isInteger() or b.isNumber() or b.isString());
 }
 
 /// Call a binary metamethod and store result
@@ -2646,9 +2704,8 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, result_reg: u8) !?ExecuteResult {
     // Get shared metatable for this value type
     const mt = vm.gc.shared_mt.getForValue(value) orelse {
-        // No shared metatable - return nil
-        vm.stack[vm.base + result_reg] = .nil;
-        return null;
+        // No shared metatable - cannot index this value type
+        return error.NotATable;
     };
 
     // Look up __index in the metatable

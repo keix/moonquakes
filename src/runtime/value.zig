@@ -103,10 +103,33 @@ pub const TValue = union(enum) {
 
     // ===== Numeric conversions =====
 
+    /// Convert float to integer safely, checking for finite, integral, and in-range
+    fn floatToIntSafe(n: f64) ?i64 {
+        // Must be finite (not inf/nan)
+        if (!std.math.isFinite(n)) return null;
+        // Must be integral (no fractional part)
+        if (std.math.modf(n).fpart != 0.0) return null;
+        // Must be in i64 range
+        const min_i64: f64 = @floatFromInt(std.math.minInt(i64));
+        const max_i64: f64 = @floatFromInt(std.math.maxInt(i64));
+        if (n < min_i64 or n > max_i64) return null;
+        return @intFromFloat(n);
+    }
+
     pub fn toInteger(self: TValue) ?i64 {
         return switch (self) {
             .integer => |i| i,
-            .number => |n| if (std.math.modf(n).fpart == 0.0) @intFromFloat(n) else null,
+            .number => |n| floatToIntSafe(n),
+            .object => |obj| {
+                // Lua 5.4: strings are coerced to numbers in arithmetic
+                if (obj.type == .string) {
+                    const str = object.getObject(StringObject, obj);
+                    const slice = std.mem.trim(u8, str.asSlice(), " \t\n\r");
+                    const n = std.fmt.parseFloat(f64, slice) catch return null;
+                    return floatToIntSafe(n);
+                }
+                return null;
+            },
             else => null,
         };
     }
@@ -115,6 +138,15 @@ pub const TValue = union(enum) {
         return switch (self) {
             .integer => |i| @floatFromInt(i),
             .number => |n| n,
+            .object => |obj| {
+                // Lua 5.4: strings are coerced to numbers in arithmetic
+                if (obj.type == .string) {
+                    const str = object.getObject(StringObject, obj);
+                    const slice = std.mem.trim(u8, str.asSlice(), " \t\n\r");
+                    return std.fmt.parseFloat(f64, slice) catch null;
+                }
+                return null;
+            },
             else => null,
         };
     }

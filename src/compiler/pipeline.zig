@@ -59,8 +59,12 @@ pub fn compile(
     options: CompileOptions,
 ) CompileResult {
     var lx = lexer.Lexer.init(source);
-    var builder = parser.ProtoBuilder.init(allocator, null);
+    var builder = parser.ProtoBuilder.init(allocator, null) catch {
+        return .{ .err = .{ .line = 0, .message = allocator.dupe(u8, "OutOfMemory") catch "" } };
+    };
     builder.source = options.source_name;
+    // Note: _ENV upvalue is now added in ProtoBuilder.init for all functions
+
     defer builder.deinit();
 
     var p = parser.Parser.init(&lx, &builder);

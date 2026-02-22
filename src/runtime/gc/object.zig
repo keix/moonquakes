@@ -169,9 +169,10 @@ pub const TableObject = struct {
     }
 
     /// Set a value by TValue key
-    /// Note: nil keys are not allowed (Lua semantics)
+    /// Note: nil and NaN keys are not allowed (Lua 5.4 semantics)
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
         if (key.isNil()) return error.InvalidTableKey;
+        if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
         // Setting to nil removes the entry
         if (value.isNil()) {
             _ = self.hash_part.remove(key);

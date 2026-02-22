@@ -29,5 +29,5 @@ test "TAILCALL - basic structure" {
 
     // Should fail because integer is not a function
     const result = Mnemonics.execute(&ctx.vm, proto);
-    try testing.expectError(error.NotAFunction, result);
+    try testing.expectError(error.LuaException, result);
 }

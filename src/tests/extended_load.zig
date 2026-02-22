@@ -78,11 +78,9 @@ test "GETFIELD with nil table returns nil (shared metatable support)" {
 
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &instructions, 0, false, 10);
 
-    // With shared metatable support, accessing field on nil without metatable returns nil
-    // (instead of erroring, allowing for potential nil metatables via debug.setmetatable)
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    try testing.expect(result == .single);
-    try testing.expect(result.single.isNil());
+    // Lua 5.4: indexing nil without a metatable should error
+    const result = Mnemonics.execute(&ctx.vm, proto);
+    try testing.expectError(error.LuaException, result);
 }
 
 test "Multiple LOADKX operations" {

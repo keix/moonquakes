@@ -1349,16 +1349,16 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 try padAndAppend(allocator, &result, effective_str, width, left_justify, ' ');
             },
             'd', 'i' => {
-                // Integer
-                const val = arg.toInteger() orelse 0;
+                // Integer - Lua 5.4: error if number has no integer representation
+                const val = arg.toInteger() orelse return error.FormatError;
                 var buf: [32]u8 = undefined;
                 const num_str = formatIntBuf(&buf, val, show_sign, space_sign);
                 const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
                 try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
             'u' => {
-                // Unsigned integer
-                const val = arg.toInteger() orelse 0;
+                // Unsigned integer - Lua 5.4: error if number has no integer representation
+                const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
                 const num_str = std.fmt.bufPrint(&buf, "{d}", .{uval}) catch "0";
@@ -1366,8 +1366,8 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
             'x', 'X' => {
-                // Hexadecimal
-                const val = arg.toInteger() orelse 0;
+                // Hexadecimal - Lua 5.4: error if number has no integer representation
+                const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
                 const num_str = if (spec == 'x')
@@ -1381,8 +1381,8 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
             'o' => {
-                // Octal
-                const val = arg.toInteger() orelse 0;
+                // Octal - Lua 5.4: error if number has no integer representation
+                const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
                 const num_str = std.fmt.bufPrint(&buf, "{o}", .{uval}) catch "0";

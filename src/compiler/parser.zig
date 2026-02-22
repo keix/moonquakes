@@ -156,8 +156,8 @@ pub const ProtoBuilder = struct {
     labels: std.StringHashMap(usize), // label name -> code position
     pending_gotos: std.ArrayList(PendingGoto), // gotos that need patching
 
-    pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) ProtoBuilder {
-        return .{
+    pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) std.mem.Allocator.Error!ProtoBuilder {
+        var builder = ProtoBuilder{
             .code = .{},
             .lineinfo = .{},
             .booleans = .{},
@@ -180,6 +180,18 @@ pub const ProtoBuilder = struct {
             .labels = std.StringHashMap(usize).init(allocator),
             .pending_gotos = .{},
         };
+
+        // All functions have _ENV as upvalue[0]
+        // This ensures GETTABUP with B=0 always accesses _ENV
+        if (parent != null) {
+            // Nested function: _ENV comes from parent's upvalue[0]
+            try builder.upvalues.append(allocator, .{ .instack = false, .idx = 0, .name = "_ENV" });
+        } else {
+            // Main chunk: _ENV comes from loader (instack=true, idx=0)
+            try builder.upvalues.append(allocator, .{ .instack = true, .idx = 0, .name = "_ENV" });
+        }
+
+        return builder;
     }
 
     pub fn deinit(self: *ProtoBuilder) void {
@@ -4249,7 +4261,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
+        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit(); // Clean up at end of function
 
         // Create RawProto container early (address is fixed, content will be filled later)
@@ -4421,7 +4433,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
+        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container with safe default values
@@ -4534,7 +4546,7 @@ pub const Parser = struct {
         self.advance(); // consume '('
 
         // Create a separate builder for function body with parent reference
-        var func_builder = ProtoBuilder.init(self.proto.allocator, self.proto);
+        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
         defer func_builder.deinit();
 
         // Create RawProto container with safe default values

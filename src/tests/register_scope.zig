@@ -7,7 +7,7 @@ const parser = @import("../compiler/parser.zig");
 /// No GC needed - parser now produces RawProto
 fn compileAndGetMaxStack(allocator: std.mem.Allocator, source: []const u8) !u8 {
     var lx = lexer.Lexer.init(source);
-    var proto_builder = parser.ProtoBuilder.init(allocator, null);
+    var proto_builder = try parser.ProtoBuilder.init(allocator, null);
     defer proto_builder.deinit();
 
     var p = parser.Parser.init(&lx, &proto_builder);

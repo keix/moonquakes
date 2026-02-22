@@ -66,7 +66,7 @@ pub const CLI = struct {
     fn printVersion(_: *CLI) !void {
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         const stdout = &stdout_writer.interface;
-        try stdout.print("Moonquakes {s} Copyright (C) 2025 Kei Sawamura.\n", .{version});
+        try ver.printIdentity(stdout);
     }
 
     fn printUsage(_: *CLI) !void {
