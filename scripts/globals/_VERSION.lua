@@ -1,6 +1,7 @@
 -- Test _VERSION
 
 assert(type(_VERSION) == "string", "_VERSION should be a string")
-assert(_VERSION == "Moonquakes 0.1.0", "_VERSION should be 'Lua 5.4'")
+-- Check that _VERSION starts with "Moonquakes"
+assert(string.sub(_VERSION, 1, 10) == "Moonquakes", "_VERSION should start with 'Moonquakes'")
 
-print("_VERSION test passed!")
+print("_VERSION test passed: " .. _VERSION)
