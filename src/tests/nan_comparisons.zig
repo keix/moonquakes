@@ -38,8 +38,8 @@ test "LT with NaN: NaN < 5.0 = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN < 5.0 should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -68,8 +68,8 @@ test "LT with NaN: 5.0 < NaN = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // 5.0 < NaN should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -98,8 +98,8 @@ test "LE with NaN: NaN <= 5.0 = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN <= 5.0 should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -128,8 +128,8 @@ test "LE with NaN: NaN <= NaN = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN <= NaN should be false in Lua
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -158,8 +158,8 @@ test "EQ with NaN: NaN == NaN = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN == NaN should be false
     try expectSingleResult(result, TValue{ .boolean = false });
@@ -183,8 +183,8 @@ test "Arithmetic with NaN propagation" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN + 5.0 should propagate NaN
     try testing.expect(result == .single);

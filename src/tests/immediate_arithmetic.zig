@@ -31,8 +31,8 @@ test "ADDI: positive immediate with integer" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 15 });
 }
@@ -55,8 +55,8 @@ test "ADDI: negative immediate with integer" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 7 });
 }
@@ -76,8 +76,8 @@ test "ADDI: with float number" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 13.5 });
 }
@@ -97,8 +97,8 @@ test "ADDI: maximum positive immediate" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 227 });
 }
@@ -121,8 +121,8 @@ test "ADDI: maximum negative immediate" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -28 });
 }
@@ -144,8 +144,8 @@ test "ADDI: loop counter optimization" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 }

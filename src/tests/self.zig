@@ -15,8 +15,8 @@ test "SELF - prepare method call" {
     defer ctx.deinit();
 
     // Create a table with a method
-    const table = try ctx.vm.gc.allocTable();
-    const method_key = try ctx.vm.gc.allocString("getValue");
+    const table = try ctx.vm.gc().allocTable();
+    const method_key = try ctx.vm.gc().allocString("getValue");
 
     // Create a simple closure as the method
     // (In a real test, this would be a proper closure)
@@ -38,9 +38,9 @@ test "SELF - prepare method call" {
         Instruction.initABC(.RETURN, 1, 3, 0), // Return R[1], R[2]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .multiple);
 
     // R[1] should be the method (42 in our test)

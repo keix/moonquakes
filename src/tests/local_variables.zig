@@ -18,9 +18,9 @@ fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, s
     try p.parseChunk();
 
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
-    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc(), allocator);
 
-    return Mnemonics.execute(&ctx.vm, proto);
+    return Mnemonics.execute(ctx.vm, proto);
 }
 
 // =============================================================================

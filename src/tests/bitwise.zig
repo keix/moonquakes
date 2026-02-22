@@ -29,15 +29,15 @@ test "BNOT: basic integer negation" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
 
     // Capture initial state
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 4);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 4);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Update final state
-    trace.updateFinal(&ctx.vm, 4);
+    trace.updateFinal(ctx.vm, 4);
 
     // Verify result
     try testing.expect(result == .multiple);
@@ -47,7 +47,7 @@ test "BNOT: basic integer negation" {
     try testing.expect(result.multiple[2].eql(TValue{ .integer = ~@as(i64, 5) })); // ~5 = -6
 
     // Verify register states
-    try test_utils.expectRegisters(&ctx.vm, 0, &[_]TValue{
+    try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
         .{ .integer = 0 }, // R0: original value
         .{ .integer = ~@as(i64, 0) }, // R1: ~0 = -1
         .{ .integer = 5 }, // R2: loaded value
@@ -73,8 +73,8 @@ test "BNOT: float to integer conversion" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = ~@as(i64, 42) });
 }
@@ -94,8 +94,8 @@ test "BNOT: float with fractional part should error" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try testing.expectError(error.LuaException, result);
 }
@@ -119,15 +119,15 @@ test "BAND: basic integer AND" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
 
     // Execute with state tracking
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 3);
 
     // Verify result and VM state
-    try test_utils.expectResultAndState(result, TValue{ .integer = 0b1010 }, &ctx.vm, 0, 3);
+    try test_utils.expectResultAndState(result, TValue{ .integer = 0b1010 }, ctx.vm, 0, 3);
 
     // Verify register changes
     try trace.expectRegisterChanged(0, TValue{ .integer = 0b1111 });
@@ -155,8 +155,8 @@ test "BAND: mixed integer and float" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 }); // 255 & 15 = 15
 }
@@ -180,8 +180,8 @@ test "BOR: basic integer OR" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b1111 }); // 12 | 3 = 15
 }
@@ -205,8 +205,8 @@ test "BXOR: basic integer XOR" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b0101 }); // 15 ^ 10 = 5
 }
@@ -229,23 +229,23 @@ test "BANDK: AND with constant and side effect verification" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
 
     // Initialize other registers to verify no side effects
     ctx.vm.stack[2] = TValue{ .integer = 999 };
     ctx.vm.stack[3] = TValue{ .boolean = true };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xF0 }); // 255 & 0xF0 = 240
 
     // Verify only R0 and R1 changed
-    try test_utils.expectRegister(&ctx.vm, 0, TValue{ .integer = 255 });
-    try test_utils.expectRegister(&ctx.vm, 1, TValue{ .integer = 0xF0 });
+    try test_utils.expectRegister(ctx.vm, 0, TValue{ .integer = 255 });
+    try test_utils.expectRegister(ctx.vm, 1, TValue{ .integer = 0xF0 });
 
     // Verify other registers unchanged
-    try test_utils.expectRegister(&ctx.vm, 2, TValue{ .integer = 999 });
-    try test_utils.expectRegister(&ctx.vm, 3, TValue{ .boolean = true });
+    try test_utils.expectRegister(ctx.vm, 2, TValue{ .integer = 999 });
+    try test_utils.expectRegister(ctx.vm, 3, TValue{ .boolean = true });
 }
 
 test "BORK: OR with constant" {
@@ -264,8 +264,8 @@ test "BORK: OR with constant" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xFF }); // 0x0F | 0xF0 = 0xFF
 }
@@ -286,8 +286,8 @@ test "BXORK: XOR with constant" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xAA }); // 0xFF ^ 0x55 = 0xAA
 }
@@ -311,15 +311,15 @@ test "SHL: shift left basic" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
 
     // Execute and track state
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 3);
 
     // Verify result
-    try test_utils.expectResultAndState(result, TValue{ .integer = 16 }, &ctx.vm, 0, 3);
+    try test_utils.expectResultAndState(result, TValue{ .integer = 16 }, ctx.vm, 0, 3);
 
     // Verify register state changes
     try trace.expectRegisterChanged(0, TValue{ .integer = 1 }); // R0: loaded value
@@ -344,8 +344,8 @@ test "SHL: negative shift (becomes right shift)" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 32 >> 3 = 4
 }
@@ -367,8 +367,8 @@ test "SHR: shift right basic" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 16 >> 2 = 4
 }
@@ -390,8 +390,8 @@ test "SHR: arithmetic shift with negative number" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = -4 }); // -16 >> 2 = -4 (sign preserved)
 }
@@ -413,8 +413,8 @@ test "SHLI: shift left immediate" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 24 }); // 3 << 3 = 24
 }
@@ -434,8 +434,8 @@ test "SHRI: shift right immediate" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 64 >> 4 = 4
 }
@@ -468,12 +468,12 @@ test "Bitwise: complex expression with state tracking" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 8);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 8);
 
     // Capture execution state
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 8);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 8);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 8);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 8);
 
     // Calculate expected: (0xFF & 0x0F) | ((~0x55) ^ 0xAA)
     const expected = (0xFF & 0x0F) | ((~@as(i64, 0x55)) ^ 0xAA);
@@ -486,7 +486,7 @@ test "Bitwise: complex expression with state tracking" {
     try trace.expectRegisterChanged(7, TValue{ .integer = expected }); // final result
 
     // Verify VM state consistency
-    try test_utils.expectVMState(&ctx.vm, 0, 8);
+    try test_utils.expectVMState(ctx.vm, 0, 8);
 
     // Print trace for debugging (optional)
     // trace.print(8);
@@ -511,8 +511,8 @@ test "Bitwise operations with non-integer values should error" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try testing.expectError(error.LuaException, result);
 }

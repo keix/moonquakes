@@ -715,12 +715,13 @@ pub const GC = struct {
     }
 
     /// Run __gc finalizers for all unmarked tables that have them
-    /// Note: Uses the first registered provider for callValue.
-    /// In single-VM scenarios this is always the main VM.
+    /// Note: Uses the last registered provider for callValue.
+    /// The VM is registered after Runtime, so this picks the active VM.
     /// Multi-VM would need a dedicated finalizer executor.
     fn runFinalizers(self: *GC) void {
         if (self.root_providers.items.len == 0) return;
-        const provider = self.root_providers.items[0];
+        // Use last provider (VM) - Runtime is registered first but cannot execute code
+        const provider = self.root_providers.items[self.root_providers.items.len - 1];
 
         // Inhibit GC during finalizer execution to prevent recursive collection
         self.gc_inhibit += 1;

@@ -7,6 +7,7 @@
 //! Embedders can use this directly or build their own launcher.
 
 const std = @import("std");
+const Runtime = @import("runtime/runtime.zig").Runtime;
 const VM = @import("vm/vm.zig").VM;
 const GC = @import("runtime/gc/gc.zig").GC;
 const TableObject = @import("runtime/gc/object.zig").TableObject;
@@ -53,7 +54,7 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
 }
 
 /// Full execution pipeline with options
-/// Creates VM, injects context, compiles, executes, returns owned result
+/// Creates Runtime, VM, injects context, compiles, executes, returns owned result
 pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !OwnedReturnValue {
     // Phase 1: Compile to RawProto (no GC needed)
     const compile_result = pipeline.compile(allocator, source, .{});
@@ -68,24 +69,22 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     const raw_proto = compile_result.ok;
     defer pipeline.freeRawProto(allocator, raw_proto);
 
-    // Phase 2: Create GC (global state) and VM (thread state)
-    var gc = GC.init(allocator);
-    defer gc.deinit();
-    try gc.initMetamethodKeys();
+    // Phase 2: Create Runtime (shared state) and VM (thread state)
+    const rt = try Runtime.init(allocator);
+    defer rt.deinit();
 
-    var vm: VM = undefined;
-    try vm.init(&gc);
+    const vm = try VM.init(rt);
     defer vm.deinit();
 
     // Phase 3: Inject execution context (arg table, etc.)
-    try injectArg(vm.globals, vm.gc, options);
+    try injectArg(vm.globals(), vm.gc(), options);
 
     // Phase 4: Materialize constants (returns GC-managed ProtoObject)
-    const proto = try pipeline.materialize(&raw_proto, vm.gc, allocator);
+    const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     // No defer needed - ProtoObject is GC-managed
 
     // Phase 5: Execute
-    const result = Mnemonics.execute(&vm, proto) catch |err| {
+    const result = Mnemonics.execute(vm, proto) catch |err| {
         if (err == error.LuaException) {
             // Print Lua error message before VM is destroyed
             if (vm.lua_error_value.asString()) |err_str| {

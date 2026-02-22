@@ -20,10 +20,10 @@ fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, s
     const raw_proto = try proto_builder.toRawProto(allocator, 0);
     // Note: raw_proto memory managed by arena, no explicit free needed
 
-    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc(), allocator);
     // Note: proto memory managed by arena, no explicit free needed
 
-    return Mnemonics.execute(&ctx.vm, proto);
+    return Mnemonics.execute(ctx.vm, proto);
 }
 
 test "parser: return 42" {

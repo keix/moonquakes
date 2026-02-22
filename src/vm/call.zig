@@ -190,7 +190,7 @@ fn runUntilReturn(
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
-                vm.lua_error_value = TValue.fromString(vm.gc.allocString(msg) catch {
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
                     return err; // OOM: can't convert, propagate original error
                 });
                 if (mnemonics.handleLuaException(vm)) continue;

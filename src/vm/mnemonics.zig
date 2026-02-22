@@ -265,7 +265,7 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
         const val = vm.stack[vm.base + r];
 
         // Get __close metamethod
-        if (metamethod.getMetamethod(val, .close, &vm.gc.mm_keys, &vm.gc.shared_mt)) |mm| {
+        if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
             // Call __close(val, nil) - second arg is error object (nil for normal close)
             const saved_top = vm.top;
 
@@ -346,21 +346,21 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     // Create main closure with _ENV upvalue pointing to globals
     // Inhibit GC during allocation sequence to prevent collection of
     // intermediate objects (main_closure) before they're fully rooted
-    vm.gc.inhibitGC();
+    vm.gc().inhibitGC();
     const proto_mut = @constCast(proto);
-    const main_closure = vm.gc.allocClosure(proto_mut) catch |err| {
-        vm.gc.allowGC();
+    const main_closure = vm.gc().allocClosure(proto_mut) catch |err| {
+        vm.gc().allowGC();
         return err;
     };
     if (proto.nups > 0) {
         // Main chunk's upvalue[0] is _ENV = globals
-        const env_upval = vm.gc.allocClosedUpvalue(TValue.fromTable(vm.globals)) catch |err| {
-            vm.gc.allowGC();
+        const env_upval = vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals())) catch |err| {
+            vm.gc().allowGC();
             return err;
         };
         main_closure.upvalues[0] = env_upval;
     }
-    vm.gc.allowGC();
+    vm.gc().allowGC();
 
     setupMainFrame(vm, proto, main_closure);
 
@@ -390,7 +390,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
-                vm.lua_error_value = TValue.fromString(vm.gc.allocString(msg) catch {
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
                     return err;
                 });
                 if (handleLuaException(vm)) continue;
@@ -865,7 +865,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .number = -n };
             } else {
                 // Try __unm metamethod
-                const mm = metamethod.getMetamethod(vb, .unm, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
+                const mm = metamethod.getMetamethod(vb, .unm, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                     return error.ArithmeticError;
                 };
                 return try callUnaryMetamethod(vm, mm, vb, a);
@@ -966,8 +966,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                const result_buf = try vm.gc.allocator.alloc(u8, total_len);
-                defer vm.gc.allocator.free(result_buf);
+                const result_buf = try vm.gc().allocator.alloc(u8, total_len);
+                defer vm.gc().allocator.free(result_buf);
                 var offset: usize = 0;
 
                 for (b..c + 1) |i| {
@@ -989,7 +989,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 }
 
-                const result_str = try vm.gc.allocString(result_buf);
+                const result_str = try vm.gc().allocString(result_buf);
                 vm.stack[vm.base + a] = TValue.fromString(result_str);
                 return .Continue;
             }
@@ -1716,10 +1716,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Get environment table from upvalue or fall back to globals
             const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
                 if (b < closure.upvalues.len) {
-                    break :blk closure.upvalues[b].get().asTable() orelse vm.globals;
+                    break :blk closure.upvalues[b].get().asTable() orelse vm.globals();
                 }
-                break :blk vm.globals;
-            } else vm.globals;
+                break :blk vm.globals();
+            } else vm.globals();
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
@@ -1739,10 +1739,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Get environment table from upvalue or fall back to globals
             const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
                 if (a < closure.upvalues.len) {
-                    break :blk closure.upvalues[a].get().asTable() orelse vm.globals;
+                    break :blk closure.upvalues[a].get().asTable() orelse vm.globals();
                 }
-                break :blk vm.globals;
-            } else vm.globals;
+                break :blk vm.globals();
+            } else vm.globals();
 
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
@@ -1800,7 +1800,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     } else {
                         // Check __index metamethod
                         if (table.metatable) |mt| {
-                            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.index)))) |index_mm| {
+                            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
                                 if (index_mm.asTable()) |index_table| {
                                     vm.stack[vm.base + a] = index_table.get(key_val) orelse .nil;
                                 } else {
@@ -1866,7 +1866,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Slow path: check __index metamethod
                     // Note: For integer keys, we still call metamethod with integer key
                     if (table.metatable) |mt| {
-                        if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.index)))) |index_mm| {
+                        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
                             if (index_mm.asTable()) |index_table| {
                                 vm.stack[vm.base + a] = index_table.get(key) orelse .nil;
                             } else {
@@ -1953,7 +1953,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         },
         .NEWTABLE => {
             const a = inst.getA();
-            const table = try vm.gc.allocTable();
+            const table = try vm.gc().allocTable();
             vm.stack[vm.base + a] = TValue.fromTable(table);
             return .Continue;
         },
@@ -2129,7 +2129,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Check that value has __close metamethod
-            if (metamethod.getMetamethod(val, .close, &vm.gc.mm_keys, &vm.gc.shared_mt) == null) {
+            if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt) == null) {
                 return error.NoCloseMetamethod;
             }
 
@@ -2201,12 +2201,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (ci.closure) |enclosing| {
                         upvals_buf[i] = enclosing.upvalues[upvaldesc.idx];
                     } else {
-                        upvals_buf[i] = try vm.gc.allocUpvalue(&vm.stack[0]);
+                        upvals_buf[i] = try vm.gc().allocUpvalue(&vm.stack[0]);
                     }
                 }
             }
 
-            const closure = try vm.gc.allocClosure(child_proto);
+            const closure = try vm.gc().allocClosure(child_proto);
             @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
 
             vm.stack[vm.base + a] = TValue.fromClosure(closure);
@@ -2228,7 +2228,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                 // No metamethod found - arithmetic error
                 return error.ArithmeticError;
             };
@@ -2279,7 +2279,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2325,7 +2325,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const right = if (k) va else vb;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                 return error.ArithmeticError;
             };
 
@@ -2478,7 +2478,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Not a function - return error
             vm.stack[vm.base + a] = .{ .boolean = false };
-            const err_str = try vm.gc.allocString("attempt to call a non-function value");
+            const err_str = try vm.gc().allocString("attempt to call a non-function value");
             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
             return .Continue;
         },
@@ -2522,7 +2522,7 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     }
 
     // Try metamethod
-    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc.mm_keys, &vm.gc.shared_mt) orelse {
+    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
         return error.ArithmeticError;
     };
 
@@ -2641,7 +2641,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
         return null; // Continue
     };
 
-    const index_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.index))) orelse {
+    const index_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.index))) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null; // Continue
     };
@@ -2703,13 +2703,13 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 /// Uses shared metatables from gc.shared_mt
 fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, result_reg: u8) !?ExecuteResult {
     // Get shared metatable for this value type
-    const mt = vm.gc.shared_mt.getForValue(value) orelse {
+    const mt = vm.gc().shared_mt.getForValue(value) orelse {
         // No shared metatable - cannot index this value type
         return error.NotATable;
     };
 
     // Look up __index in the metatable
-    const index_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.index))) orelse {
+    const index_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.index))) orelse {
         vm.stack[vm.base + result_reg] = .nil;
         return null;
     };
@@ -2786,7 +2786,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         return null; // Continue
     };
 
-    const newindex_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.newindex))) orelse {
+    const newindex_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex))) orelse {
         // No __newindex, just set the value
         try table.set(key_val, value);
         return null; // Continue
@@ -2851,7 +2851,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
     const mt = table.metatable orelse return null;
 
-    const call_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.call))) orelse return null;
+    const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return null;
 
     // __call must be a function
     if (call_mm.asClosure()) |closure| {
@@ -2899,7 +2899,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
     const mt = table.metatable orelse return null;
 
-    const len_mm = mt.get(TValue.fromString(vm.gc.mm_keys.get(.len))) orelse return null;
+    const len_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.len))) orelse return null;
 
     // __len is a Lua function
     if (len_mm.asClosure()) |closure| {
@@ -2950,7 +2950,7 @@ fn canConcatPrimitive(val: TValue) bool {
 fn getConcatMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.concat)));
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.concat)));
 }
 
 /// Concat with __concat metamethod fallback
@@ -3006,7 +3006,7 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
 fn getEqMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.eq)));
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.eq)));
 }
 
 /// Equality with __eq metamethod fallback
@@ -3065,7 +3065,7 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLtMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.lt)));
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.lt)));
 }
 
 /// Less-than with __lt metamethod fallback
@@ -3109,7 +3109,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getLeMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    return mt.get(TValue.fromString(vm.gc.mm_keys.get(.le)));
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.le)));
 }
 
 /// Less-or-equal with __le metamethod fallback
@@ -3198,7 +3198,7 @@ const BitwiseMetaEvent = enum {
 fn getBitwiseMM(vm: *VM, val: TValue, comptime event: BitwiseMetaEvent) !?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
-    const key = try vm.gc.allocString(event.toKey());
+    const key = try vm.gc().allocString(event.toKey());
     return mt.get(TValue.fromString(key));
 }
 

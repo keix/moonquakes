@@ -296,7 +296,7 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
     try setStringKey(package_table, gc, "config", TValue.fromString(config_str));
 
-    const path_str = try gc.allocString("./?.lua;/usr/local/share/lua/5.4/?.lua");
+    const path_str = try gc.allocString("./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua");
     try setStringKey(package_table, gc, "path", TValue.fromString(path_str));
 
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");

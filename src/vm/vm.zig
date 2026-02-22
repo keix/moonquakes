@@ -15,6 +15,7 @@ const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
 const metamethod = @import("metamethod.zig");
+const Runtime = @import("../runtime/runtime.zig").Runtime;
 
 // Execution ABI: CallInfo (frame)
 const execution = @import("execution.zig");
@@ -26,20 +27,19 @@ pub const MetamethodKeys = metamethod.MetamethodKeys;
 /// VM represents an execution thread (Lua "thread"/coroutine state).
 /// The name VM is kept intentionally as a clean-room abstraction.
 ///
-/// Architecture: VM (thread) references GC (global state) via pointer.
-/// Multiple VMs (coroutines) can share the same GC.
+/// Architecture: VM (thread) references Runtime (shared state) via pointer.
+/// Multiple VMs (coroutines) share a single Runtime.
 pub const VM = struct {
+    rt: *Runtime,
+
+    // Thread-local execution state
     stack: [256]TValue,
-    stack_last: u32,
     top: u32,
     base: u32,
     ci: ?*CallInfo,
     base_ci: CallInfo,
     callstack: [35]CallInfo, // Support up to 35 nested calls
     callstack_size: u8,
-    globals: *TableObject,
-    registry: *TableObject, // Global registry table (for debug.getregistry)
-    gc: *GC, // Pointer to shared GC (global state)
     open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
     lua_error_value: TValue = .nil, // Stored Lua error value for pcall (any TValue)
 
@@ -52,22 +52,44 @@ pub const VM = struct {
     hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
     hook_count: u32 = 0, // Count for count hook
 
-    /// Initialize a VM in-place with a shared GC.
-    /// GC must be initialized and have mm_keys set up before calling this.
+    // ========================================
+    // Accessors for Runtime resources
+    // ========================================
+
+    /// Get the GC from Runtime.
+    pub inline fn gc(self: *VM) *GC {
+        return self.rt.gc;
+    }
+
+    /// Get the globals table from Runtime.
+    pub inline fn globals(self: *VM) *TableObject {
+        return self.rt.globals;
+    }
+
+    /// Get the registry table from Runtime.
+    pub inline fn registry(self: *VM) *TableObject {
+        return self.rt.registry;
+    }
+
+    // ========================================
+    // Lifecycle
+    // ========================================
+
+    /// Initialize a VM with a shared Runtime.
     /// The VM is automatically registered as a GC root provider.
-    pub fn init(self: *VM, gc: *GC) !void {
+    pub fn init(rt: *Runtime) !*VM {
+        const self = try rt.allocator.create(VM);
+        errdefer rt.allocator.destroy(self);
+
         self.* = .{
+            .rt = rt,
             .stack = undefined,
-            .stack_last = 256 - 1,
             .top = 0,
             .base = 0,
             .ci = null,
             .base_ci = undefined,
             .callstack = undefined,
             .callstack_size = 0,
-            .globals = try gc.allocTable(),
-            .registry = try gc.allocTable(),
-            .gc = gc,
             .open_upvalues = null,
         };
 
@@ -75,17 +97,24 @@ pub const VM = struct {
             v.* = .nil;
         }
 
-        // Initialize global environment (needs GC for string allocation)
-        try builtin.initGlobalEnvironment(self.globals, gc);
+        // Register as GC root provider
+        try rt.gc.addRootProvider(self.rootProvider());
 
-        // Register as GC root provider (self is now at its final address)
-        try gc.addRootProvider(self.rootProvider());
+        return self;
     }
 
+    /// Clean up VM resources.
     pub fn deinit(self: *VM) void {
         // Unregister from GC before destruction
-        self.gc.removeRootProvider(self.rootProvider());
+        self.rt.gc.removeRootProvider(self.rootProvider());
+
+        // Free self
+        self.rt.allocator.destroy(self);
     }
+
+    // ========================================
+    // Temp roots (for REPL, embedder API)
+    // ========================================
 
     /// Push a value to temporary roots (protected from GC).
     /// Used by REPL and embedder API for values not yet on stack.
@@ -110,17 +139,26 @@ pub const VM = struct {
         }
     }
 
+    // ========================================
+    // GC interface
+    // ========================================
+
     /// Run garbage collection manually.
     pub fn collectGarbage(self: *VM) void {
-        const before = self.gc.bytes_allocated;
+        const gc_ptr = self.gc();
+        const before = gc_ptr.bytes_allocated;
 
-        self.gc.collect();
+        gc_ptr.collect();
 
         // Debug output (disabled in ReleaseFast)
         if (@import("builtin").mode != .ReleaseFast) {
-            std.log.info("GC: {} -> {} bytes, next at {}", .{ before, self.gc.bytes_allocated, self.gc.next_gc });
+            std.log.info("GC: {} -> {} bytes, next at {}", .{ before, gc_ptr.bytes_allocated, gc_ptr.next_gc });
         }
     }
+
+    // ========================================
+    // Upvalue management
+    // ========================================
 
     /// Close all upvalues at or above the given stack level
     pub fn closeUpvalues(self: *VM, level: u32) void {
@@ -133,27 +171,6 @@ pub const VM = struct {
             self.open_upvalues = uv.next_open;
             uv.close();
         }
-    }
-
-    /// Lua exception type - the only "catchable" error in protected calls
-    pub const LuaException = error{LuaException};
-
-    /// Raise a Lua exception with the given error value.
-    /// The value is stored in lua_error_value and LuaException is returned.
-    /// pcall/xpcall will catch this and convert it to (false, value).
-    ///
-    /// Usage: return vm.raise(error_value);
-    pub fn raise(self: *VM, value: TValue) LuaException {
-        self.lua_error_value = value;
-        return error.LuaException;
-    }
-
-    /// Raise a Lua exception with a string message.
-    /// Convenience wrapper that allocates the string.
-    /// Returns OutOfMemory if allocation fails (not caught by pcall).
-    pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfMemory}) {
-        const str = self.gc.allocString(message) catch return error.OutOfMemory;
-        return self.raise(TValue.fromString(str));
     }
 
     /// Get existing open upvalue for stack slot, or create a new one
@@ -176,7 +193,7 @@ pub const VM = struct {
         }
 
         // Create new upvalue
-        const new_uv = try self.gc.allocUpvalue(location);
+        const new_uv = try self.gc().allocUpvalue(location);
 
         // Insert into sorted list
         new_uv.next_open = current;
@@ -189,10 +206,43 @@ pub const VM = struct {
         return new_uv;
     }
 
+    // ========================================
+    // Error handling
+    // ========================================
+
+    /// Lua exception type - the only "catchable" error in protected calls
+    pub const LuaException = error{LuaException};
+
+    /// Raise a Lua exception with the given error value.
+    /// The value is stored in lua_error_value and LuaException is returned.
+    /// pcall/xpcall will catch this and convert it to (false, value).
+    ///
+    /// Usage: return vm.raise(error_value);
+    pub fn raise(self: *VM, value: TValue) LuaException {
+        self.lua_error_value = value;
+        return error.LuaException;
+    }
+
+    /// Raise a Lua exception with a string message.
+    /// Convenience wrapper that allocates the string.
+    /// Returns OutOfMemory if allocation fails (not caught by pcall).
+    pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfMemory}) {
+        const str = self.gc().allocString(message) catch return error.OutOfMemory;
+        return self.raise(TValue.fromString(str));
+    }
+
+    // ========================================
+    // Native function dispatch
+    // ========================================
+
     /// VM is just a bridge - dispatches to appropriate native function
     pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
         try builtin.invoke(id, self, func_reg, nargs, nresults);
     }
+
+    // ========================================
+    // GC root provider
+    // ========================================
 
     /// Create a RootProvider for this VM instance
     pub fn rootProvider(self: *VM) RootProvider {
@@ -221,7 +271,10 @@ const vmRootProviderVTable = RootProvider.VTable{
 
 /// Mark all VM roots for GC
 /// Called by GC during mark phase via RootProvider interface
-fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
+///
+/// NOTE: VM does NOT mark globals/registry - that is Runtime's responsibility.
+/// VM only marks thread-local state: stack, callstack, upvalues, error value, hooks.
+fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     const self: *VM = @ptrCast(@alignCast(ctx));
 
     // 1. Mark VM stack
@@ -245,7 +298,7 @@ fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
         }
     }
 
-    gc.markStack(self.stack[0..stack_extent]);
+    gc_ptr.markStack(self.stack[0..stack_extent]);
 
     // 2. Mark call frames
     // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
@@ -253,45 +306,39 @@ fn vmMarkRoots(ctx: *anyopaque, gc: *GC) void {
     // contains nested function protos. These must be marked or their
     // constants (strings, native closures) will be collected.
     if (self.base_ci.closure) |closure| {
-        gc.mark(&closure.header);
+        gc_ptr.mark(&closure.header);
     } else {
         // Main chunk: mark proto and all nested protos recursively
-        gc.markProtoObject(@constCast(self.base_ci.func));
+        gc_ptr.markProtoObject(@constCast(self.base_ci.func));
     }
 
     // Mark function call frames on the callstack
     for (self.callstack[0..self.callstack_size]) |frame| {
         if (frame.closure) |closure| {
-            gc.mark(&closure.header);
+            gc_ptr.mark(&closure.header);
         } else {
-            gc.markProtoObject(@constCast(frame.func));
+            gc_ptr.markProtoObject(@constCast(frame.func));
         }
     }
 
-    // 3. Mark global environment
-    gc.mark(&self.globals.header);
-
-    // 3b. Mark registry table
-    gc.mark(&self.registry.header);
-
-    // 4. Mark open upvalues (captured variables still pointing to stack)
+    // 3. Mark open upvalues (captured variables still pointing to stack)
     var upval = self.open_upvalues;
     while (upval) |uv| {
-        gc.mark(&uv.header);
+        gc_ptr.mark(&uv.header);
         upval = uv.next_open;
     }
 
-    // 5. Mark lua_error_value (stored error value for pcall)
-    gc.markValue(self.lua_error_value);
+    // 4. Mark lua_error_value (stored error value for pcall)
+    gc_ptr.markValue(self.lua_error_value);
 
-    // 6. Mark debug hook function (if set)
+    // 5. Mark debug hook function (if set)
     if (self.hook_func) |hook| {
-        gc.mark(&hook.header);
+        gc_ptr.mark(&hook.header);
     }
 
-    // 7. Mark temporary roots (REPL, embedder API)
+    // 6. Mark temporary roots (REPL, embedder API)
     for (self.temp_roots[0..self.temp_roots_count]) |val| {
-        gc.markValue(val);
+        gc_ptr.markValue(val);
     }
 }
 

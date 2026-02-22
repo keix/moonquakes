@@ -32,9 +32,9 @@ fn parseAndExecute(allocator: std.mem.Allocator, source: []const u8) !ReturnValu
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try materialize(&raw_proto, ctx.vm.gc, allocator);
+    const proto = try materialize(&raw_proto, ctx.vm.gc(), allocator);
 
-    return Mnemonics.execute(&ctx.vm, proto);
+    return Mnemonics.execute(ctx.vm, proto);
 }
 
 fn testParserExpression(source: []const u8, expected: TValue) !void {
