@@ -38,22 +38,28 @@ local function foo()
 end
 
 -- Test getupvalue
+-- Note: upvalue[1] is _ENV, captured variables start at index 2
 local name1, val1 = debug.getupvalue(foo, 1)
 local name2, val2 = debug.getupvalue(foo, 2)
+local name3, val3 = debug.getupvalue(foo, 3)
 
--- Upvalue names might be x and y (order may vary)
-assert(name1 ~= nil, "getupvalue should return name")
-assert(val1 == 10 or val1 == 20, "getupvalue should return value")
+-- First upvalue is _ENV
+assert(name1 == "_ENV", "getupvalue(1) should return _ENV, got: " .. tostring(name1))
+assert(type(val1) == "table", "getupvalue(1) value should be table")
+
+-- Next upvalues are x and y (order may vary)
 assert(name2 ~= nil, "getupvalue for second upvalue should return name")
-assert(val2 == 10 or val2 == 20, "getupvalue for second upvalue should return value")
+assert(val2 == 10 or val2 == 20, "getupvalue should return value 10 or 20, got: " .. tostring(val2))
+assert(name3 ~= nil, "getupvalue for third upvalue should return name")
+assert(val3 == 10 or val3 == 20, "getupvalue for third upvalue should return value 10 or 20")
 
 -- Test getupvalue out of bounds
-local name3 = debug.getupvalue(foo, 3)
-assert(name3 == nil, "getupvalue out of bounds should return nil")
+local name4 = debug.getupvalue(foo, 4)
+assert(name4 == nil, "getupvalue out of bounds should return nil")
 
--- Test setupvalue
-debug.setupvalue(foo, 1, 100)
-local _, newval = debug.getupvalue(foo, 1)
+-- Test setupvalue on captured variable (index 2)
+debug.setupvalue(foo, 2, 100)
+local _, newval = debug.getupvalue(foo, 2)
 assert(newval == 100, "setupvalue should change upvalue value")
 
 -- Verify the actual variable was changed

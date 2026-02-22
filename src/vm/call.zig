@@ -169,7 +169,36 @@ fn runUntilReturn(
             vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
             continue;
         };
-        switch (try mnemonics.do(vm, inst)) {
+        const result = mnemonics.do(vm, inst) catch |err| {
+            // Handle LuaException by unwinding to protected frames (pcall)
+            if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            // Convert VM errors to LuaException for pcall catchability
+            if (err == error.ArithmeticError or
+                err == error.NotATable or
+                err == error.NotAFunction or
+                err == error.InvalidTableKey or
+                err == error.InvalidTableOperation or
+                err == error.FormatError)
+            {
+                // Set error message and try to handle as LuaException
+                const msg = switch (err) {
+                    error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.NotATable => "attempt to index a non-table value",
+                    error.NotAFunction => "attempt to call a non-function value",
+                    error.InvalidTableKey => "table index is nil or NaN",
+                    error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.FormatError => "bad argument to string format",
+                    else => "runtime error",
+                };
+                vm.lua_error_value = TValue.fromString(vm.gc.allocString(msg) catch {
+                    return err; // OOM: can't convert, propagate original error
+                });
+                if (mnemonics.handleLuaException(vm)) continue;
+                return error.LuaException;
+            }
+            return err;
+        };
+        switch (result) {
             .Continue => {},
             .LoopContinue => {},
             .ReturnVM => |ret| {

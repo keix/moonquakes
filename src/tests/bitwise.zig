@@ -97,7 +97,7 @@ test "BNOT: float with fractional part should error" {
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
     const result = Mnemonics.execute(&ctx.vm, proto);
 
-    try testing.expectError(error.ArithmeticError, result);
+    try testing.expectError(error.LuaException, result);
 }
 
 // ===== BAND (Bitwise AND) Tests =====
@@ -514,5 +514,5 @@ test "Bitwise operations with non-integer values should error" {
     const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
     const result = Mnemonics.execute(&ctx.vm, proto);
 
-    try testing.expectError(error.ArithmeticError, result);
+    try testing.expectError(error.LuaException, result);
 }

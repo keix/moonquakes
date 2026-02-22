@@ -9,6 +9,35 @@ const call = @import("../vm/call.zig");
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.10
+///
+/// ## v0.1.0 Limitations
+///
+/// ProtoObject lacks debug metadata, limiting several functions:
+///
+/// | Feature                | Status      | Workaround                    |
+/// |------------------------|-------------|-------------------------------|
+/// | Variable names         | Placeholder | Returns "(local N)"           |
+/// | Source filename        | Unavailable | Returns "?"                   |
+/// | Line numbers           | Unavailable | Returns 0 or -1               |
+/// | PC-to-line mapping     | Unavailable | traceback shows [Lua function]|
+/// | Hook invocation        | Stored only | sethook saves but VM ignores  |
+///
+/// ## Required for Full Support (v0.2.0)
+///
+/// ProtoObject needs these fields:
+/// ```
+/// source: ?[]const u8,      // "@filename" or "=stdin"
+/// linedefined: u32,         // function definition start line
+/// lastlinedefined: u32,     // function definition end line
+/// lineinfo: []const u8,     // PC to line number mapping
+/// locvars: []const LocVar,  // local variable debug info
+/// ```
+///
+/// VM execution loop needs hook dispatch at:
+/// - Function call (mask & 0x01)
+/// - Function return (mask & 0x02)
+/// - Line change (mask & 0x04)
+/// - Instruction count (hook_count)
 /// debug.debug() - Enters interactive mode with the user
 /// Reads and executes each line entered by the user.
 /// The session ends when the user enters a line containing only "cont".
@@ -173,6 +202,12 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 ///   "t": istailcall
 ///   "u": nups, nparams, isvararg
 ///   "f": func
+///
+/// v0.1.0 limitations:
+/// - name/namewhat: not available (requires bytecode analysis)
+/// - source/short_src: returns "?" (ProtoObject lacks source field)
+/// - linedefined/lastlinedefined: returns 0
+/// - currentline: returns -1 (no PC-to-line mapping)
 pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
@@ -594,7 +629,12 @@ pub fn nativeDebugGetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
 /// hook: function to call (or nil to clear)
 /// mask: string with 'c' (call), 'r' (return), 'l' (line)
 /// count: call hook every count instructions (optional)
-/// Note: Hooks are stored but not yet invoked by the VM
+///
+/// v0.1.0 limitation: Hook settings are stored in VM but never invoked.
+/// To implement hook dispatch, mnemonics.execute() needs:
+/// - Check hook_mask on CALL/RETURN opcodes
+/// - Track line changes via lineinfo mapping
+/// - Count instructions for hook_count
 pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 

@@ -137,14 +137,13 @@ pub const CallInfo = struct {
         return inst;
     }
 
-    /// Validate PC is within function bounds (disabled in ReleaseFast)
+    /// Validate PC is within function bounds
+    /// Always enabled for VM safety - prevents undefined behavior from malformed bytecode
     inline fn validatePC(self: *CallInfo) !void {
-        if (std.debug.runtime_safety) {
-            const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
-            const pc_index = pc_offset / @sizeOf(Instruction);
-            if (pc_index >= self.func.code.len) {
-                return error.PcOutOfRange;
-            }
+        const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
+        const pc_index = pc_offset / @sizeOf(Instruction);
+        if (pc_index >= self.func.code.len) {
+            return error.PcOutOfRange;
         }
     }
 };

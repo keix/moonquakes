@@ -133,8 +133,9 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
-                vm.lua_error_value = .nil;
             }
+            // Always clear error value after handling
+            vm.lua_error_value = .nil;
         },
         else => return err, // OOM etc. propagate up
     }
@@ -185,8 +186,8 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                     vm.stack[vm.base + func_reg] = .{ .boolean = false };
                     if (nresults > 1) {
                         vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
-                        vm.lua_error_value = .nil;
                     }
+                    vm.lua_error_value = .nil;
                     return;
                 },
                 else => return handler_err, // OOM etc. propagate up
@@ -642,6 +643,7 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const serializer = @import("../compiler/serializer.zig");
+    const object = @import("../runtime/gc/object.zig");
 
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -653,6 +655,12 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     const chunk_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Get env parameter (4th argument, default to globals)
+    const env_table: *object.TableObject = if (nargs >= 4 and !vm.stack[vm.base + func_reg + 4].isNil())
+        vm.stack[vm.base + func_reg + 4].asTable() orelse vm.globals
+    else
+        vm.globals;
 
     // Get source string
     const source = if (chunk_arg.asString()) |str_obj|
@@ -683,6 +691,13 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         };
 
         const closure = try vm.gc.allocClosure(proto);
+
+        // Initialize _ENV upvalue (first upvalue) to the environment table
+        if (closure.upvalues.len > 0) {
+            const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+            closure.upvalues[0] = env_upval;
+        }
+
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
         return;
     }
@@ -725,12 +740,21 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
+
+    // Initialize _ENV upvalue (first upvalue) to the environment table
+    if (closure.upvalues.len > 0) {
+        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+        closure.upvalues[0] = env_upval;
+    }
+
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
 
 /// loadfile([filename [, mode [, env]]]) - Loads a chunk from a file
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    const object = @import("../runtime/gc/object.zig");
+
     if (nargs < 1) {
         // loadfile() without args reads from stdin - not implemented
         vm.stack[vm.base + func_reg] = .nil;
@@ -752,6 +776,12 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
         return;
     };
+
+    // Get env parameter (3rd argument, default to globals)
+    const env_table: *object.TableObject = if (nargs >= 3 and !vm.stack[vm.base + func_reg + 3].isNil())
+        vm.stack[vm.base + func_reg + 3].asTable() orelse vm.globals
+    else
+        vm.globals;
 
     // Read file contents
     const file = std.fs.cwd().openFile(filename, .{}) catch {
@@ -812,6 +842,13 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
+
+    // Initialize _ENV upvalue (first upvalue) to the environment table
+    if (closure.upvalues.len > 0) {
+        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+        closure.upvalues[0] = env_upval;
+    }
+
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
 }
 
@@ -858,20 +895,24 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
 
     // Materialize to Proto and create closure
-    // Inhibit GC until closure is executed (proto is not rooted otherwise)
+    // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
     vm.gc.inhibitGC();
+    defer vm.gc.allowGC();
 
     const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
-        vm.gc.allowGC();
         return vm.raiseString("failed to materialize chunk");
     };
 
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc.allocClosure(proto);
-    const func_val = TValue.fromClosure(closure);
 
-    // Allow GC again before execution (closure is now rooted when called)
-    vm.gc.allowGC();
+    // Initialize _ENV upvalue (first upvalue) to the globals table
+    if (closure.upvalues.len > 0) {
+        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(vm.globals));
+        closure.upvalues[0] = env_upval;
+    }
+
+    const func_val = TValue.fromClosure(closure);
 
     // Execute the chunk - errors propagate directly
     const result = try call.callValue(vm, func_val, &[_]TValue{});

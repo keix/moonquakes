@@ -372,6 +372,23 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new closed upvalue with a specific value
+    /// Used for _ENV in load() and similar cases where the upvalue doesn't reference the stack
+    pub fn allocClosedUpvalue(self: *GC, value: TValue) !*UpvalueObject {
+        const obj = try self.allocObject(UpvalueObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.upvalue, self.objects);
+        obj.closed = value;
+        obj.location = &obj.closed; // Point to self (closed state)
+        obj.next_open = null;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Allocate a new native closure object
     pub fn allocNativeClosure(self: *GC, func: NativeFn) !*NativeClosureObject {
         const obj = try self.allocObject(NativeClosureObject, 0);
