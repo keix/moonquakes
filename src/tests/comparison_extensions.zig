@@ -25,12 +25,12 @@ test "EQK: equality with constant - skip on match" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip LOADTRUE R[0], execute LOADFALSE R[0]
     try testing.expect(result == .single);
@@ -53,12 +53,12 @@ test "EQK: equality with constant - no skip on mismatch" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should execute LOADTRUE R[0]
     try testing.expect(result == .single);
@@ -78,12 +78,12 @@ test "EQI: equality with immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -103,12 +103,12 @@ test "LTI: less than immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -128,12 +128,12 @@ test "LEI: less than or equal immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -153,12 +153,12 @@ test "GTI: greater than immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -178,12 +178,12 @@ test "GEI: greater than or equal immediate integer" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -206,12 +206,12 @@ test "Comparison extensions: negative immediate values" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 5
     ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 5 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
@@ -231,12 +231,12 @@ test "Comparison extensions: floating point values" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 3.14
     ctx.vm.stack[ctx.vm.base + 1] = .{ .number = 3.14 };
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);

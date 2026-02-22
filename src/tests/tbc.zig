@@ -23,9 +23,9 @@ test "TBC with nil - no error" {
         Instruction.initABC(.RETURN, 1, 2, 0), // Return 42
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 42 }));
 }
@@ -43,9 +43,9 @@ test "TBC with false - no error" {
         Instruction.initABC(.RETURN, 1, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
     try testing.expect(result.single.eql(.{ .integer = 100 }));
 }
@@ -63,9 +63,9 @@ test "TBC with value without __close - error" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.NoCloseMetamethod, result);
 }
 
@@ -75,7 +75,7 @@ test "TBC with table without __close - error" {
     defer ctx.deinit();
 
     // Table without metatable doesn't have __close
-    const table = try ctx.vm.gc.allocTable();
+    const table = try ctx.vm.gc().allocTable();
     ctx.vm.stack[0] = TValue.fromTable(table);
 
     const code = [_]Instruction{
@@ -83,9 +83,9 @@ test "TBC with table without __close - error" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.NoCloseMetamethod, result);
 }
 
@@ -95,13 +95,13 @@ test "CLOSE triggers TBC __close" {
     defer ctx.deinit();
 
     // Create a table with __close metamethod
-    const table = try ctx.vm.gc.allocTable();
-    const mt = try ctx.vm.gc.allocTable();
+    const table = try ctx.vm.gc().allocTable();
+    const mt = try ctx.vm.gc().allocTable();
 
     // Create a simple closure for __close that sets a flag
     // For testing, we'll use a marker value
-    const close_key = try ctx.vm.gc.allocString("__close");
-    const closed_key = try ctx.vm.gc.allocString("closed");
+    const close_key = try ctx.vm.gc().allocString("__close");
+    const closed_key = try ctx.vm.gc().allocString("closed");
 
     // We can't easily test __close being called at the VM level
     // without a full Lua closure, so we just verify the structure
@@ -119,8 +119,8 @@ test "CLOSE triggers TBC __close" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
 }

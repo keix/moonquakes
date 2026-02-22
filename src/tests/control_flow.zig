@@ -32,8 +32,8 @@ test "control flow: JMP forward" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
@@ -59,8 +59,8 @@ test "control flow: JMP 0 goes to next instruction" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 1 });
 }
@@ -81,8 +81,8 @@ test "control flow: JMP out of bounds should error" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (never reached)
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try testing.expectError(error.PcOutOfRange, result);
 }
@@ -111,8 +111,8 @@ test "control flow: JMP backward (real loop)" {
         Instruction.initABC(.RETURN, 0, 2, 0), // 7: return R0
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 3 });
 }
@@ -136,8 +136,8 @@ test "control flow: TEST with true value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -161,8 +161,8 @@ test "control flow: TEST with false value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -186,8 +186,8 @@ test "control flow: TEST with k=true (inverted)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 2 });
 }
@@ -210,8 +210,8 @@ test "control flow: TESTSET with true value" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // TESTSET should not have copied, R1 is replaced with 99 again
     try expectSingleResult(result, TValue{ .integer = 99 });
@@ -246,8 +246,8 @@ test "control flow: if-then-else simulation" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 100 });
 }

@@ -86,32 +86,32 @@ pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         if (trimmed.len == 0) continue;
 
         // Compile the input
-        const compile_result = pipeline.compile(vm.gc.allocator, trimmed, .{});
+        const compile_result = pipeline.compile(vm.gc().allocator, trimmed, .{});
         switch (compile_result) {
             .err => |e| {
-                defer e.deinit(vm.gc.allocator);
+                defer e.deinit(vm.gc().allocator);
                 stderr.print("syntax error: {s}\n", .{e.message}) catch {};
                 continue;
             },
             .ok => {},
         }
         const raw_proto = compile_result.ok;
-        defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+        defer pipeline.freeRawProto(vm.gc().allocator, raw_proto);
 
         // Materialize and execute
-        vm.gc.inhibitGC();
-        const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
-            vm.gc.allowGC();
+        vm.gc().inhibitGC();
+        const proto = pipeline.materialize(&raw_proto, vm.gc(), vm.gc().allocator) catch {
+            vm.gc().allowGC();
             stderr.writeAll("error: failed to materialize chunk\n") catch {};
             continue;
         };
 
-        const closure = vm.gc.allocClosure(proto) catch {
-            vm.gc.allowGC();
+        const closure = vm.gc().allocClosure(proto) catch {
+            vm.gc().allowGC();
             stderr.writeAll("error: failed to create closure\n") catch {};
             continue;
         };
-        vm.gc.allowGC();
+        vm.gc().allowGC();
 
         // Execute the chunk using call.callValue (same pattern as dofile)
         const func_val = TValue.fromClosure(closure);
@@ -182,7 +182,7 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             mask_buf[pos] = 'l';
             pos += 1;
         }
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc.allocString(mask_buf[0..pos]));
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString(mask_buf[0..pos]));
     }
 
     // Return count
@@ -269,10 +269,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         // Level 0 is getinfo itself - which is native, so we return C info
         if (ulevel == 0) {
-            const result_table = try vm.gc.allocTable();
+            const result_table = try vm.gc().allocTable();
             if (want_source) {
-                const what_key = try vm.gc.allocString("what");
-                try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc.allocString("C")));
+                const what_key = try vm.gc().allocString("what");
+                try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("C")));
             }
             vm.stack[vm.base + func_reg] = TValue.fromTable(result_table);
             return;
@@ -306,54 +306,54 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     // Create result table
-    const result_table = try vm.gc.allocTable();
+    const result_table = try vm.gc().allocTable();
 
     if (target_closure) |closure| {
         const proto = closure.proto;
 
         if (want_name) {
             if (func_name) |name| {
-                const name_key = try vm.gc.allocString("name");
-                try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc.allocString(name)));
-                const namewhat_key = try vm.gc.allocString("namewhat");
-                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc.allocString("field")));
+                const name_key = try vm.gc().allocString("name");
+                try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
+                const namewhat_key = try vm.gc().allocString("namewhat");
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString("field")));
             }
         }
 
         if (want_source) {
-            const what_key = try vm.gc.allocString("what");
-            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc.allocString("Lua")));
-            const source_key = try vm.gc.allocString("source");
-            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc.allocString("?")));
-            const short_src_key = try vm.gc.allocString("short_src");
-            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc.allocString("?")));
-            const linedefined_key = try vm.gc.allocString("linedefined");
+            const what_key = try vm.gc().allocString("what");
+            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("Lua")));
+            const source_key = try vm.gc().allocString("source");
+            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString("?")));
+            const short_src_key = try vm.gc().allocString("short_src");
+            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString("?")));
+            const linedefined_key = try vm.gc().allocString("linedefined");
             try result_table.set(TValue.fromString(linedefined_key), .{ .integer = 0 });
-            const lastlinedefined_key = try vm.gc.allocString("lastlinedefined");
+            const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
             try result_table.set(TValue.fromString(lastlinedefined_key), .{ .integer = 0 });
         }
 
         if (want_line) {
-            const currentline_key = try vm.gc.allocString("currentline");
+            const currentline_key = try vm.gc().allocString("currentline");
             try result_table.set(TValue.fromString(currentline_key), .{ .integer = -1 });
         }
 
         if (want_tailcall) {
-            const istailcall_key = try vm.gc.allocString("istailcall");
+            const istailcall_key = try vm.gc().allocString("istailcall");
             try result_table.set(TValue.fromString(istailcall_key), .{ .boolean = false });
         }
 
         if (want_upvalue) {
-            const nups_key = try vm.gc.allocString("nups");
+            const nups_key = try vm.gc().allocString("nups");
             try result_table.set(TValue.fromString(nups_key), .{ .integer = @intCast(proto.upvalues.len) });
-            const nparams_key = try vm.gc.allocString("nparams");
+            const nparams_key = try vm.gc().allocString("nparams");
             try result_table.set(TValue.fromString(nparams_key), .{ .integer = @intCast(proto.numparams) });
-            const isvararg_key = try vm.gc.allocString("isvararg");
+            const isvararg_key = try vm.gc().allocString("isvararg");
             try result_table.set(TValue.fromString(isvararg_key), .{ .boolean = proto.is_vararg });
         }
 
         if (want_func) {
-            const func_key = try vm.gc.allocString("func");
+            const func_key = try vm.gc().allocString("func");
             try result_table.set(TValue.fromString(func_key), TValue.fromClosure(closure));
         }
     }
@@ -423,7 +423,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         const name = std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
 
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
+            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
         }
         if (nresults > 1) {
             vm.stack[vm.base + func_reg + 1] = value;
@@ -446,7 +446,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         const name = std.fmt.bufPrint(&name_buf, "(param {d})", .{local_int}) catch "(param)";
 
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
+            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
         }
         // For function objects (not active frames), we can't get the value
         if (nresults > 1) {
@@ -469,7 +469,7 @@ pub fn nativeDebugGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
 
     // Get metatable directly, bypassing __metatable protection
     // Uses metamethod.getMetatable which handles both individual and shared metatables
-    const result: TValue = if (metamethod.getMetatable(value, &vm.gc.shared_mt)) |mt|
+    const result: TValue = if (metamethod.getMetatable(value, &vm.gc().shared_mt)) |mt|
         TValue.fromTable(mt)
     else
         TValue.nil;
@@ -512,7 +512,7 @@ pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
         ud.metatable = new_mt;
     } else {
         // Primitive type: set shared metatable
-        _ = vm.gc.shared_mt.setForValue(value, new_mt);
+        _ = vm.gc().shared_mt.setForValue(value, new_mt);
     }
 
     // Return the original value
@@ -527,7 +527,7 @@ pub fn nativeDebugGetregistry(vm: anytype, func_reg: u32, nargs: u32, nresults: 
     _ = nargs;
 
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromTable(vm.registry);
+        vm.stack[vm.base + func_reg] = TValue.fromTable(vm.registry());
     }
 }
 
@@ -578,7 +578,7 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
 
     // Return name and value
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
+        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
     }
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = value;
@@ -754,7 +754,7 @@ pub fn nativeDebugSetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     const name = std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
 
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
+        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
     }
 }
 
@@ -806,7 +806,7 @@ pub fn nativeDebugSetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
 
     // Return name
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc.allocString(name));
+        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
     }
 }
 
@@ -869,7 +869,7 @@ pub fn nativeDebugNewuserdata(vm: anytype, func_reg: u32, nargs: u32, nresults: 
         0;
 
     // Allocate userdata
-    const ud = try vm.gc.allocUserdata(size, nuvalue);
+    const ud = try vm.gc().allocUserdata(size, nuvalue);
 
     // Return userdata
     if (nresults > 0) {
@@ -973,7 +973,7 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 
     // Create result string
-    const result_str = try vm.gc.allocString(buf[0..pos]);
+    const result_str = try vm.gc().allocString(buf[0..pos]);
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue.fromString(result_str);

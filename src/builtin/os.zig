@@ -50,42 +50,42 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Check for "*t" format - return table
     if (std.mem.eql(u8, format, "*t")) {
         vm.reserveSlots(func_reg, 3);
-        const table = try vm.gc.allocTable();
+        const table = try vm.gc().allocTable();
 
         // year
-        const year_key = try vm.gc.allocString("year");
+        const year_key = try vm.gc().allocString("year");
         try table.set(TValue.fromString(year_key), .{ .integer = dt.year });
 
         // month (1-12)
-        const month_key = try vm.gc.allocString("month");
+        const month_key = try vm.gc().allocString("month");
         try table.set(TValue.fromString(month_key), .{ .integer = dt.month });
 
         // day (1-31)
-        const day_key = try vm.gc.allocString("day");
+        const day_key = try vm.gc().allocString("day");
         try table.set(TValue.fromString(day_key), .{ .integer = dt.day });
 
         // hour (0-23)
-        const hour_key = try vm.gc.allocString("hour");
+        const hour_key = try vm.gc().allocString("hour");
         try table.set(TValue.fromString(hour_key), .{ .integer = dt.hour });
 
         // min (0-59)
-        const min_key = try vm.gc.allocString("min");
+        const min_key = try vm.gc().allocString("min");
         try table.set(TValue.fromString(min_key), .{ .integer = dt.min });
 
         // sec (0-59)
-        const sec_key = try vm.gc.allocString("sec");
+        const sec_key = try vm.gc().allocString("sec");
         try table.set(TValue.fromString(sec_key), .{ .integer = dt.sec });
 
         // wday (1-7, Sunday is 1)
-        const wday_key = try vm.gc.allocString("wday");
+        const wday_key = try vm.gc().allocString("wday");
         try table.set(TValue.fromString(wday_key), .{ .integer = dt.wday });
 
         // yday (1-366)
-        const yday_key = try vm.gc.allocString("yday");
+        const yday_key = try vm.gc().allocString("yday");
         try table.set(TValue.fromString(yday_key), .{ .integer = dt.yday });
 
         // isdst (daylight saving, always false for now)
-        const isdst_key = try vm.gc.allocString("isdst");
+        const isdst_key = try vm.gc().allocString("isdst");
         try table.set(TValue.fromString(isdst_key), .{ .boolean = false });
 
         vm.stack[vm.base + func_reg] = TValue.fromTable(table);
@@ -99,7 +99,7 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         return;
     };
 
-    const result_str = try vm.gc.allocString(result);
+    const result_str = try vm.gc().allocString(result);
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
@@ -308,7 +308,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const cmd_obj = cmd_arg.asString() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const err_msg = try vm.gc.allocString("bad argument #1 to 'execute' (string expected)");
+            const err_msg = try vm.gc().allocString("bad argument #1 to 'execute' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -317,13 +317,13 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Execute command using /bin/sh -c
     const result = std.process.Child.run(.{
-        .allocator = vm.gc.allocator,
+        .allocator = vm.gc().allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd },
     }) catch {
         // Command failed to execute
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const exit_key = try vm.gc.allocString("exit");
+            const exit_key = try vm.gc().allocString("exit");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_key);
         }
         if (nresults >= 3) {
@@ -331,8 +331,8 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         }
         return;
     };
-    defer vm.gc.allocator.free(result.stdout);
-    defer vm.gc.allocator.free(result.stderr);
+    defer vm.gc().allocator.free(result.stdout);
+    defer vm.gc().allocator.free(result.stderr);
 
     // Check termination type
     switch (result.term) {
@@ -344,7 +344,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                 vm.stack[vm.base + func_reg] = .nil;
             }
             if (nresults >= 2) {
-                const exit_key = try vm.gc.allocString("exit");
+                const exit_key = try vm.gc().allocString("exit");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_key);
             }
             if (nresults >= 3) {
@@ -355,7 +355,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             // Killed by signal
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults >= 2) {
-                const sig_key = try vm.gc.allocString("signal");
+                const sig_key = try vm.gc().allocString("signal");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(sig_key);
             }
             if (nresults >= 3) {
@@ -414,7 +414,7 @@ pub fn nativeOsGetenv(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    const result = try vm.gc.allocString(value);
+    const result = try vm.gc().allocString(value);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -425,7 +425,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const err_msg = try vm.gc.allocString("bad argument #1 to 'remove' (string expected)");
+            const err_msg = try vm.gc().allocString("bad argument #1 to 'remove' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -435,7 +435,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const filename_obj = filename_arg.asString() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const err_msg = try vm.gc.allocString("bad argument #1 to 'remove' (string expected)");
+            const err_msg = try vm.gc().allocString("bad argument #1 to 'remove' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -451,10 +451,10 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 vm.stack[vm.base + func_reg] = .nil;
                 if (nresults >= 2) {
                     const err_msg = switch (dir_err) {
-                        error.FileNotFound => try vm.gc.allocString("No such file or directory"),
-                        error.AccessDenied => try vm.gc.allocString("Permission denied"),
-                        error.DirNotEmpty => try vm.gc.allocString("Directory not empty"),
-                        else => try vm.gc.allocString("Unknown error"),
+                        error.FileNotFound => try vm.gc().allocString("No such file or directory"),
+                        error.AccessDenied => try vm.gc().allocString("Permission denied"),
+                        error.DirNotEmpty => try vm.gc().allocString("Directory not empty"),
+                        else => try vm.gc().allocString("Unknown error"),
                     };
                     vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
                 }
@@ -467,9 +467,9 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
             const err_msg = switch (file_err) {
-                error.FileNotFound => try vm.gc.allocString("No such file or directory"),
-                error.AccessDenied => try vm.gc.allocString("Permission denied"),
-                else => try vm.gc.allocString("Unknown error"),
+                error.FileNotFound => try vm.gc().allocString("No such file or directory"),
+                error.AccessDenied => try vm.gc().allocString("Permission denied"),
+                else => try vm.gc().allocString("Unknown error"),
             };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
@@ -490,7 +490,7 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 "bad argument #1 to 'rename' (string expected)"
             else
                 "bad argument #2 to 'rename' (string expected)";
-            const err_msg = try vm.gc.allocString(msg);
+            const err_msg = try vm.gc().allocString(msg);
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -500,7 +500,7 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const oldname_obj = oldname_arg.asString() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const err_msg = try vm.gc.allocString("bad argument #1 to 'rename' (string expected)");
+            const err_msg = try vm.gc().allocString("bad argument #1 to 'rename' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -510,7 +510,7 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const newname_obj = newname_arg.asString() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
-            const err_msg = try vm.gc.allocString("bad argument #2 to 'rename' (string expected)");
+            const err_msg = try vm.gc().allocString("bad argument #2 to 'rename' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
         return;
@@ -524,10 +524,10 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
             const err_msg = switch (err) {
-                error.FileNotFound => try vm.gc.allocString("No such file or directory"),
-                error.AccessDenied => try vm.gc.allocString("Permission denied"),
-                error.PathAlreadyExists => try vm.gc.allocString("File exists"),
-                else => try vm.gc.allocString("Unknown error"),
+                error.FileNotFound => try vm.gc().allocString("No such file or directory"),
+                error.AccessDenied => try vm.gc().allocString("Permission denied"),
+                error.PathAlreadyExists => try vm.gc().allocString("File exists"),
+                else => try vm.gc().allocString("Unknown error"),
             };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
         }
@@ -579,7 +579,7 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                     std.mem.eql(u8, locale, "POSIX"))
                 {
                     // Setting to C locale - always succeeds
-                    const result_str = try vm.gc.allocString("C");
+                    const result_str = try vm.gc().allocString("C");
                     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
                     return;
                 }
@@ -595,7 +595,7 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // Query current locale (nil or no argument) - always "C"
-    const result_str = try vm.gc.allocString("C");
+    const result_str = try vm.gc().allocString("C");
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
@@ -626,6 +626,6 @@ pub fn nativeOsTmpname(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return;
     };
 
-    const result = try vm.gc.allocString(name);
+    const result = try vm.gc().allocString(name);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }

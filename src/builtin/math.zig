@@ -477,10 +477,10 @@ pub fn nativeMathType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const arg = vm.stack[vm.base + func_reg + 1];
 
     if (arg == .integer) {
-        const str = try vm.gc.allocString("integer");
+        const str = try vm.gc().allocString("integer");
         vm.stack[vm.base + func_reg] = TValue.fromString(str);
     } else if (arg == .number) {
-        const str = try vm.gc.allocString("float");
+        const str = try vm.gc().allocString("float");
         vm.stack[vm.base + func_reg] = TValue.fromString(str);
     } else {
         vm.stack[vm.base + func_reg] = .nil;

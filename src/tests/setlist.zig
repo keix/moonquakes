@@ -15,7 +15,7 @@ test "SETLIST basic - set array elements" {
     defer ctx.deinit();
 
     // Create a table
-    const table = try ctx.vm.gc.allocTable();
+    const table = try ctx.vm.gc().allocTable();
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
     ctx.vm.stack[1] = .{ .integer = 10 };
@@ -28,9 +28,9 @@ test "SETLIST basic - set array elements" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return table
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
 
     // Check table contents (SETLIST now uses integer keys)
@@ -51,7 +51,7 @@ test "SETLIST with B=0 - variable count from top" {
     defer ctx.deinit();
 
     // Create a table
-    const table = try ctx.vm.gc.allocTable();
+    const table = try ctx.vm.gc().allocTable();
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
     ctx.vm.stack[1] = .{ .integer = 100 };
@@ -64,9 +64,9 @@ test "SETLIST with B=0 - variable count from top" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;
@@ -84,7 +84,7 @@ test "SETLIST with offset mode (k=1, C=0)" {
     defer ctx.deinit();
 
     // Create a table with first element already set (using integer key)
-    const table = try ctx.vm.gc.allocTable();
+    const table = try ctx.vm.gc().allocTable();
     try table.set(TValue{ .integer = 1 }, .{ .integer = 1 });
 
     ctx.vm.stack[0] = TValue.fromTable(table);
@@ -100,9 +100,9 @@ test "SETLIST with offset mode (k=1, C=0)" {
         Instruction.initABC(.RETURN, 0, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 5);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
 
     const result_table = result.single.asTable().?;

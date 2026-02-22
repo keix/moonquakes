@@ -49,8 +49,8 @@ test "DIV: division by zero (integer) returns inf" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     // Lua 5.4: division by zero returns inf (IEEE 754)
     try expectInf(result);
@@ -73,8 +73,8 @@ test "DIV: division by zero (float) returns inf" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     // Lua 5.4: division by zero returns inf (IEEE 754)
     try expectInf(result);
@@ -97,8 +97,8 @@ test "IDIV: integer division by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try expectError(result, error.LuaException);
 }
@@ -120,8 +120,8 @@ test "MOD: modulo by zero" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R2
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try expectError(result, error.LuaException);
 }
@@ -142,8 +142,8 @@ test "DIVK: division by zero constant returns inf" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     // Lua 5.4: division by zero returns inf (IEEE 754)
     try expectInf(result);
@@ -165,8 +165,8 @@ test "IDIVK: integer division by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try expectError(result, error.LuaException);
 }
@@ -187,8 +187,8 @@ test "MODK: modulo by zero constant" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     try expectError(result, error.LuaException);
 }
@@ -212,8 +212,8 @@ test "Division operations with non-zero divisors should succeed" {
         Instruction.initABC(.RETURN, 2, 4, 0), // return R2, R3, R4
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);

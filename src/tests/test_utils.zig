@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const TValue = @import("../runtime/value.zig").TValue;
+const Runtime = @import("../runtime/runtime.zig").Runtime;
 const VM = @import("../vm/vm.zig").VM;
 const GC = @import("../runtime/gc/gc.zig").GC;
 const Mnemonics = @import("../vm/mnemonics.zig");
@@ -16,24 +17,28 @@ const Instruction = opcodes.Instruction;
 pub const GCObject = object.GCObject;
 pub const UpvaldescType = Upvaldesc;
 
-/// Test context that manages GC and VM lifecycle together
-/// This simplifies test setup by handling the GC -> VM dependency
+/// Test context that manages Runtime and VM lifecycle together
+/// This simplifies test setup by handling the Runtime -> VM dependency
 pub const TestContext = struct {
-    gc: GC,
-    vm: VM,
+    rt: *Runtime,
+    vm: *VM,
 
-    /// Initialize a TestContext in-place.
-    /// GC and VM are automatically set up with proper references.
+    /// Initialize a TestContext.
+    /// Runtime and VM are automatically set up with proper references.
     pub fn init(self: *TestContext) !void {
-        self.gc = GC.init(testing.allocator);
-        errdefer self.gc.deinit();
-        try self.gc.initMetamethodKeys();
-        try self.vm.init(&self.gc);
+        self.rt = try Runtime.init(testing.allocator);
+        errdefer self.rt.deinit();
+        self.vm = try VM.init(self.rt);
     }
 
     pub fn deinit(self: *TestContext) void {
         self.vm.deinit();
-        self.gc.deinit();
+        self.rt.deinit();
+    }
+
+    /// Get GC from runtime (convenience accessor)
+    pub fn gc(self: *TestContext) *GC {
+        return self.rt.gc;
     }
 };
 
@@ -47,11 +52,12 @@ pub fn createTestProto(
     is_vararg: bool,
     maxstacksize: u8,
 ) !*ProtoObject {
+    const gc = vm.gc();
     // Dupe the arrays since ProtoObject owns them
-    const k_copy = try vm.gc.allocator.dupe(TValue, k);
-    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
+    const k_copy = try gc.allocator.dupe(TValue, k);
+    const code_copy = try gc.allocator.dupe(Instruction, code);
 
-    return vm.gc.allocProto(
+    return gc.allocProto(
         k_copy,
         code_copy,
         &[_]*ProtoObject{}, // no nested protos
@@ -76,12 +82,13 @@ pub fn createTestProtoWithUpvalues(
     nups: u8,
     upvalues: []const Upvaldesc,
 ) !*ProtoObject {
+    const gc = vm.gc();
     // Dupe the arrays since ProtoObject owns them
-    const k_copy = try vm.gc.allocator.dupe(TValue, k);
-    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
-    const upvalues_copy = try vm.gc.allocator.dupe(Upvaldesc, upvalues);
+    const k_copy = try gc.allocator.dupe(TValue, k);
+    const code_copy = try gc.allocator.dupe(Instruction, code);
+    const upvalues_copy = try gc.allocator.dupe(Upvaldesc, upvalues);
 
-    return vm.gc.allocProto(
+    return gc.allocProto(
         k_copy,
         code_copy,
         &[_]*ProtoObject{}, // no nested protos
@@ -105,12 +112,13 @@ pub fn createTestProtoWithChildProtos(
     maxstacksize: u8,
     child_protos: []const *ProtoObject,
 ) !*ProtoObject {
+    const gc = vm.gc();
     // Dupe the arrays since ProtoObject owns them
-    const k_copy = try vm.gc.allocator.dupe(TValue, k);
-    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
-    const protos_copy = try vm.gc.allocator.dupe(*ProtoObject, child_protos);
+    const k_copy = try gc.allocator.dupe(TValue, k);
+    const code_copy = try gc.allocator.dupe(Instruction, code);
+    const protos_copy = try gc.allocator.dupe(*ProtoObject, child_protos);
 
-    return vm.gc.allocProto(
+    return gc.allocProto(
         k_copy,
         code_copy,
         protos_copy,
@@ -136,13 +144,14 @@ pub fn createTestProtoFull(
     upvalues: []const Upvaldesc,
     child_protos: []const *ProtoObject,
 ) !*ProtoObject {
+    const gc = vm.gc();
     // Dupe the arrays since ProtoObject owns them
-    const k_copy = try vm.gc.allocator.dupe(TValue, k);
-    const code_copy = try vm.gc.allocator.dupe(Instruction, code);
-    const upvalues_copy = try vm.gc.allocator.dupe(Upvaldesc, upvalues);
-    const protos_copy = try vm.gc.allocator.dupe(*ProtoObject, child_protos);
+    const k_copy = try gc.allocator.dupe(TValue, k);
+    const code_copy = try gc.allocator.dupe(Instruction, code);
+    const upvalues_copy = try gc.allocator.dupe(Upvaldesc, upvalues);
+    const protos_copy = try gc.allocator.dupe(*ProtoObject, child_protos);
 
-    return vm.gc.allocProto(
+    return gc.allocProto(
         k_copy,
         code_copy,
         protos_copy,
@@ -357,14 +366,14 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try createTestProto(&ctx.vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));
+    const proto = try createTestProto(ctx.vm, constants, &code, 0, false, @as(u8, @intCast(initial_regs.len)));
 
     // Set initial registers
     for (initial_regs, 0..) |val, i| {
         ctx.vm.stack[i] = val;
     }
 
-    var inst_test = InstructionTest.init(&ctx.vm, proto, @as(u8, @intCast(initial_regs.len)));
+    var inst_test = InstructionTest.init(ctx.vm, proto, @as(u8, @intCast(initial_regs.len)));
     const trace = try inst_test.expectSuccess(@as(u8, @intCast(expected_regs.len)));
 
     // Verify expected registers
@@ -373,7 +382,7 @@ pub fn testSingleInstruction(instruction: Instruction, constants: []const TValue
     }
 
     // Verify VM state
-    try expectVMState(&ctx.vm, expected_base, expected_top);
+    try expectVMState(ctx.vm, expected_base, expected_top);
 }
 
 /// Stack growth verification

@@ -41,18 +41,18 @@ test "arithmetic: 10 - 3 * 2 = 4" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
 
     // Capture initial state
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Update final state
-    trace.updateFinal(&ctx.vm, 5);
+    trace.updateFinal(ctx.vm, 5);
 
     // Verify result
-    try test_utils.expectResultAndState(result, TValue{ .integer = 4 }, &ctx.vm, 0, 5);
+    try test_utils.expectResultAndState(result, TValue{ .integer = 4 }, ctx.vm, 0, 5);
 
     // Verify register states
     try trace.expectRegisterChanged(0, TValue{ .integer = 10 }); // R0 loaded 10
@@ -82,16 +82,16 @@ test "arithmetic: 10 / 3 with side effect verification" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 6);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 6);
 
     // Set up registers beyond what we need to verify no side effects
     ctx.vm.stack[3] = TValue{ .integer = 999 };
     ctx.vm.stack[4] = TValue{ .boolean = true };
     ctx.vm.stack[5] = TValue{ .number = 3.14 };
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 6);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 6);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 6);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 6);
 
     // Verify result
     try testing.expect(result == .single);
@@ -130,14 +130,14 @@ test "arithmetic: 10 // 3 = 3" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
 
     // Added: Stack and register verification
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 3);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
-    trace.updateFinal(&ctx.vm, 3);
+    trace.updateFinal(ctx.vm, 3);
 
     // Existing verification
     try expectSingleResult(result, TValue{ .number = 3 });
@@ -148,7 +148,7 @@ test "arithmetic: 10 // 3 = 3" {
     try trace.expectRegisterChanged(2, TValue{ .number = 3 }); // IDIV always returns float
 
     // VM state verification
-    try test_utils.expectVMState(&ctx.vm, 0, 3);
+    try test_utils.expectVMState(ctx.vm, 0, 3);
 }
 
 test "arithmetic: 10 % 3 = 1" {
@@ -168,18 +168,18 @@ test "arithmetic: 10 % 3 = 1" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
 
     // Added: ExecutionTrace for state tracking
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 3);
 
     // Existing verification
     try expectSingleResult(result, TValue{ .number = 1 });
 
     // Added: Detailed state verification
-    try test_utils.expectRegisters(&ctx.vm, 0, &[_]TValue{
+    try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
         .{ .integer = 10 }, // R0
         .{ .integer = 3 }, // R1
         .{ .number = 1 }, // R2 (MOD always returns float)
@@ -206,16 +206,16 @@ test "arithmetic: 2 ^ 3 = 8 (power operation)" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 3);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 3);
 
     try expectSingleResult(result, TValue{ .number = 8.0 });
 
     // Verify register states
-    try test_utils.expectRegisters(&ctx.vm, 0, &[_]TValue{
+    try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
         .{ .number = 2.0 }, // R0
         .{ .number = 3.0 }, // R1
         .{ .number = 8.0 }, // R2
@@ -239,8 +239,8 @@ test "arithmetic: 5 ^ 2 with integer inputs" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 25.0 });
 }

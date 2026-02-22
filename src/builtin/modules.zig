@@ -30,8 +30,8 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
 
     // Get package table
-    const package_key = try vm.gc.allocString("package");
-    const package_table = if (vm.globals.get(TValue.fromString(package_key))) |v|
+    const package_key = try vm.gc().allocString("package");
+    const package_table = if (vm.globals().get(TValue.fromString(package_key))) |v|
         v.asTable()
     else
         null;
@@ -39,7 +39,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Get package.loaded
     var loaded_table: ?*TableObject = null;
     if (package_table) |pkg| {
-        const loaded_key = try vm.gc.allocString("loaded");
+        const loaded_key = try vm.gc().allocString("loaded");
         if (pkg.get(TValue.fromString(loaded_key))) |v| {
             loaded_table = v.asTable();
         }
@@ -47,15 +47,15 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Create loaded table if it doesn't exist
     if (loaded_table == null) {
-        loaded_table = try vm.gc.allocTable();
+        loaded_table = try vm.gc().allocTable();
         if (package_table) |pkg| {
-            const loaded_key = try vm.gc.allocString("loaded");
+            const loaded_key = try vm.gc().allocString("loaded");
             try pkg.set(TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
         }
     }
 
     // Step 1: Check package.loaded[modname]
-    const mod_key = try vm.gc.allocString(modname);
+    const mod_key = try vm.gc().allocString(modname);
     if (loaded_table.?.get(TValue.fromString(mod_key))) |cached| {
         if (!cached.isNil()) {
             if (nresults > 0) {
@@ -67,7 +67,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Step 2: Check package.preload[modname]
     if (package_table) |pkg| {
-        const preload_key = try vm.gc.allocString("preload");
+        const preload_key = try vm.gc().allocString("preload");
         if (pkg.get(TValue.fromString(preload_key))) |preload_val| {
             if (preload_val.asTable()) |preload| {
                 if (preload.get(TValue.fromString(mod_key))) |loader| {
@@ -93,8 +93,8 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const builtin_modules = [_][]const u8{ "debug", "string", "table", "math", "io", "os", "coroutine", "utf8", "package" };
     for (builtin_modules) |builtin| {
         if (std.mem.eql(u8, modname, builtin)) {
-            const builtin_key = try vm.gc.allocString(builtin);
-            if (vm.globals.get(TValue.fromString(builtin_key))) |global_val| {
+            const builtin_key = try vm.gc().allocString(builtin);
+            if (vm.globals().get(TValue.fromString(builtin_key))) |global_val| {
                 // Cache it
                 try loaded_table.?.set(TValue.fromString(mod_key), global_val);
                 if (nresults > 0) {
@@ -160,16 +160,16 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype, loaded_table:
     };
     defer file.close();
 
-    const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
+    const source = file.readToEndAlloc(vm.gc().allocator, 1024 * 1024 * 10) catch {
         return vm.raiseString("cannot read module file");
     };
-    defer vm.gc.allocator.free(source);
+    defer vm.gc().allocator.free(source);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc.allocator, source, .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, source, .{});
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.gc.allocator);
+            defer e.deinit(vm.gc().allocator);
             var msg_buf: [512]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "{s}:{d}: {s}", .{
                 filename_copy[0..len], e.line, e.message,
@@ -179,19 +179,19 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype, loaded_table:
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc().allocator, raw_proto);
 
     // Materialize to Proto
-    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc(), vm.gc().allocator) catch {
         return vm.raiseString("failed to load module");
     };
 
     // Create closure
-    const closure = try vm.gc.allocClosure(proto);
+    const closure = try vm.gc().allocClosure(proto);
 
     // Set up _ENV upvalue
     if (proto.nups > 0) {
-        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(vm.globals));
+        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
         closure.upvalues[0] = env_upval;
     }
 
@@ -229,7 +229,7 @@ pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
     // Return nil, error_message (Lua convention for loadlib failures)
     vm.stack[vm.base + func_reg] = .nil;
     if (nresults > 1) {
-        const err_str = try vm.gc.allocString("C libraries not supported");
+        const err_str = try vm.gc().allocString("C libraries not supported");
         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
     }
 }
@@ -279,7 +279,7 @@ pub fn nativePackageSearchpath(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
 
     if (searchPathImpl(name, path, sep, rep, &out_buf, &out_len, &err_buf, &err_pos)) {
         // Return the found path
-        const path_str = try vm.gc.allocString(out_buf[0..out_len]);
+        const path_str = try vm.gc().allocString(out_buf[0..out_len]);
         vm.stack[vm.base + func_reg] = TValue.fromString(path_str);
         if (nresults > 1) {
             vm.stack[vm.base + func_reg + 1] = .nil;
@@ -288,7 +288,7 @@ pub fn nativePackageSearchpath(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         // Return nil + error message
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString(err_buf[0..err_pos]);
+            const err_str = try vm.gc().allocString(err_buf[0..err_pos]);
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
     }
