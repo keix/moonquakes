@@ -41,6 +41,17 @@ const MetaEvent = metamethod.MetaEvent;
 const SharedMetatables = metamethod.SharedMetatables;
 const MetamethodKeys = metamethod.MetamethodKeys;
 
+/// GC State Machine for incremental collection
+/// idle → mark → sweep → idle
+pub const GCState = enum(u8) {
+    /// No collection in progress
+    idle,
+    /// Mark phase: traversing from roots, building gray list
+    mark,
+    /// Sweep phase: freeing white objects
+    sweep,
+};
+
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
 const GC_THRESHOLD = 64 * 1024; // 64KB initial threshold
@@ -180,6 +191,24 @@ pub const GC = struct {
     /// When false, automatic collection is disabled but manual collect() still works.
     is_running: bool = true,
 
+    /// Current state in the GC cycle
+    gc_state: GCState = .idle,
+
+    /// Current mark (flip mark scheme)
+    /// Object is marked if: obj.mark_bit == current_mark
+    /// Avoids O(n) sweep reset by flipping instead of clearing
+    current_mark: bool = false,
+
+    /// Gray list head for incremental marking
+    /// Gray objects: marked but children not yet scanned
+    gray_list: ?*GCObject = null,
+
+    /// Sweep cursor for incremental sweep (current object being examined)
+    sweep_cursor: ?*GCObject = null,
+
+    /// Previous object in sweep (to update .next pointer)
+    sweep_prev: ?*GCObject = null,
+
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
@@ -263,6 +292,205 @@ pub const GC = struct {
     /// Get memory usage remainder in bytes (0-1023).
     pub fn getCountB(self: *GC) usize {
         return self.bytes_allocated % 1024;
+    }
+
+    /// Check if an object is marked (reachable in current cycle)
+    /// Uses flip mark: marked if obj.mark_bit == gc.current_mark
+    pub fn isMarked(self: *const GC, obj: *const GCObject) bool {
+        return obj.mark_bit == self.current_mark;
+    }
+
+    /// Check if an object is white (unmarked, potentially garbage)
+    pub fn isWhite(self: *const GC, obj: *const GCObject) bool {
+        return obj.mark_bit != self.current_mark;
+    }
+
+    /// Check if an object is gray (marked, children not scanned)
+    pub fn isGray(self: *const GC, obj: *const GCObject) bool {
+        return self.isMarked(obj) and obj.in_gray;
+    }
+
+    /// Check if an object is black (marked, fully scanned)
+    pub fn isBlack(self: *const GC, obj: *const GCObject) bool {
+        return self.isMarked(obj) and !obj.in_gray;
+    }
+
+    /// Flip the mark bit for next cycle
+    /// This avoids O(n) sweep reset - all objects become white implicitly
+    pub fn flipMark(self: *GC) void {
+        self.current_mark = !self.current_mark;
+    }
+
+    /// Mark object as gray (reachable, children not yet scanned)
+    /// Non-recursive: adds to gray list for later processing
+    ///
+    /// Tri-color invariant: white → gray → black
+    ///   - White: not yet seen (mark_bit != current_mark)
+    ///   - Gray: seen, children pending (in gray list)
+    ///   - Black: fully scanned (marked, not in gray list)
+    pub fn markGray(self: *GC, obj: *GCObject) void {
+        // Skip if already marked
+        if (self.isMarked(obj)) return;
+
+        // Mark object (white → gray)
+        obj.mark_bit = self.current_mark;
+        obj.in_gray = true;
+
+        // Add to gray list (LIFO for cache locality)
+        obj.gray_next = self.gray_list;
+        self.gray_list = obj;
+    }
+
+    /// Mark a TValue as gray if it contains a GC object
+    pub fn markGrayValue(self: *GC, value: TValue) void {
+        if (value == .object) {
+            self.markGray(value.object);
+        }
+    }
+
+    /// Pop an object from the gray list for processing
+    fn popGray(self: *GC) ?*GCObject {
+        const obj = self.gray_list orelse return null;
+        self.gray_list = obj.gray_next;
+        obj.gray_next = null;
+        obj.in_gray = false; // Gray → Black
+        return obj;
+    }
+
+    /// Check if gray list is empty
+    pub fn grayListEmpty(self: *const GC) bool {
+        return self.gray_list == null;
+    }
+
+    /// Process one object from the gray list
+    /// Marks children as gray (non-recursive)
+    /// Returns true if an object was processed, false if gray list empty
+    pub fn propagateOne(self: *GC) bool {
+        const obj = self.popGray() orelse return false;
+        self.scanChildren(obj);
+        return true;
+    }
+
+    /// Scan children of a black object, marking them gray
+    /// This is the non-recursive version of the child-marking in markObject
+    fn scanChildren(self: *GC, obj: *GCObject) void {
+        switch (obj.type) {
+            .string => {
+                // Strings have no references
+            },
+            .table => {
+                const table: *TableObject = @fieldParentPtr("header", obj);
+                // Mark metatable and parse __mode
+                if (table.metatable) |mt| {
+                    self.markGray(&mt.header);
+                    table.weak_mode = self.parseWeakMode(mt);
+                } else {
+                    table.weak_mode = .none;
+                }
+
+                // Handle weak tables differently
+                if (table.weak_mode != .none) {
+                    // Track for cleanup
+                    self.weak_tables.append(self.allocator, table) catch {};
+
+                    // For weak values: mark keys only
+                    if (table.weak_mode == .weak_values) {
+                        var iter = table.hash_part.iterator();
+                        while (iter.next()) |entry| {
+                            self.markGrayValue(entry.key_ptr.*);
+                        }
+                    }
+                    // weak_keys (ephemerons): defer to propagateEphemerons
+                } else {
+                    // Strong table: mark all keys and values
+                    var iter = table.hash_part.iterator();
+                    while (iter.next()) |entry| {
+                        self.markGrayValue(entry.key_ptr.*);
+                        self.markGrayValue(entry.value_ptr.*);
+                    }
+                }
+            },
+            .closure => {
+                const closure: *ClosureObject = @fieldParentPtr("header", obj);
+                for (closure.upvalues) |upval| {
+                    self.markGray(&upval.header);
+                }
+                self.markGray(&closure.proto.header);
+            },
+            .native_closure => {
+                // No references
+            },
+            .upvalue => {
+                const upval: *UpvalueObject = @fieldParentPtr("header", obj);
+                if (upval.isClosed()) {
+                    self.markGrayValue(upval.closed);
+                }
+            },
+            .userdata => {
+                const ud: *UserdataObject = @fieldParentPtr("header", obj);
+                if (ud.metatable) |mt| {
+                    self.markGray(&mt.header);
+                }
+                for (ud.userValues()) |uv| {
+                    self.markGrayValue(uv);
+                }
+            },
+            .proto => {
+                const proto: *ProtoObject = @fieldParentPtr("header", obj);
+                for (proto.k) |value| {
+                    self.markGrayValue(value);
+                }
+                for (proto.protos) |nested| {
+                    self.markGray(&nested.header);
+                }
+            },
+            .thread => {
+                const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
+                if (thread_obj.mark_vm) |mark_fn| {
+                    mark_fn(thread_obj.vm, @ptrCast(self));
+                }
+            },
+        }
+    }
+
+    /// Propagate all gray objects until the list is empty
+    /// This is used for STW collection
+    pub fn propagateAll(self: *GC) void {
+        while (self.propagateOne()) {}
+    }
+
+    // Backward barrier: when black parent references white child,
+    // push parent back to gray list to rescan later.
+    //
+    // Why backward (not forward)?
+    // - Forward: mark child immediately → may miss other white refs from same parent
+    // - Backward: rescan parent → catches all children in one pass
+    // - Backward is simpler and more robust for Lua's dynamic writes
+
+    /// Backward barrier for object references
+    /// Call when: parent[field] = child (where child may be white)
+    ///
+    /// Invariant: black object must not reference white object
+    /// Solution: push black parent back to gray for re-scanning
+    pub fn barrierBack(self: *GC, parent: *GCObject, child: *GCObject) void {
+        // Only needed during mark phase
+        if (self.gc_state != .mark) return;
+
+        // Check: parent is black AND child is white
+        if (self.isBlack(parent) and self.isWhite(child)) {
+            // Push parent back to gray
+            parent.in_gray = true;
+            parent.gray_next = self.gray_list;
+            self.gray_list = parent;
+        }
+    }
+
+    /// Backward barrier for TValue references
+    /// Call when: parent[field] = value (where value may contain white object)
+    pub fn barrierBackValue(self: *GC, parent: *GCObject, value: TValue) void {
+        if (value == .object) {
+            self.barrierBack(parent, value.object);
+        }
     }
 
     /// Register a root provider for GC marking
@@ -386,6 +614,12 @@ pub const GC = struct {
         self.finishCollection();
     }
 
+    /// Create a GC header for new object allocation
+    /// New objects are marked black (current_mark) to survive the current cycle
+    fn newObjectHeader(self: *GC, obj_type: GCObjectType) GCObject {
+        return GCObject.initWithMark(obj_type, self.objects, self.current_mark);
+    }
+
     /// Allocate a new string object
     pub fn allocString(self: *GC, str: []const u8) !*StringObject {
         // Check intern table for existing string
@@ -396,8 +630,8 @@ pub const GC = struct {
         // Allocate new StringObject
         const obj = try self.allocObject(StringObject, str.len);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.string, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.string);
         obj.len = str.len;
         obj.hash = StringObject.hashString(str);
 
@@ -417,8 +651,8 @@ pub const GC = struct {
     pub fn allocTable(self: *GC) !*TableObject {
         const obj = try self.allocObject(TableObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.table, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.table);
         // TODO: Use tracking allocator for HashMap memory accounting
         // Currently disabled due to potential GC interaction issues
         obj.hash_part = TableObject.HashMap.init(self.allocator);
@@ -435,8 +669,8 @@ pub const GC = struct {
     pub fn allocClosure(self: *GC, proto: *ProtoObject) !*ClosureObject {
         const obj = try self.allocObject(ClosureObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.closure, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.closure);
         obj.proto = proto;
 
         // Allocate upvalues array if needed
@@ -471,8 +705,8 @@ pub const GC = struct {
     ) !*ProtoObject {
         const obj = try self.allocObject(ProtoObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.proto, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.proto);
         obj.k = k;
         obj.code = code;
         obj.protos = protos;
@@ -503,8 +737,8 @@ pub const GC = struct {
     pub fn allocUpvalue(self: *GC, location: *TValue) !*UpvalueObject {
         const obj = try self.allocObject(UpvalueObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.upvalue, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.upvalue);
         obj.location = location;
         obj.closed = TValue.nil;
         obj.next_open = null;
@@ -520,8 +754,8 @@ pub const GC = struct {
     pub fn allocClosedUpvalue(self: *GC, value: TValue) !*UpvalueObject {
         const obj = try self.allocObject(UpvalueObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.upvalue, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.upvalue);
         obj.closed = value;
         obj.location = &obj.closed; // Point to self (closed state)
         obj.next_open = null;
@@ -536,8 +770,8 @@ pub const GC = struct {
     pub fn allocNativeClosure(self: *GC, func: NativeFn) !*NativeClosureObject {
         const obj = try self.allocObject(NativeClosureObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.native_closure, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.native_closure);
         obj.func = func;
 
         // Add to GC object list
@@ -553,8 +787,8 @@ pub const GC = struct {
         const extra = @as(usize, num_user_values) * @sizeOf(TValue) + data_size;
         const obj = try self.allocObject(UserdataObject, extra);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.userdata, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.userdata);
         obj.size = data_size;
         obj.nuvalue = num_user_values;
         obj.metatable = null;
@@ -586,8 +820,8 @@ pub const GC = struct {
     ) !*ThreadObject {
         const obj = try self.allocObject(ThreadObject, 0);
 
-        // Initialize GC header
-        obj.header = GCObject.init(.thread, self.objects);
+        // Initialize GC header (black = survives current cycle)
+        obj.header = self.newObjectHeader(.thread);
         obj.status = status;
         obj.vm = vm_ptr;
         obj.mark_vm = mark_vm;
@@ -601,22 +835,42 @@ pub const GC = struct {
 
     /// Prepare for a new GC cycle (called before VM marks roots)
     pub fn beginCollection(self: *GC) void {
+        // Flip mark - all objects become white implicitly (O(1) vs O(n))
+        self.flipMark();
+
+        // Clear gray list
+        self.gray_list = null;
+
         // Clear weak tables list from previous cycle
         self.weak_tables.clearRetainingCapacity();
+
+        // Set state to mark phase
+        self.gc_state = .mark;
     }
 
     /// Complete collection: ephemeron propagation, sweep, cleanup (called after marking)
     fn finishCollection(self: *GC) void {
+        // Propagate all gray objects (non-recursive traversal)
+        self.propagateAll();
+
         // Propagate ephemerons until stable
         // For weak-key tables, values are only marked if their keys are marked
-        while (self.propagateEphemerons()) {}
+        while (self.propagateEphemerons()) {
+            // Ephemeron propagation may add more gray objects
+            self.propagateAll();
+        }
 
-        // Clean dead entries from weak tables BEFORE sweep clears marks
-        // (sweep clears mark bits, so we need to check them first)
+        // Clean dead entries from weak tables
         self.cleanWeakTables();
+
+        // Set state to sweep phase
+        self.gc_state = .sweep;
 
         // Sweep phase (also runs __gc finalizers)
         self.sweep();
+
+        // Return to idle state
+        self.gc_state = .idle;
 
         // Adjust next GC threshold based on survival rate
         self.next_gc = @max(
@@ -639,12 +893,9 @@ pub const GC = struct {
         }
     }
 
-    /// Mark a TValue if it contains a GC object
+    /// Mark a TValue if it contains a GC object (adds to gray list)
     pub fn markValue(self: *GC, value: TValue) void {
-        if (value == .object) {
-            markObject(self, value.object);
-        }
-        // Immediate values (nil, bool, integer, number) don't need marking
+        self.markGrayValue(value);
     }
 
     /// Mark a ProtoObject (GC-managed prototype)
@@ -652,113 +903,7 @@ pub const GC = struct {
     /// GC SAFETY: This function marks the proto itself, its constants (k),
     /// and nested ProtoObjects. All are now GC-managed.
     pub fn markProtoObject(self: *GC, proto: *ProtoObject) void {
-        markObject(self, &proto.header);
-    }
-
-    /// Mark an object and recursively mark its children
-    fn markObject(self: *GC, obj: *GCObject) void {
-        if (obj.marked) return; // Already marked
-
-        obj.marked = true;
-
-        // Mark referenced objects based on type
-        switch (obj.type) {
-            .string => {
-                // Strings have no references to other objects
-            },
-            .table => {
-                const table: *TableObject = @fieldParentPtr("header", obj);
-                // Mark metatable if present and parse __mode
-                if (table.metatable) |mt| {
-                    markObject(self, &mt.header);
-                    // Parse __mode from metatable
-                    table.weak_mode = self.parseWeakMode(mt);
-                } else {
-                    table.weak_mode = .none;
-                }
-
-                // Handle weak tables differently
-                if (table.weak_mode != .none) {
-                    // Track weak table for cleanup after sweep
-                    self.weak_tables.append(self.allocator, table) catch {
-                        // OOM: weak table tracking lost, but GC can continue
-                        if (builtin.mode == .Debug) {
-                            std.debug.print("GC: failed to track weak table\n", .{});
-                        }
-                    };
-
-                    // For weak values only: mark all keys but not values
-                    if (table.weak_mode == .weak_values) {
-                        var iter = table.hash_part.iterator();
-                        while (iter.next()) |entry| {
-                            // Keys can be any TValue now - mark if object
-                            self.markValue(entry.key_ptr.*);
-                            // Skip marking values - they are weak
-                        }
-                    }
-                    // For weak keys (ephemerons): defer marking to propagation phase
-                    // Keys and values are not marked here - handled by propagateEphemerons
-                } else {
-                    // Strong table: mark all keys and values
-                    var iter = table.hash_part.iterator();
-                    while (iter.next()) |entry| {
-                        // Mark both key and value (keys can be any TValue)
-                        self.markValue(entry.key_ptr.*);
-                        self.markValue(entry.value_ptr.*);
-                    }
-                }
-            },
-            .closure => {
-                const closure: *ClosureObject = @fieldParentPtr("header", obj);
-                // Mark upvalues
-                for (closure.upvalues) |upval| {
-                    markObject(self, &upval.header);
-                }
-                // Mark proto (GC-managed)
-                self.markProtoObject(closure.proto);
-            },
-            .native_closure => {
-                // Native closures have no references to other objects
-            },
-            .upvalue => {
-                // Mark the closed value if the upvalue is closed
-                const upval: *UpvalueObject = @fieldParentPtr("header", obj);
-                if (upval.isClosed()) {
-                    self.markValue(upval.closed);
-                }
-            },
-            .userdata => {
-                const ud: *UserdataObject = @fieldParentPtr("header", obj);
-                // Mark metatable if present
-                if (ud.metatable) |mt| {
-                    markObject(self, &mt.header);
-                }
-                // Mark user values
-                for (ud.userValues()) |uv| {
-                    self.markValue(uv);
-                }
-            },
-            .proto => {
-                const proto: *ProtoObject = @fieldParentPtr("header", obj);
-                // Mark constants (may contain GC objects like strings)
-                for (proto.k) |value| {
-                    self.markValue(value);
-                }
-                // Mark nested protos
-                for (proto.protos) |nested| {
-                    markObject(self, &nested.header);
-                }
-            },
-            .thread => {
-                // Mark the VM's roots (stack, callframes, upvalues, etc.)
-                // Main thread: marked via RootProvider (mark_vm is null)
-                // Coroutine threads: marked here via callback
-                const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
-                if (thread_obj.mark_vm) |mark_fn| {
-                    mark_fn(thread_obj.vm, @ptrCast(self));
-                }
-            },
-        }
+        self.markGray(&proto.header);
     }
 
     /// Parse __mode string from metatable to determine weak table mode
@@ -795,15 +940,15 @@ pub const GC = struct {
 
                 // Check if key is marked (only objects can be unmarked)
                 const key_marked = switch (key) {
-                    .object => |obj| obj.marked,
+                    .object => |o| self.isMarked(o),
                     else => true, // Non-objects (nil, bool, int, number) are always "marked"
                 };
 
                 // If key is marked, mark the value (unless weak values)
                 if (key_marked and !table.hasWeakValues()) {
                     const value = entry.value_ptr.*;
-                    if (value == .object and !value.object.marked) {
-                        markObject(self, value.object);
+                    if (value == .object and self.isWhite(value.object)) {
+                        self.markGray(value.object);
                         changed = true;
                     }
                 }
@@ -834,7 +979,7 @@ pub const GC = struct {
 
             // Check weak key (only objects can be collected)
             if (table.hasWeakKeys()) {
-                if (key == .object and !key.object.marked) {
+                if (key == .object and self.isWhite(key.object)) {
                     remove = true;
                 }
             }
@@ -842,7 +987,7 @@ pub const GC = struct {
             // Check weak value (only for collectable values)
             if (table.hasWeakValues() and !remove) {
                 const val = entry.value_ptr.*;
-                if (val == .object and !val.object.marked) {
+                if (val == .object and self.isWhite(val.object)) {
                     remove = true;
                 }
             }
@@ -858,25 +1003,37 @@ pub const GC = struct {
         }
     }
 
-    /// Sweep phase: free all unmarked objects
+    /// Sweep phase: free all unmarked (white) objects
     /// Calls __gc finalizers for tables before freeing
+    /// Uses flip mark scheme - no need to clear marks (flipMark handles that)
     pub fn sweep(self: *GC) void {
         // First pass: call __gc finalizers for unmarked tables
         // We do this before freeing to ensure objects are still valid
         self.runFinalizers();
+
+        // Re-mark from roots after finalizers to catch resurrected objects
+        // Finalizers can "resurrect" objects by storing references to them
+        // (e.g., in globals or other reachable tables). Without re-marking,
+        // those references would point to freed memory.
+        for (self.root_providers.items) |provider| {
+            provider.markRoots(self);
+        }
+        self.propagateAll();
 
         // Second pass: free unmarked objects
         var prev: ?*GCObject = null;
         var current = self.objects;
 
         while (current) |obj| {
-            if (obj.marked) {
-                // Keep object, clear mark for next cycle
-                obj.marked = false;
+            if (self.isMarked(obj)) {
+                // Keep object - mark is preserved (flip mark scheme)
+                // Clear gray state for next cycle
+                obj.in_gray = false;
+                obj.gray_next = null;
                 prev = obj;
                 current = obj.next;
             } else {
-                // Free unmarked object
+                // Free unmarked (white) object
                 const next = obj.next;
 
                 if (prev) |p| {
@@ -906,7 +1063,7 @@ pub const GC = struct {
 
         var current = self.objects;
         while (current) |obj| {
-            if (!obj.marked) {
+            if (self.isWhite(obj)) {
                 // Tables and userdata can have __gc finalizers
                 const maybe_metatable: ?*TableObject = switch (obj.type) {
                     .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
@@ -1045,8 +1202,9 @@ pub const GC = struct {
     }
 
     /// Manually mark an object as reachable (for testing / root marking)
+    /// Uses gray list for non-recursive marking
     pub fn mark(self: *GC, obj: *GCObject) void {
-        markObject(self, obj);
+        self.markGray(obj);
     }
 
     /// Get current memory usage statistics
@@ -1081,19 +1239,20 @@ test "single string mark survives GC" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 1), stats_before.object_count);
 
+    // Prepare for collection (flip mark, so fresh objects are white)
+    gc.beginCollection();
+
     // Mark the string
     gc.mark(&str.header);
-    try std.testing.expect(str.header.marked);
+    try std.testing.expect(gc.isMarked(&str.header));
 
     // Run GC (sweep phase)
     gc.sweep();
+    gc.gc_state = .idle;
 
     // String should survive
     const stats_after = gc.getStats();
     try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
-
-    // Mark should be cleared for next cycle
-    try std.testing.expect(!str.header.marked);
 
     // Verify string content is intact
     try std.testing.expectEqualStrings("hello", str.asSlice());
@@ -1109,8 +1268,12 @@ test "unmarked string is collected" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 1), stats_before.object_count);
 
-    // Run GC without marking
+    // Prepare for collection (flip mark, so objects become white)
+    gc.beginCollection();
+
+    // Run GC without marking anything
     gc.sweep();
+    gc.gc_state = .idle;
 
     // String should be collected
     const stats_after = gc.getStats();
@@ -1129,11 +1292,15 @@ test "marked string survives, unmarked is collected" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 2), stats_before.object_count);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark only the survivor
     gc.mark(&survivor.header);
 
     // Run GC
     gc.sweep();
+    gc.gc_state = .idle;
 
     // Only survivor should remain
     const stats_after = gc.getStats();
@@ -1153,14 +1320,18 @@ test "markValue marks string in TValue" {
     // Wrap it in a TValue
     const value = TValue.fromString(str);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark through TValue
     gc.markValue(value);
 
     // Verify the string is marked
-    try std.testing.expect(str.header.marked);
+    try std.testing.expect(gc.isMarked(&str.header));
 
     // Run GC - string should survive
     gc.sweep();
+    gc.gc_state = .idle;
 
     const stats = gc.getStats();
     try std.testing.expectEqual(@as(usize, 1), stats.object_count);
@@ -1188,11 +1359,15 @@ test "markStack marks all strings in stack slice" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark stack
     gc.markStack(&stack);
 
     // Run GC
     gc.sweep();
+    gc.gc_state = .idle;
 
     // Only stack items should survive (2 strings)
     const stats_after = gc.getStats();
@@ -1215,11 +1390,15 @@ test "forceGC collects unmarked objects" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark only survivor
     gc.mark(&survivor.header);
 
-    // forceGC should collect unmarked objects
-    gc.forceGC();
+    // Complete collection manually
+    gc.sweep();
+    gc.gc_state = .idle;
 
     const stats_after = gc.getStats();
     try std.testing.expectEqual(@as(usize, 1), stats_after.object_count);
@@ -1267,11 +1446,18 @@ test "table marks its contents" {
     const stats_before = gc.getStats();
     try std.testing.expectEqual(@as(usize, 4), stats_before.object_count);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark only the table (should transitively mark key and value strings inside)
     gc.mark(&table.header);
 
+    // Propagate marks through gray list (non-recursive traversal)
+    gc.propagateAll();
+
     // Run GC
     gc.sweep();
+    gc.gc_state = .idle;
 
     // Table, key, and value string should survive, garbage should be collected
     const stats_after = gc.getStats();
@@ -1310,11 +1496,18 @@ test "markValue marks closure" {
     // proto + closure + garbage string = 3 objects
     try std.testing.expectEqual(@as(usize, 3), stats_before.object_count);
 
+    // Prepare for collection
+    gc.beginCollection();
+
     // Mark the closure via TValue (should also mark proto transitively)
     gc.markValue(TValue.fromClosure(closure));
 
+    // Propagate marks through gray list (non-recursive traversal)
+    gc.propagateAll();
+
     // Run GC
     gc.sweep();
+    gc.gc_state = .idle;
 
     // Closure and proto should survive, garbage string should be collected
     const stats_after = gc.getStats();

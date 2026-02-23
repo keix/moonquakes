@@ -38,40 +38,65 @@ pub const GCObjectType = enum(u8) {
 ///
 /// This header must be the first field in every GC object struct.
 /// It provides the infrastructure for mark-and-sweep collection.
+///
+/// Tri-color abstraction for incremental GC:
+///   White: mark_bit != GC.current_mark (unreachable, potentially garbage)
+///   Gray:  mark_bit == GC.current_mark AND in_gray == true (reachable, children not scanned)
+///   Black: mark_bit == GC.current_mark AND in_gray == false (reachable, fully scanned)
 pub const GCObject = struct {
     /// Object type for dispatch in mark/sweep phases
     type: GCObjectType,
 
-    /// Mark bit for garbage collection
-    /// true = reachable, false = potentially garbage
-    marked: bool,
+    /// Mark bit for garbage collection (flip mark scheme)
+    /// Compared with GC.current_mark to determine reachability
+    mark_bit: bool,
+
+    /// Gray list membership flag
+    /// true = in gray list (awaiting child scan)
+    in_gray: bool = false,
 
     /// Linked list pointer for tracking all objects
     /// The GC maintains a list of all allocated objects
     next: ?*GCObject,
 
+    /// Gray list link for incremental marking
+    gray_next: ?*GCObject = null,
+
     /// Initialize a GC object header
     pub fn init(object_type: GCObjectType, next_obj: ?*GCObject) GCObject {
         return .{
             .type = object_type,
-            .marked = false,
+            .mark_bit = false,
+            .in_gray = false,
             .next = next_obj,
+            .gray_next = null,
         };
     }
 
-    /// Mark this object as reachable
+    /// Initialize with specific mark bit (for incremental GC)
+    pub fn initWithMark(object_type: GCObjectType, next_obj: ?*GCObject, mark_value: bool) GCObject {
+        return .{
+            .type = object_type,
+            .mark_bit = mark_value,
+            .in_gray = false,
+            .next = next_obj,
+            .gray_next = null,
+        };
+    }
+
+    /// Mark this object as reachable (legacy, for compatibility)
     pub fn mark(self: *GCObject) void {
-        self.marked = true;
+        self.mark_bit = true;
     }
 
     /// Clear the mark (for next collection cycle)
     pub fn unmark(self: *GCObject) void {
-        self.marked = false;
+        self.mark_bit = false;
     }
 
-    /// Check if object is marked
-    pub fn isMarked(self: *const GCObject) bool {
-        return self.marked;
+    /// Check if object is marked (legacy, use GC.isMarked for flip mark)
+    pub fn isMarkedLegacy(self: *const GCObject) bool {
+        return self.mark_bit;
     }
 };
 

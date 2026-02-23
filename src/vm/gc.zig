@@ -21,17 +21,10 @@ pub const vmRootProviderVTable = RootProvider.VTable{
 };
 
 fn computeStackExtent(vm: *const VM) u32 {
-    var extent = vm.top;
-    if (vm.ci != null) {
-        const base_max = vm.base_ci.base + vm.base_ci.func.maxstacksize;
-        if (base_max > extent) extent = base_max;
-
-        for (vm.callstack[0..vm.callstack_size]) |frame| {
-            const frame_max = frame.base + frame.func.maxstacksize;
-            if (frame_max > extent) extent = frame_max;
-        }
-    }
-    return extent;
+    // IMPORTANT: Only mark up to vm.top, not base + maxstacksize.
+    // Slots beyond top may contain stale pointers from previous function calls
+    // that have already returned. Those objects may have been freed.
+    return vm.top;
 }
 
 fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
