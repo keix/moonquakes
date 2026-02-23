@@ -17,100 +17,76 @@ const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
 const metamethod = @import("metamethod.zig");
 const Runtime = @import("../runtime/runtime.zig").Runtime;
-
-// Execution ABI: CallInfo (frame)
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 
-// Re-export MetamethodKeys from metamethod.zig
 pub const MetamethodKeys = metamethod.MetamethodKeys;
 
 /// VM represents an execution thread (Lua "thread"/coroutine state).
-/// The name VM is kept intentionally as a clean-room abstraction.
 ///
-/// Architecture: VM (thread) references Runtime (shared state) via pointer.
+/// Architecture: VM references Runtime (shared state) via pointer.
 /// Multiple VMs (coroutines) share a single Runtime.
+/// VM knows Runtime; Runtime does not know VM.
 pub const VM = struct {
-    rt: *Runtime,
-
-    /// The ThreadObject that wraps this VM (for coroutine API)
-    thread: *ThreadObject,
-
-    // Thread-local execution state
     stack: [256]TValue,
     top: u32,
     base: u32,
     ci: ?*CallInfo,
     base_ci: CallInfo,
-    callstack: [35]CallInfo, // Support up to 35 nested calls
+    callstack: [35]CallInfo,
     callstack_size: u8,
-    open_upvalues: ?*UpvalueObject, // Linked list of open upvalues (sorted by stack level)
-    lua_error_value: TValue = .nil, // Stored Lua error value for pcall (any TValue)
+    open_upvalues: ?*UpvalueObject,
+    lua_error_value: TValue = .nil,
 
-    // Temporary roots for values not yet on stack (REPL, embedder API)
+    // Yield state
+    yield_base: u32 = 0,
+    yield_count: u32 = 0,
+    yield_ret_base: u32 = 0,
+    yield_nresults: i32 = 0, // -1 = variable results
+
+    rt: *Runtime,
+    thread: *ThreadObject,
+
+    /// Values not yet on stack (REPL, embedder API)
     temp_roots: [8]TValue = [_]TValue{.nil} ** 8,
     temp_roots_count: u8 = 0,
 
-    // Debug hook fields (for debug.sethook/gethook)
-    hook_func: ?*ClosureObject = null, // Hook function
-    hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
-    hook_count: u32 = 0, // Count for count hook
+    hook_func: ?*ClosureObject = null,
+    hook_mask: u8 = 0, // 1=call, 2=return, 4=line
+    hook_count: u32 = 0,
 
-    // Yield state (for coroutine.yield)
-    yield_base: u32 = 0, // Stack base where yield values start
-    yield_count: u32 = 0, // Number of yield values
-    yield_ret_base: u32 = 0, // Where resume's results should go (base + func_reg)
-    yield_nresults: i32 = 0, // How many results the CALL expects (-1 = variable)
-
-    // ========================================
-    // Accessors for Runtime resources
-    // ========================================
-
-    /// Get the GC from Runtime.
     pub inline fn gc(self: *VM) *GC {
         return self.rt.gc;
     }
 
-    /// Get the globals table from Runtime.
     pub inline fn globals(self: *VM) *TableObject {
         return self.rt.globals;
     }
 
-    /// Get the registry table from Runtime.
     pub inline fn registry(self: *VM) *TableObject {
         return self.rt.registry;
     }
 
-    /// Get this VM's ThreadObject.
     pub inline fn getThread(self: *VM) *ThreadObject {
         return self.thread;
     }
 
-    /// Check if this VM is the main thread.
     pub inline fn isMainThread(self: *VM) bool {
         return self.rt.main_thread == self.thread;
     }
 
-    // ========================================
-    // Lifecycle
-    // ========================================
-
     /// Initialize a VM with a shared Runtime.
-    /// Main thread is registered as a GC root provider.
-    /// Coroutine VMs are NOT registered - their stacks are marked via ThreadObject.
+    /// Main thread registers as GC root provider.
+    /// Coroutine VMs are marked via ThreadObject instead.
     pub fn init(rt: *Runtime) !*VM {
         const self = try rt.allocator.create(VM);
         errdefer rt.allocator.destroy(self);
 
-        // Determine if this is the main thread (first VM)
         const is_main = rt.main_thread == null;
         const initial_status: ThreadStatus = if (is_main) .running else .suspended;
-
-        // free_vm callback for coroutines (safe to set now, only used during sweep)
         const free_vm: ?*const fn (*anyopaque, std.mem.Allocator) void = if (is_main) null else &vmFreeCallback;
 
-        // Create ThreadObject with mark_vm = null initially
-        // (mark_vm will be set after VM is fully initialized to avoid marking uninitialized VM)
+        // mark_vm = null initially; set after VM is initialized to avoid marking undefined fields
         const thread = try rt.gc.allocThread(@ptrCast(self), initial_status, null, free_vm);
 
         self.* = .{
@@ -130,13 +106,11 @@ pub const VM = struct {
             v.* = .nil;
         }
 
-        // Now that VM is fully initialized, set mark_vm callback
         if (!is_main) {
             thread.mark_vm = &vmMarkCallback;
             rt.gc.trackAllocation(@sizeOf(VM));
         }
 
-        // Only main thread registers as root provider
         if (is_main) {
             try rt.gc.addRootProvider(self.rootProvider());
             rt.setMainThread(thread);
@@ -145,26 +119,67 @@ pub const VM = struct {
         return self;
     }
 
-    /// Clean up VM resources.
     /// Only called for main thread (via Runtime.deinit).
     /// Coroutine VMs are freed by GC when ThreadObject is collected.
     pub fn deinit(self: *VM) void {
-        // Only main thread is registered as root provider
         if (self.isMainThread()) {
             self.rt.gc.removeRootProvider(self.rootProvider());
         }
-
-        // Free self
         self.rt.allocator.destroy(self);
     }
 
-    // ========================================
-    // Temp roots (for REPL, embedder API)
-    // ========================================
+    pub fn closeUpvalues(self: *VM, level: u32) void {
+        while (self.open_upvalues) |uv| {
+            const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&self.stack[0])) / @sizeOf(TValue);
+            if (uv_level < level) break;
+            self.open_upvalues = uv.next_open;
+            uv.close();
+        }
+    }
 
-    /// Push a value to temporary roots (protected from GC).
-    /// Used by REPL and embedder API for values not yet on stack.
-    /// Returns false if temp root stack is full.
+    pub fn getOrCreateUpvalue(self: *VM, location: *TValue) !*UpvalueObject {
+        var prev: ?*UpvalueObject = null;
+        var current = self.open_upvalues;
+
+        while (current) |uv| {
+            if (@intFromPtr(uv.location) == @intFromPtr(location)) {
+                return uv;
+            }
+            if (@intFromPtr(uv.location) < @intFromPtr(location)) {
+                break; // List sorted by descending address
+            }
+            prev = uv;
+            current = uv.next_open;
+        }
+
+        const new_uv = try self.gc().allocUpvalue(location);
+        new_uv.next_open = current;
+        if (prev) |p| {
+            p.next_open = new_uv;
+        } else {
+            self.open_upvalues = new_uv;
+        }
+        return new_uv;
+    }
+
+    pub const LuaException = error{LuaException};
+
+    /// Raise with value. pcall/xpcall catches this.
+    pub fn raise(self: *VM, value: TValue) LuaException {
+        self.lua_error_value = value;
+        return error.LuaException;
+    }
+
+    /// Raise with string. OutOfMemory is NOT caught by pcall.
+    pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfMemory}) {
+        const str = self.gc().allocString(message) catch return error.OutOfMemory;
+        return self.raise(TValue.fromString(str));
+    }
+
+    pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+        try builtin.invoke(id, self, func_reg, nargs, nresults);
+    }
+
     pub fn pushTempRoot(self: *VM, value: TValue) bool {
         if (self.temp_roots_count >= self.temp_roots.len) return false;
         self.temp_roots[self.temp_roots_count] = value;
@@ -172,233 +187,123 @@ pub const VM = struct {
         return true;
     }
 
-    /// Pop n values from temporary roots.
     pub fn popTempRoots(self: *VM, n: u8) void {
         if (n > self.temp_roots_count) {
             self.temp_roots_count = 0;
         } else {
             self.temp_roots_count -= n;
         }
-        // Clear popped slots to avoid stale references
         for (self.temp_roots[self.temp_roots_count..]) |*slot| {
             slot.* = .nil;
         }
     }
 
-    // ========================================
-    // GC interface
-    // ========================================
-
-    /// Run garbage collection manually.
     pub fn collectGarbage(self: *VM) void {
         const gc_ptr = self.gc();
         const before = gc_ptr.bytes_allocated;
-
         gc_ptr.collect();
-
-        // Debug output (disabled in ReleaseFast)
         if (@import("builtin").mode != .ReleaseFast) {
             std.log.info("GC: {} -> {} bytes, next at {}", .{ before, gc_ptr.bytes_allocated, gc_ptr.next_gc });
         }
     }
 
-    // ========================================
-    // Upvalue management
-    // ========================================
-
-    /// Close all upvalues at or above the given stack level
-    pub fn closeUpvalues(self: *VM, level: u32) void {
-        while (self.open_upvalues) |uv| {
-            // Check if this upvalue points to a stack slot at or above level
-            const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&self.stack[0])) / @sizeOf(TValue);
-            if (uv_level < level) break;
-
-            // Remove from open list and close
-            self.open_upvalues = uv.next_open;
-            uv.close();
-        }
-    }
-
-    /// Get existing open upvalue for stack slot, or create a new one
-    pub fn getOrCreateUpvalue(self: *VM, location: *TValue) !*UpvalueObject {
-        // Search for existing open upvalue pointing to this location
-        var prev: ?*UpvalueObject = null;
-        var current = self.open_upvalues;
-
-        while (current) |uv| {
-            if (@intFromPtr(uv.location) == @intFromPtr(location)) {
-                // Found existing upvalue
-                return uv;
-            }
-            if (@intFromPtr(uv.location) < @intFromPtr(location)) {
-                // Passed the insertion point (list is sorted by descending address)
-                break;
-            }
-            prev = uv;
-            current = uv.next_open;
-        }
-
-        // Create new upvalue
-        const new_uv = try self.gc().allocUpvalue(location);
-
-        // Insert into sorted list
-        new_uv.next_open = current;
-        if (prev) |p| {
-            p.next_open = new_uv;
-        } else {
-            self.open_upvalues = new_uv;
-        }
-
-        return new_uv;
-    }
-
-    // ========================================
-    // Error handling
-    // ========================================
-
-    /// Lua exception type - the only "catchable" error in protected calls
-    pub const LuaException = error{LuaException};
-
-    /// Raise a Lua exception with the given error value.
-    /// The value is stored in lua_error_value and LuaException is returned.
-    /// pcall/xpcall will catch this and convert it to (false, value).
-    ///
-    /// Usage: return vm.raise(error_value);
-    pub fn raise(self: *VM, value: TValue) LuaException {
-        self.lua_error_value = value;
-        return error.LuaException;
-    }
-
-    /// Raise a Lua exception with a string message.
-    /// Convenience wrapper that allocates the string.
-    /// Returns OutOfMemory if allocation fails (not caught by pcall).
-    pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfMemory}) {
-        const str = self.gc().allocString(message) catch return error.OutOfMemory;
-        return self.raise(TValue.fromString(str));
-    }
-
-    // ========================================
-    // Native function dispatch
-    // ========================================
-
-    /// VM is just a bridge - dispatches to appropriate native function
-    pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
-        try builtin.invoke(id, self, func_reg, nargs, nresults);
-    }
-
-    // ========================================
-    // GC root provider
-    // ========================================
-
-    /// Create a RootProvider for this VM instance
     pub fn rootProvider(self: *VM) RootProvider {
         return RootProvider.init(VM, self, &vmRootProviderVTable);
     }
 
-    /// Reserve temporary stack slots for native functions.
-    /// MUST be called before any GC-triggering operation (allocString, allocTable, etc.)
-    /// when using stack slots beyond the function's arguments.
-    ///
-    /// func_reg: base-relative register where the function was called
-    /// count: number of slots to reserve (func_reg + 0 through func_reg + count - 1)
-    ///
-    /// GC uses vm.top as the boundary; only slots below vm.top are scanned as roots.
+    /// Reserve stack slots before GC-triggering operations.
+    /// GC only scans slots below vm.top.
     pub inline fn reserveSlots(self: *VM, func_reg: u32, count: u32) void {
         const needed = self.base + func_reg + count;
         if (self.top < needed) self.top = needed;
     }
 };
 
-/// VTable for VM's RootProvider implementation
+// GC Integration (Internal)
 const vmRootProviderVTable = RootProvider.VTable{
     .markRoots = vmMarkRoots,
     .callValue = vmCallValue,
 };
 
-/// Mark all VM roots for GC
-/// Called by GC during mark phase via RootProvider interface
-///
-/// NOTE: VM does NOT mark globals/registry - that is Runtime's responsibility.
-/// VM only marks thread-local state: stack, callstack, upvalues, error value, hooks.
-fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
-    const self: *VM = @ptrCast(@alignCast(ctx));
+fn computeStackExtent(vm: *const VM) u32 {
+    var extent = vm.top;
+    if (vm.ci != null) {
+        const base_max = vm.base_ci.base + vm.base_ci.func.maxstacksize;
+        if (base_max > extent) extent = base_max;
 
-    // 1. Mark VM stack
-    var stack_extent = self.top;
-
-    // Only access base_ci if VM has started execution (ci != null)
-    // For coroutines that haven't been resumed yet, ci is null and base_ci is undefined
-    if (self.ci != null) {
-        const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
-        if (base_frame_max > stack_extent) {
-            stack_extent = base_frame_max;
-        }
-
-        for (self.callstack[0..self.callstack_size]) |frame| {
+        for (vm.callstack[0..vm.callstack_size]) |frame| {
             const frame_max = frame.base + frame.func.maxstacksize;
-            if (frame_max > stack_extent) {
-                stack_extent = frame_max;
-            }
+            if (frame_max > extent) extent = frame_max;
         }
     }
+    return extent;
+}
 
-    gc_ptr.markStack(self.stack[0..stack_extent]);
+fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
+    if (vm.ci == null) return;
 
-    // 2. Mark call frames (only if VM has started execution)
-    if (self.ci != null) {
-        if (self.base_ci.closure) |closure| {
+    if (vm.base_ci.closure) |closure| {
+        gc_ptr.mark(&closure.header);
+    } else {
+        gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
+    }
+
+    for (vm.callstack[0..vm.callstack_size]) |frame| {
+        if (frame.closure) |closure| {
             gc_ptr.mark(&closure.header);
         } else {
-            gc_ptr.markProtoObject(@constCast(self.base_ci.func));
-        }
-
-        for (self.callstack[0..self.callstack_size]) |frame| {
-            if (frame.closure) |closure| {
-                gc_ptr.mark(&closure.header);
-            } else {
-                gc_ptr.markProtoObject(@constCast(frame.func));
-            }
+            gc_ptr.markProtoObject(@constCast(frame.func));
         }
     }
+}
 
-    // 3. Mark open upvalues (captured variables still pointing to stack)
-    var upval = self.open_upvalues;
+fn markUpvalues(vm: *const VM, gc_ptr: *GC) void {
+    var upval = vm.open_upvalues;
     while (upval) |uv| {
         gc_ptr.mark(&uv.header);
         upval = uv.next_open;
     }
+}
 
-    // 4. Mark lua_error_value (stored error value for pcall)
-    gc_ptr.markValue(self.lua_error_value);
-
-    // 5. Mark debug hook function (if set)
-    if (self.hook_func) |hook| {
+fn markHooks(vm: *const VM, gc_ptr: *GC) void {
+    if (vm.hook_func) |hook| {
         gc_ptr.mark(&hook.header);
     }
+}
 
-    // 6. Mark temporary roots (REPL, embedder API)
-    for (self.temp_roots[0..self.temp_roots_count]) |val| {
+fn markTempRoots(vm: *const VM, gc_ptr: *GC) void {
+    for (vm.temp_roots[0..vm.temp_roots_count]) |val| {
         gc_ptr.markValue(val);
     }
 }
 
-/// Call a Lua value (used for __gc finalizers)
-/// Called by GC via RootProvider interface
-fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
-    const self: *VM = @ptrCast(@alignCast(ctx));
-    return call.callValue(self, func.*, args);
+/// VM marks thread-local state only.
+/// Runtime marks globals/registry.
+fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
+    const vm: *VM = @ptrCast(@alignCast(ctx));
+    const stack_extent = computeStackExtent(vm);
+
+    gc_ptr.markStack(vm.stack[0..stack_extent]);
+    markCallFrames(vm, gc_ptr);
+    markUpvalues(vm, gc_ptr);
+    gc_ptr.markValue(vm.lua_error_value);
+    markHooks(vm, gc_ptr);
+    markTempRoots(vm, gc_ptr);
 }
 
-/// Free VM memory (for coroutine threads only)
-/// Called by GC when sweeping dead ThreadObjects
+fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
+    const vm: *VM = @ptrCast(@alignCast(ctx));
+    return call.callValue(vm, func.*, args);
+}
+
+/// Coroutine VM cleanup (called by GC during sweep)
 fn vmFreeCallback(vm_ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const vm: *VM = @ptrCast(@alignCast(vm_ptr));
     vm.rt.gc.trackDeallocation(@sizeOf(VM));
     allocator.destroy(vm);
 }
 
-/// Mark VM roots (for coroutine threads only)
-/// Wrapper for vmMarkRoots with anyopaque signature to avoid circular imports
+/// Wrapper to avoid circular import (anyopaque signature)
 fn vmMarkCallback(vm_ptr: *anyopaque, gc_ptr: *anyopaque) void {
     vmMarkRoots(vm_ptr, @ptrCast(@alignCast(gc_ptr)));
 }
