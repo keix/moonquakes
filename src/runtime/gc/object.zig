@@ -1,3 +1,22 @@
+//! GC Object System
+//!
+//! All heap-allocated Lua values inherit from GCObject.
+//! Uniform header enables polymorphic GC traversal.
+//!
+//! Object types:
+//!   - StringObject: interned, immutable, hash cached
+//!   - TableObject: hash + array hybrid (Lua table)
+//!   - ClosureObject: function + captured upvalues
+//!   - NativeClosureObject: C/Zig function + upvalues
+//!   - UpvalueObject: open (stack ref) or closed (own storage)
+//!   - ProtoObject: compiled bytecode (function prototype)
+//!   - ThreadObject: coroutine state (VM reference)
+//!   - UserdataObject: C-managed memory with optional metatable
+//!
+//! Layout invariant:
+//!   Every object struct starts with GCObject header.
+//!   @fieldParentPtr enables safe downcasting from header to concrete type.
+
 const std = @import("std");
 const proto_mod = @import("../../compiler/proto.zig");
 pub const Instruction = @import("../../compiler/opcodes.zig").Instruction;

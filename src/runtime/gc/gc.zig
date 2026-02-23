@@ -1,3 +1,22 @@
+//! Garbage Collector - Mark and Sweep
+//!
+//! Non-moving, threshold-based collector.
+//! All GC objects share a common header (GCObject) for uniform traversal.
+//!
+//! Design choices:
+//!   - Non-moving: pointers remain stable (C API friendly)
+//!   - Threshold-based: collect when bytes_allocated > threshold
+//!   - String interning: deduplicated via hash table
+//!   - Root providers: VM and Runtime register as marking roots
+//!
+//! Collection phases:
+//!   1. Mark: traverse from roots, set marked=true
+//!   2. Sweep: free unmarked objects, reset marks
+//!
+//! Memory tracking:
+//!   - All allocations go through tracking allocator
+//!   - bytes_allocated updated on alloc/free/resize
+
 const std = @import("std");
 const builtin = @import("builtin");
 const object = @import("object.zig");

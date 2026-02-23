@@ -12,6 +12,11 @@
 //! Architecture:
 //!   Runtime (shared) ← VM (thread)
 //!   1 Runtime : N VMs (coroutines)
+//!
+//! Dependency rule:
+//!   - VM depends on Runtime.
+//!   - Runtime does NOT depend on VM execution state.
+//!   - Runtime only stores GC-level ThreadObject references.
 
 const std = @import("std");
 const gc_mod = @import("gc/gc.zig");
@@ -29,10 +34,14 @@ pub const Runtime = struct {
     globals: *TableObject,
     registry: *TableObject,
 
-    /// The main thread (first VM created). Set by VM.init.
+    /// The main thread (first VM created).
+    /// Stored only as a GC-level thread object.
+    /// Runtime does NOT access VM stack or call frames.
     main_thread: ?*ThreadObject = null,
 
-    /// Currently executing thread. Changes during coroutine resume/yield.
+    /// Currently executing thread (identity tracking only).
+    /// Used for coroutine bookkeeping and GC reachability.
+    /// Runtime does not execute code.
     current_thread: ?*ThreadObject = null,
 
     /// Initialize a new Runtime.

@@ -1,9 +1,28 @@
-//! VM State
+//! VM State - Execution Thread
 //!
-//! Pure execution state. All behavior is in separate files:
-//! - api.zig: public methods (accessors, upvalue, error, temp roots)
-//! - gc.zig: GC integration (root provider, mark, callbacks)
-//! - lifecycle.zig: init/deinit
+//! VM is the unit of execution (Lua "thread" / coroutine).
+//! Pure state container; behavior lives in separate modules.
+//!
+//! Architecture:
+//!   Runtime (shared) ← VM (thread)
+//!   - VM references Runtime via pointer
+//!   - Multiple VMs share one Runtime (coroutines)
+//!   - VM knows Runtime; Runtime does NOT know VM internals
+//!
+//! Stack model:
+//!   - Fixed 256 slots (compile-time constant)
+//!   - base: current frame's register 0
+//!   - top: next free slot (for GC extent)
+//!
+//! Error handling:
+//!   - lua_error_value stores the error object
+//!   - error.LuaException propagates up call stack
+//!   - pcall catches and converts to status code
+//!
+//! Module split:
+//!   - api.zig: public methods (accessors, upvalue, error, temp roots)
+//!   - gc.zig: GC integration (root provider, mark, callbacks)
+//!   - lifecycle.zig: init/deinit
 
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
