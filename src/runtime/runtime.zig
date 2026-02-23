@@ -130,8 +130,13 @@ fn runtimeMarkRoots(ctx: *anyopaque, gc: *GC) void {
     // Mark thread objects (keeps them alive)
     if (self.main_thread) |mt| {
         gc.mark(&mt.header);
-    }
-    if (self.current_thread) |ct| {
+        // Mark current_thread only if different from main_thread
+        if (self.current_thread) |ct| {
+            if (ct != mt) {
+                gc.mark(&ct.header);
+            }
+        }
+    } else if (self.current_thread) |ct| {
         gc.mark(&ct.header);
     }
 }
