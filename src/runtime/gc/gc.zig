@@ -176,6 +176,10 @@ pub const GC = struct {
     /// True after initMetamethodKeys() has been called
     mm_keys_initialized: bool = false,
 
+    /// GC running state (for stop/restart control)
+    /// When false, automatic collection is disabled but manual collect() still works.
+    is_running: bool = true,
+
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
             .allocator = allocator,
@@ -227,6 +231,38 @@ pub const GC = struct {
         if (self.gc_inhibit > 0) {
             self.gc_inhibit -= 1;
         }
+    }
+
+    /// Stop automatic GC. Returns previous running state.
+    /// Manual collect() still works when stopped.
+    pub fn stop(self: *GC) bool {
+        const was_running = self.is_running;
+        self.is_running = false;
+        return was_running;
+    }
+
+    /// Restart automatic GC.
+    pub fn restart(self: *GC) void {
+        self.is_running = true;
+    }
+
+    /// Perform a GC step. Currently runs a full collection.
+    /// Returns true if a collection cycle completed.
+    pub fn step(self: *GC) bool {
+        if (self.gc_inhibit > 0) return false;
+        if (self.root_providers.items.len == 0) return false;
+        self.collect();
+        return true;
+    }
+
+    /// Get memory usage in KB (integer part).
+    pub fn getCountKB(self: *GC) usize {
+        return self.bytes_allocated / 1024;
+    }
+
+    /// Get memory usage remainder in bytes (0-1023).
+    pub fn getCountB(self: *GC) usize {
+        return self.bytes_allocated % 1024;
     }
 
     /// Register a root provider for GC marking
@@ -310,8 +346,10 @@ pub const GC = struct {
         return ptr;
     }
 
-    /// Try to run GC if root providers are registered and not inhibited
+    /// Try to run GC if running, not inhibited, and root providers exist
     fn tryCollect(self: *GC) void {
+        // Don't run GC if stopped via stop()
+        if (!self.is_running) return;
         // Don't run GC if inhibited (during materialization, etc.)
         if (self.gc_inhibit > 0) return;
         // Don't run GC if no root providers registered

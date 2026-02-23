@@ -1002,28 +1002,25 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         break :blk if (opt_arg.asString()) |s| s.asSlice() else "collect";
     } else "collect";
 
+    const gc = vm.gc();
     const result: TValue = if (gc_options.get(opt)) |option| switch (option) {
         .collect => blk: {
             vm.collectGarbage();
-            break :blk TValue{ .nil = {} };
+            break :blk .nil;
         },
-        .stop => TValue{ .nil = {} }, // TODO
-        .restart => TValue{ .nil = {} }, // TODO
-        .count => blk: {
-            const stats = vm.gc().getStats();
-            const kb: f64 = @as(f64, @floatFromInt(stats.bytes_allocated)) / 1024.0;
-            break :blk TValue{ .number = kb };
+        .stop => TValue{ .boolean = gc.stop() },
+        .restart => blk: {
+            gc.restart();
+            break :blk .nil;
         },
-        .step => blk: {
-            vm.collectGarbage();
-            break :blk TValue{ .boolean = true };
-        },
-        .isrunning => TValue{ .boolean = true },
-        .incremental => TValue{ .nil = {} }, // TODO
-        .generational => TValue{ .nil = {} }, // TODO
+        .count => TValue{ .number = @as(f64, @floatFromInt(gc.bytes_allocated)) / 1024.0 },
+        .step => TValue{ .boolean = gc.step() },
+        .isrunning => TValue{ .boolean = gc.is_running },
+        .incremental => .nil, // Not implemented (Lua 5.4 advanced)
+        .generational => .nil, // Not implemented (Lua 5.4 advanced)
     } else blk: {
-        // TODO: Raise error for invalid option
-        break :blk TValue{ .nil = {} };
+        // Invalid option returns nil (Lua compatible)
+        break :blk .nil;
     };
 
     if (nresults > 0) {
