@@ -1031,10 +1031,6 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 test "gc_options maps all valid Lua 5.4 options" {
     // Valid options
     try std.testing.expectEqual(GcOption.collect, gc_options.get("collect").?);

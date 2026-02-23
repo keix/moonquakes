@@ -16,10 +16,6 @@ const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const ProtoObject = object.ProtoObject;
 
-// ============================================================================
-// Execution Results
-// ============================================================================
-
 pub const ReturnValue = union(enum) {
     none,
     single: TValue,
@@ -32,10 +28,6 @@ pub const ExecuteResult = union(enum) {
     LoopContinue,
     ReturnVM: ReturnValue,
 };
-
-// ============================================================================
-// Call Info
-// ============================================================================
 
 /// CallInfo represents a function call in the call stack
 pub const CallInfo = struct {

@@ -23,10 +23,6 @@ const ExecuteResult = execution.ExecuteResult;
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 
-// ============================================================================
-// Arithmetic Operations
-// ============================================================================
-
 pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
 pub const BitwiseOp = enum { band, bor, bxor };
 
@@ -115,10 +111,6 @@ fn toIntForBitwise(v: *const TValue) !i64 {
     return error.ArithmeticError;
 }
 
-// ============================================================================
-// Comparison Operations
-// ============================================================================
-
 pub fn eqOp(a: TValue, b: TValue) bool {
     return a.eql(b);
 }
@@ -152,10 +144,6 @@ pub fn leOp(a: TValue, b: TValue) !bool {
     }
     return error.OrderComparisonError;
 }
-
-// ============================================================================
-// Call Stack Management
-// ============================================================================
 
 pub fn pushCallInfo(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
     return pushCallInfoVararg(vm, func, closure, base, ret_base, nresults, 0, 0);
@@ -198,10 +186,6 @@ pub fn popCallInfo(vm: *VM) void {
         }
     }
 }
-
-// ============================================================================
-// Metamethod Execution
-// ============================================================================
 
 /// Execute a metamethod synchronously and return its first result.
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
@@ -251,10 +235,6 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 
     return vm.stack[result_slot];
 }
-
-// ============================================================================
-// Main Execution Loop
-// ============================================================================
 
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
