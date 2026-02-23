@@ -1,3 +1,21 @@
+//! TValue - Tagged Value Representation
+//!
+//! Lua values are dynamically typed. TValue is the universal container.
+//!
+//! Design:
+//!   - Tagged union (Zig native, no manual bit packing)
+//!   - Immediate types: nil, boolean, integer (i64), number (f64)
+//!   - Reference type: object (*GCObject for all heap types)
+//!
+//! Why not NaN-boxing?
+//!   - Zig's tagged union is type-safe and clear
+//!   - No pointer arithmetic or bit manipulation
+//!   - Easy to debug and maintain
+//!
+//! GC interaction:
+//!   - Only .object variant holds GC references
+//!   - Marking a TValue marks the underlying GCObject if present
+
 const std = @import("std");
 const object = @import("gc/object.zig");
 const GCObject = object.GCObject;
@@ -18,8 +36,6 @@ pub const TValue = union(enum) {
     integer: i64,
     number: f64,
     object: *GCObject,
-
-    // ===== Type predicates =====
 
     pub fn isNil(self: TValue) bool {
         return self == .nil;
@@ -69,8 +85,6 @@ pub const TValue = union(enum) {
         return self == .object and self.object.type == .thread;
     }
 
-    // ===== Object accessors =====
-
     pub fn asString(self: TValue) ?*StringObject {
         if (self == .object and self.object.type == .string) {
             return object.getObject(StringObject, self.object);
@@ -112,8 +126,6 @@ pub const TValue = union(enum) {
         }
         return null;
     }
-
-    // ===== Numeric conversions =====
 
     /// Convert float to integer safely, checking for finite, integral, and in-range
     fn floatToIntSafe(n: f64) ?i64 {
@@ -171,8 +183,6 @@ pub const TValue = union(enum) {
         };
     }
 
-    // ===== Constructors =====
-
     pub fn fromString(str: *StringObject) TValue {
         return .{ .object = &str.header };
     }
@@ -196,8 +206,6 @@ pub const TValue = union(enum) {
     pub fn fromThread(thread: *ThreadObject) TValue {
         return .{ .object = &thread.header };
     }
-
-    // ===== Formatting =====
 
     pub fn format(
         self: TValue,
@@ -227,8 +235,6 @@ pub const TValue = union(enum) {
             },
         }
     }
-
-    // ===== Equality =====
 
     pub fn eql(a: TValue, b: TValue) bool {
         return switch (a) {
