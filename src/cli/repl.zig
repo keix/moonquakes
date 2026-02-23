@@ -1,9 +1,10 @@
 //! REPL - Read-Eval-Print Loop
 //!
 //! Interactive Lua interpreter for Moonquakes.
-//! Maintains a persistent VM state across inputs.
+//! Maintains a persistent Runtime/VM state across inputs.
 
 const std = @import("std");
+const Runtime = @import("../runtime/runtime.zig").Runtime;
 const VM = @import("../vm/vm.zig").VM;
 const GC = @import("../runtime/gc/gc.zig").GC;
 const TValue = @import("../runtime/value.zig").TValue;
@@ -14,31 +15,28 @@ const ver = @import("../version.zig");
 
 pub const REPL = struct {
     allocator: std.mem.Allocator,
-    gc: *GC,
+    rt: *Runtime,
     vm: *VM,
     prompt_key: *object.StringObject,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) !Self {
-        // GC on heap - stable address for VM reference
-        const gc = try allocator.create(GC);
-        errdefer allocator.destroy(gc);
-        gc.* = GC.init(allocator);
-        errdefer gc.deinit();
-        try gc.initMetamethodKeys();
+        // Create Runtime (owns GC, globals, registry)
+        const rt = try Runtime.init(allocator);
+        errdefer rt.deinit();
 
-        const vm = try allocator.create(VM);
-        errdefer allocator.destroy(vm);
-        try vm.init(gc);
+        // Create VM (thread state)
+        const vm = try VM.init(rt);
+        errdefer vm.deinit();
 
         // Pre-intern _PROMPT key (rooted via registry)
-        const prompt_key = try gc.allocString("_PROMPT");
-        try vm.registry.set(TValue.fromString(prompt_key), TValue.fromString(prompt_key));
+        const prompt_key = try rt.gc.allocString("_PROMPT");
+        try vm.registry().set(TValue.fromString(prompt_key), TValue.fromString(prompt_key));
 
         return Self{
             .allocator = allocator,
-            .gc = gc,
+            .rt = rt,
             .vm = vm,
             .prompt_key = prompt_key,
         };
@@ -46,9 +44,7 @@ pub const REPL = struct {
 
     pub fn deinit(self: *Self) void {
         self.vm.deinit();
-        self.allocator.destroy(self.vm);
-        self.gc.deinit();
-        self.allocator.destroy(self.gc);
+        self.rt.deinit();
     }
 
     /// Run the REPL loop
@@ -94,7 +90,7 @@ pub const REPL = struct {
     /// Get prompt from _PROMPT global or return null for default
     fn getPrompt(self: *Self) ?[]const u8 {
         // Use pre-interned key (rooted in registry) to avoid GC issues
-        const prompt_val = self.vm.globals.get(TValue.fromString(self.prompt_key)) orelse return null;
+        const prompt_val = self.vm.globals().get(TValue.fromString(self.prompt_key)) orelse return null;
         if (prompt_val.asString()) |str| {
             return str.asSlice();
         }
@@ -138,21 +134,22 @@ pub const REPL = struct {
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
         // Materialize and execute
-        self.gc.inhibitGC();
-        const proto = pipeline.materialize(&raw_proto, self.gc, self.allocator) catch {
-            self.gc.allowGC();
+        const gc = self.vm.gc();
+        gc.inhibitGC();
+        const proto = pipeline.materialize(&raw_proto, gc, self.allocator) catch {
+            gc.allowGC();
             return null;
         };
 
-        const closure = self.gc.allocClosure(proto) catch {
-            self.gc.allowGC();
+        const closure = gc.allocClosure(proto) catch {
+            gc.allowGC();
             return null;
         };
 
         // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
         if (proto.nups > 0) {
-            const env_upval = self.gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals)) catch {
-                self.gc.allowGC();
+            const env_upval = gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals())) catch {
+                gc.allowGC();
                 return null;
             };
             closure.upvalues[0] = env_upval;
@@ -161,7 +158,7 @@ pub const REPL = struct {
         // Root the closure before allowing GC
         const func_val = TValue.fromClosure(closure);
         _ = self.vm.pushTempRoot(func_val);
-        self.gc.allowGC();
+        gc.allowGC();
 
         // Execute (closure protected by temp root)
         const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
@@ -193,23 +190,24 @@ pub const REPL = struct {
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
         // Materialize and execute
-        self.gc.inhibitGC();
-        const proto = pipeline.materialize(&raw_proto, self.gc, self.allocator) catch {
-            self.gc.allowGC();
+        const gc = self.vm.gc();
+        gc.inhibitGC();
+        const proto = pipeline.materialize(&raw_proto, gc, self.allocator) catch {
+            gc.allowGC();
             stderr.writeAll("error: failed to materialize chunk\n") catch {};
             return null;
         };
 
-        const closure = self.gc.allocClosure(proto) catch {
-            self.gc.allowGC();
+        const closure = gc.allocClosure(proto) catch {
+            gc.allowGC();
             stderr.writeAll("error: failed to create closure\n") catch {};
             return null;
         };
 
         // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
         if (proto.nups > 0) {
-            const env_upval = self.gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals)) catch {
-                self.gc.allowGC();
+            const env_upval = gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals())) catch {
+                gc.allowGC();
                 stderr.writeAll("error: failed to create _ENV upvalue\n") catch {};
                 return null;
             };
@@ -219,7 +217,7 @@ pub const REPL = struct {
         // Root the closure before allowing GC
         const func_val = TValue.fromClosure(closure);
         _ = self.vm.pushTempRoot(func_val);
-        self.gc.allowGC();
+        gc.allowGC();
 
         // Execute (closure protected by temp root)
         _ = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
@@ -306,6 +304,7 @@ pub const REPL = struct {
                     .userdata => try stdout.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                     .proto => try stdout.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                     .upvalue => try stdout.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
+                    .thread => try stdout.print("thread: 0x{x}", .{@intFromPtr(obj)}),
                 }
             },
         }

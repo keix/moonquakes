@@ -25,9 +25,9 @@ test "TAILCALL - basic structure" {
         Instruction.initABC(.TAILCALL, 0, 1, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &.{}, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &.{}, &code, 0, false, 3);
 
     // Should fail because integer is not a function
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.LuaException, result);
 }

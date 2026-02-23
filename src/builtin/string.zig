@@ -38,19 +38,19 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const result = switch (arg) {
         .number => |n| ret: {
             const formatted = formatNumber(&buf, n);
-            break :ret TValue.fromString(try vm.gc.allocString(formatted));
+            break :ret TValue.fromString(try vm.gc().allocString(formatted));
         },
         .integer => |i| ret: {
             const formatted = formatInteger(&buf, i);
-            break :ret TValue.fromString(try vm.gc.allocString(formatted));
+            break :ret TValue.fromString(try vm.gc().allocString(formatted));
         },
-        .nil => TValue.fromString(try vm.gc.allocString("nil")),
-        .boolean => |b| TValue.fromString(try vm.gc.allocString(if (b) "true" else "false")),
+        .nil => TValue.fromString(try vm.gc().allocString("nil")),
+        .boolean => |b| TValue.fromString(try vm.gc().allocString(if (b) "true" else "false")),
         .object => |obj| switch (obj.type) {
             .string => arg,
             .table, .userdata => ret: {
                 // Check for __tostring metamethod
-                if (metamethod.getMetamethod(arg, .tostring, &vm.gc.mm_keys, &vm.gc.shared_mt)) |mm| {
+                if (metamethod.getMetamethod(arg, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
                     if (mm.asClosure()) |closure| {
                         // Save and restore vm.top since executeSyncMM modifies it
                         const saved_top = vm.top;
@@ -66,14 +66,15 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 }
                 // Default representation
                 if (obj.type == .table) {
-                    break :ret TValue.fromString(try vm.gc.allocString("<table>"));
+                    break :ret TValue.fromString(try vm.gc().allocString("<table>"));
                 } else {
-                    break :ret TValue.fromString(try vm.gc.allocString("<userdata>"));
+                    break :ret TValue.fromString(try vm.gc().allocString("<userdata>"));
                 }
             },
-            .closure, .native_closure => TValue.fromString(try vm.gc.allocString("<function>")),
-            .upvalue => TValue.fromString(try vm.gc.allocString("<upvalue>")),
-            .proto => TValue.fromString(try vm.gc.allocString("<proto>")),
+            .closure, .native_closure => TValue.fromString(try vm.gc().allocString("<function>")),
+            .upvalue => TValue.fromString(try vm.gc().allocString("<upvalue>")),
+            .proto => TValue.fromString(try vm.gc().allocString("<proto>")),
+            .thread => TValue.fromString(try vm.gc().allocString("<thread>")),
         },
     };
 
@@ -130,7 +131,7 @@ pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Return empty string if range is invalid
     if (i > j) {
-        const empty_str = try vm.gc.allocString("");
+        const empty_str = try vm.gc().allocString("");
         vm.stack[vm.base + func_reg] = TValue.fromString(empty_str);
         return;
     }
@@ -140,7 +141,7 @@ pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const end: usize = @intCast(j);
 
     // Create substring
-    const result = try vm.gc.allocString(str[start..end]);
+    const result = try vm.gc().allocString(str[start..end]);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -157,14 +158,14 @@ pub fn nativeStringUpper(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const str = str_obj.asSlice();
 
     // Allocate buffer for uppercase string
-    const buf = try vm.gc.allocator.alloc(u8, str.len);
-    defer vm.gc.allocator.free(buf);
+    const buf = try vm.gc().allocator.alloc(u8, str.len);
+    defer vm.gc().allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[i] = std.ascii.toUpper(c);
     }
 
-    const result = try vm.gc.allocString(buf);
+    const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -181,14 +182,14 @@ pub fn nativeStringLower(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const str = str_obj.asSlice();
 
     // Allocate buffer for lowercase string
-    const buf = try vm.gc.allocator.alloc(u8, str.len);
-    defer vm.gc.allocator.free(buf);
+    const buf = try vm.gc().allocator.alloc(u8, str.len);
+    defer vm.gc().allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[i] = std.ascii.toLower(c);
     }
 
-    const result = try vm.gc.allocString(buf);
+    const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -253,14 +254,14 @@ pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     if (nresults == 0) return;
 
     if (nargs == 0) {
-        const result = try vm.gc.allocString("");
+        const result = try vm.gc().allocString("");
         vm.stack[vm.base + func_reg] = TValue.fromString(result);
         return;
     }
 
     // Allocate buffer for characters
-    const buf = try vm.gc.allocator.alloc(u8, nargs);
-    defer vm.gc.allocator.free(buf);
+    const buf = try vm.gc().allocator.alloc(u8, nargs);
+    defer vm.gc().allocator.free(buf);
 
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
@@ -273,7 +274,7 @@ pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         }
     }
 
-    const result = try vm.gc.allocString(buf);
+    const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -297,7 +298,7 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const n = n_arg.toInteger() orelse 0;
 
     if (n <= 0) {
-        const result = try vm.gc.allocString("");
+        const result = try vm.gc().allocString("");
         vm.stack[vm.base + func_reg] = TValue.fromString(result);
         return;
     }
@@ -317,8 +318,8 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const result_len = str.len * count + sep.len * (count - 1);
 
     // Allocate buffer
-    const buf = try vm.gc.allocator.alloc(u8, result_len);
-    defer vm.gc.allocator.free(buf);
+    const buf = try vm.gc().allocator.alloc(u8, result_len);
+    defer vm.gc().allocator.free(buf);
 
     // Build result
     var pos: usize = 0;
@@ -331,7 +332,7 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         pos += str.len;
     }
 
-    const result = try vm.gc.allocString(buf);
+    const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -348,20 +349,20 @@ pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     const str = str_obj.asSlice();
 
     if (str.len == 0) {
-        const result = try vm.gc.allocString("");
+        const result = try vm.gc().allocString("");
         vm.stack[vm.base + func_reg] = TValue.fromString(result);
         return;
     }
 
     // Allocate buffer for reversed string
-    const buf = try vm.gc.allocator.alloc(u8, str.len);
-    defer vm.gc.allocator.free(buf);
+    const buf = try vm.gc().allocator.alloc(u8, str.len);
+    defer vm.gc().allocator.free(buf);
 
     for (str, 0..) |c, i| {
         buf[str.len - 1 - i] = c;
     }
 
-    const result = try vm.gc.allocString(buf);
+    const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -480,14 +481,14 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                 var i: u32 = 0;
                 while (i < matcher.capture_count) : (i += 1) {
                     const cap = matcher.captures[i];
-                    const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                     vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
                 }
                 return;
             } else {
                 // Return whole match
                 if (nresults > 0) {
-                    const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+                    const match_str = try vm.gc().allocString(str[matcher.match_start..matcher.match_end]);
                     vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
                 }
                 return;
@@ -845,16 +846,16 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     // Create state table with string, pattern, and position
-    const state_table = try vm.gc.allocTable();
-    const key_s = try vm.gc.allocString("s");
-    const key_p = try vm.gc.allocString("p");
-    const key_pos = try vm.gc.allocString("pos");
+    const state_table = try vm.gc().allocTable();
+    const key_s = try vm.gc().allocString("s");
+    const key_p = try vm.gc().allocString("p");
+    const key_pos = try vm.gc().allocString("pos");
     try state_table.set(TValue.fromString(key_s), str_arg);
     try state_table.set(TValue.fromString(key_p), pat_arg);
     try state_table.set(TValue.fromString(key_pos), .{ .integer = 0 });
 
     // Return iterator function
-    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .string_gmatch_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .string_gmatch_iterator });
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // Return state table (for-in will pass this to iterator)
@@ -888,7 +889,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     };
 
     // Get string from state table
-    const key_s = try vm.gc.allocString("s");
+    const key_s = try vm.gc().allocString("s");
     const str_val = state_table.get(TValue.fromString(key_s)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -900,7 +901,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     const str = str_obj.asSlice();
 
     // Get pattern from state table
-    const key_p = try vm.gc.allocString("p");
+    const key_p = try vm.gc().allocString("p");
     const pat_val = state_table.get(TValue.fromString(key_p)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -912,7 +913,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     const pattern = pat_obj.asSlice();
 
     // Get current position from state table
-    const key_pos = try vm.gc.allocString("pos");
+    const key_pos = try vm.gc().allocString("pos");
     const pos_val = state_table.get(TValue.fromString(key_pos)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -956,12 +957,12 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
                 var i: u32 = 0;
                 while (i < matcher.capture_count and i < nresults) : (i += 1) {
                     const cap = matcher.captures[i];
-                    const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                     vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
                 }
             } else {
                 // Return whole match
-                const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+                const match_str = try vm.gc().allocString(str[matcher.match_start..matcher.match_end]);
                 vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
             }
             return;
@@ -1013,7 +1014,7 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     }
 
     // Build result string
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len);
     defer result.deinit(allocator);
 
@@ -1075,7 +1076,7 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     }
 
     // Return result string
-    const result_str = try vm.gc.allocString(result.items);
+    const result_str = try vm.gc().allocString(result.items);
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 
     // Return replacement count as second value
@@ -1105,7 +1106,7 @@ fn getGsubReplacement(
         else
             str[matcher.match_start..matcher.match_end];
 
-        const key = try vm.gc.allocString(key_str);
+        const key = try vm.gc().allocString(key_str);
         if (repl_table.get(TValue.fromString(key))) |val| {
             if (val.asString()) |s| {
                 return s.asSlice();
@@ -1131,13 +1132,13 @@ fn getGsubReplacement(
             var i: u32 = 0;
             while (i < matcher.capture_count and i < 32) : (i += 1) {
                 const cap = matcher.captures[i];
-                const cap_str = try vm.gc.allocString(str[cap.start..cap.end]);
+                const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                 args_buf[arg_count] = TValue.fromString(cap_str);
                 arg_count += 1;
             }
         } else {
             // Pass whole match as argument
-            const match_str = try vm.gc.allocString(str[matcher.match_start..matcher.match_end]);
+            const match_str = try vm.gc().allocString(str[matcher.match_start..matcher.match_end]);
             args_buf[0] = TValue.fromString(match_str);
             arg_count = 1;
         }
@@ -1167,7 +1168,7 @@ fn getGsubReplacement(
                 std.fmt.bufPrint(&buf, "{d}", .{result.integer}) catch return null
             else
                 std.fmt.bufPrint(&buf, "{d}", .{num}) catch return null;
-            const str_obj = try vm.gc.allocString(num_str);
+            const str_obj = try vm.gc().allocString(num_str);
             return str_obj.asSlice();
         }
 
@@ -1196,7 +1197,7 @@ fn expandGsubCaptures(
     if (!has_escapes) return repl;
 
     // Expand escapes
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, repl.len);
     defer result.deinit(allocator);
 
@@ -1232,7 +1233,7 @@ fn expandGsubCaptures(
     }
 
     // Allocate result as GC string and return slice
-    const result_obj = try vm.gc.allocString(result.items);
+    const result_obj = try vm.gc().allocString(result.items);
     return result_obj.asSlice();
 }
 
@@ -1258,7 +1259,7 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const fmt = fmt_str.asSlice();
 
     // Build result string
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, fmt.len * 2);
     defer result.deinit(allocator);
 
@@ -1454,7 +1455,7 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     // Allocate result string via GC
-    const result_str = try vm.gc.allocString(result.items);
+    const result_str = try vm.gc().allocString(result.items);
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
@@ -1544,13 +1545,13 @@ pub fn nativeStringDump(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void
     const proto = closure.getProto();
 
     // Dump the proto to bytecode
-    const dump = serializer.dumpProto(proto, vm.gc.allocator, strip) catch {
+    const dump = serializer.dumpProto(proto, vm.gc().allocator, strip) catch {
         return vm.raiseString("unable to dump given function");
     };
-    defer vm.gc.allocator.free(dump);
+    defer vm.gc().allocator.free(dump);
 
     // Allocate string for the result
-    const result_str = try vm.gc.allocString(dump);
+    const result_str = try vm.gc().allocString(dump);
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
@@ -1690,7 +1691,7 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     };
     const fmt = fmt_obj.asSlice();
 
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, 64);
     defer result.deinit(allocator);
 
@@ -1852,7 +1853,7 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         }
     }
 
-    const result_str = try vm.gc.allocString(result.items);
+    const result_str = try vm.gc().allocString(result.items);
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
 }
 
@@ -2027,7 +2028,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 // Fixed-size string
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
                 if (data_pos + n > data.len) break;
-                const str = try vm.gc.allocString(data[data_pos..][0..n]);
+                const str = try vm.gc().allocString(data[data_pos..][0..n]);
                 data_pos += n;
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
                 result_idx += 1;
@@ -2038,7 +2039,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 while (end_pos < data.len and data[end_pos] != 0) {
                     end_pos += 1;
                 }
-                const str = try vm.gc.allocString(data[data_pos..end_pos]);
+                const str = try vm.gc().allocString(data[data_pos..end_pos]);
                 data_pos = if (end_pos < data.len) end_pos + 1 else end_pos; // Skip null terminator
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
                 result_idx += 1;
@@ -2052,7 +2053,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const len = unpackInteger(data[data_pos..][0..size], size, state.little_endian);
                 data_pos += size;
                 if (data_pos + len > data.len) break;
-                const str = try vm.gc.allocString(data[data_pos..][0..len]);
+                const str = try vm.gc().allocString(data[data_pos..][0..len]);
                 data_pos += len;
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
                 result_idx += 1;

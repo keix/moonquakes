@@ -33,8 +33,8 @@ test "FORPREP minimal test" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be 5-1=4)
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 4.0 }); // init - step = 5 - 1 = 4
 }
@@ -67,14 +67,14 @@ test "for loop: simple integer loop 1 to 3" {
         Instruction.initABC(.RETURN, 4, 2, 0), // return R4
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
 
     // Added: Comprehensive state tracking
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
-    trace.updateFinal(&ctx.vm, 5);
+    trace.updateFinal(ctx.vm, 5);
 
     // Existing verification
     try expectSingleResult(result, TValue{ .integer = 6 }); // 1+2+3 = 6
@@ -113,10 +113,10 @@ test "for loop: negative step (countdown)" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 5);
 
     // Should execute: 5, 4, 3, 2, 1 = 15
     try expectSingleResult(result, TValue{ .integer = 15 });
@@ -149,21 +149,21 @@ test "for loop: zero iterations (start > limit with positive step)" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
 
     // Set up R3 to verify it never gets set
     ctx.vm.stack[3] = .nil;
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 5);
 
     // Should not execute any iterations
     try expectSingleResult(result, TValue{ .integer = 99 }); // unchanged
 
     // R3 should remain nil (control variable never set)
     try trace.expectRegisterUnchanged(3);
-    try test_utils.expectRegister(&ctx.vm, 3, .nil);
+    try test_utils.expectRegister(ctx.vm, 3, .nil);
 
     // R4 should remain 99 (accumulator unchanged)
     try trace.expectRegisterChanged(4, TValue{ .integer = 99 });
@@ -192,16 +192,16 @@ test "for loop: float loop variables with integer path detection" {
         Instruction.initABC(.RETURN, 0, 5, 0), // return all registers
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
-    const loop_trace = test_utils.ForLoopTrace.capture(&ctx.vm, 0);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
+    const loop_trace = test_utils.ForLoopTrace.capture(ctx.vm, 0);
     _ = loop_trace; // Will use after execution
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 5);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 5);
 
     // Check if VM optimized to integer path or stayed float
-    const final_loop = test_utils.ForLoopTrace.capture(&ctx.vm, 0);
+    const final_loop = test_utils.ForLoopTrace.capture(ctx.vm, 0);
 
     // These values might be converted to integers or stay as floats
     // This test exposes whether the VM does this optimization
@@ -237,8 +237,8 @@ test "for loop: step of zero should error" {
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
-    const result = Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
+    const result = Mnemonics.execute(ctx.vm, proto);
 
     // Step of zero should cause an error
     // FIXED: VM now checks for zero step in FORPREP
@@ -269,8 +269,8 @@ test "for loop: overflow behavior" {
         Instruction.initABC(.RETURN, 4, 2, 0),
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should execute 3 times: max-2, max-1, max
     try expectSingleResult(result, TValue{ .integer = 3 });
@@ -299,7 +299,7 @@ test "for loop: side effects on unused registers" {
         Instruction.initABC(.RETURN, 0, 11, 0), // return R0..R10
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 11);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 11);
 
     // Initialize extra registers with specific values
     ctx.vm.stack[5] = TValue{ .integer = 555 };
@@ -309,9 +309,9 @@ test "for loop: side effects on unused registers" {
     ctx.vm.stack[9] = TValue{ .integer = 999 };
     ctx.vm.stack[10] = TValue{ .boolean = false };
 
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 11);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
-    trace.updateFinal(&ctx.vm, 11);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 11);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 11);
 
     // Use result to avoid unused warning
     try testing.expect(result == .multiple);

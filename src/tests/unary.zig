@@ -30,8 +30,8 @@ test "unary: -5 = -5" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -5 });
 }
@@ -51,8 +51,8 @@ test "unary: -3.5 = -3.5" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = -3.5 });
 }
@@ -72,8 +72,8 @@ test "unary: not true = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -93,8 +93,8 @@ test "unary: not nil = true" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -114,8 +114,8 @@ test "unary: not 0 = false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -138,8 +138,8 @@ test "unary: -5 + 3 = -2" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 4);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -2 });
 }
@@ -150,7 +150,7 @@ test "unary: #\"hello\" = 5 (string length)" {
     defer ctx.deinit();
 
     // Allocate string through GC
-    const hello_str = try ctx.vm.gc.allocString("hello");
+    const hello_str = try ctx.vm.gc().allocString("hello");
 
     const constants = [_]TValue{
         TValue.fromString(hello_str),
@@ -162,9 +162,9 @@ test "unary: #\"hello\" = 5 (string length)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 5 });
 }
@@ -175,7 +175,7 @@ test "unary: #\"\" = 0 (empty string length)" {
     defer ctx.deinit();
 
     // Allocate empty string through GC
-    const empty_str = try ctx.vm.gc.allocString("");
+    const empty_str = try ctx.vm.gc().allocString("");
 
     const constants = [_]TValue{
         TValue.fromString(empty_str),
@@ -187,9 +187,9 @@ test "unary: #\"\" = 0 (empty string length)" {
         Instruction.initABC(.RETURN, 1, 2, 0), // return R1
     };
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 2);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
 
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 0 });
 }

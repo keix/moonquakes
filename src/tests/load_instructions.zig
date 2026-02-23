@@ -34,8 +34,8 @@ test "LOADI: load signed immediate integer" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = 42 });
 }
@@ -50,8 +50,8 @@ test "LOADI: load negative signed immediate" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .integer = -100 });
 }
@@ -66,8 +66,8 @@ test "LOADF: load signed immediate as float" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .number = 42.0 });
 }
@@ -82,8 +82,8 @@ test "LOADFALSE: load false" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -98,8 +98,8 @@ test "LOADTRUE: load true" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = true });
 }
@@ -115,8 +115,8 @@ test "LFALSESKIP: load false and skip" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue{ .boolean = false });
 }
@@ -136,8 +136,8 @@ test "LOADNIL: single register" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 1);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     try expectSingleResult(result, TValue.nil);
 }
@@ -161,8 +161,8 @@ test "LOADNIL: multiple registers" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 3);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     const expected = [_]TValue{ .nil, .nil, .nil };
     try expectMultipleResults(result, &expected);
@@ -185,8 +185,8 @@ test "LOADNIL: range in middle of stack" {
     try ctx.init();
     defer ctx.deinit();
 
-    const proto = try test_utils.createTestProto(&ctx.vm, &constants, &code, 0, false, 5);
-    const result = try Mnemonics.execute(&ctx.vm, proto);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
+    const result = try Mnemonics.execute(ctx.vm, proto);
 
     const expected = [_]TValue{
         .{ .integer = 1 },

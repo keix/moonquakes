@@ -10,7 +10,7 @@ pub fn nativeUtf8Char(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (nresults == 0) return;
 
     if (nargs == 0) {
-        const empty = try vm.gc.allocString("");
+        const empty = try vm.gc().allocString("");
         vm.stack[vm.base + func_reg] = TValue.fromString(empty);
         return;
     }
@@ -54,7 +54,7 @@ pub fn nativeUtf8Char(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         pos += len;
     }
 
-    const result = try vm.gc.allocString(buf[0..pos]);
+    const result = try vm.gc().allocString(buf[0..pos]);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
 }
 
@@ -76,7 +76,7 @@ pub fn nativeUtf8Codes(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     // Return iterator function
-    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .utf8_codes_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .utf8_codes_iterator });
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // Return the string

@@ -94,7 +94,7 @@ pub const Moonquakes = struct {
         try vm.init(&gc);
         defer vm.deinit();
 
-        const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);
+        const proto = try pipeline.materialize(&raw_proto, vm.gc(), self.allocator);
         // Note: ProtoObject is GC-managed, no manual free needed
 
         // Phase 3: Execute
@@ -177,7 +177,7 @@ pub const Moonquakes = struct {
         try vm.init(&gc);
         defer vm.deinit();
 
-        const proto = try pipeline.materialize(&raw_proto, vm.gc, self.allocator);
+        const proto = try pipeline.materialize(&raw_proto, vm.gc(), self.allocator);
         // Note: ProtoObject is GC-managed, no manual free needed
 
         try self.dumpProto(proto);

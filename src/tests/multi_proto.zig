@@ -32,10 +32,10 @@ test "manual multi-proto execution - simple call and return" {
         Instruction.initABC(.RETURN, 2, 2, 0), // return R[2] (1 value)
     };
 
-    const add_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &add_code, 2, false, 3);
+    const add_proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &add_code, 2, false, 3);
 
     // Create closure via GC
-    const add_closure = try ctx.vm.gc.allocClosure(add_proto);
+    const add_closure = try ctx.vm.gc().allocClosure(add_proto);
 
     // Proto for main function - build constants at runtime
     var main_constants = [_]TValue{
@@ -52,15 +52,15 @@ test "manual multi-proto execution - simple call and return" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
 
-    const main_proto = try test_utils.createTestProto(&ctx.vm, &main_constants, &main_code, 0, false, 4);
+    const main_proto = try test_utils.createTestProto(ctx.vm, &main_constants, &main_code, 0, false, 4);
 
     // Capture initial state
-    var trace = test_utils.ExecutionTrace.captureInitial(&ctx.vm, 4);
+    var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 4);
 
-    const result = try Mnemonics.execute(&ctx.vm, main_proto);
+    const result = try Mnemonics.execute(ctx.vm, main_proto);
 
     // Update final state
-    trace.updateFinal(&ctx.vm, 4);
+    trace.updateFinal(ctx.vm, 4);
 
     // Should return 10 + 20 = 30
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
@@ -79,12 +79,12 @@ test "VM call stack push and pop" {
     const proto1_code = [_]Instruction{
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
-    const proto1 = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &proto1_code, 0, false, 1);
+    const proto1 = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &proto1_code, 0, false, 1);
 
     const proto2_code = [_]Instruction{
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
-    const proto2 = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &proto2_code, 0, false, 1);
+    const proto2 = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &proto2_code, 0, false, 1);
 
     // Set up initial call frame (simulating execute)
     ctx.vm.base_ci = .{
@@ -101,7 +101,7 @@ test "VM call stack push and pop" {
     ctx.vm.base = 0;
 
     // Test pushing a new call info (null closure since we're testing with bare Proto)
-    const new_ci = try Mnemonics.pushCallInfo(&ctx.vm, proto2, null, 4, 4, 1);
+    const new_ci = try Mnemonics.pushCallInfo(ctx.vm, proto2, null, 4, 4, 1);
     try std.testing.expect(ctx.vm.ci == new_ci);
     try std.testing.expect(ctx.vm.base == 4);
     try std.testing.expect(ctx.vm.callstack_size == 1);
@@ -117,7 +117,7 @@ test "VM call stack push and pop" {
     // Test popping call info
     const old_base = ctx.vm.base;
     const old_ci = ctx.vm.ci;
-    Mnemonics.popCallInfo(&ctx.vm);
+    Mnemonics.popCallInfo(ctx.vm);
 
     // Verify state after pop
     try std.testing.expect(ctx.vm.ci == &ctx.vm.base_ci);
@@ -137,7 +137,7 @@ test "VM call stack overflow" {
     const dummy_code = [_]Instruction{
         Instruction.initABC(.RETURN, 0, 1, 0),
     };
-    const dummy_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &dummy_code, 0, false, 1);
+    const dummy_proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &dummy_code, 0, false, 1);
 
     // Set up initial frame
     ctx.vm.base_ci = .{
@@ -155,11 +155,11 @@ test "VM call stack overflow" {
     // Push frames until we hit the limit
     var i: usize = 0;
     while (i < ctx.vm.callstack.len) : (i += 1) {
-        _ = try Mnemonics.pushCallInfo(&ctx.vm, dummy_proto, null, @intCast(i * 4), @intCast(i * 4), 1);
+        _ = try Mnemonics.pushCallInfo(ctx.vm, dummy_proto, null, @intCast(i * 4), @intCast(i * 4), 1);
     }
 
     // Next push should fail
-    try std.testing.expectError(error.CallStackOverflow, Mnemonics.pushCallInfo(&ctx.vm, dummy_proto, null, 100, 100, 1));
+    try std.testing.expectError(error.CallStackOverflow, Mnemonics.pushCallInfo(ctx.vm, dummy_proto, null, 100, 100, 1));
 }
 
 test "nested function call with register tracking" {
@@ -174,10 +174,10 @@ test "nested function call with register tracking" {
         Instruction.initABC(.MUL, 2, 0, 1), // R[2] = R[0] * R[1]
         Instruction.initABC(.RETURN, 2, 2, 0), // return R[2]
     };
-    const mul_proto = try test_utils.createTestProto(&ctx.vm, &[_]TValue{}, &mul_code, 2, false, 3);
+    const mul_proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &mul_code, 2, false, 3);
 
     // Create closures via GC
-    const mul_closure = try ctx.vm.gc.allocClosure(mul_proto);
+    const mul_closure = try ctx.vm.gc().allocClosure(mul_proto);
 
     // add_and_double(a, b) returns (a + b) * 2
     const add_double_code = [_]Instruction{
@@ -194,8 +194,8 @@ test "nested function call with register tracking" {
         .{ .integer = 0 }, // placeholder
         .{ .integer = 2 },
     };
-    const add_double_proto = try test_utils.createTestProto(&ctx.vm, &add_double_constants, &add_double_code, 2, false, 6);
-    const add_double_closure = try ctx.vm.gc.allocClosure(add_double_proto);
+    const add_double_proto = try test_utils.createTestProto(ctx.vm, &add_double_constants, &add_double_code, 2, false, 6);
+    const add_double_closure = try ctx.vm.gc().allocClosure(add_double_proto);
 
     // main: add_and_double(3, 4)
     const main_code = [_]Instruction{
@@ -210,12 +210,12 @@ test "nested function call with register tracking" {
         .{ .integer = 3 },
         .{ .integer = 4 },
     };
-    const main_proto = try test_utils.createTestProto(&ctx.vm, &main_constants, &main_code, 0, false, 3);
+    const main_proto = try test_utils.createTestProto(ctx.vm, &main_constants, &main_code, 0, false, 3);
 
     // Track call stack depth
     try std.testing.expect(ctx.vm.callstack_size == 0);
 
-    const result = try Mnemonics.execute(&ctx.vm, main_proto);
+    const result = try Mnemonics.execute(ctx.vm, main_proto);
 
     // (3 + 4) * 2 = 14
     try test_utils.ReturnTest.expectSingle(result, .{ .integer = 14 });

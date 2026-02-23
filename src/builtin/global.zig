@@ -58,7 +58,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
     if (nargs == 0) {
-        const type_name = try vm.gc.allocString("nil");
+        const type_name = try vm.gc().allocString("nil");
         vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
         return;
     }
@@ -68,7 +68,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Check for __name metamethod on tables
     if (arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.name)))) |name_val| {
+            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
                 if (name_val.asString()) |name_str| {
                     vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
                     return;
@@ -90,10 +90,11 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .upvalue => "upvalue",
             .userdata => "userdata",
             .proto => "proto",
+            .thread => "thread",
         },
     };
 
-    const type_name = try vm.gc.allocString(type_name_str);
+    const type_name = try vm.gc().allocString(type_name_str);
     vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
 }
 
@@ -103,7 +104,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("bad argument #1 to 'pcall' (value expected)");
+            const err_str = try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -147,7 +148,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("bad argument #2 to 'xpcall' (value expected)");
+            const err_str = try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -265,7 +266,7 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     // Check for __pairs metamethod
     if (table_arg.asTable()) |table| {
         if (table.metatable) |mt| {
-            if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.pairs)))) |pairs_mm| {
+            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.pairs)))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
                 const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
@@ -281,7 +282,7 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     }
 
     // Default behavior: return next, table, nil
-    const next_nc = try vm.gc.allocNativeClosure(.{ .id = .next });
+    const next_nc = try vm.gc().allocNativeClosure(.{ .id = .next });
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(next_nc);
 
     // Return the table
@@ -306,7 +307,7 @@ pub fn nativeIpairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     const table_arg = vm.stack[vm.base + func_reg + 1];
 
     // Return ipairs_iterator function
-    const iter_nc = try vm.gc.allocNativeClosure(.{ .id = .ipairs_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // Return the table
@@ -373,9 +374,9 @@ pub fn nativeGetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     var result: TValue = .nil;
 
     // Use metamethod.getMetatable which handles both individual and shared metatables
-    if (metamethod.getMetatable(arg, &vm.gc.shared_mt)) |mt| {
+    if (metamethod.getMetatable(arg, &vm.gc().shared_mt)) |mt| {
         // Check for __metatable field (protects metatable from modification/inspection)
-        if (mt.get(TValue.fromString(vm.gc.mm_keys.get(.metatable)))) |protected| {
+        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.metatable)))) |protected| {
             result = protected;
         } else {
             result = TValue.fromTable(mt);
@@ -402,7 +403,7 @@ pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Check if current metatable is protected
     if (table.metatable) |current_mt| {
-        if (current_mt.get(TValue.fromString(vm.gc.mm_keys.get(.metatable))) != null) {
+        if (current_mt.get(TValue.fromString(vm.gc().mm_keys.get(.metatable))) != null) {
             return vm.raiseString("cannot change a protected metatable");
         }
     }
@@ -648,7 +649,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("bad argument #1 to 'load' (value expected)");
+            const err_str = try vm.gc().allocString("bad argument #1 to 'load' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -658,9 +659,9 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Get env parameter (4th argument, default to globals)
     const env_table: *object.TableObject = if (nargs >= 4 and !vm.stack[vm.base + func_reg + 4].isNil())
-        vm.stack[vm.base + func_reg + 4].asTable() orelse vm.globals
+        vm.stack[vm.base + func_reg + 4].asTable() orelse vm.globals()
     else
-        vm.globals;
+        vm.globals();
 
     // Get source string
     const source = if (chunk_arg.asString()) |str_obj|
@@ -669,7 +670,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         // TODO: Support reader function
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("load: reader function not yet supported");
+            const err_str = try vm.gc().allocString("load: reader function not yet supported");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -678,23 +679,23 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Check if this is binary bytecode
     if (serializer.isBytecode(source)) {
         // Load from bytecode
-        vm.gc.inhibitGC();
-        defer vm.gc.allowGC();
+        vm.gc().inhibitGC();
+        defer vm.gc().allowGC();
 
-        const proto = serializer.loadProto(source, vm.gc, vm.gc.allocator) catch {
+        const proto = serializer.loadProto(source, vm.gc(), vm.gc().allocator) catch {
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
-                const err_str = try vm.gc.allocString("invalid bytecode");
+                const err_str = try vm.gc().allocString("invalid bytecode");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
             return;
         };
 
-        const closure = try vm.gc.allocClosure(proto);
+        const closure = try vm.gc().allocClosure(proto);
 
         // Initialize _ENV upvalue (first upvalue) to the environment table
         if (closure.upvalues.len > 0) {
-            const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+            const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
             closure.upvalues[0] = env_upval;
         }
 
@@ -703,18 +704,18 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc.allocator, source, .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, source, .{});
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.gc.allocator);
+            defer e.deinit(vm.gc().allocator);
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 // Format: "[string]:line: message"
-                const msg = std.fmt.allocPrint(vm.gc.allocator, "[string]:{d}: {s}", .{
+                const msg = std.fmt.allocPrint(vm.gc().allocator, "[string]:{d}: {s}", .{
                     e.line, e.message,
                 }) catch "syntax error";
-                defer vm.gc.allocator.free(msg);
-                const err_str = try vm.gc.allocString(msg);
+                defer vm.gc().allocator.free(msg);
+                const err_str = try vm.gc().allocString(msg);
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
             return;
@@ -722,28 +723,28 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc().allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
-    vm.gc.inhibitGC();
-    defer vm.gc.allowGC();
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
 
-    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc(), vm.gc().allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("failed to materialize chunk");
+            const err_str = try vm.gc().allocString("failed to materialize chunk");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
     };
 
     // Create closure - proto is now safe since GC is inhibited
-    const closure = try vm.gc.allocClosure(proto);
+    const closure = try vm.gc().allocClosure(proto);
 
     // Initialize _ENV upvalue (first upvalue) to the environment table
     if (closure.upvalues.len > 0) {
-        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
         closure.upvalues[0] = env_upval;
     }
 
@@ -759,7 +760,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // loadfile() without args reads from stdin - not implemented
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("loadfile: stdin not supported");
+            const err_str = try vm.gc().allocString("loadfile: stdin not supported");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -771,7 +772,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     else {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("bad argument #1 to 'loadfile' (string expected)");
+            const err_str = try vm.gc().allocString("bad argument #1 to 'loadfile' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
@@ -779,44 +780,44 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Get env parameter (3rd argument, default to globals)
     const env_table: *object.TableObject = if (nargs >= 3 and !vm.stack[vm.base + func_reg + 3].isNil())
-        vm.stack[vm.base + func_reg + 3].asTable() orelse vm.globals
+        vm.stack[vm.base + func_reg + 3].asTable() orelse vm.globals()
     else
-        vm.globals;
+        vm.globals();
 
     // Read file contents
     const file = std.fs.cwd().openFile(filename, .{}) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("cannot open file");
+            const err_str = try vm.gc().allocString("cannot open file");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
     };
     defer file.close();
 
-    const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
+    const source = file.readToEndAlloc(vm.gc().allocator, 1024 * 1024 * 10) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("cannot read file");
+            const err_str = try vm.gc().allocString("cannot read file");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
     };
-    defer vm.gc.allocator.free(source);
+    defer vm.gc().allocator.free(source);
 
     // Compile the source with filename as source name
-    const compile_result = pipeline.compile(vm.gc.allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc().allocator, source, .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.gc.allocator);
+            defer e.deinit(vm.gc().allocator);
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 // Format: "filename:line: message"
-                const msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
+                const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
                     filename, e.line, e.message,
                 }) catch "syntax error";
-                defer vm.gc.allocator.free(msg);
-                const err_str = try vm.gc.allocString(msg);
+                defer vm.gc().allocator.free(msg);
+                const err_str = try vm.gc().allocString(msg);
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
             return;
@@ -824,28 +825,28 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc().allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
-    vm.gc.inhibitGC();
-    defer vm.gc.allowGC();
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
 
-    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc(), vm.gc().allocator) catch {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc.allocString("failed to materialize chunk");
+            const err_str = try vm.gc().allocString("failed to materialize chunk");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
     };
 
     // Create closure - proto is now safe since GC is inhibited
-    const closure = try vm.gc.allocClosure(proto);
+    const closure = try vm.gc().allocClosure(proto);
 
     // Initialize _ENV upvalue (first upvalue) to the environment table
     if (closure.upvalues.len > 0) {
-        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(env_table));
+        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
         closure.upvalues[0] = env_upval;
     }
 
@@ -873,42 +874,42 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
     defer file.close();
 
-    const source = file.readToEndAlloc(vm.gc.allocator, 1024 * 1024 * 10) catch {
+    const source = file.readToEndAlloc(vm.gc().allocator, 1024 * 1024 * 10) catch {
         return vm.raiseString("cannot read file");
     };
-    defer vm.gc.allocator.free(source);
+    defer vm.gc().allocator.free(source);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc.allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc().allocator, source, .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
-            defer e.deinit(vm.gc.allocator);
-            const msg = std.fmt.allocPrint(vm.gc.allocator, "{s}:{d}: {s}", .{
+            defer e.deinit(vm.gc().allocator);
+            const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
                 filename, e.line, e.message,
             }) catch "syntax error";
-            defer vm.gc.allocator.free(msg);
+            defer vm.gc().allocator.free(msg);
             return vm.raiseString(msg);
         },
         .ok => {},
     }
     const raw_proto = compile_result.ok;
-    defer pipeline.freeRawProto(vm.gc.allocator, raw_proto);
+    defer pipeline.freeRawProto(vm.gc().allocator, raw_proto);
 
     // Materialize to Proto and create closure
     // Inhibit GC until closure is on the stack (proto is not rooted otherwise)
-    vm.gc.inhibitGC();
-    defer vm.gc.allowGC();
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
 
-    const proto = pipeline.materialize(&raw_proto, vm.gc, vm.gc.allocator) catch {
+    const proto = pipeline.materialize(&raw_proto, vm.gc(), vm.gc().allocator) catch {
         return vm.raiseString("failed to materialize chunk");
     };
 
     // Create closure - proto is now safe since GC is inhibited
-    const closure = try vm.gc.allocClosure(proto);
+    const closure = try vm.gc().allocClosure(proto);
 
     // Initialize _ENV upvalue (first upvalue) to the globals table
     if (closure.upvalues.len > 0) {
-        const env_upval = try vm.gc.allocClosedUpvalue(TValue.fromTable(vm.globals));
+        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
         closure.upvalues[0] = env_upval;
     }
 
@@ -968,7 +969,7 @@ pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     _ = nargs;
     if (nresults == 0) return;
 
-    const version_str = try vm.gc.allocString("Lua 5.4");
+    const version_str = try vm.gc().allocString("Lua 5.4");
     vm.stack[vm.base + func_reg] = TValue.fromString(version_str);
 }
 
@@ -1009,7 +1010,7 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         .stop => TValue{ .nil = {} }, // TODO
         .restart => TValue{ .nil = {} }, // TODO
         .count => blk: {
-            const stats = vm.gc.getStats();
+            const stats = vm.gc().getStats();
             const kb: f64 = @as(f64, @floatFromInt(stats.bytes_allocated)) / 1024.0;
             break :blk TValue{ .number = kb };
         },

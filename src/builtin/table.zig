@@ -140,7 +140,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (len <= 1) return; // Already sorted
 
     // Collect all elements into a temporary array
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var elements = try std.ArrayList(TValue).initCapacity(allocator, @intCast(len));
     defer elements.deinit(allocator);
 
@@ -269,7 +269,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
     // Handle empty range
     if (start > end) {
-        const empty = vm.gc.allocString("") catch {
+        const empty = vm.gc().allocString("") catch {
             vm.stack[vm.base + func_reg] = .nil;
             return;
         };
@@ -278,7 +278,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // Build result string
-    const allocator = vm.gc.allocator;
+    const allocator = vm.gc().allocator;
     var result = std.ArrayList(u8).initCapacity(allocator, 256) catch {
         vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -330,7 +330,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // Allocate result string
-    const result_str = vm.gc.allocString(result.items) catch {
+    const result_str = vm.gc().allocString(result.items) catch {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -407,7 +407,7 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (nresults == 0) return;
 
     // Create a new table
-    const table = try vm.gc.allocTable();
+    const table = try vm.gc().allocTable();
 
     // Store all arguments with integer keys starting from 1
     var i: u32 = 0;
@@ -418,7 +418,7 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     // Set the "n" field to the count of arguments
-    const n_key = try vm.gc.allocString("n");
+    const n_key = try vm.gc().allocString("n");
     try table.set(TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
 
     // Return the table

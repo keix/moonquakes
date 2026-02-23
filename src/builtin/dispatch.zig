@@ -296,7 +296,7 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
     try setStringKey(package_table, gc, "config", TValue.fromString(config_str));
 
-    const path_str = try gc.allocString("./?.lua;/usr/local/share/lua/5.4/?.lua");
+    const path_str = try gc.allocString("./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua");
     try setStringKey(package_table, gc, "path", TValue.fromString(path_str));
 
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
@@ -472,6 +472,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .coroutine_running => try coroutine.nativeCoroutineRunning(vm, func_reg, nargs, nresults),
         .coroutine_status => try coroutine.nativeCoroutineStatus(vm, func_reg, nargs, nresults),
         .coroutine_wrap => try coroutine.nativeCoroutineWrap(vm, func_reg, nargs, nresults),
+        .coroutine_wrap_call => try coroutine.nativeCoroutineWrapCall(vm, func_reg, nargs, nresults),
         .coroutine_yield => try coroutine.nativeCoroutineYield(vm, func_reg, nargs, nresults),
         .coroutine_isyieldable => try coroutine.nativeCoroutineIsYieldable(vm, func_reg, nargs, nresults),
         .coroutine_close => try coroutine.nativeCoroutineClose(vm, func_reg, nargs, nresults),
