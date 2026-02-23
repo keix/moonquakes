@@ -59,7 +59,7 @@ pub fn toOwnedValue(allocator: std.mem.Allocator, val: TValue) !OwnedValue {
             .string => .{ .string = try allocator.dupe(u8, val.asString().?.asSlice()) },
             .table => .nil, // TODO: serialize table
             .closure, .native_closure => .nil, // TODO: represent closure
-            .upvalue, .userdata, .proto => .nil,
+            .upvalue, .userdata, .proto, .thread => .nil,
         },
     };
 }

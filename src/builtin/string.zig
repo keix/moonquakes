@@ -74,6 +74,7 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .closure, .native_closure => TValue.fromString(try vm.gc().allocString("<function>")),
             .upvalue => TValue.fromString(try vm.gc().allocString("<upvalue>")),
             .proto => TValue.fromString(try vm.gc().allocString("<proto>")),
+            .thread => TValue.fromString(try vm.gc().allocString("<thread>")),
         },
     };
 

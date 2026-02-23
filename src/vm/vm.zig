@@ -11,6 +11,8 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const UpvalueObject = object.UpvalueObject;
+const ThreadObject = object.ThreadObject;
+const ThreadStatus = object.ThreadStatus;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const builtin = @import("../builtin/dispatch.zig");
@@ -32,6 +34,9 @@ pub const MetamethodKeys = metamethod.MetamethodKeys;
 pub const VM = struct {
     rt: *Runtime,
 
+    /// The ThreadObject that wraps this VM (for coroutine API)
+    thread: *ThreadObject,
+
     // Thread-local execution state
     stack: [256]TValue,
     top: u32,
@@ -52,6 +57,12 @@ pub const VM = struct {
     hook_mask: u8 = 0, // Bitmask: 1=call, 2=return, 4=line
     hook_count: u32 = 0, // Count for count hook
 
+    // Yield state (for coroutine.yield)
+    yield_base: u32 = 0, // Stack base where yield values start
+    yield_count: u32 = 0, // Number of yield values
+    yield_ret_base: u32 = 0, // Where resume's results should go (base + func_reg)
+    yield_nresults: i32 = 0, // How many results the CALL expects (-1 = variable)
+
     // ========================================
     // Accessors for Runtime resources
     // ========================================
@@ -71,18 +82,37 @@ pub const VM = struct {
         return self.rt.registry;
     }
 
+    /// Get this VM's ThreadObject.
+    pub inline fn getThread(self: *VM) *ThreadObject {
+        return self.thread;
+    }
+
+    /// Check if this VM is the main thread.
+    pub inline fn isMainThread(self: *VM) bool {
+        return self.rt.main_thread == self.thread;
+    }
+
     // ========================================
     // Lifecycle
     // ========================================
 
     /// Initialize a VM with a shared Runtime.
     /// The VM is automatically registered as a GC root provider.
+    /// If this is the first VM, it becomes the main thread.
     pub fn init(rt: *Runtime) !*VM {
         const self = try rt.allocator.create(VM);
         errdefer rt.allocator.destroy(self);
 
+        // Determine if this is the main thread (first VM)
+        const is_main = rt.main_thread == null;
+        const initial_status: ThreadStatus = if (is_main) .running else .suspended;
+
+        // Create ThreadObject to wrap this VM
+        const thread = try rt.gc.allocThread(@ptrCast(self), initial_status);
+
         self.* = .{
             .rt = rt,
+            .thread = thread,
             .stack = undefined,
             .top = 0,
             .base = 0,
@@ -99,6 +129,11 @@ pub const VM = struct {
 
         // Register as GC root provider
         try rt.gc.addRootProvider(self.rootProvider());
+
+        // If this is the first VM, set it as the main thread
+        if (is_main) {
+            rt.setMainThread(thread);
+        }
 
         return self;
     }

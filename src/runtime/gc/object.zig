@@ -12,6 +12,7 @@ pub const GCObjectType = enum(u8) {
     upvalue,
     userdata,
     proto,
+    thread,
 };
 
 /// Common header for all GC-managed objects
@@ -344,6 +345,37 @@ pub const UserdataObject = struct {
     /// Calculate total allocation size for a userdata
     pub fn allocationSize(data_size: usize, num_user_values: u8) usize {
         return @sizeOf(UserdataObject) + @as(usize, num_user_values) * @sizeOf(TValue) + data_size;
+    }
+};
+
+/// Thread Status for coroutines
+pub const ThreadStatus = enum(u8) {
+    suspended, // Created or yielded, ready to be resumed
+    running, // Currently executing
+    normal, // Resumed another coroutine (waiting for it to finish)
+    dead, // Finished execution or errored
+};
+
+/// Thread Object - GC-managed coroutine/thread
+///
+/// Represents a Lua thread (coroutine). Each thread has its own execution
+/// state (stack, call stack, etc.) but shares the global environment with
+/// other threads via Runtime.
+///
+/// The main thread is also a ThreadObject, returned by coroutine.running().
+pub const ThreadObject = struct {
+    header: GCObject,
+
+    /// Coroutine status
+    status: ThreadStatus,
+
+    /// Pointer to VM execution state (actually *VM, using anyopaque to avoid circular import)
+    /// The VM contains: stack, top, base, ci, callstack, open_upvalues, etc.
+    vm: *anyopaque,
+
+    /// Get VM pointer (casts from anyopaque)
+    pub fn getVM(self: *ThreadObject) *anyopaque {
+        return self.vm;
     }
 };
 

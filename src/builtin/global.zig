@@ -90,6 +90,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .upvalue => "upvalue",
             .userdata => "userdata",
             .proto => "proto",
+            .thread => "thread",
         },
     };
 

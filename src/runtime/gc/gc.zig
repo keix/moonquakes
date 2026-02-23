@@ -10,6 +10,8 @@ const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
+const ThreadObject = object.ThreadObject;
+const ThreadStatus = object.ThreadStatus;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
@@ -431,6 +433,23 @@ pub const GC = struct {
         return obj;
     }
 
+    /// Allocate a new thread object (coroutine wrapper)
+    /// vm_ptr: pointer to VM execution state (passed as anyopaque to avoid circular import)
+    /// status: initial thread status (usually .suspended for coroutines)
+    pub fn allocThread(self: *GC, vm_ptr: *anyopaque, status: ThreadStatus) !*ThreadObject {
+        const obj = try self.allocObject(ThreadObject, 0);
+
+        // Initialize GC header
+        obj.header = GCObject.init(.thread, self.objects);
+        obj.status = status;
+        obj.vm = vm_ptr;
+
+        // Add to GC object list
+        self.objects = &obj.header;
+
+        return obj;
+    }
+
     /// Prepare for a new GC cycle (called before VM marks roots)
     pub fn beginCollection(self: *GC) void {
         // Clear weak tables list from previous cycle
@@ -580,6 +599,12 @@ pub const GC = struct {
                 for (proto.protos) |nested| {
                     markObject(self, &nested.header);
                 }
+            },
+            .thread => {
+                // Thread marking is handled by the thread's own RootProvider
+                // (each VM registers itself as a root provider when initialized)
+                // This case handles ThreadObjects that might be stored in tables/upvalues
+                // but the actual VM state marking is done via vmMarkRoots
             },
         }
     }
@@ -837,6 +862,18 @@ pub const GC = struct {
                 const size = @sizeOf(ProtoObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(proto_obj))[0..size];
+                self.allocator.free(memory);
+            },
+            .thread => {
+                const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
+                // Note: The VM inside the thread is NOT freed here.
+                // The VM must be explicitly deinit'd before the thread becomes garbage.
+                // This is similar to how Lua handles thread finalization.
+                // In coroutine.close() or when a dead coroutine is collected,
+                // the VM should already be cleaned up.
+                const size = @sizeOf(ThreadObject);
+                self.bytes_allocated -= size;
+                const memory = @as([*]u8, @ptrCast(thread_obj))[0..size];
                 self.allocator.free(memory);
             },
         }

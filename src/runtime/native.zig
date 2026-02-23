@@ -37,6 +37,7 @@ pub const NativeFnId = enum(u8) {
     coroutine_running,
     coroutine_status,
     coroutine_wrap,
+    coroutine_wrap_call, // Internal: __call handler for wrapped coroutine
     coroutine_yield,
     coroutine_isyieldable,
     coroutine_close,

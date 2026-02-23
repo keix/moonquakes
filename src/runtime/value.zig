@@ -7,6 +7,7 @@ const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UserdataObject = object.UserdataObject;
+const ThreadObject = object.ThreadObject;
 
 /// TValue: Lua value representation
 /// - Immediate values: nil, boolean, integer, number
@@ -64,6 +65,10 @@ pub const TValue = union(enum) {
         return self == .object and self.object.type == .userdata;
     }
 
+    pub fn isThread(self: TValue) bool {
+        return self == .object and self.object.type == .thread;
+    }
+
     // ===== Object accessors =====
 
     pub fn asString(self: TValue) ?*StringObject {
@@ -97,6 +102,13 @@ pub const TValue = union(enum) {
     pub fn asUserdata(self: TValue) ?*UserdataObject {
         if (self == .object and self.object.type == .userdata) {
             return object.getObject(UserdataObject, self.object);
+        }
+        return null;
+    }
+
+    pub fn asThread(self: TValue) ?*ThreadObject {
+        if (self == .object and self.object.type == .thread) {
+            return object.getObject(ThreadObject, self.object);
         }
         return null;
     }
@@ -181,6 +193,10 @@ pub const TValue = union(enum) {
         return .{ .object = &ud.header };
     }
 
+    pub fn fromThread(thread: *ThreadObject) TValue {
+        return .{ .object = &thread.header };
+    }
+
     // ===== Formatting =====
 
     pub fn format(
@@ -206,6 +222,8 @@ pub const TValue = union(enum) {
                 .native_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                 .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
+                .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
+                .thread => try writer.print("thread: 0x{x}", .{@intFromPtr(obj)}),
             },
         }
     }

@@ -147,6 +147,7 @@ fn printValue(writer: anytype, val: TValue) !void {
                 .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
+                .thread => try writer.print("thread: 0x{x}", .{@intFromPtr(obj)}),
             }
         },
     }

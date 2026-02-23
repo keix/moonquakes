@@ -19,6 +19,7 @@ const GC = gc_mod.GC;
 const RootProvider = gc_mod.RootProvider;
 const object = @import("gc/object.zig");
 const TableObject = object.TableObject;
+const ThreadObject = object.ThreadObject;
 const TValue = @import("value.zig").TValue;
 const builtin_dispatch = @import("../builtin/dispatch.zig");
 
@@ -27,6 +28,12 @@ pub const Runtime = struct {
     gc: *GC,
     globals: *TableObject,
     registry: *TableObject,
+
+    /// The main thread (first VM created). Set by VM.init.
+    main_thread: ?*ThreadObject = null,
+
+    /// Currently executing thread. Changes during coroutine resume/yield.
+    current_thread: ?*ThreadObject = null,
 
     /// Initialize a new Runtime.
     /// Creates GC, globals, registry, and initializes builtin environment.
@@ -80,6 +87,27 @@ pub const Runtime = struct {
     pub fn rootProvider(self: *Runtime) RootProvider {
         return RootProvider.init(Runtime, self, &runtimeRootProviderVTable);
     }
+
+    /// Set the main thread. Called by VM.init for the first VM.
+    pub fn setMainThread(self: *Runtime, thread: *ThreadObject) void {
+        self.main_thread = thread;
+        self.current_thread = thread;
+    }
+
+    /// Get the main thread.
+    pub fn getMainThread(self: *Runtime) ?*ThreadObject {
+        return self.main_thread;
+    }
+
+    /// Get the currently running thread.
+    pub fn getCurrentThread(self: *Runtime) ?*ThreadObject {
+        return self.current_thread;
+    }
+
+    /// Set the currently running thread (for coroutine resume/yield).
+    pub fn setCurrentThread(self: *Runtime, thread: *ThreadObject) void {
+        self.current_thread = thread;
+    }
 };
 
 /// VTable for Runtime's RootProvider implementation
@@ -98,6 +126,14 @@ fn runtimeMarkRoots(ctx: *anyopaque, gc: *GC) void {
 
     // Mark registry
     gc.mark(&self.registry.header);
+
+    // Mark thread objects (keeps them alive)
+    if (self.main_thread) |mt| {
+        gc.mark(&mt.header);
+    }
+    if (self.current_thread) |ct| {
+        gc.mark(&ct.header);
+    }
 }
 
 /// Call a Lua value (for __gc finalizers).

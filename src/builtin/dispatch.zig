@@ -472,6 +472,7 @@ pub fn invoke(id: NativeFnId, vm: anytype, func_reg: u32, nargs: u32, nresults: 
         .coroutine_running => try coroutine.nativeCoroutineRunning(vm, func_reg, nargs, nresults),
         .coroutine_status => try coroutine.nativeCoroutineStatus(vm, func_reg, nargs, nresults),
         .coroutine_wrap => try coroutine.nativeCoroutineWrap(vm, func_reg, nargs, nresults),
+        .coroutine_wrap_call => try coroutine.nativeCoroutineWrapCall(vm, func_reg, nargs, nresults),
         .coroutine_yield => try coroutine.nativeCoroutineYield(vm, func_reg, nargs, nresults),
         .coroutine_isyieldable => try coroutine.nativeCoroutineIsYieldable(vm, func_reg, nargs, nresults),
         .coroutine_close => try coroutine.nativeCoroutineClose(vm, func_reg, nargs, nresults),

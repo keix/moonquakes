@@ -304,6 +304,7 @@ pub const REPL = struct {
                     .userdata => try stdout.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                     .proto => try stdout.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                     .upvalue => try stdout.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
+                    .thread => try stdout.print("thread: 0x{x}", .{@intFromPtr(obj)}),
                 }
             },
         }
