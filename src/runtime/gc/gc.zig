@@ -1013,10 +1013,6 @@ pub const GC = struct {
     }
 };
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 test "single string mark survives GC" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();

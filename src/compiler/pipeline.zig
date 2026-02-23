@@ -11,10 +11,6 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 pub const materialize = @import("materialize.zig").materialize;
 
-// ============================================================================
-// Compile API Types
-// ============================================================================
-
 /// Compilation error with structured information
 pub const CompileError = struct {
     line: u32,
@@ -44,10 +40,6 @@ pub const CompileResult = union(enum) {
 pub const CompileOptions = struct {
     source_name: []const u8 = "[string]",
 };
-
-// ============================================================================
-// Compile API
-// ============================================================================
 
 /// Compile source to RawProto or CompileError
 ///
@@ -89,10 +81,6 @@ pub fn compile(
 
     return .{ .ok = raw };
 }
-
-// ============================================================================
-// Memory Management
-// ============================================================================
 
 /// Free RawProto and all nested protos
 pub fn freeRawProto(allocator: std.mem.Allocator, raw: RawProto) void {

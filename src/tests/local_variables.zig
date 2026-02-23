@@ -23,10 +23,6 @@ fn parseAndExecute(ctx: *test_utils.TestContext, allocator: std.mem.Allocator, s
     return Mnemonics.execute(ctx.vm, proto);
 }
 
-// =============================================================================
-// Basic local variable tests
-// =============================================================================
-
 test "local: single variable" {
     var ctx: test_utils.TestContext = undefined;
     try ctx.init();
@@ -127,10 +123,6 @@ test "local: computed value" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 30 });
 }
 
-// =============================================================================
-// Local variables with function parameters
-// =============================================================================
-
 test "local: with parameter" {
     var ctx: test_utils.TestContext = undefined;
     try ctx.init();
@@ -170,10 +162,6 @@ test "local: multiple params and locals" {
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 91 });
 }
-
-// =============================================================================
-// Register allocation correctness
-// =============================================================================
 
 test "local: registers not reused incorrectly" {
     var ctx: test_utils.TestContext = undefined;

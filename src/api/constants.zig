@@ -5,10 +5,6 @@
 
 const std = @import("std");
 
-// ============================================================================
-// Status Codes
-// ============================================================================
-
 /// No errors
 pub const MQ_OK = 0;
 /// Thread yielded
@@ -23,10 +19,6 @@ pub const MQ_ERRMEM = 4;
 pub const MQ_ERRERR = 5;
 /// File-related error
 pub const MQ_ERRFILE = 6;
-
-// ============================================================================
-// Type Codes
-// ============================================================================
 
 /// Non-valid stack index
 pub const MQ_TNONE = -1;
@@ -51,10 +43,6 @@ pub const MQ_TTHREAD = 8;
 
 /// Number of basic types
 pub const MQ_NUMTYPES = 9;
-
-// ============================================================================
-// Arithmetic Operators (for mq_arith)
-// ============================================================================
 
 /// Addition (+)
 pub const MQ_OPADD = 0;
@@ -85,20 +73,12 @@ pub const MQ_OPSHL = 12;
 /// Right shift (>>)
 pub const MQ_OPSHR = 13;
 
-// ============================================================================
-// Comparison Operators (for mq_compare)
-// ============================================================================
-
 /// Equality (==)
 pub const MQ_OPEQ = 0;
 /// Less than (<)
 pub const MQ_OPLT = 1;
 /// Less or equal (<=)
 pub const MQ_OPLE = 2;
-
-// ============================================================================
-// Hook Events
-// ============================================================================
 
 /// Call hook
 pub const MQ_HOOKCALL = 0;
@@ -111,10 +91,6 @@ pub const MQ_HOOKCOUNT = 3;
 /// Tail call hook
 pub const MQ_HOOKTAILCALL = 4;
 
-// ============================================================================
-// Hook Masks
-// ============================================================================
-
 /// Call mask
 pub const MQ_MASKCALL = 1 << MQ_HOOKCALL;
 /// Return mask
@@ -124,18 +100,10 @@ pub const MQ_MASKLINE = 1 << MQ_HOOKLINE;
 /// Count mask
 pub const MQ_MASKCOUNT = 1 << MQ_HOOKCOUNT;
 
-// ============================================================================
-// Integer Limits
-// ============================================================================
-
 /// Maximum value for mq_Integer (i64)
 pub const MQ_MAXINTEGER = std.math.maxInt(i64);
 /// Minimum value for mq_Integer (i64)
 pub const MQ_MININTEGER = std.math.minInt(i64);
-
-// ============================================================================
-// Stack and Registry
-// ============================================================================
 
 /// Minimum Lua stack available to a C function
 pub const MQ_MINSTACK = 20;
@@ -148,34 +116,18 @@ pub const MQ_RIDX_MAINTHREAD = 1;
 /// Registry index for global environment
 pub const MQ_RIDX_GLOBALS = 2;
 
-// ============================================================================
-// Reference System
-// ============================================================================
-
 /// Invalid reference (returned by luaL_ref for nil)
 pub const MQ_REFNIL = -1;
 /// No reference (initial/invalid state)
 pub const MQ_NOREF = -2;
 
-// ============================================================================
-// Function Calls
-// ============================================================================
-
 /// Option for multiple returns in mq_call and mq_pcall
 pub const MQ_MULTRET = -1;
-
-// ============================================================================
-// Module System
-// ============================================================================
 
 /// Name of table for loaded modules (package.loaded)
 pub const MQ_LOADED_TABLE = "_LOADED";
 /// Name of table for preloaded modules (package.preload)
 pub const MQ_PRELOAD_TABLE = "_PRELOAD";
-
-// ============================================================================
-// Garbage Collection
-// ============================================================================
 
 /// Stop the garbage collector
 pub const MQ_GCSTOP = 0;
@@ -200,16 +152,8 @@ pub const MQ_GCGEN = 10;
 /// Change to incremental mode
 pub const MQ_GCINC = 11;
 
-// ============================================================================
-// Buffer (Auxiliary Library)
-// ============================================================================
-
 /// Initial buffer size for mqL_Buffer
 pub const MQL_BUFFERSIZE = 8192;
-
-// ============================================================================
-// Debug/Configuration
-// ============================================================================
 
 /// Enable API argument checks (enabled in debug/safe builds)
 pub const MQ_USE_APICHECK = std.debug.runtime_safety;
