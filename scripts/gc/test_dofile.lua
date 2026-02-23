@@ -1,0 +1,11 @@
+-- Test dofile sequence
+print("=== Test 1: control ===")
+dofile("scripts/gc/control.lua")
+print()
+print("=== Test 2: stop_behavior ===")
+dofile("scripts/gc/stop_behavior.lua")
+print()
+print("=== Test 3: transitive_mark ===")
+dofile("scripts/gc/transitive_mark.lua")
+print()
+print("All dofile tests passed")

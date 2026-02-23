@@ -9,8 +9,6 @@ const Instruction = opcodes.Instruction;
 
 const test_utils = @import("test_utils.zig");
 
-// ===== BNOT (Bitwise NOT) Tests =====
-
 test "BNOT: basic integer negation" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 0
@@ -100,8 +98,6 @@ test "BNOT: float with fractional part should error" {
     try testing.expectError(error.LuaException, result);
 }
 
-// ===== BAND (Bitwise AND) Tests =====
-
 test "BAND: basic integer AND" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 0b1111
@@ -161,8 +157,6 @@ test "BAND: mixed integer and float" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 }); // 255 & 15 = 15
 }
 
-// ===== BOR (Bitwise OR) Tests =====
-
 test "BOR: basic integer OR" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 0b1100
@@ -186,8 +180,6 @@ test "BOR: basic integer OR" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b1111 }); // 12 | 3 = 15
 }
 
-// ===== BXOR (Bitwise XOR) Tests =====
-
 test "BXOR: basic integer XOR" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 0b1111
@@ -210,8 +202,6 @@ test "BXOR: basic integer XOR" {
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b0101 }); // 15 ^ 10 = 5
 }
-
-// ===== Constant Bitwise Operations Tests =====
 
 test "BANDK: AND with constant and side effect verification" {
     const code = [_]Instruction{
@@ -291,8 +281,6 @@ test "BXORK: XOR with constant" {
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xAA }); // 0xFF ^ 0x55 = 0xAA
 }
-
-// ===== Shift Operations Tests =====
 
 test "SHL: shift left basic" {
     const code = [_]Instruction{
@@ -396,8 +384,6 @@ test "SHR: arithmetic shift with negative number" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = -4 }); // -16 >> 2 = -4 (sign preserved)
 }
 
-// ===== Immediate Shift Tests =====
-
 test "SHLI: shift left immediate" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 3
@@ -439,8 +425,6 @@ test "SHRI: shift right immediate" {
 
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 64 >> 4 = 4
 }
-
-// ===== Complex Bitwise Operations Test =====
 
 test "Bitwise: complex expression with state tracking" {
     // Test: (a & b) | (~c ^ d)
@@ -491,8 +475,6 @@ test "Bitwise: complex expression with state tracking" {
     // Print trace for debugging (optional)
     // trace.print(8);
 }
-
-// ===== Error Cases =====
 
 test "Bitwise operations with non-integer values should error" {
     const code = [_]Instruction{
