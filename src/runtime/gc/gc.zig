@@ -26,6 +26,57 @@ const MetamethodKeys = metamethod.MetamethodKeys;
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
 const GC_THRESHOLD = 64 * 1024; // 64KB initial threshold
 
+/// VTable for tracking allocator (uses GC as context directly)
+const tracking_vtable = std.mem.Allocator.VTable{
+    .alloc = trackingAlloc,
+    .resize = trackingResize,
+    .remap = trackingRemap,
+    .free = trackingFree,
+};
+
+fn trackingAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    const gc: *GC = @ptrCast(@alignCast(ctx));
+    const result = gc.allocator.rawAlloc(len, alignment, ret_addr);
+    if (result != null) {
+        gc.bytes_allocated += len;
+    }
+    return result;
+}
+
+fn trackingResize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+    const gc: *GC = @ptrCast(@alignCast(ctx));
+    const old_len = buf.len;
+    const success = gc.allocator.rawResize(buf, alignment, new_len, ret_addr);
+    if (success) {
+        if (new_len > old_len) {
+            gc.bytes_allocated += (new_len - old_len);
+        } else {
+            gc.bytes_allocated -= (old_len - new_len);
+        }
+    }
+    return success;
+}
+
+fn trackingRemap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    const gc: *GC = @ptrCast(@alignCast(ctx));
+    const old_len = buf.len;
+    const result = gc.allocator.rawRemap(buf, alignment, new_len, ret_addr);
+    if (result != null) {
+        if (new_len > old_len) {
+            gc.bytes_allocated += (new_len - old_len);
+        } else {
+            gc.bytes_allocated -= (old_len - new_len);
+        }
+    }
+    return result;
+}
+
+fn trackingFree(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+    const gc: *GC = @ptrCast(@alignCast(ctx));
+    gc.bytes_allocated -= buf.len;
+    gc.allocator.rawFree(buf, alignment, ret_addr);
+}
+
 /// Type-safe interface for root providers (VM, REPL, test harnesses, etc.)
 /// Replaces the unsafe ?*anyopaque pattern with a proper vtable-based interface.
 /// GC can have multiple root providers, each responsible for marking its own roots.
@@ -103,6 +154,8 @@ pub const GC = struct {
     /// Pre-allocated metamethod key strings (interned, shared across all coroutines)
     /// Initialized via initMetamethodKeys() after GC creation.
     mm_keys: MetamethodKeys = undefined,
+    /// True after initMetamethodKeys() has been called
+    mm_keys_initialized: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
@@ -117,10 +170,20 @@ pub const GC = struct {
         };
     }
 
+    /// Get an allocator that tracks allocations for GC threshold calculation.
+    /// Use this for data structures that manage their own memory (e.g., HashMap).
+    pub fn trackingAllocator(self: *GC) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &tracking_vtable,
+        };
+    }
+
     /// Initialize metamethod keys (must be called after GC creation)
     /// This interns all metamethod strings (__add, __sub, etc.)
     pub fn initMetamethodKeys(self: *GC) !void {
         self.mm_keys = try MetamethodKeys.init(self);
+        self.mm_keys_initialized = true;
     }
 
     /// GC INHIBITION API
@@ -171,6 +234,18 @@ pub const GC = struct {
             }
             i += 1;
         }
+    }
+
+    /// Track an external allocation (not managed by GC, but affects threshold).
+    /// Use for allocations that are logically part of GC-managed objects
+    /// but allocated separately (e.g., VM memory for coroutines).
+    pub fn trackAllocation(self: *GC, size: usize) void {
+        self.bytes_allocated += size;
+    }
+
+    /// Track an external deallocation.
+    pub fn trackDeallocation(self: *GC, size: usize) void {
+        self.bytes_allocated -= size;
     }
 
     pub fn deinit(self: *GC) void {
@@ -243,6 +318,13 @@ pub const GC = struct {
         if (self.shared_mt.function) |mt| self.mark(&mt.header);
         if (self.shared_mt.nil) |mt| self.mark(&mt.header);
 
+        // Mark metamethod key strings (must survive GC for metamethod dispatch)
+        if (self.mm_keys_initialized) {
+            for (self.mm_keys.strings) |str| {
+                self.mark(&str.header);
+            }
+        }
+
         // Finish: ephemeron propagation, weak table cleanup, sweep
         self.finishCollection();
     }
@@ -280,6 +362,8 @@ pub const GC = struct {
 
         // Initialize GC header
         obj.header = GCObject.init(.table, self.objects);
+        // TODO: Use tracking allocator for HashMap memory accounting
+        // Currently disabled due to potential GC interaction issues
         obj.hash_part = TableObject.HashMap.init(self.allocator);
         obj.allocator = self.allocator;
         obj.metatable = null; // No metatable by default
@@ -436,13 +520,21 @@ pub const GC = struct {
     /// Allocate a new thread object (coroutine wrapper)
     /// vm_ptr: pointer to VM execution state (passed as anyopaque to avoid circular import)
     /// status: initial thread status (usually .suspended for coroutines)
-    pub fn allocThread(self: *GC, vm_ptr: *anyopaque, status: ThreadStatus) !*ThreadObject {
+    pub fn allocThread(
+        self: *GC,
+        vm_ptr: *anyopaque,
+        status: ThreadStatus,
+        mark_vm: ?*const fn (*anyopaque, *anyopaque) void,
+        free_vm: ?*const fn (*anyopaque, std.mem.Allocator) void,
+    ) !*ThreadObject {
         const obj = try self.allocObject(ThreadObject, 0);
 
         // Initialize GC header
         obj.header = GCObject.init(.thread, self.objects);
         obj.status = status;
         obj.vm = vm_ptr;
+        obj.mark_vm = mark_vm;
+        obj.free_vm = free_vm;
 
         // Add to GC object list
         self.objects = &obj.header;
@@ -601,10 +693,13 @@ pub const GC = struct {
                 }
             },
             .thread => {
-                // Thread marking is handled by the thread's own RootProvider
-                // (each VM registers itself as a root provider when initialized)
-                // This case handles ThreadObjects that might be stored in tables/upvalues
-                // but the actual VM state marking is done via vmMarkRoots
+                // Mark the VM's roots (stack, callframes, upvalues, etc.)
+                // Main thread: marked via RootProvider (mark_vm is null)
+                // Coroutine threads: marked here via callback
+                const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
+                if (thread_obj.mark_vm) |mark_fn| {
+                    mark_fn(thread_obj.vm, @ptrCast(self));
+                }
             },
         }
     }
@@ -754,15 +849,22 @@ pub const GC = struct {
 
         var current = self.objects;
         while (current) |obj| {
-            if (!obj.marked and obj.type == .table) {
-                const table: *TableObject = @fieldParentPtr("header", obj);
-                if (table.metatable) |mt| {
-                    // Look up __gc in metatable
+            if (!obj.marked) {
+                // Tables and userdata can have __gc finalizers
+                const maybe_metatable: ?*TableObject = switch (obj.type) {
+                    .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
+                    .userdata => @as(*UserdataObject, @fieldParentPtr("header", obj)).metatable,
+                    else => null,
+                };
+                if (maybe_metatable) |mt| {
                     if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
-                        // Call __gc(table)
-                        // Errors in finalizers are ignored (standard Lua behavior)
-                        const table_val = TValue.fromTable(table);
-                        _ = provider.callValue(&gc_fn, &[_]TValue{table_val}) catch {};
+                        // Call __gc(obj) - errors are ignored (standard Lua behavior)
+                        const obj_val: TValue = switch (obj.type) {
+                            .table => TValue.fromTable(@fieldParentPtr("header", obj)),
+                            .userdata => TValue.fromUserdata(@fieldParentPtr("header", obj)),
+                            else => unreachable,
+                        };
+                        _ = provider.callValue(&gc_fn, &[_]TValue{obj_val}) catch {};
                     }
                 }
             }
@@ -866,11 +968,11 @@ pub const GC = struct {
             },
             .thread => {
                 const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
-                // Note: The VM inside the thread is NOT freed here.
-                // The VM must be explicitly deinit'd before the thread becomes garbage.
-                // This is similar to how Lua handles thread finalization.
-                // In coroutine.close() or when a dead coroutine is collected,
-                // the VM should already be cleaned up.
+                // Free VM memory if callback is set (coroutine threads only)
+                // Main thread is freed by Runtime.deinit, not here
+                if (thread_obj.free_vm) |free_fn| {
+                    free_fn(thread_obj.vm, self.allocator);
+                }
                 const size = @sizeOf(ThreadObject);
                 self.bytes_allocated -= size;
                 const memory = @as([*]u8, @ptrCast(thread_obj))[0..size];

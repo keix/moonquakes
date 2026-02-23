@@ -48,7 +48,81 @@ pub fn callValue(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValu
         return callClosure(vm, closure, args);
     }
 
+    // Handle table with __call metamethod
+    if (func_val.asTable()) |table| {
+        if (table.metatable) |mt| {
+            const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
+            if (mt.get(call_key)) |call_mm| {
+                // __call can be a native closure or Lua closure
+                // Call as: __call(table, args...)
+                return callWithSelf(vm, call_mm, func_val, args);
+            }
+        }
+    }
+
     // Not a function - this is an error in Lua semantics
+    return CallError.NotCallable;
+}
+
+/// Call a function with self prepended to arguments.
+/// Used for __call metamethod: __call(self, args...)
+fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) anyerror!TValue {
+    // Handle native closure __call
+    if (func_val.asNativeClosure()) |nc| {
+        // GC SAFETY: Save caller's frame state
+        const saved_base = vm.base;
+        const saved_top = vm.top;
+
+        const call_base = vm.top;
+        const result_slot = call_base;
+
+        // Stack layout: [self, arg0, arg1, ...]
+        // (native function sees self at func_reg, args at func_reg+1...)
+        vm.stack[call_base] = self;
+        for (args, 0..) |arg, i| {
+            vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
+        }
+
+        vm.base = call_base;
+        vm.top = call_base + 1 + @as(u32, @intCast(args.len));
+
+        // nargs is args.len + 1 (includes self)
+        try vm.callNative(nc.func.id, 0, @as(u32, @intCast(args.len)) + 1, 1);
+
+        const result = vm.stack[result_slot];
+        vm.base = saved_base;
+        vm.top = saved_top;
+
+        return result;
+    }
+
+    // Handle Lua closure __call
+    if (func_val.asClosure()) |closure| {
+        const proto = closure.proto;
+
+        const saved_base = vm.base;
+        const saved_top = vm.top;
+
+        const call_base = vm.top;
+        const result_slot = call_base;
+
+        // Stack layout: [self, arg0, arg1, ...]
+        vm.stack[call_base] = self;
+        for (args, 0..) |arg, i| {
+            vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
+        }
+
+        // Fill remaining params with nil (total params = 1 + args.len)
+        var i: u32 = 1 + @as(u32, @intCast(args.len));
+        while (i < proto.numparams) : (i += 1) {
+            vm.stack[call_base + i] = .nil;
+        }
+
+        vm.top = call_base + proto.maxstacksize;
+
+        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
+    }
+
     return CallError.NotCallable;
 }
 

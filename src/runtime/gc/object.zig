@@ -373,6 +373,18 @@ pub const ThreadObject = struct {
     /// The VM contains: stack, top, base, ci, callstack, open_upvalues, etc.
     vm: *anyopaque,
 
+    /// Callback to mark VM roots (stack, callframes, upvalues, etc.)
+    /// Set by VM.init. GC calls this during mark phase for coroutine threads.
+    /// Main thread is marked via its RootProvider registration.
+    /// Signature: fn(vm: *anyopaque, gc: *anyopaque) void
+    /// Uses anyopaque for GC to avoid circular import with gc.zig.
+    mark_vm: ?*const fn (*anyopaque, *anyopaque) void = null,
+
+    /// Callback to free VM memory.
+    /// Set by VM.init. GC calls this during sweep phase for coroutine threads.
+    /// Main thread is freed by Runtime.deinit, not by GC.
+    free_vm: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
+
     /// Get VM pointer (casts from anyopaque)
     pub fn getVM(self: *ThreadObject) *anyopaque {
         return self.vm;

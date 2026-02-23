@@ -1,19 +1,13 @@
-const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
-const ThreadObject = object.ThreadObject;
 const ThreadStatus = object.ThreadStatus;
-const ClosureObject = object.ClosureObject;
-const ProtoObject = object.ProtoObject;
-const TableObject = object.TableObject;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
-const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 
-/// Lua 5.4 Coroutine Library
-/// Corresponds to Lua manual chapter "Coroutines"
-/// Reference: https://www.lua.org/manual/5.4/manual.html#2.6
+// Lua 5.4 Coroutine Library
+// Reference: https://www.lua.org/manual/5.4/manual.html#2.6
+
 /// coroutine.create(f) - Creates a new coroutine with body f
 pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
@@ -67,83 +61,21 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         return;
     }
 
-    // Get the target VM
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
+    const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
+    const arg_base = vm.base + func_reg + 2; // skip thread argument
 
-    // Check if this is the first resume (ci not set up yet)
-    const is_first_resume = co_vm.ci == null;
-
-    if (is_first_resume) {
-        // Get the function from stack[0]
-        const func_val = co_vm.stack[0];
-        const closure = func_val.asClosure() orelse {
-            // Native closure not supported as coroutine body for now
+    if (co_vm.ci == null) {
+        // First resume - check function type and set up call frame
+        if (co_vm.stack[0].asClosure() == null) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
             return;
-        };
-        const proto = closure.proto;
-
-        // Copy arguments to coroutine's stack (after function slot)
-        // Arguments: resume(co, arg1, arg2, ...) -> args start at func_reg + 2
-        const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-        var i: u32 = 0;
-        while (i < num_args) : (i += 1) {
-            co_vm.stack[1 + i] = vm.stack[vm.base + func_reg + 2 + i];
         }
-
-        // Fill remaining params with nil
-        while (i < proto.numparams) : (i += 1) {
-            co_vm.stack[1 + i] = .nil;
-        }
-
-        // Set up initial call frame at base 1 (after function slot)
-        co_vm.base = 1;
-        co_vm.top = 1 + proto.maxstacksize;
-
-        // Initialize base_ci for the coroutine's main function
-        co_vm.base_ci = .{
-            .func = proto,
-            .closure = closure,
-            .pc = proto.code.ptr, // Start at first instruction
-            .savedpc = null,
-            .base = 1,
-            .ret_base = 0, // Results go to slot 0+
-            .nresults = -1, // Variable results
-            .previous = null,
-        };
-        co_vm.ci = &co_vm.base_ci;
+        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
-        // Resuming after yield
-        // Resume arguments become return values of yield
-        // Arguments: resume(co, arg1, arg2, ...) -> args start at func_reg + 2
-        const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-
-        // Put resume args where yield expects its results
-        // yield saved: yield_ret_base (where CALL results go), yield_nresults
-        const ret_base = co_vm.yield_ret_base;
-        const nres = co_vm.yield_nresults;
-
-        if (nres < 0) {
-            // Variable results - copy all args
-            var i: u32 = 0;
-            while (i < num_args) : (i += 1) {
-                co_vm.stack[ret_base + i] = vm.stack[vm.base + func_reg + 2 + i];
-            }
-            // Update top to reflect the new values
-            co_vm.top = ret_base + num_args;
-        } else {
-            // Fixed results - copy up to nresults
-            const max_copy = @as(u32, @intCast(nres));
-            var i: u32 = 0;
-            while (i < num_args and i < max_copy) : (i += 1) {
-                co_vm.stack[ret_base + i] = vm.stack[vm.base + func_reg + 2 + i];
-            }
-            // Fill remaining with nil
-            while (i < max_copy) : (i += 1) {
-                co_vm.stack[ret_base + i] = .nil;
-            }
-        }
+        // Resume after yield
+        setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
     }
 
     // Update statuses
@@ -200,10 +132,64 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// Result of coroutine execution
 const CoroutineResult = union(enum) {
-    completed: u32, // Number of return values
-    yielded: struct { base: u32, count: u32 }, // Yield values location in coroutine stack
+    completed: u32,
+    yielded: struct { base: u32, count: u32 },
     errored: TValue,
 };
+
+/// Set up coroutine for first resume (initialize call frame)
+fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) error{OutOfMemory}!void {
+    const func_val = co_vm.stack[0];
+    const closure = func_val.asClosure().?;
+    const proto = closure.proto;
+
+    // Copy arguments to coroutine stack
+    var i: u32 = 0;
+    while (i < num_args) : (i += 1) {
+        co_vm.stack[1 + i] = caller_stack[arg_base + i];
+    }
+    while (i < proto.numparams) : (i += 1) {
+        co_vm.stack[1 + i] = .nil;
+    }
+
+    // Set up initial call frame
+    co_vm.base = 1;
+    co_vm.top = 1 + proto.maxstacksize;
+    co_vm.base_ci = .{
+        .func = proto,
+        .closure = closure,
+        .pc = proto.code.ptr,
+        .savedpc = null,
+        .base = 1,
+        .ret_base = 0,
+        .nresults = -1,
+        .previous = null,
+    };
+    co_vm.ci = &co_vm.base_ci;
+}
+
+/// Set up coroutine for resume after yield (pass values to yield return)
+fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
+    const ret_base = co_vm.yield_ret_base;
+    const nres = co_vm.yield_nresults;
+
+    if (nres < 0) {
+        var i: u32 = 0;
+        while (i < num_args) : (i += 1) {
+            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
+        }
+        co_vm.top = ret_base + num_args;
+    } else {
+        const max_copy = @as(u32, @intCast(nres));
+        var i: u32 = 0;
+        while (i < num_args and i < max_copy) : (i += 1) {
+            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
+        }
+        while (i < max_copy) : (i += 1) {
+            co_vm.stack[ret_base + i] = .nil;
+        }
+    }
+}
 
 /// Execute coroutine until completion or yield
 fn executeCoroutine(co_vm: *VM) CoroutineResult {
@@ -277,7 +263,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
         }
     }
 
-    // Should not reach here
+    // ci became null without explicit return - treat as empty return
     return .{ .completed = 0 };
 }
 
@@ -350,14 +336,26 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
 
+    // CRITICAL: Protect the new thread from GC before any more allocations.
+    // VM.init may increase bytes_allocated (if tracking enabled), and subsequent
+    // allocations might trigger GC. The thread is not yet reachable from any root.
+    _ = vm.pushTempRoot(TValue.fromThread(new_vm.thread));
+    defer vm.popTempRoots(1);
+
     // Create wrapper table to store the thread
+    // Must protect intermediate allocations from GC during multi-allocation sequence
     const wrapper = try vm.gc().allocTable();
+    _ = vm.pushTempRoot(TValue.fromTable(wrapper));
+    defer vm.popTempRoots(1);
 
     // Store thread at index 1
     try wrapper.set(.{ .integer = 1 }, TValue.fromThread(new_vm.thread));
 
     // Create metatable with __call
     const metatable = try vm.gc().allocTable();
+    _ = vm.pushTempRoot(TValue.fromTable(metatable));
+    defer vm.popTempRoots(1);
+
     const call_key = try vm.gc().allocString("__call");
     const call_fn = try vm.gc().allocNativeClosure(NativeFn.init(.coroutine_wrap_call));
     try metatable.set(TValue.fromString(call_key), TValue.fromNativeClosure(call_fn));
@@ -399,69 +397,19 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         return vm.raiseString("cannot resume running coroutine");
     }
 
-    // Get the target VM
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
+    const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
+    const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
 
-    // Check if this is the first resume
-    const is_first_resume = co_vm.ci == null;
-
-    if (is_first_resume) {
-        // Same setup as regular resume
-        const func_val = co_vm.stack[0];
-        const closure = func_val.asClosure() orelse {
+    if (co_vm.ci == null) {
+        // First resume
+        if (co_vm.stack[0].asClosure() == null) {
             return vm.raiseString("coroutine body must be a Lua function");
-        };
-        const proto = closure.proto;
-
-        // Copy arguments (skip wrapper, start from func_reg+1)
-        // In __call: nargs includes wrapper, so actual args = nargs - 1
-        const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-        var i: u32 = 0;
-        while (i < num_args) : (i += 1) {
-            co_vm.stack[1 + i] = vm.stack[vm.base + func_reg + 1 + i];
         }
-
-        // Fill remaining params with nil
-        while (i < proto.numparams) : (i += 1) {
-            co_vm.stack[1 + i] = .nil;
-        }
-
-        // Set up initial call frame
-        co_vm.base = 1;
-        co_vm.top = 1 + proto.maxstacksize;
-        co_vm.base_ci = .{
-            .func = proto,
-            .closure = closure,
-            .pc = proto.code.ptr,
-            .savedpc = null,
-            .base = 1,
-            .ret_base = 0,
-            .nresults = -1,
-            .previous = null,
-        };
-        co_vm.ci = &co_vm.base_ci;
+        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
         // Resume after yield
-        const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-        const ret_base = co_vm.yield_ret_base;
-        const nres = co_vm.yield_nresults;
-
-        if (nres < 0) {
-            var i: u32 = 0;
-            while (i < num_args) : (i += 1) {
-                co_vm.stack[ret_base + i] = vm.stack[vm.base + func_reg + 1 + i];
-            }
-            co_vm.top = ret_base + num_args;
-        } else {
-            const max_copy = @as(u32, @intCast(nres));
-            var i: u32 = 0;
-            while (i < num_args and i < max_copy) : (i += 1) {
-                co_vm.stack[ret_base + i] = vm.stack[vm.base + func_reg + 1 + i];
-            }
-            while (i < max_copy) : (i += 1) {
-                co_vm.stack[ret_base + i] = .nil;
-            }
-        }
+        setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
     }
 
     // Update statuses and execute
@@ -564,11 +512,7 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
         return;
     }
 
-    // Mark as dead
     thread.status = .dead;
-
-    // TODO: Run to-be-closed variables if any
-
-    // Return (true)
+    // NOTE: To-be-closed variables (__close) not yet implemented
     vm.stack[vm.base + func_reg] = .{ .boolean = true };
 }

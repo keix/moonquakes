@@ -1,6 +1,5 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const Proto = @import("../compiler/proto.zig").Proto;
 const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const gc_mod = @import("../runtime/gc/gc.zig");
 const GC = gc_mod.GC;
@@ -97,8 +96,8 @@ pub const VM = struct {
     // ========================================
 
     /// Initialize a VM with a shared Runtime.
-    /// The VM is automatically registered as a GC root provider.
-    /// If this is the first VM, it becomes the main thread.
+    /// Main thread is registered as a GC root provider.
+    /// Coroutine VMs are NOT registered - their stacks are marked via ThreadObject.
     pub fn init(rt: *Runtime) !*VM {
         const self = try rt.allocator.create(VM);
         errdefer rt.allocator.destroy(self);
@@ -107,8 +106,12 @@ pub const VM = struct {
         const is_main = rt.main_thread == null;
         const initial_status: ThreadStatus = if (is_main) .running else .suspended;
 
-        // Create ThreadObject to wrap this VM
-        const thread = try rt.gc.allocThread(@ptrCast(self), initial_status);
+        // free_vm callback for coroutines (safe to set now, only used during sweep)
+        const free_vm: ?*const fn (*anyopaque, std.mem.Allocator) void = if (is_main) null else &vmFreeCallback;
+
+        // Create ThreadObject with mark_vm = null initially
+        // (mark_vm will be set after VM is fully initialized to avoid marking uninitialized VM)
+        const thread = try rt.gc.allocThread(@ptrCast(self), initial_status, null, free_vm);
 
         self.* = .{
             .rt = rt,
@@ -127,11 +130,15 @@ pub const VM = struct {
             v.* = .nil;
         }
 
-        // Register as GC root provider
-        try rt.gc.addRootProvider(self.rootProvider());
+        // Now that VM is fully initialized, set mark_vm callback
+        if (!is_main) {
+            thread.mark_vm = &vmMarkCallback;
+            rt.gc.trackAllocation(@sizeOf(VM));
+        }
 
-        // If this is the first VM, set it as the main thread
+        // Only main thread registers as root provider
         if (is_main) {
+            try rt.gc.addRootProvider(self.rootProvider());
             rt.setMainThread(thread);
         }
 
@@ -139,9 +146,13 @@ pub const VM = struct {
     }
 
     /// Clean up VM resources.
+    /// Only called for main thread (via Runtime.deinit).
+    /// Coroutine VMs are freed by GC when ThreadObject is collected.
     pub fn deinit(self: *VM) void {
-        // Unregister from GC before destruction
-        self.rt.gc.removeRootProvider(self.rootProvider());
+        // Only main thread is registered as root provider
+        if (self.isMainThread()) {
+            self.rt.gc.removeRootProvider(self.rootProvider());
+        }
 
         // Free self
         self.rt.allocator.destroy(self);
@@ -313,46 +324,40 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     const self: *VM = @ptrCast(@alignCast(ctx));
 
     // 1. Mark VM stack
-    // Calculate the maximum stack extent across all active frames.
-    // We need to mark up to the highest frame_max because:
-    // - vm.top may be lower than frame_max for variable results (nresults < 0)
-    // - Each frame's local variables must be protected during GC
     var stack_extent = self.top;
 
-    // Check base_ci's extent
-    const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
-    if (base_frame_max > stack_extent) {
-        stack_extent = base_frame_max;
-    }
+    // Only access base_ci if VM has started execution (ci != null)
+    // For coroutines that haven't been resumed yet, ci is null and base_ci is undefined
+    if (self.ci != null) {
+        const base_frame_max = self.base_ci.base + self.base_ci.func.maxstacksize;
+        if (base_frame_max > stack_extent) {
+            stack_extent = base_frame_max;
+        }
 
-    // Check each call frame's extent
-    for (self.callstack[0..self.callstack_size]) |frame| {
-        const frame_max = frame.base + frame.func.maxstacksize;
-        if (frame_max > stack_extent) {
-            stack_extent = frame_max;
+        for (self.callstack[0..self.callstack_size]) |frame| {
+            const frame_max = frame.base + frame.func.maxstacksize;
+            if (frame_max > stack_extent) {
+                stack_extent = frame_max;
+            }
         }
     }
 
     gc_ptr.markStack(self.stack[0..stack_extent]);
 
-    // 2. Mark call frames
-    // NOTE: base_ci is NOT in callstack[] - it's the main chunk's frame.
-    // When inside a function call, base_ci still holds the main proto which
-    // contains nested function protos. These must be marked or their
-    // constants (strings, native closures) will be collected.
-    if (self.base_ci.closure) |closure| {
-        gc_ptr.mark(&closure.header);
-    } else {
-        // Main chunk: mark proto and all nested protos recursively
-        gc_ptr.markProtoObject(@constCast(self.base_ci.func));
-    }
-
-    // Mark function call frames on the callstack
-    for (self.callstack[0..self.callstack_size]) |frame| {
-        if (frame.closure) |closure| {
+    // 2. Mark call frames (only if VM has started execution)
+    if (self.ci != null) {
+        if (self.base_ci.closure) |closure| {
             gc_ptr.mark(&closure.header);
         } else {
-            gc_ptr.markProtoObject(@constCast(frame.func));
+            gc_ptr.markProtoObject(@constCast(self.base_ci.func));
+        }
+
+        for (self.callstack[0..self.callstack_size]) |frame| {
+            if (frame.closure) |closure| {
+                gc_ptr.mark(&closure.header);
+            } else {
+                gc_ptr.markProtoObject(@constCast(frame.func));
+            }
         }
     }
 
@@ -382,4 +387,18 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
 fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
     const self: *VM = @ptrCast(@alignCast(ctx));
     return call.callValue(self, func.*, args);
+}
+
+/// Free VM memory (for coroutine threads only)
+/// Called by GC when sweeping dead ThreadObjects
+fn vmFreeCallback(vm_ptr: *anyopaque, allocator: std.mem.Allocator) void {
+    const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+    vm.rt.gc.trackDeallocation(@sizeOf(VM));
+    allocator.destroy(vm);
+}
+
+/// Mark VM roots (for coroutine threads only)
+/// Wrapper for vmMarkRoots with anyopaque signature to avoid circular imports
+fn vmMarkCallback(vm_ptr: *anyopaque, gc_ptr: *anyopaque) void {
+    vmMarkRoots(vm_ptr, @ptrCast(@alignCast(gc_ptr)));
 }

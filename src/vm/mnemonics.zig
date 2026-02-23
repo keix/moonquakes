@@ -2476,6 +2476,78 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Handle __call metamethod for tables (same as CALL slow path)
+            if (func_val.asTable()) |table| {
+                if (table.metatable) |mt| {
+                    const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
+                        // No __call - fall through to error
+                        vm.stack[vm.base + a] = .{ .boolean = false };
+                        const err_str = try vm.gc().allocString("attempt to call a non-function value");
+                        vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
+                        return .Continue;
+                    };
+
+                    // __call is a native closure
+                    if (call_mm.isObject() and call_mm.object.type == .native_closure) {
+                        const nc = object.getObject(NativeClosureObject, call_mm.object);
+                        const frame_max = vm.base + ci.func.maxstacksize;
+                        const call_reg: u32 = a + 1;
+
+                        // Stack: [func_reg]=table, [func_reg+1..]=args
+                        // __call expects: (table, args...) so nargs+1
+                        vm.top = vm.base + call_reg + 1 + nargs;
+
+                        const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), nargs + 1, nresults)) blk: {
+                            // Success: move results and prepend true
+                            var i: u32 = nresults;
+                            while (i > 0) : (i -= 1) {
+                                vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
+                            }
+                            vm.stack[vm.base + a] = .{ .boolean = true };
+                            break :blk nresults + 1;
+                        } else |err| blk: {
+                            if (err != error.LuaException) return err;
+                            vm.stack[vm.base + a] = .{ .boolean = false };
+                            vm.stack[vm.base + a + 1] = vm.lua_error_value;
+                            vm.lua_error_value = .nil;
+                            break :blk 2;
+                        };
+
+                        const result_end = vm.base + a + result_count;
+                        if (result_end < frame_max) {
+                            for (vm.stack[result_end..frame_max]) |*slot| {
+                                slot.* = .nil;
+                            }
+                        }
+                        vm.top = frame_max;
+                        return .Continue;
+                    }
+
+                    // __call is a Lua closure
+                    if (call_mm.asClosure()) |closure| {
+                        const func_proto = closure.proto;
+                        const call_base = vm.base + a + 1;
+
+                        // Stack already has: [call_base]=table, [call_base+1..]=args
+                        // __call expects (self, args...), so total args = nargs + 1
+                        const total_args = nargs + 1;
+
+                        // Fill remaining params with nil
+                        var i: u32 = total_args;
+                        while (i < func_proto.numparams) : (i += 1) {
+                            vm.stack[call_base + i] = .nil;
+                        }
+
+                        const pcall_nresults: i16 = @intCast(nresults);
+                        const new_ci = try pushCallInfo(vm, func_proto, closure, call_base, vm.base + a, pcall_nresults);
+                        new_ci.is_protected = true;
+
+                        vm.top = call_base + func_proto.maxstacksize;
+                        return .LoopContinue;
+                    }
+                }
+            }
+
             // Not a function - return error
             vm.stack[vm.base + a] = .{ .boolean = false };
             const err_str = try vm.gc().allocString("attempt to call a non-function value");
@@ -2885,7 +2957,8 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
         // Stack is already correct: obj at base_slot, args at base_slot+1...
         // Call native with nargs+1 (obj counts as first arg)
-        const actual_nresults: u32 = if (nresults >= 0) @intCast(nresults) else 0;
+        // When nresults is -1 (variable), default to 1 like CALL does for native closures
+        const actual_nresults: u32 = if (nresults >= 0) @intCast(nresults) else 1;
         try vm.callNative(nc.func.id, base_slot, nargs + 1, actual_nresults);
         return .LoopContinue;
     }
