@@ -49,6 +49,7 @@ pub fn init(rt: *Runtime) !*VM {
 
     if (is_main) {
         try rt.gc.addRootProvider(vm_gc.rootProvider(self));
+        rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(self));
         rt.setMainThread(thread);
     }
 
@@ -60,6 +61,7 @@ pub fn init(rt: *Runtime) !*VM {
 pub fn deinit(self: *VM) void {
     const is_main = self.rt.main_thread == self.thread;
     if (is_main) {
+        self.rt.gc.setFinalizerExecutor(null);
         self.rt.gc.removeRootProvider(vm_gc.rootProvider(self));
     }
     self.rt.allocator.destroy(self);

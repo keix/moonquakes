@@ -22,6 +22,7 @@ const ExecuteResult = execution.ExecuteResult;
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const vm_gc = @import("gc.zig");
 
 pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
 pub const BitwiseOp = enum { band, bor, bxor };
@@ -344,7 +345,14 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 
     setupMainFrame(vm, proto, main_closure);
 
+    // Finalizers are executed by the currently running VM.
+    vm.gc().setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
+    defer vm.gc().setFinalizerExecutor(null);
+
     while (true) {
+        if (vm.gc().hasPendingFinalizers()) {
+            vm.gc().drainFinalizers();
+        }
         const ci = vm.ci.?;
         const inst = ci.fetch() catch |err| {
             if (err == error.LuaException and handleLuaException(vm)) continue;

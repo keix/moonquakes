@@ -62,6 +62,9 @@ pub const GCObject = struct {
     /// Gray list link for incremental marking
     gray_next: ?*GCObject = null,
 
+    /// True if object has a pending __gc finalizer in the queue
+    finalizer_queued: bool = false,
+
     /// Initialize a GC object header
     pub fn init(object_type: GCObjectType, next_obj: ?*GCObject) GCObject {
         return .{
@@ -70,6 +73,7 @@ pub const GCObject = struct {
             .in_gray = false,
             .next = next_obj,
             .gray_next = null,
+            .finalizer_queued = false,
         };
     }
 
@@ -81,6 +85,7 @@ pub const GCObject = struct {
             .in_gray = false,
             .next = next_obj,
             .gray_next = null,
+            .finalizer_queued = false,
         };
     }
 

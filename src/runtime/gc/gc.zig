@@ -117,8 +117,6 @@ pub const RootProvider = struct {
     pub const VTable = struct {
         /// Mark all roots owned by this provider (stack, globals, etc.)
         markRoots: *const fn (ctx: *anyopaque, gc: *GC) void,
-        /// Call a Lua value (for __gc finalizers). Returns first result or nil.
-        callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
     };
 
     /// Type-safe constructor - prevents mismatched ptr/vtable pairs
@@ -132,10 +130,25 @@ pub const RootProvider = struct {
     pub fn markRoots(self: RootProvider, gc: *GC) void {
         self.vtable.markRoots(self.ptr, gc);
     }
+};
 
-    pub fn callValue(self: RootProvider, func: *const TValue, args: []const TValue) !TValue {
-        return self.vtable.callValue(self.ptr, func, args);
+/// Executor for __gc finalizers.
+/// Separate from RootProvider to keep responsibilities clear.
+pub const FinalizerExecutor = struct {
+    ptr: *anyopaque,
+    callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+
+    pub fn init(ptr: *anyopaque, callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue) FinalizerExecutor {
+        return .{
+            .ptr = ptr,
+            .callValue = callValue,
+        };
     }
+};
+
+const FinalizerItem = struct {
+    func: TValue,
+    obj: *GCObject,
 };
 
 /// Moonquakes Mark & Sweep Garbage Collector
@@ -163,6 +176,12 @@ pub const GC = struct {
     /// Each provider is responsible for marking its own roots (stack, globals, etc.)
     /// Multiple providers supported for VM, REPL, test harnesses, etc.
     root_providers: std.ArrayListUnmanaged(RootProvider),
+
+    /// Queue of pending __gc finalizers (deferred execution)
+    finalizer_queue: std.ArrayListUnmanaged(FinalizerItem),
+
+    /// Active executor for running finalizers (typically current VM)
+    finalizer_executor: ?FinalizerExecutor = null,
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
@@ -217,6 +236,8 @@ pub const GC = struct {
             .bytes_allocated = 0,
             .next_gc = GC_THRESHOLD,
             .root_providers = .{},
+            .finalizer_queue = .{},
+            .finalizer_executor = null,
             .gc_inhibit = 0,
             .weak_tables = .{},
         };
@@ -323,6 +344,8 @@ pub const GC = struct {
 
     /// Mark object as gray (reachable, children not yet scanned)
     /// Non-recursive: adds to gray list for later processing
+    /// Note: This is for first-time marking. Re-graying black objects
+    /// during incremental marking must use barrierBack().
     ///
     /// Tri-color invariant: white → gray → black
     ///   - White: not yet seen (mark_bit != current_mark)
@@ -519,6 +542,42 @@ pub const GC = struct {
         }
     }
 
+    /// Set or clear the active finalizer executor.
+    /// When null, finalizers are queued but not executed.
+    pub fn setFinalizerExecutor(self: *GC, executor: ?FinalizerExecutor) void {
+        self.finalizer_executor = executor;
+    }
+
+    /// True if there are pending finalizers waiting to run.
+    pub fn hasPendingFinalizers(self: *const GC) bool {
+        return self.finalizer_queue.items.len > 0;
+    }
+
+    /// Drain all pending finalizers using the active executor.
+    /// Safe to call at VM "safe points" (between instructions, resume boundaries).
+    pub fn drainFinalizers(self: *GC) void {
+        const executor = self.finalizer_executor orelse return;
+        if (self.finalizer_queue.items.len == 0) return;
+
+        // Inhibit GC during finalizer execution to prevent recursive collection.
+        self.gc_inhibit += 1;
+        defer self.gc_inhibit -= 1;
+
+        for (self.finalizer_queue.items) |item| {
+            const obj_val: TValue = switch (item.obj.type) {
+                .table => TValue.fromTable(@fieldParentPtr("header", item.obj)),
+                .userdata => TValue.fromUserdata(@fieldParentPtr("header", item.obj)),
+                else => continue,
+            };
+            _ = executor.callValue(executor.ptr, &item.func, &[_]TValue{obj_val}) catch {};
+            // Note: finalizer_queued stays true to prevent re-finalization.
+            // Lua semantics: once finalized, object is not finalized again
+            // (unless setmetatable is called to set a new __gc).
+        }
+
+        self.finalizer_queue.clearRetainingCapacity();
+    }
+
     /// Track an external allocation (not managed by GC, but affects threshold).
     /// Use for allocations that are logically part of GC-managed objects
     /// but allocated separately (e.g., VM memory for coroutines).
@@ -540,6 +599,9 @@ pub const GC = struct {
 
         // Clear root providers list
         self.root_providers.deinit(self.allocator);
+
+        // Clear finalizer queue
+        self.finalizer_queue.deinit(self.allocator);
 
         // Free all remaining objects without mark/sweep
         // (no need to determine liveness at program exit)
@@ -609,6 +671,9 @@ pub const GC = struct {
                 self.mark(&str.header);
             }
         }
+
+        // Mark queued finalizers (objects + __gc functions)
+        self.markFinalizerQueue();
 
         // Finish: ephemeron propagation, weak table cleanup, sweep
         self.finishCollection();
@@ -860,13 +925,23 @@ pub const GC = struct {
             self.propagateAll();
         }
 
+        // Enqueue __gc finalizers for newly unreachable objects
+        // This also marks them to keep alive until finalization.
+        self.enqueueFinalizers();
+
+        // Newly enqueued finalizers can add references
+        self.propagateAll();
+        while (self.propagateEphemerons()) {
+            self.propagateAll();
+        }
+
         // Clean dead entries from weak tables
         self.cleanWeakTables();
 
         // Set state to sweep phase
         self.gc_state = .sweep;
 
-        // Sweep phase (also runs __gc finalizers)
+        // Sweep phase
         self.sweep();
 
         // Return to idle state
@@ -896,6 +971,46 @@ pub const GC = struct {
     /// Mark a TValue if it contains a GC object (adds to gray list)
     pub fn markValue(self: *GC, value: TValue) void {
         self.markGrayValue(value);
+    }
+
+    /// Mark pending finalizers as roots to keep them alive across cycles.
+    fn markFinalizerQueue(self: *GC) void {
+        for (self.finalizer_queue.items) |item| {
+            self.markGray(item.obj);
+            self.markGrayValue(item.func);
+        }
+    }
+
+    /// Enqueue __gc finalizers for newly unreachable objects.
+    /// The objects and their finalizer functions are marked to keep them alive
+    /// until execution.
+    fn enqueueFinalizers(self: *GC) void {
+        if (!self.mm_keys_initialized) return;
+        var current = self.objects;
+        while (current) |obj| {
+            if (self.isWhite(obj) and !obj.finalizer_queued) {
+                const maybe_metatable: ?*TableObject = switch (obj.type) {
+                    .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
+                    .userdata => @as(*UserdataObject, @fieldParentPtr("header", obj)).metatable,
+                    else => null,
+                };
+                if (maybe_metatable) |mt| {
+                    if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
+                        if (self.finalizer_queue.append(self.allocator, .{
+                            .func = gc_fn,
+                            .obj = obj,
+                        })) |_| {
+                            obj.finalizer_queued = true;
+
+                            // Keep object and finalizer function alive.
+                            self.markGray(obj);
+                            self.markGrayValue(gc_fn);
+                        } else |_| {}
+                    }
+                }
+            }
+            current = obj.next;
+        }
     }
 
     /// Mark a ProtoObject (GC-managed prototype)
@@ -1004,23 +1119,8 @@ pub const GC = struct {
     }
 
     /// Sweep phase: free all unmarked (white) objects
-    /// Calls __gc finalizers for tables before freeing
     /// Uses flip mark scheme - no need to clear marks (flipMark handles that)
     pub fn sweep(self: *GC) void {
-        // First pass: call __gc finalizers for unmarked tables
-        // We do this before freeing to ensure objects are still valid
-        self.runFinalizers();
-
-        // Re-mark from roots after finalizers to catch resurrected objects
-        // Finalizers can "resurrect" objects by storing references to them
-        // (e.g., in globals or other reachable tables). Without re-marking,
-        // those references would point to freed memory.
-        for (self.root_providers.items) |provider| {
-            provider.markRoots(self);
-        }
-        self.propagateAll();
-
-        // Second pass: free unmarked objects
         var prev: ?*GCObject = null;
         var current = self.objects;
 
@@ -1045,44 +1145,6 @@ pub const GC = struct {
                 self.freeObject(obj);
                 current = next;
             }
-        }
-    }
-
-    /// Run __gc finalizers for all unmarked tables that have them
-    /// Note: Uses the last registered provider for callValue.
-    /// The VM is registered after Runtime, so this picks the active VM.
-    /// Multi-VM would need a dedicated finalizer executor.
-    fn runFinalizers(self: *GC) void {
-        if (self.root_providers.items.len == 0) return;
-        // Use last provider (VM) - Runtime is registered first but cannot execute code
-        const provider = self.root_providers.items[self.root_providers.items.len - 1];
-
-        // Inhibit GC during finalizer execution to prevent recursive collection
-        self.gc_inhibit += 1;
-        defer self.gc_inhibit -= 1;
-
-        var current = self.objects;
-        while (current) |obj| {
-            if (self.isWhite(obj)) {
-                // Tables and userdata can have __gc finalizers
-                const maybe_metatable: ?*TableObject = switch (obj.type) {
-                    .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
-                    .userdata => @as(*UserdataObject, @fieldParentPtr("header", obj)).metatable,
-                    else => null,
-                };
-                if (maybe_metatable) |mt| {
-                    if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
-                        // Call __gc(obj) - errors are ignored (standard Lua behavior)
-                        const obj_val: TValue = switch (obj.type) {
-                            .table => TValue.fromTable(@fieldParentPtr("header", obj)),
-                            .userdata => TValue.fromUserdata(@fieldParentPtr("header", obj)),
-                            else => unreachable,
-                        };
-                        _ = provider.callValue(&gc_fn, &[_]TValue{obj_val}) catch {};
-                    }
-                }
-            }
-            current = obj.next;
         }
     }
 
