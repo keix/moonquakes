@@ -25,7 +25,6 @@ const RootProvider = gc_mod.RootProvider;
 const object = @import("gc/object.zig");
 const TableObject = object.TableObject;
 const ThreadObject = object.ThreadObject;
-const TValue = @import("value.zig").TValue;
 const builtin_dispatch = @import("../builtin/dispatch.zig");
 
 pub const Runtime = struct {
@@ -122,7 +121,6 @@ pub const Runtime = struct {
 /// VTable for Runtime's RootProvider implementation
 const runtimeRootProviderVTable = RootProvider.VTable{
     .markRoots = runtimeMarkRoots,
-    .callValue = runtimeCallValue,
 };
 
 /// Mark Runtime roots for GC.
@@ -148,13 +146,4 @@ fn runtimeMarkRoots(ctx: *anyopaque, gc: *GC) void {
     } else if (self.current_thread) |ct| {
         gc.mark(&ct.header);
     }
-}
-
-/// Call a Lua value (for __gc finalizers).
-/// Runtime doesn't have execution state - this should not be called.
-/// The active VM's callValue will be used instead.
-fn runtimeCallValue(_: *anyopaque, _: *const TValue, _: []const TValue) anyerror!TValue {
-    // Runtime cannot execute code - it has no stack.
-    // __gc finalizers are called via VM's root provider.
-    return .nil;
 }

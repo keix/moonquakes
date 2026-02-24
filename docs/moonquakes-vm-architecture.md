@@ -149,6 +149,18 @@ Initialized by `builtin.initGlobalEnvironment()`:
 - Registers builtin functions
 - Sets up io table and functions
 
+### Finalizers (__gc)
+
+Moonquakes queues `__gc` finalizers during GC, then executes them from the
+currently running VM at safe points.
+
+- **GC responsibility:** discover unreachable objects with `__gc` and enqueue
+  them; keep queued objects and their `__gc` closures alive until execution.
+- **VM responsibility:** drain the finalizer queue (Lua calls) at safe points
+  such as the main execute loop or coroutine resume boundaries.
+- **Executor selection:** the active VM is set as the finalizer executor based
+  on `Runtime.current_thread`.
+
 ### Cleanup
 
 ```zig
@@ -181,4 +193,3 @@ pub fn deinit(self: *VM) void
 - Unified dispatch mechanism
 - Error propagation
 - Global environment setup
-

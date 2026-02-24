@@ -4,6 +4,7 @@ const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
+const vm_gc = @import("../vm/gc.zig");
 
 // Lua 5.4 Coroutine Library
 // Reference: https://www.lua.org/manual/5.4/manual.html#2.6
@@ -83,6 +84,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     caller_thread.status = .normal; // Caller is waiting
     thread.status = .running; // Coroutine is now running
     vm.rt.setCurrentThread(thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     // Execute the coroutine
     const exec_result = executeCoroutine(co_vm);
@@ -90,6 +92,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     // Restore caller status
     caller_thread.status = .running;
     vm.rt.setCurrentThread(caller_thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
 
     // Handle result
     switch (exec_result) {

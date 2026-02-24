@@ -7,6 +7,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const gc_mod = @import("../runtime/gc/gc.zig");
 const GC = gc_mod.GC;
 const RootProvider = gc_mod.RootProvider;
+const FinalizerExecutor = gc_mod.FinalizerExecutor;
 const object = @import("../runtime/gc/object.zig");
 const call = @import("call.zig");
 const VM = @import("vm.zig").VM;
@@ -17,7 +18,6 @@ pub fn rootProvider(self: *VM) RootProvider {
 
 pub const vmRootProviderVTable = RootProvider.VTable{
     .markRoots = vmMarkRoots,
-    .callValue = vmCallValue,
 };
 
 fn computeStackExtent(vm: *const VM) u32 {
@@ -82,6 +82,10 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
 fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
     const vm: *VM = @ptrCast(@alignCast(ctx));
     return call.callValue(vm, func.*, args);
+}
+
+pub fn finalizerExecutor(self: *VM) FinalizerExecutor {
+    return FinalizerExecutor.init(@ptrCast(self), vmCallValue);
 }
 
 /// Coroutine VM cleanup (called by GC during sweep)

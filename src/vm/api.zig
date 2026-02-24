@@ -108,6 +108,8 @@ pub fn collectGarbage(self: *VM) void {
     const gc_ptr = gc(self);
     const before = gc_ptr.bytes_allocated;
     gc_ptr.collect();
+    // Run queued finalizers at this safe point
+    gc_ptr.drainFinalizers();
     if (@import("builtin").mode != .ReleaseFast) {
         std.log.info("GC: {} -> {} bytes, next at {}", .{ before, gc_ptr.bytes_allocated, gc_ptr.next_gc });
     }
