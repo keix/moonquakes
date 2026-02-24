@@ -34,8 +34,8 @@ pub const tbc_tests = @import("tests/tbc.zig");
 pub const self_tests = @import("tests/self.zig");
 pub const tailcall_tests = @import("tests/tailcall.zig");
 pub const function_calls_tests = @import("tests/function_calls.zig");
-pub const gc_tests = @import("runtime/gc/tests.zig");
-pub const vm_error_tests = @import("vm/error.zig");
+pub const gc_tests = @import("tests/gc.zig");
+pub const vm_error_tests = @import("tests/vm_error.zig");
 
 test {
     // This will include all tests from imported modules

@@ -1,10 +1,6 @@
-//! GC Unit Tests
-//!
-//! Covers basic mark/sweep behaviors for strings and TValue marking.
-
 const std = @import("std");
-const gc_mod = @import("gc.zig");
-const TValue = @import("../value.zig").TValue;
+const gc_mod = @import("../runtime/gc/gc.zig");
+const TValue = @import("../runtime/value.zig").TValue;
 
 const GC = gc_mod.GC;
 
