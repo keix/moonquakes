@@ -28,7 +28,7 @@ Nix is optional and leaves your system untouched.
 nix develop
 ```
 
-## Build
+## Moonquakes Build
 Moonquakes is built with Zig.  
 For normal use and evaluation, build with optimizations enabled:
 ```sh
@@ -38,8 +38,25 @@ zig build -Doptimize=ReleaseSafe
 ## Running Moonquakes
 
 After building:
-```
+
+```sh
 ./zig-out/bin/moonquakes
+```
+
+## C Interface (Experimental)
+Moonquakes exposes a minimal C interface for embedding.  
+The public boundary is defined in [`include/moonquakes.h`](include/moonquakes.h).
+
+To build the static and shared libraries:
+
+```sh
+make
+```
+
+## Running C Example
+To run the example:
+```sh
+LD_LIBRARY_PATH=build/lib ./build/bin/minimal
 ```
 
 ## Architecture
