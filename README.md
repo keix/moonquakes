@@ -43,7 +43,7 @@ After building:
 ./zig-out/bin/moonquakes
 ```
 
-## C Interface (Experimental)
+## C Interface
 Moonquakes exposes a minimal C interface for embedding.  
 The public boundary is defined in [`include/moonquakes.h`](include/moonquakes.h).
 
@@ -54,7 +54,7 @@ make
 ```
 
 ## Running C Example
-To run the example:
+Build first (either `make` above or `zig build`), then run the example:
 ```sh
 LD_LIBRARY_PATH=build/lib ./build/bin/minimal
 ```
