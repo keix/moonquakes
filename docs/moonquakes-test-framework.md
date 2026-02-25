@@ -26,10 +26,13 @@ A struct for recording and comparing register states before and after execution.
 
 ```zig
 // Usage example
-var vm = VM.init();
-var trace = utils.ExecutionTrace.captureInitial(&vm, 4); // Track R0-R3
-const result = try vm.execute(&proto);
-trace.updateFinal(&vm, 4); // Record post-execution state
+var ctx = utils.TestContext{};
+try ctx.init();
+defer ctx.deinit();
+
+var trace = utils.ExecutionTrace.captureInitial(ctx.vm, 4); // Track R0-R3
+const result = try Mnemonics.execute(ctx.vm, proto);
+trace.updateFinal(ctx.vm, 4); // Record post-execution state
 ```
 
 ### Main Methods
@@ -45,13 +48,13 @@ trace.updateFinal(&vm, 4); // Record post-execution state
 ### expectRegister
 Verify a single register value:
 ```zig
-try utils.expectRegister(&vm, 0, TValue{ .integer = 42 }); // R0 = 42
+try utils.expectRegister(ctx.vm, 0, TValue{ .integer = 42 }); // R0 = 42
 ```
 
 ### expectRegisters
 Verify multiple registers at once:
 ```zig
-try utils.expectRegisters(&vm, 0, &[_]TValue{
+try utils.expectRegisters(ctx.vm, 0, &[_]TValue{
     .{ .integer = 10 },  // R0
     .{ .integer = 20 },  // R1
     .{ .integer = 30 },  // R2
@@ -61,7 +64,7 @@ try utils.expectRegisters(&vm, 0, &[_]TValue{
 ### expectNilRange
 Verify register range is nil:
 ```zig
-try utils.expectNilRange(&vm, 0, 5); // R0-R4 are nil
+try utils.expectNilRange(ctx.vm, 0, 5); // R0-R4 are nil
 ```
 
 ### expectRegistersUnchanged
@@ -76,7 +79,7 @@ try utils.expectRegistersUnchanged(&trace, 5, &[_]u8{0, 1});
 ### expectVMState
 Verify VM base/top pointers:
 ```zig
-try utils.expectVMState(&vm, 0, 3); // base=0, top=3
+try utils.expectVMState(ctx.vm, 0, 3); // base=0, top=3
 ```
 
 ### expectResultAndState
@@ -85,7 +88,7 @@ Verify return value and VM state together:
 try utils.expectResultAndState(
     result,
     TValue{ .integer = 42 },  // Expected return value
-    &vm,
+    ctx.vm,
     0,  // expected base
     3   // expected top
 );
@@ -112,6 +115,8 @@ try utils.ReturnTest.expectMultiple(result, &[_]TValue{
 
 ## Specialized Test Patterns
 
+Assume `ctx` is an initialized `utils.TestContext` as shown above.
+
 ### ComparisonTest - Comparison Instruction Skip Behavior
 
 Lua 5.4 comparison instructions skip the next instruction based on conditions:
@@ -119,7 +124,7 @@ Lua 5.4 comparison instructions skip the next instruction based on conditions:
 ```zig
 // Expect skip when condition is true
 try utils.ComparisonTest.expectSkip(
-    &vm,
+    ctx.vm,
     Instruction.initABC(.EQ, 0, 0, 1),  // R0 == R1
     TValue{ .integer = 42 },  // R0 value
     TValue{ .integer = 42 },  // R1 value
@@ -128,7 +133,7 @@ try utils.ComparisonTest.expectSkip(
 
 // Expect no skip when condition is false
 try utils.ComparisonTest.expectNoSkip(
-    &vm,
+    ctx.vm,
     Instruction.initABC(.EQ, 0, 0, 1),
     TValue{ .integer = 42 },
     TValue{ .integer = 43 },
@@ -139,7 +144,7 @@ try utils.ComparisonTest.expectNoSkip(
 ### ForLoopTrace - Loop State Tracking
 
 ```zig
-const loop_trace = utils.ForLoopTrace.capture(&vm, 0); // Start from R0
+const loop_trace = utils.ForLoopTrace.capture(ctx.vm, 0); // Start from R0
 try loop_trace.expectIntegerPath();  // Uses integer optimization path
 try loop_trace.expectFloatPath();    // Uses floating-point path
 ```
@@ -147,7 +152,7 @@ try loop_trace.expectFloatPath();    // Uses floating-point path
 ### InstructionTest - Single Instruction Testing
 
 ```zig
-var inst_test = utils.InstructionTest.init(&vm, &proto, 3);
+var inst_test = utils.InstructionTest.init(ctx.vm, proto, 3);
 
 // Expect success
 const trace = try inst_test.expectSuccess(3);
@@ -160,7 +165,7 @@ try inst_test.expectError(error.ArithmeticError);
 
 ```zig
 try utils.testArithmeticOp(
-    &vm,
+    ctx.vm,
     Instruction.initABC(.ADD, 2, 0, 1),  // R2 = R0 + R1
     TValue{ .integer = 10 },  // R0
     TValue{ .integer = 20 },  // R1
@@ -173,7 +178,7 @@ try utils.testArithmeticOp(
 
 ```zig
 // Only R2 changes, other registers remain unchanged
-try utils.expectSideEffectFree(&vm, &proto, &[_]u8{2}, 5);
+try utils.expectSideEffectFree(ctx.vm, proto, &[_]u8{2}, 5);
 ```
 
 ## Best Practices
@@ -190,16 +195,18 @@ test "BAND: Complete test example" {
         Instruction.initABC(.RETURN, 2, 2, 0),
     };
 
-    // 2. Initialize VM and record pre-execution state
-    var vm = VM.init();
-    var trace = utils.ExecutionTrace.captureInitial(&vm, 3);
+    // 2. Initialize Runtime + VM and record pre-execution state
+    var ctx = utils.TestContext{};
+    try ctx.init();
+    defer ctx.deinit();
+    var trace = utils.ExecutionTrace.captureInitial(ctx.vm, 3);
     
     // 3. Execute
-    const result = try vm.execute(&proto);
-    trace.updateFinal(&vm, 3);
+    const result = try Mnemonics.execute(ctx.vm, proto);
+    trace.updateFinal(ctx.vm, 3);
 
     // 4. Verify result
-    try utils.expectResultAndState(result, expected_value, &vm, 0, 3);
+    try utils.expectResultAndState(result, expected_value, ctx.vm, 0, 3);
     
     // 5. Verify register states
     try trace.expectRegisterChanged(0, expected_r0);
@@ -215,8 +222,10 @@ test "BAND: Complete test example" {
 
 ```zig
 test "Error case" {
-    var vm = VM.init();
-    const result = vm.execute(&proto);
+    var ctx = utils.TestContext{};
+    try ctx.init();
+    defer ctx.deinit();
+    const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.ArithmeticError, result);
 }
 ```
@@ -225,17 +234,19 @@ test "Error case" {
 
 ```zig
 test "Side effect verification" {
-    var vm = VM.init();
+    var ctx = utils.TestContext{};
+    try ctx.init();
+    defer ctx.deinit();
     
     // Set values in unrelated registers
-    vm.stack[3] = TValue{ .integer = 999 };
-    vm.stack[4] = TValue{ .boolean = true };
+    ctx.vm.stack[3] = TValue{ .integer = 999 };
+    ctx.vm.stack[4] = TValue{ .boolean = true };
     
-    _ = try vm.execute(&proto);
+    _ = try Mnemonics.execute(ctx.vm, proto);
     
     // Verify they haven't changed
-    try utils.expectRegister(&vm, 3, TValue{ .integer = 999 });
-    try utils.expectRegister(&vm, 4, TValue{ .boolean = true });
+    try utils.expectRegister(ctx.vm, 3, TValue{ .integer = 999 });
+    try utils.expectRegister(ctx.vm, 4, TValue{ .boolean = true });
 }
 ```
 

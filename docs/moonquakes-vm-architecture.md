@@ -10,16 +10,31 @@ The Moonquakes Virtual Machine implements a register-based execution model simil
 
 ```zig
 pub const VM = struct {
-    stack: [256]TValue,           // Value stack
-    stack_last: u32,              // Stack boundary
-    top: u32,                     // Current stack top
-    base: u32,                    // Current frame base
-    ci: ?*CallInfo,               // Current call info
-    base_ci: CallInfo,            // Base call frame
-    callstack: [20]CallInfo,      // Call stack (max 20 nested calls)
-    callstack_size: u8,           // Current call stack depth
-    globals: *Table,              // Global environment
-    allocator: std.mem.Allocator, // Memory allocator
+    stack: [256]TValue,        // Value stack
+    top: u32,                  // Current stack top (GC scan extent)
+    base: u32,                 // Current frame base
+    ci: ?*CallInfo,            // Current call info
+    base_ci: CallInfo,         // Base call frame
+    callstack: [35]CallInfo,   // Call stack (vm.callstack.len)
+    callstack_size: u8,        // Current call stack depth
+    open_upvalues: ?*UpvalueObject,
+    lua_error_value: TValue,   // Error object for LuaException
+
+    // Yield state
+    yield_base: u32,
+    yield_count: u32,
+    yield_ret_base: u32,
+    yield_nresults: i32,       // -1 = variable results
+
+    rt: *Runtime,              // Shared runtime (GC, globals, registry)
+    thread: *ThreadObject,     // GC-managed thread object
+
+    temp_roots: [8]TValue,
+    temp_roots_count: u8,
+
+    hook_func: ?*ClosureObject,
+    hook_mask: u8,             // 1=call, 2=return, 4=line
+    hook_count: u32,
 }
 ```
 
@@ -29,42 +44,57 @@ pub const VM = struct {
 
 ```zig
 pub const CallInfo = struct {
-    func: *const Proto,                   // Function prototype
-    pc: [*]const Instruction,             // Program counter
-    base: u32,                            // Register frame base
-    ret_base: u32,                        // Return value destination
-    savedpc: ?[*]const Instruction,       // Saved PC for yields
-    nresults: i16,                        // Expected return count (-1 = multiple)
-    previous: ?*CallInfo,                 // Previous call frame
+    func: *const ProtoObject,       // Function prototype
+    closure: ?*ClosureObject,       // Closure (null for main chunk)
+
+    pc: [*]const Instruction,       // Program counter
+    savedpc: ?[*]const Instruction, // Saved PC for yields
+
+    base: u32,                      // Register frame base
+    ret_base: u32,                  // Return value destination
+
+    vararg_base: u32,               // Vararg base
+    vararg_count: u32,              // Vararg count
+
+    nresults: i16,                  // Expected return count (-1 = multiple)
+    previous: ?*CallInfo,           // Previous call frame
+
+    is_protected: bool,             // True if this is a pcall frame
+    tbc_bitmap: u64,                // To-be-closed registers bitmap
 };
 ```
 
 #### CallInfo Fields Explained
 
 - **func**: Points to the function prototype being executed
+- **closure**: Closure for upvalue access (null for main chunk)
 - **pc**: Current instruction pointer within the function
 - **base**: Base register index for this function's local variables
 - **ret_base**: Where to place return values in the caller's register space
 - **savedpc**: Saved program counter (used for coroutines/yields)
+- **vararg_base**: Stack base for varargs
+- **vararg_count**: Number of vararg values
 - **nresults**: Number of expected return values (-1 = variadic)
 - **previous**: Linked list pointer to previous call frame
+- **is_protected**: True if this is a pcall frame
+- **tbc_bitmap**: Bitmap of to-be-closed registers
 
 ### Call Stack Management
 
 #### Pushing a Call Frame
 
 ```zig
-pub fn pushCallInfo(self: *VM, func: *const Proto, base: u32, ret_base: u32, nresults: i16) !*CallInfo
+pub fn pushCallInfo(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo
 ```
 
-1. Checks for stack overflow (max 20 nested calls)
+1. Checks for stack overflow (max `vm.callstack.len` frames)
 2. Initializes new CallInfo structure
 3. Links to previous frame
 4. Updates VM state
 
 #### Function Call Execution
 
-1. **Native Functions**: Dispatched through `builtin.invoke()`
+1. **Native Functions**: Dispatched through `builtin_dispatch.invoke()`
 2. **Lua Functions**: Execute bytecode instructions
 3. **Return Handling**: Restore previous call frame state
 
@@ -73,9 +103,9 @@ pub fn pushCallInfo(self: *VM, func: *const Proto, base: u32, ret_base: u32, nre
 ### Dispatch Flow
 
 ```text
-VM.execute() 
+Mnemonics.execute()
     → VM.callNative()
-        → builtin.invoke()
+        → builtin_dispatch.invoke()
             → specific implementation (string.zig, io.zig, etc.)
 ```
 
@@ -92,17 +122,8 @@ Arguments are located at `vm.stack[vm.base + func_reg + 1..]`
 ### Error Handling
 
 ```zig
-fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (builtin.invoke(id, self, func_reg, nargs, nresults)) {
-        // Builtin handled successfully
-        return;
-    } else |err| switch (err) {
-        error.PrintNotImplementedInBuiltin => {
-            // Fallback to VM implementation
-            try self.nativePrint(func_reg, nargs, nresults);
-        },
-        else => return err,
-    }
+pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+    try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }
 ```
 
@@ -110,8 +131,7 @@ fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u3
 
 ### Register Allocation
 
-- Registers 0-3: Reserved for loop variables and special cases
-- Register 4+: Available for general allocation
+- Registers are addressed relative to `base`
 - Each function call gets its own register window
 
 ### Value Stack Layout
@@ -126,7 +146,7 @@ Regs:   0..n          base1..top1    base2..top2    base3..top3
 ### Main Execution Loop
 
 ```zig
-pub fn execute(self: *VM, proto: *const Proto) !void
+pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue
 ```
 
 1. Set up initial call frame
@@ -144,10 +164,9 @@ pub fn execute(self: *VM, proto: *const Proto) !void
 
 ### Global Environment
 
-Initialized by `builtin.initGlobalEnvironment()`:
-- Creates global table
+Initialized by `Runtime.init()` via `builtin_dispatch.initGlobalEnvironment()`:
+- Creates global and registry tables
 - Registers builtin functions
-- Sets up io table and functions
 
 ### Finalizers (__gc)
 
@@ -166,14 +185,13 @@ currently running VM at safe points.
 ```zig
 pub fn deinit(self: *VM) void
 ```
-- Cleans up io table
-- Destroys global environment
-- Frees allocated memory
+- Main thread unregisters as a GC root provider
+- VM memory is released (Runtime owns GC/globals/registry)
 
 ## Performance Considerations
 
 ### Call Stack Limits
-- Maximum 20 nested function calls
+- Maximum `vm.callstack.len` nested function calls (currently 35)
 - Stack overflow protection
 - Efficient frame allocation
 

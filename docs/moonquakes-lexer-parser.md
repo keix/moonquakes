@@ -151,7 +151,7 @@ Example transformation:
 | ----------- | ----------------------------------------------------------- |
 | `x = 1 + 2` | `LOADK R0 K0`, `LOADK R1 K1`, `ADD R2 R0 R1`, `SETGLOBAL R2 K2` |
 
-The resulting Proto can be directly passed to the VM's `execute()` function.
+The resulting Proto can be directly passed to `Mnemonics.execute(vm, proto)`.
 
 ## 5. Bytecode Dump (Debug)
 
