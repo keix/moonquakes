@@ -959,9 +959,8 @@ pub fn nativeG(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = func_reg;
     _ = nargs;
     _ = nresults;
-    // TODO: Implement _G
-    // Returns the global environment table
-    // Note: In Lua, _G is usually just a reference to the globals table
+    // Note: _G is initialized as a globals table reference in builtin_dispatch.
+    // This native is currently unused; if called, it should return vm.globals().
 }
 
 /// _VERSION - A global variable containing the running Lua version string

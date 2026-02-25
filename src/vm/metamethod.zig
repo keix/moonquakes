@@ -79,12 +79,8 @@ pub const MetaEvent = enum {
 };
 
 /// Pre-allocated metamethod key strings
-/// These are interned once at VM initialization and never allocated again
+/// These are interned once at GC/Runtime initialization and never allocated again
 /// This is critical for performance - metamethod lookup must not allocate
-///
-/// TODO: Consider moving to GC (global state) when implementing coroutines.
-/// Currently in VM, but mm_keys are just pointers to interned strings in GC,
-/// so sharing works correctly. Moving to GC would be cleaner architecturally.
 pub const MetamethodKeys = struct {
     strings: [@typeInfo(MetaEvent).@"enum".fields.len]*StringObject,
 
