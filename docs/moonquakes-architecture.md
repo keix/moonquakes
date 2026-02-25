@@ -93,13 +93,18 @@ Conceptually, a CallInfo is similar to a lightweight stack frame in a CPU, but d
 ### 2.1 Structure
 ```
 pub const CallInfo = struct {
-    func: *const Proto,              // the function prototype being executed
+    func: *const ProtoObject,        // function prototype being executed
+    closure: ?*ClosureObject,        // closure (null for main chunk)
     pc: [*]const Instruction,        // pointer to current instruction
+    savedpc: ?[*]const Instruction,  // saved pc for yielding
     base: u32,                       // base register index in VM stack
     ret_base: u32,                   // where to place return values in caller's frame
-    savedpc: ?[*]const Instruction,  // saved pc for yielding
+    vararg_base: u32,                // vararg base
+    vararg_count: u32,               // vararg count
     nresults: i16,                   // expected number of results (-1 = multiple)
     previous: ?*CallInfo,            // previous frame in the call stack
+    is_protected: bool,              // true if this is a pcall frame
+    tbc_bitmap: u64,                 // to-be-closed registers bitmap
 };
 ```
 
@@ -113,7 +118,7 @@ When a function is called, the VM:
 - Executes instructions in the function’s bytecode (Proto.code).
 - When a RETURN opcode is reached, the frame is popped, and control returns to the caller.
 
-In Moonquakes, the VM now supports multiple active frames with a proper call stack, allowing nested function calls up to 20 levels deep.
+In Moonquakes, the VM supports multiple active frames with a proper call stack, allowing nested function calls up to `vm.callstack.len` levels deep (currently 35).
 
 ### 2.3 Stack and Register Mapping
 The global VM stack holds all registers for all active frames:

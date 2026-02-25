@@ -12,7 +12,7 @@ Moonquakes provides a set of built-in functions that are available in the global
 All builtin functions are managed through a centralized dispatch system:
 
 ```text
-VM → builtin.invoke() → individual function implementations
+VM → builtin_dispatch.invoke() → individual function implementations
 ```
 
 **Key Files:**
@@ -22,13 +22,13 @@ VM → builtin.invoke() → individual function implementations
 
 ### Global Environment Initialization
 
-The global environment is set up by `builtin.initGlobalEnvironment()`:
+The global environment is set up by `builtin_dispatch.initGlobalEnvironment()`:
 
 ```lua
 -- Available globals after initialization
 tostring(value)  -- Convert value to string
 io.write(...)    -- Write to stdout without newline
-print(...)       -- Write to stdout with newline (legacy)
+print(...)       -- Write to stdout with newline
 ```
 
 ## Function Reference
@@ -76,7 +76,7 @@ io.write(" World")
 
 ### print(...)
 
-Writes values to standard output with a newline. Legacy function currently implemented in VM.
+Writes values to standard output with a newline.
 
 **Parameters:**
 - `...` - Values to print (currently supports single argument)
@@ -112,11 +112,7 @@ Builtin functions integrate with the VM's call stack through `CallInfo` structur
 
 Functions that are not yet implemented in the builtin system return specific errors:
 
-```zig
-error.PrintNotImplementedInBuiltin
-```
-
-This allows the VM to handle these functions locally during the transition period.
+There is no VM-side fallback; builtin dispatch is the source of truth.
 
 ## Future Enhancements
 
@@ -131,4 +127,3 @@ This allows the VM to handle these functions locally during the transition perio
 - Move print() from VM to builtin/global.zig
 - Implement proper string allocation
 - Add more comprehensive I/O functions
-
