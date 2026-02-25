@@ -52,9 +52,11 @@ pub const Moonquakes = struct {
         _ = self;
     }
 
-    /// Execute compiled bytecode with a fresh VM
+    /// Execute compiled bytecode with a fresh VM.
+    /// TODO: migrate to Runtime-based initialization (Runtime owns GC/globals/registry).
     pub fn run(self: *Moonquakes, proto: *const Proto) !ReturnValue {
-        // Create GC (global state) and VM (thread state)
+        // Create GC (global state) and VM (thread state).
+        // TODO: replace with Runtime.init + VM.init(rt).
         var gc = GC.init(self.allocator);
         defer gc.deinit();
         try gc.initMetamethodKeys();
@@ -86,7 +88,8 @@ pub const Moonquakes = struct {
         const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
-        // Phase 2: Create GC and VM, then materialize constants
+        // Phase 2: Create GC and VM, then materialize constants.
+        // TODO: replace with Runtime.init + VM.init(rt).
         var gc = GC.init(self.allocator);
         defer gc.deinit();
         try gc.initMetamethodKeys();
@@ -170,6 +173,7 @@ pub const Moonquakes = struct {
         const raw_proto = compile_result.ok;
         defer pipeline.freeRawProto(self.allocator, raw_proto);
 
+        // TODO: replace with Runtime.init + VM.init(rt).
         var gc = GC.init(self.allocator);
         defer gc.deinit();
         try gc.initMetamethodKeys();

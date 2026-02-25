@@ -253,8 +253,8 @@ pub const ClosureObject = struct {
 
 /// Native Closure Object - GC-managed native function
 ///
-/// Wraps a native function pointer. Always reachable via globals,
-/// so effectively never collected, but visible to GC for consistency.
+/// Wraps a native function pointer. Reachable while referenced from
+/// globals/registry or other GC-managed objects, and collected when unreachable.
 pub const NativeClosureObject = struct {
     const NativeFn = @import("../native.zig").NativeFn;
 
