@@ -50,3 +50,9 @@ pub export fn mq_close(state: ?*mq_State) void {
 
     std.heap.c_allocator.destroy(real);
 }
+
+pub export fn mq_gc_collect(state: ?*mq_State) void {
+    const s = state orelse return;
+    const real: *State = @ptrCast(@alignCast(s));
+    real.vm.collectGarbage();
+}

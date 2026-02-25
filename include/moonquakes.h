@@ -33,11 +33,23 @@ enum {
 
 typedef struct mq_State mq_State;
 
+const char* mq_version(void);
+
 mq_State* mq_newstate(void);
 void mq_close(mq_State* L);
+
+/*
+ * Force a full garbage collection cycle.
+ *
+ * This function may be unified under a more general mq_gc()
+ * interface in the future, but for now it serves as a simple way
+ * to explicity trigger collection.
+ */
+void mq_gc_collect(mq_State* L);
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // Handwritten by keix - master void*
+#endif // Handwritten by keix - Master *void
