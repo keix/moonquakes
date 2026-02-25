@@ -1,8 +1,12 @@
 const std = @import("std");
+const ver = @import("src/version.zig");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const version = std.SemanticVersion.parse(ver.version) catch {
+        std.debug.panic("invalid version string in src/version.zig", .{});
+    };
 
     const exe = b.addExecutable(.{
         .name = "moonquakes",
@@ -24,6 +28,40 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    // C API libraries (static + shared)
+    const c_api_module = b.createModule(.{
+        .root_source_file = b.path("src/api/c/exports.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const moonquakes_module = b.createModule(.{
+        .root_source_file = b.path("src/moonquakes.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    c_api_module.addImport("moonquakes", moonquakes_module);
+
+    const c_static = b.addLibrary(.{
+        .name = "moonquakes",
+        .root_module = c_api_module,
+        .linkage = .static,
+    });
+    c_static.linkLibC();
+    b.installArtifact(c_static);
+
+    const c_shared = b.addLibrary(.{
+        .name = "moonquakes",
+        .root_module = c_api_module,
+        .linkage = .dynamic,
+        .version = version,
+    });
+    c_shared.linkLibC();
+    b.installArtifact(c_shared);
+
+    b.getInstallStep().dependOn(
+        &b.addInstallHeaderFile(b.path("include/moonquakes.h"), "moonquakes.h").step,
+    );
 
     const clean_step = b.step("clean", "Clean build artifacts");
     const rm_zig_out = b.addRemoveDirTree(b.path("zig-out"));

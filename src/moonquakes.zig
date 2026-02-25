@@ -29,6 +29,7 @@ pub const RunOptions = launcher.RunOptions;
 
 // Core types for embedding
 pub const VM = @import("vm/vm.zig").VM;
+pub const Runtime = @import("runtime/runtime.zig").Runtime;
 pub const GC = @import("runtime/gc/gc.zig").GC;
 pub const Mnemonics = @import("vm/mnemonics.zig");
 pub const ReturnValue = @import("vm/execution.zig").ReturnValue;
