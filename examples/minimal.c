@@ -12,6 +12,12 @@ int main(void) {
 
     printf("State created successfully.\n");
 
+    printf("Initial stack top: %d\n", mq_gettop(L));
+    mq_settop(L, 2);
+    printf("After mq_settop(L, 2): %d\n", mq_gettop(L));
+    mq_settop(L, 0);
+    printf("After mq_settop(L, 0): %d\n", mq_gettop(L));
+
     mq_gc_collect(L);
     printf("GC collected successfully.\n");
 
