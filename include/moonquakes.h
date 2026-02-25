@@ -5,7 +5,7 @@
  * Written with clarity, structural boundaries, and explicit ownership
  * as primary design goals.
  *
- * This header defines the stable C interface between host programs and
+ * This header defines the public C interface between host programs and
  * the Moonquakes runtime.
  *
  * Moonquakes 0.1.1 - An interpretation of Lua.
@@ -17,26 +17,24 @@
 #define MOONQUAKES_H
 
 #ifdef __cplusplus
-extern "C"
-{
+extern "C" {
 #endif
 
-    // C API constants (Lua 5.4 compatible)
-    enum
-    {
-        MQ_OK = 0,
-        MQ_YIELD = 1,
-        MQ_ERRRUN = 2,
-        MQ_ERRSYNTAX = 3,
-        MQ_ERRMEM = 4,
-        MQ_ERRERR = 5,
-        MQ_ERRFILE = 6,
-    };
+// C API constants (Lua 5.4 compatible)
+enum {
+    MQ_OK = 0,
+    MQ_YIELD = 1,
+    MQ_ERRRUN = 2,
+    MQ_ERRSYNTAX = 3,
+    MQ_ERRMEM = 4,
+    MQ_ERRERR = 5,
+    MQ_ERRFILE = 6,
+};
 
-    typedef struct mq_State mq_State;
+typedef struct mq_State mq_State;
 
-    mq_State* mq_newstate(void);
-    void mq_close(mq_State* L);
+mq_State* mq_newstate(void);
+void mq_close(mq_State* L);
 
 #ifdef __cplusplus
 }

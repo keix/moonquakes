@@ -1,72 +1,51 @@
 # Moonquakes - Minimal C ABI build
 #
 # Builds:
-#   - libmoonquakes.a
-#   - libmoonquakes.so.0.1.0 (shared library)
+#   - Zig C API libraries via `zig build`
 #   - minimal example executable
 #
 # Runtime is implemented in Zig.
 # This Makefile provides a minimal C ABI smoke test.
 #
 # Run example:
-#   LD_LIBRARY_PATH=build/lib ./build/bin/minimal
+#   LD_LIBRARY_PATH=zig-out/lib ./build/bin/minimal
 
 CC      = cc
 AR      = ar
 
 CFLAGS  = -Wall -Wextra -O2 -fPIC -Iinclude
-LDFLAGS = -shared
-
-VERSION = 0.1.0
-SOMAJOR = 0
 
 BUILD   = build
-LIBDIR  = $(BUILD)/lib
 BINDIR  = $(BUILD)/bin
 
-STATIC  = $(LIBDIR)/libmoonquakes.a
-SHARED  = $(LIBDIR)/libmoonquakes.so.$(VERSION)
-SONAME  = libmoonquakes.so.$(SOMAJOR)
+ZIG_LIBDIR = zig-out/lib
+STATIC  = $(ZIG_LIBDIR)/libmoonquakes.a
+SHARED  = $(ZIG_LIBDIR)/libmoonquakes.so
 
 TARGET  = $(BINDIR)/minimal
 
-C_SRC   = src/api/c/moonquakes.c
-C_OBJ   = $(BUILD)/moonquakes.o
-
-all: $(STATIC) $(SHARED) $(TARGET)
+all: $(TARGET)
 
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(LIBDIR):
-	mkdir -p $(LIBDIR)
-
 $(BINDIR):
 	mkdir -p $(BINDIR)
 
-# Compile position-independent object
+# Build Zig libraries
 
-$(C_OBJ): $(C_SRC) | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-# Static library
-
-$(STATIC): $(C_OBJ) | $(LIBDIR)
-	$(AR) rcs $@ $^
-
-# Shared library with SONAME
-
-$(SHARED): $(C_OBJ) | $(LIBDIR)
-	$(CC) $(LDFLAGS) -Wl,-soname,$(SONAME) -o $@ $^
-	ln -sf libmoonquakes.so.$(VERSION) $(LIBDIR)/$(SONAME)
-	ln -sf $(SONAME) $(LIBDIR)/libmoonquakes.so
+zig-libs:
+	zig build -Doptimize=ReleaseFast
 
 # Example executable (links against shared library)
 
-$(TARGET): examples/minimal.c $(SHARED) | $(BINDIR)
-	$(CC) examples/minimal.c -Iinclude -L$(LIBDIR) -lmoonquakes -o $@
+$(TARGET): examples/minimal.c zig-libs | $(BINDIR)
+	$(CC) examples/minimal.c -Iinclude -L$(ZIG_LIBDIR) -lmoonquakes -o $@
 
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all clean
+.PHONY: all clean zig-libs run
+
+run: $(TARGET)
+	LD_LIBRARY_PATH=$(ZIG_LIBDIR) ./$(TARGET)
