@@ -53,7 +53,6 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 }
 
 /// type(v) - Returns the type of its only argument, coded as a string
-/// If the value is a table with __name metamethod, returns that value instead
 pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
@@ -65,15 +64,13 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     const arg = vm.stack[vm.base + func_reg + 1];
 
-    // Check for __name metamethod on tables
+    // Moonquakes represents file handles as tables internally; present them as userdata.
     if (arg.asTable()) |table| {
-        if (table.metatable) |mt| {
-            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
-                if (name_val.asString()) |name_str| {
-                    vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
-                    return;
-                }
-            }
+        const closed_key = try vm.gc().allocString("_closed");
+        if (table.get(TValue.fromString(closed_key)) != null) {
+            const type_name = try vm.gc().allocString("userdata");
+            vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
+            return;
         }
     }
 

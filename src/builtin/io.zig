@@ -2,6 +2,7 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
+const GC = @import("../runtime/gc/gc.zig").GC;
 
 /// Lua 5.4 Input and Output Library
 /// Corresponds to Lua manual chapter "Input and Output Facilities"
@@ -19,7 +20,149 @@ const FILE_STDIO_KEY = "_stdio"; // "stdin", "stdout", or "stderr"
 // Keys for io table default handles
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
 const IO_DEFAULT_OUTPUT_KEY = "_defaultOutput";
+
+pub fn initStdioHandles(io_table: *TableObject, gc: *GC) !void {
+    const stdin_handle = try createStdioHandleInit(gc, "stdin");
+    const stdout_handle = try createStdioHandleInit(gc, "stdout");
+    const stderr_handle = try createStdioHandleInit(gc, "stderr");
+
+    const stdin_key = try gc.allocString("stdin");
+    const stdout_key = try gc.allocString("stdout");
+    const stderr_key = try gc.allocString("stderr");
+    const default_input_key = try gc.allocString(IO_DEFAULT_INPUT_KEY);
+    const default_output_key = try gc.allocString(IO_DEFAULT_OUTPUT_KEY);
+
+    try io_table.set(TValue.fromString(stdin_key), TValue.fromTable(stdin_handle));
+    try io_table.set(TValue.fromString(stdout_key), TValue.fromTable(stdout_handle));
+    try io_table.set(TValue.fromString(stderr_key), TValue.fromTable(stderr_handle));
+    try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(stdin_handle));
+    try io_table.set(TValue.fromString(default_output_key), TValue.fromTable(stdout_handle));
+}
+
+fn createFileMetatableInit(gc: *GC) !*TableObject {
+    const mt = try gc.allocTable();
+    const index_table = try gc.allocTable();
+
+    try mt.set(TValue.fromString(gc.mm_keys.get(.index)), TValue.fromTable(index_table));
+    try mt.set(TValue.fromString(gc.mm_keys.get(.name)), TValue.fromString(try gc.allocString("FILE*")));
+
+    const read_nc = try gc.allocNativeClosure(.{ .id = .file_read });
+    const read_key = try gc.allocString("read");
+    try index_table.set(TValue.fromString(read_key), TValue.fromNativeClosure(read_nc));
+
+    const close_nc = try gc.allocNativeClosure(.{ .id = .file_close });
+    const close_key = try gc.allocString("close");
+    try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(gc.mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
+
+    const write_nc = try gc.allocNativeClosure(.{ .id = .file_write });
+    const write_key = try gc.allocString("write");
+    try index_table.set(TValue.fromString(write_key), TValue.fromNativeClosure(write_nc));
+
+    const lines_nc = try gc.allocNativeClosure(.{ .id = .file_lines });
+    const lines_key = try gc.allocString("lines");
+    try index_table.set(TValue.fromString(lines_key), TValue.fromNativeClosure(lines_nc));
+
+    const flush_nc = try gc.allocNativeClosure(.{ .id = .file_flush });
+    const flush_key = try gc.allocString("flush");
+    try index_table.set(TValue.fromString(flush_key), TValue.fromNativeClosure(flush_nc));
+
+    const seek_nc = try gc.allocNativeClosure(.{ .id = .file_seek });
+    const seek_key = try gc.allocString("seek");
+    try index_table.set(TValue.fromString(seek_key), TValue.fromNativeClosure(seek_nc));
+
+    const setvbuf_nc = try gc.allocNativeClosure(.{ .id = .file_setvbuf });
+    const setvbuf_key = try gc.allocString("setvbuf");
+    try index_table.set(TValue.fromString(setvbuf_key), TValue.fromNativeClosure(setvbuf_nc));
+
+    return mt;
+}
+
+fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
+    const file_table = try gc.allocTable();
+
+    const stdio_key = try gc.allocString(FILE_STDIO_KEY);
+    const stdio_str = try gc.allocString(stdio_type);
+    try file_table.set(TValue.fromString(stdio_key), TValue.fromString(stdio_str));
+
+    const output_key = try gc.allocString(FILE_OUTPUT_KEY);
+    const empty_str = try gc.allocString("");
+    try file_table.set(TValue.fromString(output_key), TValue.fromString(empty_str));
+
+    const closed_key = try gc.allocString(FILE_CLOSED_KEY);
+    try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
+
+    const mode_key = try gc.allocString(FILE_MODE_KEY);
+    const mode_str = try gc.allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
+    try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+    const pos_key = try gc.allocString(FILE_POS_KEY);
+    try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+
+    file_table.metatable = try createFileMetatableInit(gc);
+    return file_table;
+}
+
+fn isValidOpenMode(mode: []const u8) bool {
+    if (mode.len == 0) return false;
+    if (mode[0] != 'r' and mode[0] != 'w' and mode[0] != 'a') return false;
+    if (mode.len == 1) return true;
+    if (std.mem.eql(u8, mode[1..], "b")) return true;
+    if (std.mem.eql(u8, mode[1..], "+")) return true;
+    if (std.mem.eql(u8, mode[1..], "+b")) return true;
+    return false;
+}
+
+fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key)) != null) return;
+
+    const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+    if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
+        if (closed_val.toBoolean()) return;
+    }
+
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    const mode_val = file_table.get(TValue.fromString(mode_key)) orelse return;
+    const mode_str = mode_val.asString() orelse return;
+    const mode = mode_str.asSlice();
+    if (mode.len == 0 or (mode[0] != 'w' and mode[0] != 'a')) return;
+
+    const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+    const fn_val = file_table.get(TValue.fromString(filename_key)) orelse return;
+    const fn_str = fn_val.asString() orelse return;
+    const filename = fn_str.asSlice();
+
+    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+    const out_val = file_table.get(TValue.fromString(output_key)) orelse return;
+    const out_str = out_val.asString() orelse return;
+
+    const file = std.fs.cwd().createFile(filename, .{}) catch return;
+    defer file.close();
+    file.writeAll(out_str.asSlice()) catch {};
+}
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // If a default output file handle exists, delegate to file:write(self, ...)
+    const io_key = try vm.gc().allocString("io");
+    if (vm.globals().get(TValue.fromString(io_key))) |io_val| {
+        if (io_val.asTable()) |io_table| {
+            const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
+            if (io_table.get(TValue.fromString(default_output_key))) |out_val| {
+                if (out_val.asTable() != null) {
+                    vm.reserveSlots(func_reg, nargs + 3);
+                    var i: i64 = @intCast(nargs);
+                    while (i > 0) : (i -= 1) {
+                        const src = func_reg + @as(u32, @intCast(i));
+                        const dst = func_reg + @as(u32, @intCast(i)) + 1;
+                        vm.stack[vm.base + dst] = vm.stack[vm.base + src];
+                    }
+                    vm.stack[vm.base + func_reg + 1] = out_val;
+                    return nativeFileWrite(vm, func_reg, nargs + 1, nresults);
+                }
+            }
+        }
+    }
+
     const string = @import("string.zig");
     var stdout_writer = std.fs.File.stdout().writer(&.{});
     const stdout = &stdout_writer.interface;
@@ -52,8 +195,17 @@ pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Restore original top
     vm.top = saved_top;
 
-    // Set result (io.write returns file object, but we return nil for simplicity)
+    // io.write returns the current default output file
     if (nresults > 0) {
+        if (vm.globals().get(TValue.fromString(io_key))) |io_val| {
+            if (io_val.asTable()) |io_table| {
+                const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
+                if (io_table.get(TValue.fromString(default_output_key))) |out_val| {
+                    vm.stack[vm.base + func_reg] = out_val;
+                    return;
+                }
+            }
+        }
         vm.stack[vm.base + func_reg] = .nil;
     }
 }
@@ -95,6 +247,13 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             return;
         };
+    }
+
+    // Standard files cannot be closed in Lua
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key)) != null) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
     }
 
     // Check if already closed
@@ -245,14 +404,12 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
         // Open the file for reading
         const file = std.fs.cwd().openFile(filename, .{}) catch {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
+            return vm.raiseString("cannot open file");
         };
         defer file.close();
 
         const content = file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024) catch {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
+            return vm.raiseString("cannot read file");
         };
         defer vm.gc().allocator.free(content);
 
@@ -489,13 +646,8 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     // Parse mode - first char determines primary mode
-    if (mode.len == 0) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("invalid mode");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
+    if (!isValidOpenMode(mode)) {
+        return vm.raiseString("invalid mode");
     }
 
     const primary_mode = mode[0];
@@ -509,6 +661,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot open file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
             return;
         };
         defer file.close();
@@ -520,6 +673,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot read file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
             return;
         };
         defer vm.gc().allocator.free(content);
@@ -563,6 +717,18 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Handle write mode ("w" - truncate or create)
     if (primary_mode == 'w') {
+        // Validate path and apply truncation semantics at open time
+        const probe_file = std.fs.cwd().createFile(filename, .{}) catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("cannot open file");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            return;
+        };
+        probe_file.close();
+
         // Create file handle table with empty buffer
         const file_table = try vm.gc().allocTable();
         vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
@@ -661,11 +827,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     // Unknown mode
-    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-    if (nresults > 1) {
-        const err_str = try vm.gc().allocString("invalid mode");
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-    }
+    return vm.raiseString("invalid mode");
 }
 
 /// io.output([file]) - Sets default output file when called with a file name or handle
@@ -716,6 +878,11 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     // If it's a string, open as filename for writing
     if (arg.asString()) |filename_str| {
         const filename = filename_str.asSlice();
+        if (io_table.get(TValue.fromString(default_output_key))) |old_val| {
+            if (old_val.asTable()) |old_file| {
+                try flushBufferedFileTable(vm, old_file);
+            }
+        }
 
         // Create file handle for writing (similar to io.open with "w" mode)
         const file_table = try vm.gc().allocTable();
@@ -757,6 +924,13 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // If it's a file handle (table), set as default output
     if (arg.asTable()) |file_table| {
+        if (io_table.get(TValue.fromString(default_output_key))) |old_val| {
+            if (old_val.asTable()) |old_file| {
+                if (old_file != file_table) {
+                    try flushBufferedFileTable(vm, old_file);
+                }
+            }
+        }
         try io_table.set(TValue.fromString(default_output_key), TValue.fromTable(file_table));
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
         return;
@@ -928,6 +1102,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
 
     // Both tables protected, safe to set __index
     try mt.set(TValue.fromString(vm.gc().mm_keys.get(.index)), TValue.fromTable(index_table));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.name)), TValue.fromString(try vm.gc().allocString("FILE*")));
 
     // Native closure must be protected before allocating its key string
     const read_nc = try vm.gc().allocNativeClosure(.{ .id = .file_read });
@@ -940,6 +1115,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(close_nc);
     const close_key = try vm.gc().allocString("close");
     try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
 
     // Reuse scratch slot for write method
     const write_nc = try vm.gc().allocNativeClosure(.{ .id = .file_write });
@@ -1199,16 +1375,21 @@ pub fn nativeIoType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 /// For popen handles, returns: true/nil, "exit", exit_code
 pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("got no value");
     }
 
     // Get the file handle table (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
     const file_table = self_arg.asTable() orelse {
+        return vm.raiseString("got no value");
+    };
+
+    // Standard files cannot be closed in Lua
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key)) != null) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
-    };
+    }
 
     // Check if already closed
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -1479,6 +1660,22 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
+    // Standard input is not seekable
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key))) |stdio_val| {
+        if (stdio_val.asString()) |stdio_str| {
+            if (std.mem.eql(u8, stdio_str.asSlice(), "stdin")) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("not seekable");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                return;
+            }
+        }
+    }
+
     // Check if closed
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
@@ -1592,6 +1789,22 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
+
+    // Standard input is not seekable
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key))) |stdio_val| {
+        if (stdio_val.asString()) |stdio_str| {
+            if (std.mem.eql(u8, stdio_str.asSlice(), "stdin")) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("not seekable");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                return;
+            }
+        }
+    }
 
     // Check if closed
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -1755,16 +1968,22 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     else
         "";
 
-    // Build new content by appending all arguments
-    var new_content = std.ArrayList(u8).initCapacity(vm.gc().allocator, current_output.len + 256) catch {
+    // Get current position (writes happen at current position, not always append)
+    const pos_key = try vm.gc().allocString(FILE_POS_KEY);
+    var current_pos: usize = 0;
+    if (file_table.get(TValue.fromString(pos_key))) |v| {
+        const pos_i = v.toInteger() orelse 0;
+        if (pos_i > 0) current_pos = @intCast(@min(@as(i64, @intCast(current_output.len)), pos_i));
+    }
+
+    // Build write payload (concatenated arguments excluding self)
+    var write_buf = std.ArrayList(u8).initCapacity(vm.gc().allocator, 256) catch {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
-    defer new_content.deinit(vm.gc().allocator);
-    new_content.appendSlice(vm.gc().allocator, current_output) catch {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
+    defer write_buf.deinit(vm.gc().allocator);
+    // Build resulting file content after overwrite at current_pos
+    defer vm.top = vm.top;
 
     const string = @import("string.zig");
     const saved_top = vm.top;
@@ -1774,17 +1993,13 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         const tmp_reg = vm.top;
         vm.top += 2;
 
-        // Copy argument to temporary register
         const arg_reg = func_reg + 1 + i;
         vm.stack[vm.base + tmp_reg + 1] = vm.stack[vm.base + arg_reg];
-
-        // Call tostring
         try string.nativeToString(vm, tmp_reg, 1, 1);
 
-        // Get the string result
         const result = vm.stack[vm.base + tmp_reg];
         if (result.asString()) |str_val| {
-            try new_content.appendSlice(vm.gc().allocator, str_val.asSlice());
+            try write_buf.appendSlice(vm.gc().allocator, str_val.asSlice());
         }
 
         vm.top -= 2;
@@ -1792,9 +2007,23 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     vm.top = saved_top;
 
+    const end_pos = current_pos + write_buf.items.len;
+    const final_len = @max(current_output.len, end_pos);
+    var new_content = std.ArrayList(u8).initCapacity(vm.gc().allocator, final_len) catch {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return;
+    };
+    defer new_content.deinit(vm.gc().allocator);
+    try new_content.appendSlice(vm.gc().allocator, current_output[0..current_pos]);
+    try new_content.appendSlice(vm.gc().allocator, write_buf.items);
+    if (end_pos < current_output.len) {
+        try new_content.appendSlice(vm.gc().allocator, current_output[end_pos..]);
+    }
+
     // Store new content
     const new_str = try vm.gc().allocString(new_content.items);
     try file_table.set(TValue.fromString(output_key), TValue.fromString(new_str));
+    try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end_pos) });
 
     // Return the file handle for chaining
     if (nresults > 0) {

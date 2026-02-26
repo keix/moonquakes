@@ -1229,9 +1229,7 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    try self.parseGenericFunctionCall();
-                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
-                    try self.parseIoCall();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -1243,13 +1241,17 @@ pub const Parser = struct {
                     try self.parseFieldAccessOrMethodCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
-                    try self.parseMethodCallStatement();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Lua allows function-call statements whose prefixexp starts with parentheses,
+                // e.g. (Message or print)("...")
+                _ = try self.parseExpr();
             } else {
                 return error.UnsupportedStatement;
             }
@@ -2041,13 +2043,7 @@ pub const Parser = struct {
 
             if (is_call_with_parens or is_call_no_parens) {
                 const result_reg = try self.parseFunctionCallExpr();
-                // Handle chained calls: func()(), func()()(), etc.
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
-                    const arg_count = try self.parseCallArgs(result_reg);
-                    try self.proto.emitCallVararg(result_reg, arg_count, 1);
-                    // result_reg now contains the result of the chained call
-                }
-                return result_reg;
+                return try self.parseSuffixChain(result_reg);
             }
             // Check if it's a variable/parameter (includes loop variables) or upvalue
             const var_name = self.current.lexeme;
@@ -3426,9 +3422,7 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    try self.parseGenericFunctionCall();
-                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
-                    try self.parseIoCall();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -3440,13 +3434,17 @@ pub const Parser = struct {
                     try self.parseFieldAccessOrMethodCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
-                    try self.parseMethodCallStatement();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Lua allows function-call statements whose prefixexp starts with parentheses,
+                // e.g. (Message or print)("...")
+                _ = try self.parseExpr();
             } else {
                 return error.UnsupportedStatement;
             }
@@ -4180,15 +4178,19 @@ pub const Parser = struct {
                     // Could support more chaining here, but for now error
                     return error.UnsupportedStatement;
                 }
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                self.isNoParensArg())
+            {
                 // Function call: t.field(args) - e.g., table.insert(t, v)
                 const field_const = try self.proto.addConstString(field_name);
                 const func_reg = self.proto.allocTemp();
                 try self.proto.emitGETFIELD(func_reg, base_reg, field_const);
 
-                // Parse arguments and emit call
+                // Parse arguments and emit call (keep 1 result so chained suffixes like
+                // io.input():close() can continue in statement context)
                 const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                _ = try self.parseSuffixChain(func_reg);
                 return;
             } else {
                 // Unknown pattern after field access

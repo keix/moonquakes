@@ -427,9 +427,10 @@ fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
                 const nc = object.getObject(NativeClosureObject, mm.object);
                 // Set up arguments for native call
                 const temp = vm.top;
-                vm.stack[temp] = val;
-                vm.stack[temp + 1] = .nil;
-                vm.top = temp + 2;
+                vm.stack[temp] = mm;
+                vm.stack[temp + 1] = val;
+                vm.stack[temp + 2] = .nil;
+                vm.top = temp + 3;
                 try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0);
             }
             vm.top = saved_top;

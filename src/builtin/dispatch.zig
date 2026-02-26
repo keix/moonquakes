@@ -151,6 +151,7 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(io_table, gc, "read", .io_read);
     try registerNative(io_table, gc, "tmpfile", .io_tmpfile);
     try registerNative(io_table, gc, "type", .io_type);
+    try io.initStdioHandles(io_table, gc);
 
     try setStringKey(globals, gc, "io", TValue.fromTable(io_table));
 }
