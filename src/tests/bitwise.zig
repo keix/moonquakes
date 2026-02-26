@@ -361,11 +361,11 @@ test "SHR: shift right basic" {
     try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 16 >> 2 = 4
 }
 
-test "SHR: arithmetic shift with negative number" {
+test "SHR: logical shift with negative number" {
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = -16
         Instruction.initABx(.LOADK, 1, 1), // R1 = 2
-        Instruction.initABC(.SHR, 2, 0, 1), // R2 = R0 >> R1 (arithmetic shift)
+        Instruction.initABC(.SHR, 2, 0, 1), // R2 = R0 >> R1 (logical shift, Lua 5.4)
         Instruction.initABC(.RETURN, 2, 2, 0),
     };
 
@@ -381,7 +381,7 @@ test "SHR: arithmetic shift with negative number" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = -4 }); // -16 >> 2 = -4 (sign preserved)
+    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4611686018427387900 }); // 0xffff...fff0 >> 2 = 0x3fff...fffc
 }
 
 test "SHLI: shift left immediate" {
