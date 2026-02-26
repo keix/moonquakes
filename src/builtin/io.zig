@@ -158,6 +158,129 @@ fn parseLuaNumberToken(str: []const u8) ?TValue {
     return null;
 }
 
+fn tryHandleMultiRead(
+    vm: anytype,
+    file_table: *TableObject,
+    func_reg: u32,
+    fmt_arg_count: u32,
+    nresults: u32,
+    fmt_arg_start: u32,
+    fmt_count: u32,
+    content: []const u8,
+) !bool {
+    const pos_key = try vm.gc().allocString(FILE_POS_KEY);
+    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue{ .integer = 0 };
+    const pos_i64 = pos_val.toInteger() orelse 0;
+    const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
+
+    const use_multi_read = blk: {
+        if (fmt_count != 1) break :blk true;
+        if (fmt_arg_count == 0 or fmt_arg_start >= vm.top) break :blk true;
+        const fmt0 = vm.stack[fmt_arg_start].asString() orelse break :blk true;
+        const f = fmt0.asSlice();
+        break :blk std.mem.eql(u8, f, "n") or std.mem.eql(u8, f, "*n");
+    };
+    if (!use_multi_read) return false;
+
+    var cur_pos: usize = pos;
+    var out_idx: u32 = 0;
+    while (out_idx < fmt_count) : (out_idx += 1) {
+        const fmt_val: TValue = if (fmt_arg_count > 0 and out_idx < fmt_arg_count and fmt_arg_start + out_idx < vm.top)
+            vm.stack[fmt_arg_start + out_idx]
+        else
+            TValue.fromString(try vm.gc().allocString("*l"));
+
+        if (fmt_val.toInteger()) |count_i| {
+            if (count_i < 0) {
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                break;
+            }
+            const count: usize = @intCast(count_i);
+            if (count == 0) {
+                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(""));
+                continue;
+            }
+            if (cur_pos >= content.len) {
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                break;
+            }
+            const end = @min(content.len, cur_pos + count);
+            vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..end]));
+            cur_pos = end;
+            continue;
+        }
+
+        const fmt_obj = fmt_val.asString() orelse {
+            vm.stack[vm.base + func_reg + out_idx] = .nil;
+            break;
+        };
+        const fmt = fmt_obj.asSlice();
+
+        if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
+            vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..]));
+            cur_pos = content.len;
+            continue;
+        }
+
+        if (std.mem.eql(u8, fmt, "*l") or std.mem.eql(u8, fmt, "l") or
+            std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L"))
+        {
+            const keep_nl = std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L");
+            if (cur_pos >= content.len) {
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                break;
+            }
+            var end = cur_pos;
+            while (end < content.len and content[end] != '\n') : (end += 1) {}
+            const line_end = if (keep_nl and end < content.len) end + 1 else end;
+            vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..line_end]));
+            cur_pos = if (end < content.len) end + 1 else end;
+            continue;
+        }
+
+        if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
+            while (cur_pos < content.len and std.ascii.isWhitespace(content[cur_pos])) : (cur_pos += 1) {}
+            if (cur_pos >= content.len) {
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                break;
+            }
+            var end = cur_pos;
+            while (end < content.len) : (end += 1) {
+                const c = content[end];
+                if (std.ascii.isWhitespace(c)) break;
+                if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') break;
+            }
+            var parse_end = end;
+            var parsed = false;
+            while (parse_end > cur_pos) : (parse_end -= 1) {
+                if (parseLuaNumberToken(content[cur_pos..parse_end])) |num| {
+                    vm.stack[vm.base + func_reg + out_idx] = num;
+                    cur_pos = parse_end;
+                    parsed = true;
+                    break;
+                }
+            }
+            if (parsed) continue;
+            vm.stack[vm.base + func_reg + out_idx] = .nil;
+            break;
+        }
+
+        vm.stack[vm.base + func_reg + out_idx] = .nil;
+        break;
+    }
+
+    const clear_upto: u32 = @max(nresults, fmt_count + 1);
+    if (clear_upto > fmt_count) {
+        var fill = fmt_count;
+        while (fill < clear_upto) : (fill += 1) {
+            vm.stack[vm.base + func_reg + fill] = .nil;
+        }
+    }
+
+    try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+    return true;
+}
+
 fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
     const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
     if (file_table.get(TValue.fromString(stdio_key)) != null) return;
@@ -1266,115 +1389,16 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     const pos_i64 = pos_val.toInteger() orelse 0;
     const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
 
-    // General path: support multiple read formats and numeric byte counts.
-    const use_multi_read = blk: {
-        if (nargs != 2) break :blk true;
-        const fmt0 = vm.stack[vm.base + func_reg + 2].asString() orelse break :blk true;
-        const f = fmt0.asSlice();
-        break :blk std.mem.eql(u8, f, "n") or std.mem.eql(u8, f, "*n");
-    };
-    if (use_multi_read) {
-        var cur_pos: usize = pos;
-        const fmt_count: u32 = if (nargs > 1) nargs - 1 else 1;
-        var out_idx: u32 = 0;
-        while (out_idx < fmt_count) : (out_idx += 1) {
-            const fmt_val: TValue = if (nargs > 1)
-                vm.stack[vm.base + func_reg + 2 + out_idx]
-            else
-                TValue.fromString(try vm.gc().allocString("*l"));
-
-            // Integer byte count format
-            if (fmt_val.toInteger()) |count_i| {
-                if (count_i < 0) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                const count: usize = @intCast(count_i);
-                if (count == 0) {
-                    const empty_str = try vm.gc().allocString("");
-                    vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(empty_str);
-                    continue;
-                }
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                const end = @min(content.len, cur_pos + count);
-                const s = try vm.gc().allocString(content[cur_pos..end]);
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(s);
-                cur_pos = end;
-                continue;
-            }
-
-            const fmt_obj = fmt_val.asString() orelse {
-                vm.stack[vm.base + func_reg + out_idx] = .nil;
-                break;
-            };
-            const fmt = fmt_obj.asSlice();
-
-            if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
-                const remaining = content[cur_pos..];
-                const s = try vm.gc().allocString(remaining);
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(s);
-                cur_pos = content.len;
-                continue;
-            }
-            if (std.mem.eql(u8, fmt, "*l") or std.mem.eql(u8, fmt, "l") or
-                std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L"))
-            {
-                const keep_nl = std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L");
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                var end = cur_pos;
-                while (end < content.len and content[end] != '\n') : (end += 1) {}
-                const line_end = if (keep_nl and end < content.len) end + 1 else end;
-                const s = try vm.gc().allocString(content[cur_pos..line_end]);
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(s);
-                cur_pos = if (end < content.len) end + 1 else end;
-                continue;
-            }
-            if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
-                while (cur_pos < content.len and std.ascii.isWhitespace(content[cur_pos])) : (cur_pos += 1) {}
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                var end = cur_pos;
-                while (end < content.len) : (end += 1) {
-                    const c = content[end];
-                    if (std.ascii.isWhitespace(c)) break;
-                    if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') break;
-                }
-                var parse_end = end;
-                var parsed = false;
-                while (parse_end > cur_pos) : (parse_end -= 1) {
-                    if (parseLuaNumberToken(content[cur_pos..parse_end])) |num| {
-                        vm.stack[vm.base + func_reg + out_idx] = num;
-                        cur_pos = parse_end;
-                        parsed = true;
-                        break;
-                    }
-                }
-                if (parsed) continue;
-                vm.stack[vm.base + func_reg + out_idx] = .nil;
-                break;
-            }
-
-            vm.stack[vm.base + func_reg + out_idx] = .nil;
-            break;
-        }
-
-        const clear_upto: u32 = @max(nresults, fmt_count + 1);
-        if (clear_upto > fmt_count) {
-            var fill = fmt_count;
-            while (fill < clear_upto) : (fill += 1) {
-                vm.stack[vm.base + func_reg + fill] = .nil;
-            }
-        }
-
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+    if (try tryHandleMultiRead(
+        vm,
+        file_table,
+        func_reg,
+        if (nargs > 1) nargs - 1 else 0,
+        nresults,
+        vm.base + func_reg + 2,
+        if (nargs > 1) nargs - 1 else 1,
+        content,
+    )) {
         return;
     }
 
@@ -1853,111 +1877,16 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const pos_i64 = pos_val.toInteger() orelse 0;
     const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
 
-    // Support multiple read formats and numeric byte-count reads for file:read(...)
-    const use_multi_file_read = blk: {
-        if (nargs != 2) break :blk true;
-        const fmt0 = vm.stack[vm.base + func_reg + 2].asString() orelse break :blk true;
-        const f = fmt0.asSlice();
-        break :blk std.mem.eql(u8, f, "n") or std.mem.eql(u8, f, "*n");
-    };
-    if (use_multi_file_read) {
-        var cur_pos: usize = pos;
-        const fmt_count: u32 = if (nargs > 1) nargs - 1 else 1;
-        var out_idx: u32 = 0;
-        while (out_idx < fmt_count) : (out_idx += 1) {
-            const fmt_val: TValue = if (nargs > 1)
-                vm.stack[vm.base + func_reg + 2 + out_idx]
-            else
-                TValue.fromString(try vm.gc().allocString("*l"));
-
-            if (fmt_val.toInteger()) |count_i| {
-                if (count_i < 0) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                const count: usize = @intCast(count_i);
-                if (count == 0) {
-                    vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(""));
-                    continue;
-                }
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                const end = @min(content.len, cur_pos + count);
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..end]));
-                cur_pos = end;
-                continue;
-            }
-
-            const fmt_obj = fmt_val.asString() orelse {
-                vm.stack[vm.base + func_reg + out_idx] = .nil;
-                break;
-            };
-            const fmt = fmt_obj.asSlice();
-
-            if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..]));
-                cur_pos = content.len;
-                continue;
-            }
-
-            if (std.mem.eql(u8, fmt, "*l") or std.mem.eql(u8, fmt, "l") or
-                std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L"))
-            {
-                const keep_nl = std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L");
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                var end = cur_pos;
-                while (end < content.len and content[end] != '\n') : (end += 1) {}
-                const line_end = if (keep_nl and end < content.len) end + 1 else end;
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..line_end]));
-                cur_pos = if (end < content.len) end + 1 else end;
-                continue;
-            }
-
-            if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
-                while (cur_pos < content.len and std.ascii.isWhitespace(content[cur_pos])) : (cur_pos += 1) {}
-                if (cur_pos >= content.len) {
-                    vm.stack[vm.base + func_reg + out_idx] = .nil;
-                    break;
-                }
-                var end = cur_pos;
-                while (end < content.len) : (end += 1) {
-                    const cch = content[end];
-                    if (std.ascii.isWhitespace(cch)) break;
-                    if (!std.ascii.isAlphanumeric(cch) and cch != '+' and cch != '-' and cch != '.') break;
-                }
-                var parse_end = end;
-                var parsed = false;
-                while (parse_end > cur_pos) : (parse_end -= 1) {
-                    if (parseLuaNumberToken(content[cur_pos..parse_end])) |num| {
-                        vm.stack[vm.base + func_reg + out_idx] = num;
-                        cur_pos = parse_end;
-                        parsed = true;
-                        break;
-                    }
-                }
-                if (parsed) continue;
-                vm.stack[vm.base + func_reg + out_idx] = .nil;
-                break;
-            }
-
-            vm.stack[vm.base + func_reg + out_idx] = .nil;
-            break;
-        }
-
-        const clear_upto: u32 = @max(nresults, fmt_count + 1);
-        if (clear_upto > fmt_count) {
-            var fill = fmt_count;
-            while (fill < clear_upto) : (fill += 1) {
-                vm.stack[vm.base + func_reg + fill] = .nil;
-            }
-        }
-
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+    if (try tryHandleMultiRead(
+        vm,
+        file_table,
+        func_reg,
+        if (nargs > 1) nargs - 1 else 0,
+        nresults,
+        vm.base + func_reg + 2,
+        if (nargs > 1) nargs - 1 else 1,
+        content,
+    )) {
         return;
     }
 

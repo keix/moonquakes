@@ -5,7 +5,6 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
-const global = @import("global.zig");
 
 // Lua 5.4 Coroutine Library
 // Reference: https://www.lua.org/manual/5.4/manual.html#2.6
@@ -451,24 +450,6 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         }
         if (is_lua_body) {
             try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
-        } else {
-            const nc = object.getObject(object.NativeClosureObject, co_vm.stack[0].object);
-            if (nc.func.id == .dofile) {
-                if (num_args < 1) {
-                    return vm.raiseString("dofile: stdin not supported");
-                }
-                // Convert dofile(filename) into a Lua closure body via loadfile(filename)
-                co_vm.stack[1] = vm.stack[arg_base];
-                co_vm.top = 2;
-                try global.nativeLoadfile(co_vm, 0, 1, 2);
-                if (co_vm.stack[0].asClosure() == null) {
-                    if (co_vm.stack[1].asString()) |err_str| return vm.raise(TValue.fromString(err_str));
-                    return vm.raiseString("cannot load file");
-                }
-                try setupFirstResume(co_vm, &vm.stack, arg_base, 0);
-            } else {
-                return vm.raiseString("coroutine body must be a Lua function");
-            }
         }
     } else {
         // Resume after yield
