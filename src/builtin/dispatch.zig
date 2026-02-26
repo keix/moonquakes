@@ -7,6 +7,7 @@ const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const TValue = @import("../runtime/value.zig").TValue;
 const GC = @import("../runtime/gc/gc.zig").GC;
 const ver = @import("../version.zig");
+const pipeline = @import("../compiler/pipeline.zig");
 
 // Builtin library modules - organized by Lua manual chapters
 const string = @import("string.zig");
@@ -33,6 +34,46 @@ fn setStringKey(tbl: *TableObject, gc: *GC, name: []const u8, value: TValue) !vo
 fn registerNative(tbl: *TableObject, gc: *GC, name: []const u8, id: NativeFnId) !void {
     const nc = try gc.allocNativeClosure(.{ .id = id });
     try setStringKey(tbl, gc, name, TValue.fromNativeClosure(nc));
+}
+
+fn registerLuaDofileWrapper(globals: *TableObject, gc: *GC) !void {
+    const source =
+        \\return function (filename)
+        \\  if filename == nil then
+        \\    error("dofile: stdin not supported")
+        \\  end
+        \\  local f, msg = loadfile(filename)
+        \\  if not f then
+        \\    error(msg)
+        \\  end
+        \\  return f()
+        \\end
+    ;
+
+    const compile_result = pipeline.compile(gc.allocator, source, .{ .source_name = "=(dofile)" });
+    switch (compile_result) {
+        .err => |e| {
+            defer e.deinit(gc.allocator);
+            return error.InvalidBuiltinDefinition;
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
+    defer pipeline.freeRawProto(gc.allocator, raw_proto);
+
+    gc.inhibitGC();
+    defer gc.allowGC();
+
+    const proto = pipeline.materialize(&raw_proto, gc, gc.allocator) catch {
+        return error.InvalidBuiltinDefinition;
+    };
+    if (proto.protos.len < 1) return error.InvalidBuiltinDefinition;
+    const closure = try gc.allocClosure(proto.protos[0]);
+    if (closure.upvalues.len > 0) {
+        const env_upval = try gc.allocClosedUpvalue(TValue.fromTable(globals));
+        closure.upvalues[0] = env_upval;
+    }
+    try setStringKey(globals, gc, "dofile", TValue.fromClosure(closure));
 }
 
 /// Initialize the global environment with all Lua standard libraries
@@ -95,7 +136,7 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
     try registerNative(globals, gc, "tonumber", .tonumber);
     try registerNative(globals, gc, "load", .load);
     try registerNative(globals, gc, "loadfile", .loadfile);
-    try registerNative(globals, gc, "dofile", .dofile);
+    try registerLuaDofileWrapper(globals, gc);
     try registerNative(globals, gc, "warn", .warn);
 
     // _G and _ENV are self-references to the globals table itself
