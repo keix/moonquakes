@@ -75,6 +75,12 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     markCallFrames(vm, gc_ptr);
     markUpvalues(vm, gc_ptr);
     gc_ptr.markValue(vm.lua_error_value);
+    if (vm.last_field_key) |key| {
+        gc_ptr.mark(&key.header);
+    }
+    if (vm.int_repr_field_key) |key| {
+        gc_ptr.mark(&key.header);
+    }
     markHooks(vm, gc_ptr);
     markTempRoots(vm, gc_ptr);
 }

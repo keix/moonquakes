@@ -11,15 +11,32 @@ const VM = @import("../vm/vm.zig").VM;
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.4
 /// Format number to string using stack buffer (no allocation)
 fn formatNumber(buf: []u8, n: f64) []const u8 {
-    // Handle integers that fit in i64 range and have no fractional part
-    const min_i64: f64 = @floatFromInt(std.math.minInt(i64));
-    const max_i64: f64 = @floatFromInt(std.math.maxInt(i64));
-    if (n == @floor(n) and n >= min_i64 and n <= max_i64) {
-        const int_val: i64 = @intFromFloat(n);
-        return std.fmt.bufPrint(buf, "{d}", .{int_val}) catch buf[0..0];
+    // Handle integers that have no fractional part and round-trip to i64
+    if (n == @floor(n)) {
+        if (floatToIntExact(n)) |int_val| {
+            return std.fmt.bufPrint(buf, "{d}", .{int_val}) catch buf[0..0];
+        }
     }
     // Handle floating point numbers
     return std.fmt.bufPrint(buf, "{}", .{n}) catch buf[0..0];
+}
+
+fn floatToIntExact(n: f64) ?i64 {
+    if (!std.math.isFinite(n)) return null;
+    const max_i = std.math.maxInt(i64);
+    const min_i = std.math.minInt(i64);
+    const max_f = @as(f64, @floatFromInt(max_i));
+    const min_f = @as(f64, @floatFromInt(min_i));
+    if (n < min_f or n > max_f) return null;
+    if (!intFitsFloat(max_i) and n >= max_f) return null;
+    const int_val: i64 = @intFromFloat(n);
+    if (@as(f64, @floatFromInt(int_val)) != n) return null;
+    return int_val;
+}
+
+fn intFitsFloat(i: i64) bool {
+    const max_exact: i64 = @as(i64, 1) << 53;
+    return i >= -max_exact and i <= max_exact;
 }
 
 /// Format integer to string using stack buffer (no allocation)
@@ -413,22 +430,63 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         return;
     }
 
-    // Search for pattern (plain text search)
-    if (std.mem.indexOf(u8, str[init..], pattern)) |pos| {
-        const start: i64 = @intCast(init + pos + 1); // 1-based
-        const end_pos: i64 = start + @as(i64, @intCast(pattern.len)) - 1;
+    // Optional plain flag
+    var plain = false;
+    if (nargs >= 4) {
+        const plain_arg = vm.stack[vm.base + func_reg + 4];
+        plain = plain_arg.toBoolean();
+    }
 
-        // Return start and end positions
-        vm.stack[vm.base + func_reg] = .{ .integer = start };
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+    if (plain) {
+        if (std.mem.indexOf(u8, str[init..], pattern)) |pos| {
+            const start: i64 = @intCast(init + pos + 1); // 1-based
+            const end_pos: i64 = start + @as(i64, @intCast(pattern.len)) - 1;
+
+            vm.stack[vm.base + func_reg] = .{ .integer = start };
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+            }
+        } else {
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = .nil;
+            }
         }
-    } else {
-        // Not found
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = .nil;
+        return;
+    }
+
+    // Pattern match search
+    var matcher = PatternMatcher.init(pattern, str, init);
+    var match_start: usize = init;
+    while (match_start <= str.len) : (match_start += 1) {
+        matcher.reset(match_start);
+        if (matcher.match()) {
+            const start: i64 = @intCast(matcher.match_start + 1); // 1-based
+            const end_pos: i64 = @intCast(matcher.match_end);
+
+            vm.stack[vm.base + func_reg] = .{ .integer = start };
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+            }
+
+            if (matcher.capture_count > 0 and nresults > 2) {
+                var i: u32 = 0;
+                var out: u32 = 2;
+                while (i < matcher.capture_count and out < nresults) : (i += 1) {
+                    const cap = matcher.captures[i];
+                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
+                    vm.stack[vm.base + func_reg + out] = TValue.fromString(cap_str);
+                    out += 1;
+                }
+            }
+            return;
         }
+        if (pattern.len > 0 and pattern[0] == '^') break;
+    }
+
+    vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = .nil;
     }
 }
 

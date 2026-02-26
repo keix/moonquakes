@@ -237,16 +237,42 @@ pub const TValue = union(enum) {
     }
 
     pub fn eql(a: TValue, b: TValue) bool {
+        const floatToIntExact = struct {
+            fn convert(n: f64) ?i64 {
+                if (!std.math.isFinite(n)) return null;
+                if (n != @floor(n)) return null;
+                const max_i = std.math.maxInt(i64);
+                const min_i = std.math.minInt(i64);
+                const max_f: f64 = @floatFromInt(max_i);
+                const min_f: f64 = @floatFromInt(min_i);
+                if (n < min_f or n > max_f) return null;
+                if (!intFitsFloat(max_i) and n >= max_f) return null;
+                const i: i64 = @intFromFloat(n);
+                if (@as(f64, @floatFromInt(i)) != n) return null;
+                return i;
+            }
+
+            fn intFitsFloat(i: i64) bool {
+                const max_exact: i64 = @as(i64, 1) << 53;
+                return i >= -max_exact and i <= max_exact;
+            }
+        }.convert;
         return switch (a) {
             .nil => b == .nil,
             .boolean => |ab| b == .boolean and ab == b.boolean,
             .integer => |ai| switch (b) {
                 .integer => |bi| ai == bi,
-                .number => |bn| @as(f64, @floatFromInt(ai)) == bn,
+                .number => |bn| blk: {
+                    if (floatToIntExact(bn)) |bi| break :blk ai == bi;
+                    break :blk @as(f64, @floatFromInt(ai)) == bn;
+                },
                 else => false,
             },
             .number => |an| switch (b) {
-                .integer => |bi| an == @as(f64, @floatFromInt(bi)),
+                .integer => |bi| blk: {
+                    if (floatToIntExact(an)) |ai| break :blk ai == bi;
+                    break :blk an == @as(f64, @floatFromInt(bi));
+                },
                 .number => |bn| an == bn,
                 else => false,
             },

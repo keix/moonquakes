@@ -248,6 +248,9 @@ fn runUntilReturn(
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.ArithmeticError or
+                err == error.DivideByZero or
+                err == error.ModuloByZero or
+                err == error.IntegerRepresentation or
                 err == error.NotATable or
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
@@ -255,8 +258,18 @@ fn runUntilReturn(
                 err == error.FormatError)
             {
                 // Set error message and try to handle as LuaException
+                var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
                     error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.DivideByZero => "divide by zero",
+                    error.ModuloByZero => "attempt to perform 'n%0'",
+                    error.IntegerRepresentation => blk: {
+                        if (vm.int_repr_field_key) |key| {
+                            vm.int_repr_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "number (field '{s}') has no integer representation", .{key.asSlice()}) catch "number has no integer representation";
+                        }
+                        break :blk "number has no integer representation";
+                    },
                     error.NotATable => "attempt to index a non-table value",
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",

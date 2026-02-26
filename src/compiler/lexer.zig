@@ -43,6 +43,9 @@ pub const Lexer = struct {
 
         if (isAlpha(c) or c == '_') return self.readIdentifier();
         if (isDigit(c)) return self.readNumber();
+        if (c == '.' and self.pos + 1 < self.src.len and isDigit(self.src[self.pos + 1])) {
+            return self.readNumberLeadingDot();
+        }
         if (c == '"' or c == '\'') return self.readString();
         if (c == '[') {
             // Check for long bracket string: [[ or [=[ or [==[ etc.
@@ -150,10 +153,10 @@ pub const Lexer = struct {
                 _ = self.advance();
             }
 
-            // Fractional part (e.g., 3.14)
+            // Fractional part (e.g., 3.14, 3., 3.e2)
             if (self.pos < self.src.len and self.peek() == '.') {
                 // Check next char to distinguish from ".." operator
-                if (self.pos + 1 < self.src.len and isDigit(self.src[self.pos + 1])) {
+                if (self.pos + 1 < self.src.len and self.src[self.pos + 1] != '.') {
                     _ = self.advance(); // consume '.'
                     while (self.pos < self.src.len and isDigit(self.peek())) {
                         _ = self.advance();
@@ -172,6 +175,33 @@ pub const Lexer = struct {
                 while (self.pos < self.src.len and isDigit(self.peek())) {
                     _ = self.advance();
                 }
+            }
+        }
+
+        return .{
+            .kind = .Number,
+            .lexeme = self.src[start..self.pos],
+            .line = start_line,
+        };
+    }
+
+    fn readNumberLeadingDot(self: *Lexer) Token {
+        const start = self.pos;
+        const start_line = self.line;
+
+        _ = self.advance(); // consume '.'
+        while (self.pos < self.src.len and isDigit(self.peek())) {
+            _ = self.advance();
+        }
+
+        // Exponent part (e.g., .2e2, .0E-3)
+        if (self.pos < self.src.len and (self.peek() == 'e' or self.peek() == 'E')) {
+            _ = self.advance(); // consume 'e' or 'E'
+            if (self.pos < self.src.len and (self.peek() == '+' or self.peek() == '-')) {
+                _ = self.advance();
+            }
+            while (self.pos < self.src.len and isDigit(self.peek())) {
+                _ = self.advance();
             }
         }
 

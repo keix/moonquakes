@@ -129,6 +129,11 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     try registerNative(string_table, gc, "packsize", .string_packsize);
 
     try setStringKey(globals, gc, "string", TValue.fromTable(string_table));
+
+    // Set shared string metatable so "str:method(...)" works.
+    const string_mt = try gc.allocTable();
+    try string_mt.set(TValue.fromString(gc.mm_keys.get(.index)), TValue.fromTable(string_table));
+    gc.shared_mt.string = string_mt;
 }
 
 /// IO Library: io.write, io.open, etc. (skeleton implementations)
