@@ -32,7 +32,29 @@ pub fn luaFloorDiv(a: f64, b: f64) f64 {
 }
 
 pub fn luaMod(a: f64, b: f64) f64 {
-    return a - luaFloorDiv(a, b) * b;
+    const r = @rem(a, b);
+    if (!std.math.isFinite(r)) return r;
+    if (r == 0.0) return r;
+    if ((r < 0) != (b < 0)) return r + b;
+    return r;
+}
+
+fn idivInt(a: i64, b: i64) !i64 {
+    if (b == 0) return error.DivideByZero;
+    if (b == -1 and a == std.math.minInt(i64)) {
+        return a; // wrap per two's complement
+    }
+    return @divFloor(a, b);
+}
+
+fn modInt(a: i64, b: i64) !i64 {
+    if (b == 0) return error.ModuloByZero;
+    if (b == -1) return 0;
+    const r = @rem(a, b); // truncating remainder
+    if (r != 0 and ((r < 0) != (b < 0))) {
+        return r + b;
+    }
+    return r;
 }
 
 pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
@@ -42,7 +64,7 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
     const vb = &vm.stack[vm.base + b];
     const vc = &vm.stack[vm.base + c];
 
-    // Try integer arithmetic first for add, sub, mul
+    // Try integer arithmetic first for add, sub, mul, idiv, mod
     // Use wrapping arithmetic per Lua 5.4 semantics (two's complement)
     if (tag == .add or tag == .sub or tag == .mul) {
         if (vb.isInteger() and vc.isInteger()) {
@@ -58,15 +80,33 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
             return;
         }
     }
+    if (tag == .idiv or tag == .mod) {
+        if (vb.isInteger() and vc.isInteger()) {
+            const ib = vb.integer;
+            const ic = vc.integer;
+            const res = if (tag == .idiv)
+                try idivInt(ib, ic)
+            else
+                try modInt(ib, ic);
+            vm.stack[vm.base + a] = .{ .integer = res };
+            return;
+        }
+    }
 
     // Fall back to floating point
     const nb = vb.toNumber() orelse return error.ArithmeticError;
     const nc = vc.toNumber() orelse return error.ArithmeticError;
 
-    // Check for division by zero (only for integer division and modulo)
-    // Regular division returns inf/-inf/nan per IEEE 754
-    if ((tag == .idiv or tag == .mod) and nc == 0) {
-        return error.ArithmeticError;
+    if (tag == .mod) {
+        if (floatToIntExact(nb)) |ib| {
+            if (floatToIntExact(nc)) |ic| {
+                if (ic != 0) {
+                    const res_i = try modInt(ib, ic);
+                    vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(res_i)) };
+                    return;
+                }
+            }
+        }
     }
 
     const res = switch (tag) {
@@ -89,8 +129,18 @@ pub fn bitwiseBinary(vm: *VM, inst: Instruction, comptime tag: BitwiseOp) !void 
     const vb = &vm.stack[vm.base + b];
     const vc = &vm.stack[vm.base + c];
 
-    const ib = try toIntForBitwise(vb);
-    const ic = try toIntForBitwise(vc);
+    const ib = toIntForBitwise(vb) catch |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, b);
+        }
+        return err;
+    };
+    const ic = toIntForBitwise(vc) catch |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, c);
+        }
+        return err;
+    };
 
     const res = switch (tag) {
         .band => ib & ic,
@@ -105,11 +155,63 @@ fn toIntForBitwise(v: *const TValue) !i64 {
     if (v.isInteger()) {
         return v.integer;
     } else if (v.toNumber()) |n| {
-        if (@floor(n) == n) {
-            return @as(i64, @intFromFloat(n));
+        if (@floor(n) != n) return error.IntegerRepresentation;
+        const min_f = @as(f64, @floatFromInt(std.math.minInt(i64)));
+        const max_f = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+        if (n < min_f or n > max_f) return error.IntegerRepresentation;
+        // Reject ambiguous max_f (2^63) for floats; allow min_f.
+        if (n == max_f) return error.IntegerRepresentation;
+
+        const i: i64 = @intFromFloat(n);
+        if (@as(f64, @floatFromInt(i)) == n) {
+            return i;
         }
+        return error.IntegerRepresentation;
     }
     return error.ArithmeticError;
+}
+
+fn floatToIntExact(n: f64) ?i64 {
+    if (!std.math.isFinite(n)) return null;
+    if (n != @floor(n)) return null;
+    const max_i = std.math.maxInt(i64);
+    const min_i = std.math.minInt(i64);
+    const max_f = @as(f64, @floatFromInt(max_i));
+    const min_f = @as(f64, @floatFromInt(min_i));
+    if (n < min_f or n > max_f) return null;
+    if (!intFitsFloat(max_i) and n >= max_f) return null;
+    const i: i64 = @intFromFloat(n);
+    if (@as(f64, @floatFromInt(i)) != n) return null;
+    return i;
+}
+
+fn intFitsFloat(i: i64) bool {
+    const max_exact: i64 = @as(i64, 1) << 53;
+    return i >= -max_exact and i <= max_exact;
+}
+
+fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
+    if (vm.last_field_reg) |r| {
+        if (r == reg) {
+            vm.int_repr_field_key = vm.last_field_key;
+        }
+    }
+}
+
+fn shlInt(value: i64, shift: i64) i64 {
+    if (shift < 0) return shrInt(value, -shift);
+    if (shift >= 64) return 0;
+    const u: u64 = @bitCast(value);
+    const res: u64 = u << @intCast(shift);
+    return @bitCast(res);
+}
+
+fn shrInt(value: i64, shift: i64) i64 {
+    if (shift < 0) return shlInt(value, -shift);
+    if (shift >= 64) return 0;
+    const u: u64 = @bitCast(value);
+    const res: u64 = u >> @intCast(shift);
+    return @bitCast(res);
 }
 
 pub fn eqOp(a: TValue, b: TValue) bool {
@@ -119,6 +221,12 @@ pub fn eqOp(a: TValue, b: TValue) bool {
 pub fn ltOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
         return a.integer < b.integer;
+    }
+    if (a.isInteger() and b.isNumber()) {
+        return compareIntFloat(a.integer, b.number, false);
+    }
+    if (a.isNumber() and b.isInteger()) {
+        return compareFloatInt(a.number, b.integer, false);
     }
     const na = a.toNumber();
     const nb = b.toNumber();
@@ -135,6 +243,12 @@ pub fn leOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
         return a.integer <= b.integer;
     }
+    if (a.isInteger() and b.isNumber()) {
+        return compareIntFloat(a.integer, b.number, true);
+    }
+    if (a.isNumber() and b.isInteger()) {
+        return compareFloatInt(a.number, b.integer, true);
+    }
     const na = a.toNumber();
     const nb = b.toNumber();
     if (na != null and nb != null) {
@@ -144,6 +258,62 @@ pub fn leOp(a: TValue, b: TValue) !bool {
         return na.? <= nb.?;
     }
     return error.OrderComparisonError;
+}
+
+fn compareIntFloat(i: i64, f: f64, comptime le: bool) bool {
+    if (std.math.isNan(f)) return false;
+    if (intFitsFloat(i)) {
+        const i_f = @as(f64, @floatFromInt(i));
+        return if (le) i_f <= f else i_f < f;
+    }
+    if (le) {
+        if (floatToIntFloor(f)) |fi| {
+            return i <= fi;
+        }
+        return f > 0;
+    }
+    if (floatToIntCeil(f)) |fi| {
+        return i < fi;
+    }
+    return f > 0;
+}
+
+fn compareFloatInt(f: f64, i: i64, comptime le: bool) bool {
+    if (std.math.isNan(f)) return false;
+    if (intFitsFloat(i)) {
+        const i_f = @as(f64, @floatFromInt(i));
+        return if (le) f <= i_f else f < i_f;
+    }
+    if (le) {
+        if (floatToIntCeil(f)) |fi| {
+            return fi <= i;
+        }
+        return f < 0;
+    }
+    if (floatToIntFloor(f)) |fi| {
+        return fi < i;
+    }
+    return f < 0;
+}
+
+fn floatToIntFloor(f: f64) ?i64 {
+    if (!std.math.isFinite(f)) return null;
+    return floatToIntChecked(std.math.floor(f));
+}
+
+fn floatToIntCeil(f: f64) ?i64 {
+    if (!std.math.isFinite(f)) return null;
+    return floatToIntChecked(std.math.ceil(f));
+}
+
+fn floatToIntChecked(f: f64) ?i64 {
+    const max_i = std.math.maxInt(i64);
+    const min_i = std.math.minInt(i64);
+    const max_f = @as(f64, @floatFromInt(max_i));
+    const min_f = @as(f64, @floatFromInt(min_i));
+    if (f < min_f or f > max_f) return null;
+    if (!intFitsFloat(max_i) and f >= max_f) return null;
+    return @as(i64, @intFromFloat(f));
 }
 
 pub fn pushCallInfo(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
@@ -363,14 +533,27 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             if (err == error.LuaException and handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.ArithmeticError or
+                err == error.DivideByZero or
+                err == error.ModuloByZero or
+                err == error.IntegerRepresentation or
                 err == error.NotATable or
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
                 err == error.InvalidTableOperation or
                 err == error.FormatError)
             {
+                var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
                     error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.DivideByZero => "divide by zero",
+                    error.ModuloByZero => "attempt to perform 'n%0'",
+                    error.IntegerRepresentation => blk: {
+                        if (vm.int_repr_field_key) |key| {
+                            vm.int_repr_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "number (field '{s}') has no integer representation", .{key.asSlice()}) catch "number has no integer representation";
+                        }
+                        break :blk "number has no integer representation";
+                    },
                     error.NotATable => "attempt to index a non-table value",
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",
@@ -482,13 +665,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = vm.stack[vm.base + b];
 
             if (vb.isInteger()) {
-                const shift = @as(u8, sc);
-                vm.stack[vm.base + a] = .{ .integer = std.math.shl(i64, vb.integer, @as(u6, @intCast(shift))) };
+                const shift: i64 = @intCast(sc);
+                vm.stack[vm.base + a] = .{ .integer = shlInt(vb.integer, shift) };
                 return .Continue;
             } else if (vb.toNumber()) |n| {
                 if (@floor(n) == n) {
-                    const shift = @as(u8, sc);
-                    vm.stack[vm.base + a] = .{ .integer = std.math.shl(i64, @intFromFloat(n), @as(u6, @intCast(shift))) };
+                    const shift: i64 = @intCast(sc);
+                    vm.stack[vm.base + a] = .{ .integer = shlInt(@intFromFloat(n), shift) };
                     return .Continue;
                 }
             }
@@ -504,13 +687,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = vm.stack[vm.base + b];
 
             if (vb.isInteger()) {
-                const shift = @as(u8, sc);
-                vm.stack[vm.base + a] = .{ .integer = std.math.shr(i64, vb.integer, @as(u6, @intCast(shift))) };
+                const shift: i64 = @intCast(sc);
+                vm.stack[vm.base + a] = .{ .integer = shrInt(vb.integer, shift) };
                 return .Continue;
             } else if (vb.toNumber()) |n| {
                 if (@floor(n) == n) {
-                    const shift = @as(u8, sc);
-                    vm.stack[vm.base + a] = .{ .integer = std.math.shr(i64, @intFromFloat(n), @as(u6, @intCast(shift))) };
+                    const shift: i64 = @intCast(sc);
+                    vm.stack[vm.base + a] = .{ .integer = shrInt(@intFromFloat(n), shift) };
                     return .Continue;
                 }
             }
@@ -595,9 +778,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
+            if (vb.isInteger() and vc.isInteger()) {
+                const res = try idivInt(vb.integer, vc.integer);
+                vm.stack[vm.base + a] = .{ .integer = res };
+                return .Continue;
+            }
             const nb = vb.toNumber() orelse return error.ArithmeticError;
             const nc = vc.toNumber() orelse return error.ArithmeticError;
-            if (nc == 0) return error.ArithmeticError;
             vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb, nc) };
             return .Continue;
         },
@@ -609,9 +796,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
+            if (vb.isInteger() and vc.isInteger()) {
+                const res = try modInt(vb.integer, vc.integer);
+                vm.stack[vm.base + a] = .{ .integer = res };
+                return .Continue;
+            }
             const nb = vb.toNumber() orelse return error.ArithmeticError;
             const nc = vc.toNumber() orelse return error.ArithmeticError;
-            if (nc == 0) return error.ArithmeticError;
             vm.stack[vm.base + a] = .{ .number = luaMod(nb, nc) };
             return .Continue;
         },
@@ -632,73 +823,97 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            const vb = vm.stack[vm.base + b];
-            const vc = ci.func.k[c];
+            const vb = &vm.stack[vm.base + b];
+            const vc = &ci.func.k[c];
 
-            const toInt = struct {
-                fn convert(v: TValue) ?i64 {
-                    if (v.isInteger()) return v.integer;
-                    if (v.toNumber()) |n| if (@floor(n) == n) return @intFromFloat(n);
-                    return null;
+            var conv_err: ?anyerror = null;
+            var ib_opt: ?i64 = null;
+            var ic_opt: ?i64 = null;
+            if (toIntForBitwise(vb)) |ib| {
+                ib_opt = ib;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
-            }.convert;
-
-            if (toInt(vb)) |ib| {
-                if (toInt(vc)) |ic| {
+                conv_err = err;
+            }
+            if (toIntForBitwise(vc)) |ic| {
+                ic_opt = ic;
+            } else |err| {
+                conv_err = err;
+            }
+            if (ib_opt) |ib| {
+                if (ic_opt) |ic| {
                     vm.stack[vm.base + a] = .{ .integer = ib & ic };
                     return .Continue;
                 }
             }
-            if (try dispatchBitwiseMM(vm, vb, vc, a, .band)) |result| return result;
-            return error.ArithmeticError;
+            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .band)) |result| return result;
+            return conv_err orelse error.ArithmeticError;
         },
         .BORK => {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            const vb = vm.stack[vm.base + b];
-            const vc = ci.func.k[c];
+            const vb = &vm.stack[vm.base + b];
+            const vc = &ci.func.k[c];
 
-            const toInt = struct {
-                fn convert(v: TValue) ?i64 {
-                    if (v.isInteger()) return v.integer;
-                    if (v.toNumber()) |n| if (@floor(n) == n) return @intFromFloat(n);
-                    return null;
+            var conv_err: ?anyerror = null;
+            var ib_opt: ?i64 = null;
+            var ic_opt: ?i64 = null;
+            if (toIntForBitwise(vb)) |ib| {
+                ib_opt = ib;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
-            }.convert;
-
-            if (toInt(vb)) |ib| {
-                if (toInt(vc)) |ic| {
+                conv_err = err;
+            }
+            if (toIntForBitwise(vc)) |ic| {
+                ic_opt = ic;
+            } else |err| {
+                conv_err = err;
+            }
+            if (ib_opt) |ib| {
+                if (ic_opt) |ic| {
                     vm.stack[vm.base + a] = .{ .integer = ib | ic };
                     return .Continue;
                 }
             }
-            if (try dispatchBitwiseMM(vm, vb, vc, a, .bor)) |result| return result;
-            return error.ArithmeticError;
+            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .bor)) |result| return result;
+            return conv_err orelse error.ArithmeticError;
         },
         .BXORK => {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            const vb = vm.stack[vm.base + b];
-            const vc = ci.func.k[c];
+            const vb = &vm.stack[vm.base + b];
+            const vc = &ci.func.k[c];
 
-            const toInt = struct {
-                fn convert(v: TValue) ?i64 {
-                    if (v.isInteger()) return v.integer;
-                    if (v.toNumber()) |n| if (@floor(n) == n) return @intFromFloat(n);
-                    return null;
+            var conv_err: ?anyerror = null;
+            var ib_opt: ?i64 = null;
+            var ic_opt: ?i64 = null;
+            if (toIntForBitwise(vb)) |ib| {
+                ib_opt = ib;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
-            }.convert;
-
-            if (toInt(vb)) |ib| {
-                if (toInt(vc)) |ic| {
+                conv_err = err;
+            }
+            if (toIntForBitwise(vc)) |ic| {
+                ic_opt = ic;
+            } else |err| {
+                conv_err = err;
+            }
+            if (ib_opt) |ib| {
+                if (ic_opt) |ic| {
                     vm.stack[vm.base + a] = .{ .integer = ib ^ ic };
                     return .Continue;
                 }
             }
-            if (try dispatchBitwiseMM(vm, vb, vc, a, .bxor)) |result| return result;
-            return error.ArithmeticError;
+            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .bxor)) |result| return result;
+            return conv_err orelse error.ArithmeticError;
         },
         // [MM_ARITH] Fast path: register add. Slow path: __add metamethod.
         .ADD => {
@@ -729,38 +944,38 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             return try dispatchArithMM(vm, inst, .pow, .pow);
         },
         .BAND => {
-            bitwiseBinary(vm, inst, .band) catch {
+            bitwiseBinary(vm, inst, .band) catch |err| {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
                 if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .band)) |result| {
                     return result;
                 }
-                return error.ArithmeticError;
+                return err;
             };
             return .Continue;
         },
         .BOR => {
-            bitwiseBinary(vm, inst, .bor) catch {
+            bitwiseBinary(vm, inst, .bor) catch |err| {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
                 if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .bor)) |result| {
                     return result;
                 }
-                return error.ArithmeticError;
+                return err;
             };
             return .Continue;
         },
         .BXOR => {
-            bitwiseBinary(vm, inst, .bxor) catch {
+            bitwiseBinary(vm, inst, .bxor) catch |err| {
                 const a = inst.getA();
                 const b = inst.getB();
                 const c = inst.getC();
                 if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .bxor)) |result| {
                     return result;
                 }
-                return error.ArithmeticError;
+                return err;
             };
             return .Continue;
         },
@@ -771,28 +986,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = vm.stack[vm.base + b];
             const vc = vm.stack[vm.base + c];
 
-            const toInt = struct {
-                fn convert(v: TValue) ?i64 {
-                    if (v.isInteger()) {
-                        return v.integer;
-                    } else if (v.toNumber()) |n| {
-                        if (@floor(n) == n) {
-                            return @as(i64, @intFromFloat(n));
-                        }
-                    }
-                    return null;
+            var conv_err: ?anyerror = null;
+            var value_opt: ?i64 = null;
+            var shift_opt: ?i64 = null;
+            if (toIntForBitwise(&vb)) |value| {
+                value_opt = value;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
-            }.convert;
-
-            if (toInt(vb)) |value| {
-                if (toInt(vc)) |shift| {
-                    const result = if (shift >= 0) blk: {
-                        const s = std.math.cast(u6, shift) orelse 63;
-                        break :blk std.math.shl(i64, value, s);
-                    } else blk: {
-                        const s = std.math.cast(u6, -shift) orelse 63;
-                        break :blk std.math.shr(i64, value, s);
-                    };
+                conv_err = err;
+            }
+            if (toIntForBitwise(&vc)) |shift| {
+                shift_opt = shift;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, c);
+                }
+                conv_err = err;
+            }
+            if (value_opt) |value| {
+                if (shift_opt) |shift| {
+                    const result = shlInt(value, shift);
                     vm.stack[vm.base + a] = .{ .integer = result };
                     return .Continue;
                 }
@@ -801,7 +1016,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (try dispatchBitwiseMM(vm, vb, vc, a, .shl)) |result| {
                 return result;
             }
-            return error.ArithmeticError;
+            return conv_err orelse error.ArithmeticError;
         },
         .SHR => {
             const a = inst.getA();
@@ -810,28 +1025,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = vm.stack[vm.base + b];
             const vc = vm.stack[vm.base + c];
 
-            const toInt = struct {
-                fn convert(v: TValue) ?i64 {
-                    if (v.isInteger()) {
-                        return v.integer;
-                    } else if (v.toNumber()) |n| {
-                        if (@floor(n) == n) {
-                            return @as(i64, @intFromFloat(n));
-                        }
-                    }
-                    return null;
+            var conv_err: ?anyerror = null;
+            var value_opt: ?i64 = null;
+            var shift_opt: ?i64 = null;
+            if (toIntForBitwise(&vb)) |value| {
+                value_opt = value;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
-            }.convert;
-
-            if (toInt(vb)) |value| {
-                if (toInt(vc)) |shift| {
-                    const result = if (shift >= 0) blk: {
-                        const s = std.math.cast(u6, shift) orelse 63;
-                        break :blk std.math.shr(i64, value, s);
-                    } else blk: {
-                        const s = std.math.cast(u6, -shift) orelse 63;
-                        break :blk std.math.shl(i64, value, s);
-                    };
+                conv_err = err;
+            }
+            if (toIntForBitwise(&vc)) |shift| {
+                shift_opt = shift;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, c);
+                }
+                conv_err = err;
+            }
+            if (value_opt) |value| {
+                if (shift_opt) |shift| {
+                    const result = shrInt(value, shift);
                     vm.stack[vm.base + a] = .{ .integer = result };
                     return .Continue;
                 }
@@ -840,7 +1055,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (try dispatchBitwiseMM(vm, vb, vc, a, .shr)) |result| {
                 return result;
             }
-            return error.ArithmeticError;
+            return conv_err orelse error.ArithmeticError;
         },
         // [MM_ARITH] Fast path: unary minus. Slow path: __unm metamethod.
         .UNM => {
@@ -848,7 +1063,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             const vb = vm.stack[vm.base + b];
             if (vb.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = -vb.integer };
+                vm.stack[vm.base + a] = .{ .integer = 0 -% vb.integer };
             } else if (vb.toNumber()) |n| {
                 vm.stack[vm.base + a] = .{ .number = -n };
             } else {
@@ -872,21 +1087,21 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             const vb = vm.stack[vm.base + b];
 
-            if (vb.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = ~vb.integer };
+            var conv_err: ?anyerror = null;
+            if (toIntForBitwise(&vb)) |value| {
+                vm.stack[vm.base + a] = .{ .integer = ~value };
                 return .Continue;
-            } else if (vb.toNumber()) |n| {
-                if (@floor(n) == n) {
-                    const i = @as(i64, @intFromFloat(n));
-                    vm.stack[vm.base + a] = .{ .integer = ~i };
-                    return .Continue;
+            } else |err| {
+                if (err == error.IntegerRepresentation) {
+                    maybeSetIntReprContext(vm, b);
                 }
+                conv_err = err;
             }
             // Try metamethod
             if (try dispatchBnotMM(vm, vb, a)) |result| {
                 return result;
             }
-            return error.ArithmeticError;
+            return conv_err orelse error.ArithmeticError;
         },
         // [MM_LEN] Fast path: string/table length. Slow path: __len metamethod.
         .LEN => {
@@ -1713,6 +1928,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (key_val.asString()) |key| {
                 const value = env_table.get(TValue.fromString(key)) orelse .nil;
                 vm.stack[vm.base + a] = value;
+                vm.last_field_reg = a;
+                vm.last_field_key = key;
             } else {
                 return error.InvalidTableKey;
             }
@@ -1897,6 +2114,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = ci.func.k[c];
 
+            if (key_val.asString()) |key| {
+                vm.last_field_reg = a;
+                vm.last_field_key = key;
+            }
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {

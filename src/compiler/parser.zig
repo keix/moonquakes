@@ -1972,10 +1972,10 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(barrier_reg, a);
                     const final_reg = self.proto.allocTemp();
                     try self.proto.emitMOVE(final_reg, barrier_reg);
-                    return final_reg;
+                    return try self.parseSuffixChain(final_reg);
                 }
             }
-            return result;
+            return try self.parseSuffixChain(result);
         }
 
         if (self.current.kind == .Number) {
@@ -2068,88 +2068,108 @@ pub const Parser = struct {
                 self.advance();
             }
 
-            // Handle field/index access and method calls: t.field, t[key], t:method(), or chained
-            // Note: ':' followed by ':' is a label (::label::), not a method call
-            while (self.current.kind == .Symbol and
-                (std.mem.eql(u8, self.current.lexeme, ".") or
-                    std.mem.eql(u8, self.current.lexeme, "[") or
-                    (std.mem.eql(u8, self.current.lexeme, ":") and
-                        !(self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")))))
-            {
-                if (std.mem.eql(u8, self.current.lexeme, ".")) {
-                    self.advance(); // consume '.'
-
-                    if (self.current.kind != .Identifier) {
-                        return error.ExpectedIdentifier;
-                    }
-
-                    const field_name = self.current.lexeme;
-                    self.advance(); // consume field name
-
-                    const key_const = try self.proto.addConstString(field_name);
-                    const dst_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(dst_reg, base_reg, key_const);
-                    base_reg = dst_reg;
-
-                    // Check for function call: t.g()
-                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
-                        // The field value is a function, call it
-                        const func_reg = base_reg;
-                        const arg_count = try self.parseCallArgs(func_reg);
-                        try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                        base_reg = func_reg; // Result is in func_reg
-                    }
-                } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
-                    self.advance(); // consume '['
-
-                    const key_reg = try self.parseExpr();
-
-                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
-                        return error.ExpectedCloseBracket;
-                    }
-                    self.advance(); // consume ']'
-
-                    const dst_reg = self.proto.allocTemp();
-                    try self.proto.emitGETTABLE(dst_reg, base_reg, key_reg);
-                    base_reg = dst_reg;
-
-                    // Check for function call: t["key"]() or t[k]()
-                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
-                        const func_reg = base_reg;
-                        const arg_count = try self.parseCallArgs(func_reg);
-                        try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                        base_reg = func_reg; // Result is in func_reg
-                    }
-                } else {
-                    // Method call: t:method() - returns result
-                    self.advance(); // consume ':'
-
-                    if (self.current.kind != .Identifier) {
-                        return error.ExpectedIdentifier;
-                    }
-                    const method_name = self.current.lexeme;
-                    self.advance(); // consume method name
-
-                    // Use SELF: R[func_reg] := R[base_reg][K[method_const]]
-                    //           R[func_reg+1] := R[base_reg]
-                    const method_const = try self.proto.addConstString(method_name);
-                    const func_reg = self.proto.allocTemp();
-                    _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
-                    try self.proto.emitSELF(func_reg, base_reg, method_const);
-
-                    // Parse extra arguments starting at func_reg + 2
-                    const extra_args = try self.parseMethodArgs(func_reg);
-
-                    // Call with 1 result (expression context)
-                    try self.proto.emitCall(func_reg, extra_args + 1, 1);
-                    base_reg = func_reg; // Result is in func_reg
-                }
-            }
-
-            return base_reg;
+            return try self.parseSuffixChain(base_reg);
         }
 
         return error.ExpectedExpression;
+    }
+
+    /// Parse suffixes for a prefix expression: calls, field/index access, and method calls.
+    fn parseSuffixChain(self: *Parser, base_reg: u8) ParseError!u8 {
+        var reg = base_reg;
+
+        while (true) {
+            if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                self.isNoParensArg())
+            {
+                const arg_count = try self.parseCallArgs(reg);
+                try self.proto.emitCallVararg(reg, arg_count, 1);
+                continue;
+            }
+
+            if (!(self.current.kind == .Symbol and
+                (std.mem.eql(u8, self.current.lexeme, ".") or
+                    std.mem.eql(u8, self.current.lexeme, "[") or
+                    (std.mem.eql(u8, self.current.lexeme, ":") and
+                        !(self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":"))))))
+            {
+                break;
+            }
+
+            if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                self.advance(); // consume '.'
+
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+
+                const field_name = self.current.lexeme;
+                self.advance(); // consume field name
+
+                const key_const = try self.proto.addConstString(field_name);
+                const dst_reg = self.proto.allocTemp();
+                try self.proto.emitGETFIELD(dst_reg, reg, key_const);
+                reg = dst_reg;
+
+                // Check for function call: t.g()
+                if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                    self.isNoParensArg())
+                {
+                    const func_reg = reg;
+                    const arg_count = try self.parseCallArgs(func_reg);
+                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                    reg = func_reg;
+                }
+            } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
+                self.advance(); // consume '['
+
+                const key_reg = try self.parseExpr();
+
+                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                    return error.ExpectedCloseBracket;
+                }
+                self.advance(); // consume ']'
+
+                const dst_reg = self.proto.allocTemp();
+                try self.proto.emitGETTABLE(dst_reg, reg, key_reg);
+                reg = dst_reg;
+
+                // Check for function call: t["key"]() or t[k]()
+                if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                    self.isNoParensArg())
+                {
+                    const func_reg = reg;
+                    const arg_count = try self.parseCallArgs(func_reg);
+                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                    reg = func_reg;
+                }
+            } else {
+                // Method call: t:method() - returns result
+                self.advance(); // consume ':'
+
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const method_name = self.current.lexeme;
+                self.advance(); // consume method name
+
+                // Use SELF: R[func_reg] := R[reg][K[method_const]]
+                //           R[func_reg+1] := R[reg]
+                const method_const = try self.proto.addConstString(method_name);
+                const func_reg = self.proto.allocTemp();
+                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+                try self.proto.emitSELF(func_reg, reg, method_const);
+
+                // Parse extra arguments starting at func_reg + 2
+                const extra_args = try self.parseMethodArgs(func_reg);
+
+                // Call with 1 result (expression context)
+                try self.proto.emitCall(func_reg, extra_args + 1, 1);
+                reg = func_reg;
+            }
+        }
+
+        return reg;
     }
 
     // parsePow: handles ^ (right-associative, highest precedence binary operator)
@@ -2425,6 +2445,36 @@ pub const Parser = struct {
         self.advance();
 
         return table_reg;
+    }
+
+    /// Parse a single string literal into a register.
+    fn parseStringLiteral(self: *Parser) ParseError!u8 {
+        if (self.current.kind != .String) return error.ExpectedExpression;
+        const reg = self.proto.allocTemp();
+        const lexeme = self.current.lexeme;
+
+        if (lexeme.len >= 2 and lexeme[0] == '[') {
+            var level: usize = 0;
+            var i: usize = 1;
+            while (i < lexeme.len and lexeme[i] == '=') {
+                level += 1;
+                i += 1;
+            }
+            const start = 2 + level;
+            const end = lexeme.len - 2 - level;
+            const str_content = lexeme[start..end];
+            const k = try self.proto.addConstString(str_content);
+            try self.proto.emitLoadK(reg, k);
+        } else {
+            const str_raw = lexeme[1 .. lexeme.len - 1];
+            const str_content = try processEscapes(self.proto.allocator, str_raw);
+            defer self.proto.allocator.free(str_content);
+            const k = try self.proto.addConstString(str_content);
+            try self.proto.emitLoadK(reg, k);
+        }
+
+        self.advance();
+        return reg;
     }
 
     fn parseMul(self: *Parser) ParseError!u8 {
@@ -3832,7 +3882,10 @@ pub const Parser = struct {
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
             // Single argument without parentheses
-            const arg_reg = try self.parseExpr();
+            const arg_reg = if (self.current.kind == .String)
+                try self.parseStringLiteral()
+            else
+                try self.parseTableConstructor();
             if (arg_reg != func_reg + 1) {
                 try self.proto.emitMOVE(func_reg + 1, arg_reg);
             }

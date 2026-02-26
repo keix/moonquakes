@@ -456,6 +456,10 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     const key_arg = vm.stack[vm.base + func_reg + 2];
     const value_arg = vm.stack[vm.base + func_reg + 3];
 
+    if (key_arg.isNil() or (key_arg == .number and std.math.isNan(key_arg.number))) {
+        return vm.raiseString("table index is nil or NaN");
+    }
+
     const table = table_arg.asTable() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -580,39 +584,62 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Try to convert string to number
     if (arg.asString()) |str_obj| {
-        const str = str_obj.asSlice();
+        const str = std.mem.trim(u8, str_obj.asSlice(), " \t\n\r");
 
         // Get optional base (default 10)
         var base: u8 = 10;
-        if (nargs >= 2) {
+        const has_base = nargs >= 2;
+        if (has_base) {
             const base_arg = vm.stack[vm.base + func_reg + 2];
-            if (base_arg.toInteger()) |b| {
-                if (b >= 2 and b <= 36) {
-                    base = @intCast(b);
-                } else {
-                    vm.stack[vm.base + func_reg] = .nil;
-                    return;
-                }
+            const b = base_arg.toInteger() orelse {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            };
+            if (b >= 2 and b <= 36) {
+                base = @intCast(b);
+            } else {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
             }
         }
 
-        // Try parsing as integer with base
-        if (base == 10) {
-            // Try float first for base 10
-            if (std.fmt.parseFloat(f64, str)) |n| {
-                // Check if it's an integer
-                if (n == @floor(n) and n >= @as(f64, @floatFromInt(std.math.minInt(i64))) and n <= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
-                    vm.stack[vm.base + func_reg] = .{ .integer = @intFromFloat(n) };
-                } else {
-                    vm.stack[vm.base + func_reg] = .{ .number = n };
-                }
+        // If base is explicitly provided, only accept integer numerals for that base.
+        if (has_base) {
+            if (std.fmt.parseInt(i64, str, base)) |i| {
+                vm.stack[vm.base + func_reg] = .{ .integer = i };
                 return;
             } else |_| {}
+
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
         }
 
-        // Try integer parsing with specified base
-        if (std.fmt.parseInt(i64, str, base)) |i| {
+        // Try integer first for base 10 (preserves large integer strings)
+        if (std.fmt.parseInt(i64, str, 10)) |i| {
             vm.stack[vm.base + func_reg] = .{ .integer = i };
+            return;
+        } else |_| {}
+
+        // Hex integer literals: parse and wrap modulo 2^64 (Lua 5.4 semantics)
+        if (parseHexIntegerWrap(str)) |i| {
+            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            return;
+        }
+
+        // Hex floating literals: parse as float when format includes '.' or 'p'
+        if (parseHexFloat(str)) |n| {
+            vm.stack[vm.base + func_reg] = .{ .number = n };
+            return;
+        }
+
+        if (isInfNanToken(str)) {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+
+        // Fall back to float for base 10
+        if (std.fmt.parseFloat(f64, str)) |n| {
+            vm.stack[vm.base + func_reg] = .{ .number = n };
             return;
         } else |_| {}
 
@@ -621,6 +648,192 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     }
 
     vm.stack[vm.base + func_reg] = .nil;
+}
+
+fn parseHexIntegerWrap(str: []const u8) ?i64 {
+    if (str.len < 3) return null;
+    var idx: usize = 0;
+    var neg = false;
+    if (str[idx] == '+' or str[idx] == '-') {
+        neg = str[idx] == '-';
+        idx += 1;
+        if (idx >= str.len) return null;
+    }
+    if (idx + 1 >= str.len) return null;
+    if (str[idx] != '0' or (str[idx + 1] != 'x' and str[idx + 1] != 'X')) return null;
+    idx += 2;
+    if (idx >= str.len) return null;
+
+    var value: u64 = 0;
+    while (idx < str.len) : (idx += 1) {
+        const c = str[idx];
+        const digit: u64 = switch (c) {
+            '0'...'9' => @intCast(c - '0'),
+            'a'...'f' => @intCast(c - 'a' + 10),
+            'A'...'F' => @intCast(c - 'A' + 10),
+            else => return null,
+        };
+        value = (value << 4) | digit;
+    }
+
+    if (neg) {
+        value = 0 -% value;
+    }
+    return @bitCast(value);
+}
+
+fn parseHexFloat(str: []const u8) ?f64 {
+    if (str.len < 3) return null;
+    var idx: usize = 0;
+    var neg = false;
+    if (str[idx] == '+' or str[idx] == '-') {
+        neg = str[idx] == '-';
+        idx += 1;
+        if (idx >= str.len) return null;
+    }
+    if (idx + 1 >= str.len) return null;
+    if (str[idx] != '0' or (str[idx + 1] != 'x' and str[idx + 1] != 'X')) return null;
+    idx += 2;
+    if (idx >= str.len) return null;
+
+    // Only treat as hex float if there's a '.' or a 'p'/'P'
+    if (std.mem.indexOfScalar(u8, str[idx..], '.') == null and
+        std.mem.indexOfAny(u8, str[idx..], "pP") == null)
+    {
+        return null;
+    }
+
+    const max_keep: usize = 16;
+    var total_digits: usize = 0;
+    var frac_digits: usize = 0;
+    var saw_dot = false;
+    var first_nonzero: ?usize = null;
+
+    // Pass 1: count digits and locate first non-zero digit
+    var scan = idx;
+    var flat_index: usize = 0;
+    while (scan < str.len) {
+        const c = str[scan];
+        if (c == '.') {
+            if (saw_dot) return null;
+            saw_dot = true;
+            scan += 1;
+            continue;
+        }
+        const digit_opt: ?u8 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => null,
+        };
+        if (digit_opt) |digit| {
+            total_digits += 1;
+            if (saw_dot) frac_digits += 1;
+            if (digit != 0 and first_nonzero == null) {
+                first_nonzero = flat_index;
+            }
+            flat_index += 1;
+            scan += 1;
+            continue;
+        }
+        break;
+    }
+
+    if (total_digits == 0) return null;
+    if (first_nonzero == null) return if (neg) -0.0 else 0.0;
+
+    const start = if (first_nonzero.? >= max_keep) first_nonzero.? else 0;
+    const kept = @min(max_keep, total_digits - start);
+
+    // Pass 2: build kept_value from the selected window
+    var kept_value: u64 = 0;
+    scan = idx;
+    flat_index = 0;
+    saw_dot = false;
+    while (scan < str.len) {
+        const c = str[scan];
+        if (c == '.') {
+            saw_dot = true;
+            scan += 1;
+            continue;
+        }
+        const digit_opt: ?u8 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => null,
+        };
+        if (digit_opt) |digit| {
+            if (flat_index >= start and flat_index < start + kept) {
+                kept_value = (kept_value << 4) | @as(u64, digit);
+            }
+            flat_index += 1;
+            scan += 1;
+            continue;
+        }
+        break;
+    }
+
+    const total_i: i64 = @intCast(total_digits);
+    const start_i: i64 = @intCast(start);
+    const kept_i: i64 = @intCast(kept);
+    const frac_i: i64 = @intCast(frac_digits);
+    var exp2: i64 = 4 * (total_i - start_i - kept_i - frac_i);
+    if (scan < str.len and (str[scan] == 'p' or str[scan] == 'P')) {
+        scan += 1;
+        if (scan >= str.len) return null;
+        var exp_neg = false;
+        if (str[scan] == '+' or str[scan] == '-') {
+            exp_neg = str[scan] == '-';
+            scan += 1;
+        }
+        if (scan >= str.len) return null;
+        var exp_val: i64 = 0;
+        var saw_digit = false;
+        while (scan < str.len) : (scan += 1) {
+            const c = str[scan];
+            if (c < '0' or c > '9') break;
+            saw_digit = true;
+            exp_val = exp_val * 10 + @as(i64, @intCast(c - '0'));
+        }
+        if (!saw_digit) return null;
+        if (exp_neg) exp_val = -exp_val;
+        exp2 += exp_val;
+    }
+
+    if (scan != str.len) return null;
+
+    const value = @as(f64, @floatFromInt(kept_value));
+    const scaled = value * std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exp2)));
+    return if (neg) -scaled else scaled;
+}
+
+fn isInfNanToken(str: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(str, "inf") or
+        std.ascii.eqlIgnoreCase(str, "+inf") or
+        std.ascii.eqlIgnoreCase(str, "-inf") or
+        std.ascii.eqlIgnoreCase(str, "nan") or
+        std.ascii.eqlIgnoreCase(str, "+nan") or
+        std.ascii.eqlIgnoreCase(str, "-nan");
+}
+
+fn floatToIntExact(n: f64) ?i64 {
+    if (!std.math.isFinite(n)) return null;
+    if (n != @floor(n)) return null;
+    const max_i = std.math.maxInt(i64);
+    const min_i = std.math.minInt(i64);
+    const max_f = @as(f64, @floatFromInt(max_i));
+    const min_f = @as(f64, @floatFromInt(min_i));
+    if (n < min_f or n > max_f) return null;
+    if (!intFitsFloat(max_i) and n >= max_f) return null;
+    const i: i64 = @intFromFloat(n);
+    if (@as(f64, @floatFromInt(i)) != n) return null;
+    return i;
+}
+
+fn intFitsFloat(i: i64) bool {
+    const max_exact: i64 = @as(i64, 1) << 53;
+    return i >= -max_exact and i <= max_exact;
 }
 
 /// rawequal(v1, v2) - Checks whether v1 is equal to v2 without invoking metamethods

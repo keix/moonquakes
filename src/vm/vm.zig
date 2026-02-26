@@ -58,6 +58,9 @@ pub const VM = struct {
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
     lua_error_value: TValue = .nil,
+    last_field_reg: ?u8 = null,
+    last_field_key: ?*object.StringObject = null,
+    int_repr_field_key: ?*object.StringObject = null,
 
     // Yield state
     yield_base: u32 = 0,

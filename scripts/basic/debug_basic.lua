@@ -72,7 +72,9 @@ print("Test 3: Edge cases")
 
 -- getmetatable on non-table
 assert(debug.getmetatable(42) == nil, "getmetatable on number should return nil")
-assert(debug.getmetatable("str") == nil, "getmetatable on string should return nil")
+local str_mt = debug.getmetatable("str")
+assert(type(str_mt) == "table", "getmetatable on string should return table")
+assert(str_mt.__index == string, "string metatable __index should be string library")
 
 -- getupvalue on non-function
 assert(debug.getupvalue({}, 1) == nil, "getupvalue on table should return nil")

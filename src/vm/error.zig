@@ -16,6 +16,9 @@ pub const VMError = error{
 
     // Type & Arithmetic Errors
     ArithmeticError,
+    DivideByZero,
+    ModuloByZero,
+    IntegerRepresentation,
     OrderComparisonError,
     LengthError,
 
@@ -83,6 +86,18 @@ pub fn translateVMError(vm_error: VMError, allocator: std.mem.Allocator) !LuaErr
         error.ArithmeticError => LuaError{
             .kind = .arithmetic_error,
             .message = try allocator.dupe(u8, "attempt to perform arithmetic on non-numeric values"),
+        },
+        error.DivideByZero => LuaError{
+            .kind = .arithmetic_error,
+            .message = try allocator.dupe(u8, "divide by zero"),
+        },
+        error.ModuloByZero => LuaError{
+            .kind = .arithmetic_error,
+            .message = try allocator.dupe(u8, "attempt to perform 'n%0'"),
+        },
+        error.IntegerRepresentation => LuaError{
+            .kind = .arithmetic_error,
+            .message = try allocator.dupe(u8, "number has no integer representation"),
         },
         error.OrderComparisonError => LuaError{
             .kind = .type_error,
