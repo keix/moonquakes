@@ -1485,11 +1485,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         const arg_start = vm.base + a + 1;
                         break :blk vm.top - arg_start;
                     };
-                    // When C=0 (variable returns), default to 1 for native functions
-                    // since most natives return exactly 1 value
-                    const nresults: u32 = if (c > 0) c - 1 else 1;
                     // Remember frame extent before call
                     const frame_max = vm.base + ci.func.maxstacksize;
+                    // For C=0 (variable results), allow native functions to return as many
+                    // values as fit in the current frame (Lua-style variable returns).
+                    var nresults: u32 = if (c > 0) c - 1 else @intCast(@max(@as(usize, 1), frame_max - (vm.base + a)));
+                    // Some native readers return one result per requested format, but parser/bytecode
+                    // paths may still request a single result in expression context. Expand here to
+                    // preserve Lua-compatible multi-read assignments.
+                    if (nresults == 1 and (nc.func.id == .file_read or nc.func.id == .io_read) and nargs > 1) {
+                        nresults = nargs - 1;
+                    }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);

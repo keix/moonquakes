@@ -5,6 +5,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+const global = @import("global.zig");
 
 // Lua 5.4 Coroutine Library
 // Reference: https://www.lua.org/manual/5.4/manual.html#2.6
@@ -68,12 +69,16 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 
     if (co_vm.ci == null) {
         // First resume - check function type and set up call frame
-        if (co_vm.stack[0].asClosure() == null) {
+        const is_lua_body = co_vm.stack[0].asClosure() != null;
+        const is_native_body = co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+        if (!is_lua_body and !is_native_body) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
             return;
         }
-        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        if (is_lua_body) {
+            try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        }
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
@@ -87,7 +92,10 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     // Execute the coroutine
-    const exec_result = executeCoroutine(co_vm);
+    const exec_result = if (co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
+        executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults - 1 else 1)
+    else
+        executeCoroutine(co_vm);
 
     // Restore caller status
     caller_thread.status = .running;
@@ -139,6 +147,36 @@ const CoroutineResult = union(enum) {
     yielded: struct { base: u32, count: u32 },
     errored: TValue,
 };
+
+fn executeNativeCoroutineFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32, want_results: u32) CoroutineResult {
+    const func_val = co_vm.stack[0];
+    if (!(func_val.isObject() and func_val.object.type == .native_closure)) {
+        const err_str = co_vm.gc().allocString("coroutine body must be a Lua function") catch return .{ .errored = .nil };
+        return .{ .errored = TValue.fromString(err_str) };
+    }
+
+    const nc = object.getObject(object.NativeClosureObject, func_val.object);
+
+    var i: u32 = 0;
+    while (i < num_args) : (i += 1) {
+        co_vm.stack[1 + i] = caller_stack[arg_base + i];
+    }
+
+    var r: u32 = 0;
+    while (r < want_results) : (r += 1) {
+        co_vm.stack[r] = .nil;
+    }
+    co_vm.top = 1 + num_args;
+
+    co_vm.callNative(nc.func.id, 0, num_args, want_results) catch |err| {
+        if (err == error.LuaException) return .{ .errored = co_vm.lua_error_value };
+        const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
+        return .{ .errored = TValue.fromString(err_str) };
+    };
+
+    co_vm.top = want_results;
+    return .{ .completed = want_results };
+}
 
 /// Set up coroutine for first resume (initialize call frame)
 fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) error{OutOfMemory}!void {
@@ -406,10 +444,32 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
 
     if (co_vm.ci == null) {
         // First resume
-        if (co_vm.stack[0].asClosure() == null) {
+        const is_lua_body = co_vm.stack[0].asClosure() != null;
+        const is_native_body = co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+        if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
-        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        if (is_lua_body) {
+            try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        } else {
+            const nc = object.getObject(object.NativeClosureObject, co_vm.stack[0].object);
+            if (nc.func.id == .dofile) {
+                if (num_args < 1) {
+                    return vm.raiseString("dofile: stdin not supported");
+                }
+                // Convert dofile(filename) into a Lua closure body via loadfile(filename)
+                co_vm.stack[1] = vm.stack[arg_base];
+                co_vm.top = 2;
+                try global.nativeLoadfile(co_vm, 0, 1, 2);
+                if (co_vm.stack[0].asClosure() == null) {
+                    if (co_vm.stack[1].asString()) |err_str| return vm.raise(TValue.fromString(err_str));
+                    return vm.raiseString("cannot load file");
+                }
+                try setupFirstResume(co_vm, &vm.stack, arg_base, 0);
+            } else {
+                return vm.raiseString("coroutine body must be a Lua function");
+            }
+        }
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
@@ -421,7 +481,10 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     thread.status = .running;
     vm.rt.setCurrentThread(thread);
 
-    const exec_result = executeCoroutine(co_vm);
+    const exec_result = if (co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
+        executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults else 1)
+    else
+        executeCoroutine(co_vm);
 
     caller_thread.status = .running;
     vm.rt.setCurrentThread(caller_thread);

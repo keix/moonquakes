@@ -66,6 +66,16 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         .object => |obj| switch (obj.type) {
             .string => arg,
             .table, .userdata => ret: {
+                // Moonquakes file handles are tables internally; mimic Lua file tostring().
+                if (obj.type == .table) {
+                    if (arg.asTable()) |tbl| {
+                        const closed_key = try vm.gc().allocString("_closed");
+                        if (tbl.get(TValue.fromString(closed_key))) |closed_val| {
+                            const s = if (closed_val.toBoolean()) "file (closed)" else "file (open)";
+                            break :ret TValue.fromString(try vm.gc().allocString(s));
+                        }
+                    }
+                }
                 // Check for __tostring metamethod
                 if (metamethod.getMetamethod(arg, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
                     if (mm.asClosure()) |closure| {

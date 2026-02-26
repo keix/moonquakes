@@ -72,6 +72,16 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
             return;
         }
+
+        // Preserve Moonquakes extension: type() returns __name for tables with that metamethod.
+        if (table.metatable) |mt| {
+            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
+                if (name_val.asString()) |name_str| {
+                    vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
+                    return;
+                }
+            }
+        }
     }
 
     // Default type names

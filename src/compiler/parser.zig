@@ -1663,13 +1663,21 @@ pub const Parser = struct {
                 if (last_inst.getOpCode() == .CALL) {
                     call_idx = last_idx;
                     call_func_reg = last_inst.a;
-                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                    const prev_inst = self.proto.code.items[last_idx - 1];
-                    if (prev_inst.getOpCode() == .CALL) {
-                        call_idx = last_idx - 1;
-                        call_func_reg = prev_inst.a;
-                        // Remove the single MOVE
-                        _ = self.proto.code.pop();
+                } else {
+                    var scan = last_idx;
+                    var removed_trailing_move = false;
+                    while (true) {
+                        const inst = self.proto.code.items[scan];
+                        if (inst.getOpCode() == .CALL) {
+                            call_idx = scan;
+                            call_func_reg = inst.a;
+                            if (removed_trailing_move) _ = self.proto.code.pop();
+                            break;
+                        }
+                        if (inst.getOpCode() != .MOVE) break;
+                        if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
+                        if (scan == 0) break;
+                        scan -= 1;
                     }
                 }
 
@@ -2002,7 +2010,16 @@ pub const Parser = struct {
                 // Extract content between [[ and ]] (or [=[ and ]=] etc.)
                 const start = 2 + level; // skip [[ or [=[ etc.
                 const end = lexeme.len - 2 - level; // skip ]] or ]=] etc.
-                const str_content = lexeme[start..end];
+                var content_start = start;
+                if (content_start < end) {
+                    if (lexeme[content_start] == '\n') {
+                        content_start += 1;
+                    } else if (lexeme[content_start] == '\r') {
+                        content_start += 1;
+                        if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
+                    }
+                }
+                const str_content = lexeme[content_start..end];
                 // Long bracket strings don't process escapes
                 const k = try self.proto.addConstString(str_content);
                 try self.proto.emitLoadK(reg, k);
@@ -2458,7 +2475,16 @@ pub const Parser = struct {
             }
             const start = 2 + level;
             const end = lexeme.len - 2 - level;
-            const str_content = lexeme[start..end];
+            var content_start = start;
+            if (content_start < end) {
+                if (lexeme[content_start] == '\n') {
+                    content_start += 1;
+                } else if (lexeme[content_start] == '\r') {
+                    content_start += 1;
+                    if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
+                }
+            }
+            const str_content = lexeme[content_start..end];
             const k = try self.proto.addConstString(str_content);
             try self.proto.emitLoadK(reg, k);
         } else {
@@ -3570,14 +3596,22 @@ pub const Parser = struct {
                     if (is_call) {
                         call_idx = last_idx;
                         call_func_reg = last_inst.a;
-                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                        const prev_inst = self.proto.code.items[last_idx - 1];
-                        const prev_is_call = prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL;
-                        if (prev_is_call) {
-                            call_idx = last_idx - 1;
-                            call_func_reg = prev_inst.a;
-                            // Remove the single MOVE - we'll emit multiple MOVEs below
-                            _ = self.proto.code.pop();
+                    } else {
+                        var scan = last_idx;
+                        var removed_trailing_move = false;
+                        while (true) {
+                            const inst = self.proto.code.items[scan];
+                            const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
+                            if (scan_is_call) {
+                                call_idx = scan;
+                                call_func_reg = inst.a;
+                                if (removed_trailing_move) _ = self.proto.code.pop();
+                                break;
+                            }
+                            if (inst.getOpCode() != .MOVE) break;
+                            if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
+                            if (scan == 0) break;
+                            scan -= 1;
                         }
                     }
 
