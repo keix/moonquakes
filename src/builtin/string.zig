@@ -106,6 +106,12 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     };
 
     vm.stack[vm.base + func_reg] = result;
+    if (nresults > 1) {
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
+    }
 }
 
 /// string.len(s) - Returns the length of string s

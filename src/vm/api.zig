@@ -83,6 +83,19 @@ pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfM
 }
 
 pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // Clear slots that may become results without clobbering incoming arguments.
+    // Native call layout is [func_reg]=callee/self, [func_reg+1 .. func_reg+nargs]=args.
+    // Some natives read func_reg as self (e.g., __call handlers), so do not clear it.
+    if (nresults > 0) {
+        const base_slot = self.base + func_reg;
+        const args_end = base_slot + 1 + nargs;
+        const result_end = base_slot + nresults;
+        if (result_end > args_end) {
+            for (self.stack[args_end..result_end]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+    }
     try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }
 

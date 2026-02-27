@@ -821,19 +821,20 @@ pub const ProtoBuilder = struct {
                 try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             } else {
-                // Parse as hex integer, fall back to float on overflow
+                // Parse as hex integer with Lua 5.4 wrap semantics (mod 2^64)
                 if (std.fmt.parseInt(i64, hex_part, 16)) |value| {
                     const idx: u16 = @intCast(self.integers.items.len);
                     try self.integers.append(self.allocator, value);
                     try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
                     return @intCast(self.const_refs.items.len - 1);
                 } else |_| {
-                    // Overflow: parse hex as float
-                    const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
-                    const idx: u16 = @intCast(self.numbers.items.len);
-                    try self.numbers.append(self.allocator, value);
-                    try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
-                    return @intCast(self.const_refs.items.len - 1);
+                    if (parseHexIntegerWrap(lexeme)) |value| {
+                        const idx: u16 = @intCast(self.integers.items.len);
+                        try self.integers.append(self.allocator, value);
+                        try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
+                        return @intCast(self.const_refs.items.len - 1);
+                    }
+                    return error.InvalidNumber;
                 }
             }
         }
@@ -852,6 +853,35 @@ pub const ProtoBuilder = struct {
             try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         }
+    }
+
+    fn parseHexIntegerWrap(lexeme: []const u8) ?i64 {
+        if (lexeme.len < 3) return null;
+        var idx: usize = 0;
+        var neg = false;
+        if (lexeme[idx] == '+' or lexeme[idx] == '-') {
+            neg = lexeme[idx] == '-';
+            idx += 1;
+            if (idx >= lexeme.len) return null;
+        }
+        if (idx + 1 >= lexeme.len) return null;
+        if (lexeme[idx] != '0' or (lexeme[idx + 1] != 'x' and lexeme[idx + 1] != 'X')) return null;
+        idx += 2;
+        if (idx >= lexeme.len) return null;
+
+        var value: u64 = 0;
+        while (idx < lexeme.len) : (idx += 1) {
+            const c = lexeme[idx];
+            const digit: u64 = switch (c) {
+                '0'...'9' => @intCast(c - '0'),
+                'a'...'f' => @intCast(c - 'a' + 10),
+                'A'...'F' => @intCast(c - 'A' + 10),
+                else => return null,
+            };
+            value = (value << 4) | digit;
+        }
+        if (neg) value = 0 -% value;
+        return @bitCast(value);
     }
 
     /// Parse hex float like 0x1.5p10, 0x1p4, 0x1.8p-1

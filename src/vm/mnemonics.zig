@@ -1450,6 +1450,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .LoopContinue;
             }
 
+            // Slow path: iterator is a callable table (__call)
+            if (try dispatchCallMM(vm, func_val, call_reg, 2, @intCast(nresults))) |result| {
+                return result;
+            }
+
             return error.NotAFunction;
         },
         // Generic for loop: TFORLOOP A sBx - if R(A+3) != nil, R(A+2) = R(A+3), jump back
@@ -1487,9 +1492,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     };
                     // Remember frame extent before call
                     const frame_max = vm.base + ci.func.maxstacksize;
-                    // For C=0 (variable results), allow native functions to return as many
-                    // values as fit in the current frame (Lua-style variable returns).
-                    const nresults: u32 = if (c > 0) c - 1 else @intCast(@max(@as(usize, 1), frame_max - (vm.base + a)));
+                    // For native closures, keep C=0 conservative (1 result) unless bytecode
+                    // explicitly requests fixed results via C>0. This avoids propagating
+                    // synthetic nil var-results from native calls into expression lists.
+                    const nresults: u32 = if (c > 0) c - 1 else 1;
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);

@@ -571,6 +571,14 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 /// tonumber(e [, base]) - Tries to convert argument to a number
 pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
+    defer {
+        if (nresults > 1) {
+            var i: u32 = 1;
+            while (i < nresults) : (i += 1) {
+                vm.stack[vm.base + func_reg + i] = .nil;
+            }
+        }
+    }
 
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -595,7 +603,7 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Get optional base (default 10)
         var base: u8 = 10;
-        const has_base = nargs >= 2;
+        const has_base = nargs >= 2 and !vm.stack[vm.base + func_reg + 2].isNil();
         if (has_base) {
             const base_arg = vm.stack[vm.base + func_reg + 2];
             const b = base_arg.toInteger() orelse {

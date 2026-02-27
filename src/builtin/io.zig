@@ -158,6 +158,95 @@ fn parseLuaNumberToken(str: []const u8) ?TValue {
     return null;
 }
 
+const ReadNumberResult = struct {
+    value: ?TValue,
+    new_pos: usize,
+};
+
+fn isDecDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+fn isHexDigitLocal(c: u8) bool {
+    return isDecDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+fn readLuaNumberFromContent(content: []const u8, start_pos: usize) ReadNumberResult {
+    // Lua reads a bounded numeral prefix from streams; this keeps "too long number"
+    // behavior compatible enough for files.lua (leave unread tail in the stream).
+    const max_scan_len: usize = 400;
+
+    var pos = start_pos;
+    while (pos < content.len and std.ascii.isWhitespace(content[pos])) : (pos += 1) {}
+    if (pos >= content.len) return .{ .value = null, .new_pos = pos };
+
+    const begin = pos;
+    var i = pos;
+
+    if (content[i] == '+' or content[i] == '-') {
+        i += 1;
+        if (i >= content.len) return .{ .value = null, .new_pos = i };
+        if (i - begin >= max_scan_len) return .{ .value = null, .new_pos = i };
+    }
+
+    var consumed_any = false;
+
+    if (i + 1 < content.len and content[i] == '0' and (content[i + 1] == 'x' or content[i + 1] == 'X')) {
+        i += 2; // consume 0x prefix even if malformed after it
+        if (i - begin >= max_scan_len) i = begin + max_scan_len;
+
+        while (i < content.len and i - begin < max_scan_len and isHexDigitLocal(content[i])) : (i += 1) {
+            consumed_any = true;
+        }
+        if (i < content.len and i - begin < max_scan_len and content[i] == '.') {
+            i += 1;
+            while (i < content.len and i - begin < max_scan_len and isHexDigitLocal(content[i])) : (i += 1) {
+                consumed_any = true;
+            }
+        }
+        if (consumed_any and i < content.len and i - begin < max_scan_len and (content[i] == 'p' or content[i] == 'P')) {
+            i += 1;
+            if (i < content.len and i - begin < max_scan_len and (content[i] == '+' or content[i] == '-')) i += 1;
+            while (i < content.len and i - begin < max_scan_len and isDecDigit(content[i])) : (i += 1) {
+                consumed_any = true; // exponent digits don't matter for this flag; token parse decides validity
+            }
+        }
+    } else {
+        while (i < content.len and i - begin < max_scan_len and isDecDigit(content[i])) : (i += 1) {
+            consumed_any = true;
+        }
+        if (i < content.len and i - begin < max_scan_len and content[i] == '.') {
+            i += 1;
+            while (i < content.len and i - begin < max_scan_len and isDecDigit(content[i])) : (i += 1) {
+                consumed_any = true;
+            }
+        }
+        if (consumed_any and i < content.len and i - begin < max_scan_len and (content[i] == 'e' or content[i] == 'E')) {
+            i += 1;
+            if (i < content.len and i - begin < max_scan_len and (content[i] == '+' or content[i] == '-')) i += 1;
+            while (i < content.len and i - begin < max_scan_len and isDecDigit(content[i])) : (i += 1) {}
+        }
+    }
+
+    if (i == begin) return .{ .value = null, .new_pos = begin };
+    if (!consumed_any) {
+        // Cases like "+", "-", ".", ".e+", "0x" consume their scanned prefix on failure.
+        return .{ .value = null, .new_pos = i };
+    }
+
+    const token = content[begin..i];
+    if (parseLuaNumberToken(token)) |num| {
+        // read("n") should not accept inf/nan from overflowed decimal parsing.
+        if (num == .number and !std.math.isFinite(num.number)) {
+            return .{ .value = null, .new_pos = i };
+        }
+        return .{ .value = num, .new_pos = i };
+    }
+
+    // Invalid numeral after consuming a valid-looking prefix: discard the prefix.
+    return .{ .value = null, .new_pos = i };
+}
+
 fn tryHandleMultiRead(
     vm: anytype,
     file_table: *TableObject,
@@ -197,7 +286,11 @@ fn tryHandleMultiRead(
             }
             const count: usize = @intCast(count_i);
             if (count == 0) {
-                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(""));
+                if (cur_pos >= content.len) {
+                    vm.stack[vm.base + func_reg + out_idx] = .nil;
+                } else {
+                    vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(""));
+                }
                 continue;
             }
             if (cur_pos >= content.len) {
@@ -239,28 +332,12 @@ fn tryHandleMultiRead(
         }
 
         if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
-            while (cur_pos < content.len and std.ascii.isWhitespace(content[cur_pos])) : (cur_pos += 1) {}
-            if (cur_pos >= content.len) {
-                vm.stack[vm.base + func_reg + out_idx] = .nil;
-                break;
+            const res = readLuaNumberFromContent(content, cur_pos);
+            cur_pos = res.new_pos;
+            if (res.value) |num| {
+                vm.stack[vm.base + func_reg + out_idx] = num;
+                continue;
             }
-            var end = cur_pos;
-            while (end < content.len) : (end += 1) {
-                const c = content[end];
-                if (std.ascii.isWhitespace(c)) break;
-                if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') break;
-            }
-            var parse_end = end;
-            var parsed = false;
-            while (parse_end > cur_pos) : (parse_end -= 1) {
-                if (parseLuaNumberToken(content[cur_pos..parse_end])) |num| {
-                    vm.stack[vm.base + func_reg + out_idx] = num;
-                    cur_pos = parse_end;
-                    parsed = true;
-                    break;
-                }
-            }
-            if (parsed) continue;
             vm.stack[vm.base + func_reg + out_idx] = .nil;
             break;
         }
@@ -308,6 +385,24 @@ fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
     const file = std.fs.cwd().createFile(filename, .{}) catch return;
     defer file.close();
     file.writeAll(out_str.asSlice()) catch {};
+}
+
+fn createLinesIteratorWrapper(vm: anytype, temp_slot: u32, state_table: *TableObject) !*TableObject {
+    const wrapper = try vm.gc().allocTable();
+    vm.stack[vm.base + temp_slot] = TValue.fromTable(wrapper);
+
+    const state_key = try vm.gc().allocString("_lines_state");
+    try wrapper.set(TValue.fromString(state_key), TValue.fromTable(state_table));
+    const done_key = try vm.gc().allocString("_lines_done");
+    try wrapper.set(TValue.fromString(done_key), .{ .boolean = false });
+
+    const mt = try vm.gc().allocTable();
+    vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(mt);
+    const call_key = try vm.gc().allocString("__call");
+    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_iterator });
+    try mt.set(TValue.fromString(call_key), TValue.fromNativeClosure(iter_nc));
+    wrapper.metatable = mt;
+    return wrapper;
 }
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // If a default output file handle exists, delegate to file:write(self, ...)
@@ -429,6 +524,9 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
         if (closed_val.toBoolean()) {
             // Already closed
+            if (nargs >= 1) {
+                return vm.raiseString("closed file");
+            }
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 const err_str = try vm.gc().allocString("file already closed");
@@ -677,14 +775,12 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Open and read the file
     const file = std.fs.cwd().openFile(filename, .{}) catch {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("cannot open file");
     };
     defer file.close();
 
     const content = file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024) catch {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("cannot read file");
     };
     defer vm.gc().allocator.free(content);
 
@@ -700,11 +796,10 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     const pos_key = try vm.gc().allocString("_pos");
     try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
 
-    // Return iterator function
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_iterator });
-    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+    const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
+    vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
 
-    // Return state table (for-in will pass this to iterator)
+    // Compatibility: still return generic-for extras; wrapper ignores them.
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
     }
@@ -722,17 +817,47 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
-    if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+    var state_table: *TableObject = undefined;
+    var wrapper_opt: ?*TableObject = null;
+    if (vm.stack[vm.base + func_reg].asTable()) |wrapper| {
+        const state_key = try vm.gc().allocString("_lines_state");
+        if (wrapper.get(TValue.fromString(state_key))) |wrapped_state| {
+            if (wrapped_state.asTable()) |st| {
+                const done_key = try vm.gc().allocString("_lines_done");
+                if (wrapper.get(TValue.fromString(done_key))) |done_val| {
+                    if (done_val.toBoolean()) {
+                        return vm.raiseString("file is already closed");
+                    }
+                }
+                wrapper_opt = wrapper;
+                state_table = st;
+            } else {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+        } else {
+            // Fall back to generic-for style iterator(state, control).
+            if (nargs < 1) {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+            const state_arg = vm.stack[vm.base + func_reg + 1];
+            state_table = state_arg.asTable() orelse {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            };
+        }
+    } else {
+        if (nargs < 1) {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+        const state_arg = vm.stack[vm.base + func_reg + 1];
+        state_table = state_arg.asTable() orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        };
     }
-
-    // Get state table
-    const state_arg = vm.stack[vm.base + func_reg + 1];
-    const state_table = state_arg.asTable() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
 
     // Get content from state table
     const content_key = try vm.gc().allocString("_content");
@@ -765,6 +890,10 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
 
     // Check if we're at or past the end
     if (start_pos >= content.len) {
+        if (wrapper_opt) |wrapper| {
+            const done_key = try vm.gc().allocString("_lines_done");
+            try wrapper.set(TValue.fromString(done_key), .{ .boolean = true });
+        }
         vm.stack[vm.base + func_reg] = .nil;
         return;
     }
@@ -1810,11 +1939,10 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const pos_key = try vm.gc().allocString("_pos");
     try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
 
-    // Return iterator function (reuse io_lines_iterator)
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_iterator });
-    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+    const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
+    vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
 
-    // Return state table
+    // Compatibility: still return generic-for extras; wrapper ignores them.
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
     }
@@ -1945,28 +2073,9 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // Update position
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end) });
     } else if (std.mem.eql(u8, format, "*n") or std.mem.eql(u8, format, "n")) {
-        var i = pos;
-        while (i < content.len and std.ascii.isWhitespace(content[i])) : (i += 1) {}
-        if (i >= content.len) {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-            return;
-        }
-
-        var j = i;
-        while (j < content.len) : (j += 1) {
-            const c = content[j];
-            if (std.ascii.isWhitespace(c)) break;
-            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.' and c != 'x' and c != 'X') break;
-        }
-
-        const token = content[i..j];
-        if (parseLuaNumberToken(token)) |num| {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = num;
-            try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(j) });
-        } else {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-            try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(i) });
-        }
+        const res = readLuaNumberFromContent(content, pos);
+        if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse .nil;
+        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(res.new_pos) });
     } else {
         // Unknown format, return nil
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
