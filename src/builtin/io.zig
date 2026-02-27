@@ -915,10 +915,8 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
 
     // Get content from state table
     const err_key = try vm.gc().allocString("_error_msg");
-    if (state_table.get(TValue.fromString(err_key))) |err_val| {
-        if (err_val.asString()) |err_str| {
-            return vm.raiseString(err_str.asSlice());
-        }
+    if (state_table.get(TValue.fromString(err_key)) != null) {
+        return vm.raiseString("file is not readable");
     }
 
     const content_key = try vm.gc().allocString("_content");
@@ -2119,14 +2117,14 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (!can_read) {
         vm.reserveSlots(func_reg, 5);
         const state_table = try vm.gc().allocTable();
-        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
         const err_key = try vm.gc().allocString("_error_msg");
         const err_val = try vm.gc().allocString("file is not readable");
         try state_table.set(TValue.fromString(err_key), TValue.fromString(err_val));
         const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
         vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
-        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     }
 
