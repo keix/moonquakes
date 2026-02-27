@@ -2152,18 +2152,20 @@ pub const Parser = struct {
                 self.advance(); // consume field name
 
                 const key_const = try self.proto.addConstString(field_name);
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(dst_reg, reg, key_const);
-                reg = dst_reg;
+                const has_call_suffix = (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                    self.isNoParensArg();
 
-                // Check for function call: t.g()
-                if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
-                    self.isNoParensArg())
-                {
-                    const func_reg = reg;
-                    const arg_count = try self.parseCallArgs(func_reg);
-                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                    reg = func_reg;
+                if (has_call_suffix) {
+                    // Overwrite table register when immediately calling a field.
+                    // This keeps CALL results in-place and avoids trailing MOVE
+                    // in parent call-arg contexts.
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                    const arg_count = try self.parseCallArgs(reg);
+                    try self.proto.emitCallVararg(reg, arg_count, 1);
+                } else {
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst_reg, reg, key_const);
+                    reg = dst_reg;
                 }
             } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -3952,6 +3954,22 @@ pub const Parser = struct {
         var last_was_call = false;
         var last_was_vararg = false;
 
+        const detectTailCallInRange = struct {
+            fn run(code: []Instruction, start: usize) bool {
+                if (code.len <= start) return false;
+                var idx = code.len;
+                while (idx > start) {
+                    idx -= 1;
+                    const inst = code[idx];
+                    if (inst.getOpCode() == .CALL) {
+                        return true;
+                    }
+                    if (inst.getOpCode() != .MOVE) break;
+                }
+                return false;
+            }
+        }.run;
+
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
             // Single argument without parentheses
@@ -3990,9 +4008,7 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(func_reg + 1, arg_reg);
                 }
                 arg_count = 1;
-                // Check if this argument resulted in a CALL instruction
-                last_was_call = self.proto.code.items.len > code_len_before and
-                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
+                last_was_call = detectTailCallInRange(self.proto.code.items, code_len_before);
             }
 
             // Parse additional arguments
@@ -4014,12 +4030,12 @@ pub const Parser = struct {
                 const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
                 arg_count += 1;
+                const target_reg = func_reg + arg_count;
+                const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
                 if (next_arg != func_reg + arg_count) {
-                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    try self.proto.emitMOVE(target_reg, next_arg);
                 }
-                // Check if this (last) argument resulted in a CALL instruction
-                last_was_call = self.proto.code.items.len > code_len_before2 and
-                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
+                last_was_call = arg_is_call;
             }
         }
 
@@ -4039,7 +4055,7 @@ pub const Parser = struct {
         if (last_was_call and arg_count > 1 and self.proto.code.items.len > 0) {
             // Find the CALL instruction (might be last, or before a MOVE)
             var call_idx = self.proto.code.items.len - 1;
-            if (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
+            while (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
                 call_idx -= 1;
             }
             if (self.proto.code.items[call_idx].getOpCode() == .CALL) {

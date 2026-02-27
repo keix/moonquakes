@@ -303,10 +303,7 @@ fn tryHandleMultiRead(
             continue;
         }
 
-        const fmt_obj = fmt_val.asString() orelse {
-            vm.stack[vm.base + func_reg + out_idx] = .nil;
-            break;
-        };
+        const fmt_obj = fmt_val.asString() orelse return vm.raiseString("invalid format");
         const fmt = fmt_obj.asSlice();
 
         if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
@@ -342,8 +339,7 @@ fn tryHandleMultiRead(
             break;
         }
 
-        vm.stack[vm.base + func_reg + out_idx] = .nil;
-        break;
+        return vm.raiseString("invalid format");
     }
 
     const clear_upto: u32 = @max(nresults, fmt_count + 1);
@@ -765,6 +761,11 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // io.lines() / io.lines(nil, ...) -> iterate current default input
     const use_default_input = nargs == 0 or vm.stack[vm.base + func_reg + 1].isNil();
+    const fmt_count: u32 = if (nargs > 0) nargs - 1 else 0;
+    const fmt_start: u32 = func_reg + 2;
+    if (fmt_count > 250) {
+        return vm.raiseString("too many arguments");
+    }
     if (use_default_input) {
         const io_key = try vm.gc().allocString("io");
         const io_val = vm.globals().get(TValue.fromString(io_key)) orelse {
@@ -827,6 +828,20 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const content_str = try vm.gc().allocString(content);
         try state_table.set(TValue.fromString(content_key), TValue.fromString(content_str));
         try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+    }
+
+    if (fmt_count > 0) {
+        const fmts_key = try vm.gc().allocString("_fmts");
+        const fmt_count_key = try vm.gc().allocString("_fmt_count");
+        const fmts_table = try vm.gc().allocTable();
+        try state_table.set(TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
+        try state_table.set(TValue.fromString(fmt_count_key), .{ .integer = @intCast(fmt_count) });
+
+        var i: u32 = 0;
+        while (i < fmt_count) : (i += 1) {
+            const fmt_val = vm.stack[vm.base + fmt_start + i];
+            try fmts_table.set(.{ .integer = @as(i64, @intCast(i)) + 1 }, fmt_val);
+        }
     }
 
     const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
@@ -921,6 +936,135 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     }
     const start_pos: usize = @intCast(pos_i64);
 
+    const fmt_count_key = try vm.gc().allocString("_fmt_count");
+    const fmts_key = try vm.gc().allocString("_fmts");
+    const fmt_count: u32 = if (state_table.get(TValue.fromString(fmt_count_key))) |v|
+        @intCast(@max(@as(i64, 0), v.toInteger() orelse 0))
+    else
+        0;
+
+    if (fmt_count > 0) {
+        const fmts_val = state_table.get(TValue.fromString(fmts_key)) orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            vm.top = vm.base + func_reg + 1;
+            return;
+        };
+        const fmts_table = fmts_val.asTable() orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            vm.top = vm.base + func_reg + 1;
+            return;
+        };
+
+        var cur_pos = start_pos;
+        var out_idx: u32 = 0;
+        var written_count: u32 = 0;
+        while (out_idx < fmt_count) : (out_idx += 1) {
+            const fmt_val = fmts_table.get(.{ .integer = @as(i64, @intCast(out_idx)) + 1 }) orelse .nil;
+
+            if (fmt_val.toInteger()) |count_i| {
+                if (count_i < 0) {
+                    vm.stack[vm.base + func_reg + out_idx] = .nil;
+                    written_count = out_idx + 1;
+                    break;
+                }
+                const count: usize = @intCast(count_i);
+                if (count == 0) {
+                    if (cur_pos >= content.len) {
+                        vm.stack[vm.base + func_reg + out_idx] = .nil;
+                    } else {
+                        vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(""));
+                    }
+                    written_count = out_idx + 1;
+                    continue;
+                }
+                if (cur_pos >= content.len) {
+                    vm.stack[vm.base + func_reg + out_idx] = .nil;
+                    written_count = out_idx + 1;
+                    break;
+                }
+                const end = @min(content.len, cur_pos + count);
+                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..end]));
+                cur_pos = end;
+                written_count = out_idx + 1;
+                continue;
+            }
+
+            const fmt_obj = fmt_val.asString() orelse {
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                written_count = out_idx + 1;
+                break;
+            };
+            const fmt = fmt_obj.asSlice();
+
+            if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
+                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..]));
+                cur_pos = content.len;
+                written_count = out_idx + 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, fmt, "*l") or std.mem.eql(u8, fmt, "l") or
+                std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L"))
+            {
+                const keep_nl = std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L");
+                if (cur_pos >= content.len) {
+                    vm.stack[vm.base + func_reg + out_idx] = .nil;
+                    written_count = out_idx + 1;
+                    break;
+                }
+                var end = cur_pos;
+                while (end < content.len and content[end] != '\n') : (end += 1) {}
+                const line_end = if (keep_nl and end < content.len) end + 1 else end;
+                vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..line_end]));
+                cur_pos = if (end < content.len) end + 1 else end;
+                written_count = out_idx + 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
+                const res = readLuaNumberFromContent(content, cur_pos);
+                cur_pos = res.new_pos;
+                if (res.value) |num| {
+                    vm.stack[vm.base + func_reg + out_idx] = num;
+                    written_count = out_idx + 1;
+                    continue;
+                }
+                vm.stack[vm.base + func_reg + out_idx] = .nil;
+                written_count = out_idx + 1;
+                break;
+            }
+
+            vm.stack[vm.base + func_reg + out_idx] = .nil;
+            written_count = out_idx + 1;
+            break;
+        }
+
+        if (written_count < fmt_count) {
+            var fill_mid = written_count;
+            while (fill_mid < fmt_count) : (fill_mid += 1) {
+                vm.stack[vm.base + func_reg + fill_mid] = .nil;
+            }
+        }
+
+        const clear_upto: u32 = @max(nresults, fmt_count + 1);
+        if (clear_upto > fmt_count) {
+            var fill = fmt_count;
+            while (fill < clear_upto) : (fill += 1) {
+                vm.stack[vm.base + func_reg + fill] = .nil;
+            }
+        }
+
+        try state_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+        if (vm.stack[vm.base + func_reg].isNil()) {
+            if (wrapper_opt) |wrapper| {
+                const done_key = try vm.gc().allocString("_lines_done");
+                try wrapper.set(TValue.fromString(done_key), .{ .boolean = true });
+            }
+        }
+        vm.top = vm.base + func_reg + written_count;
+        return;
+    }
+
     // Check if we're at or past the end
     if (start_pos >= content.len) {
         if (wrapper_opt) |wrapper| {
@@ -928,6 +1072,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
             try wrapper.set(TValue.fromString(done_key), .{ .boolean = true });
         }
         vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     }
 
@@ -943,6 +1088,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     // Update position (skip past the newline if present)
     const new_pos: i64 = @intCast(if (end_pos < content.len) end_pos + 1 else end_pos);
     try state_table.set(TValue.fromString(pos_key), .{ .integer = new_pos });
+    vm.top = vm.base + func_reg + 1;
 }
 
 /// io.open(filename [, mode]) - Opens a file in specified mode
@@ -1555,10 +1701,10 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         vm,
         file_table,
         func_reg,
-        if (nargs > 1) nargs - 1 else 0,
+        nargs,
         nresults,
-        vm.base + func_reg + 2,
-        if (nargs > 1) nargs - 1 else 1,
+        vm.base + func_reg + 1,
+        if (nargs > 0) nargs else 1,
         content,
     )) {
         return;
@@ -1609,7 +1755,7 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end) });
     } else {
-        vm.stack[vm.base + func_reg] = .nil;
+        return vm.raiseString("invalid format");
     }
 }
 
@@ -2110,8 +2256,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse .nil;
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(res.new_pos) });
     } else {
-        // Unknown format, return nil
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        return vm.raiseString("invalid format");
     }
 }
 
@@ -2300,6 +2445,26 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         if (closed_val.toBoolean()) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             return;
+        }
+    }
+
+    // Check write permission from file mode. Read-only handles must return
+    // (nil, errmsg, errcode) instead of succeeding.
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    if (file_table.get(TValue.fromString(mode_key))) |mode_val| {
+        if (mode_val.asString()) |mode_str| {
+            const mode = mode_str.asSlice();
+            const can_write = mode.len > 0 and
+                (mode[0] == 'w' or mode[0] == 'a' or std.mem.indexOfScalar(u8, mode, '+') != null);
+            if (!can_write) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("file is not writable");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                return;
+            }
         }
     }
 
