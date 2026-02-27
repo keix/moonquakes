@@ -373,9 +373,11 @@ pub const ProtoBuilder = struct {
     /// On success: R(A) = true, R(A+1...) = return values
     /// On failure: R(A) = false, R(A+1) = error message
     /// result_reg is where the status boolean goes; the function is at result_reg+1
-    pub fn emitPcall(self: *ProtoBuilder, result_reg: u8, nargs: u8, nresults: u8) !void {
-        const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
-        const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
+    pub fn emitPcall(self: *ProtoBuilder, result_reg: u8, total_args: u8, total_results: u8) !void {
+        // NOTE: PCALL uses direct total counts (function+args, status+values);
+        // CALL uses +1 encoding.
+        const b: u8 = if (total_args == VARARG_SENTINEL) 0 else total_args;
+        const c: u8 = if (total_results == VARARG_SENTINEL) 0 else total_results;
         const instr = Instruction.initABC(.PCALL, result_reg, b, c);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
@@ -3886,12 +3888,12 @@ pub const Parser = struct {
         // parseCallArgs expects func_reg and places args at func_reg+1, func_reg+2...
         // For PCALL: result_reg = status, result_reg+1 = function, result_reg+2... = args
         // So we pass result_reg as "func_reg" and it places pcall's arguments correctly
-        const arg_count = try self.parseCallArgs(result_reg);
+        const total_args = try self.parseCallArgs(result_reg);
 
         // Emit PCALL instruction
         // nresults = 2 means status + 1 return value (typical usage)
         // Use VARARG_SENTINEL for variable results if caller wants multiple
-        try self.proto.emitPcall(result_reg, arg_count, 2);
+        try self.proto.emitPcall(result_reg, total_args, 2);
 
         // Return the result register (where status boolean is stored)
         // Note: caller may need to handle multiple return values

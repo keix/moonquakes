@@ -2615,12 +2615,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             const c = inst.getC();
 
+            // NOTE: PCALL uses direct total counts (function+args, status+values);
+            // CALL uses +1 encoding.
+            const total_args: u32 = b;
+            const total_results: u32 = c;
             const func_val = vm.stack[vm.base + a + 1];
-            const nargs: u32 = if (b > 0) b - 1 else blk: {
+            const user_nargs: u32 = if (total_args > 0) total_args - 1 else blk: {
                 const arg_start = vm.base + a + 2;
                 break :blk vm.top - arg_start;
             };
-            const nresults: u32 = if (c > 0) c - 1 else 1;
+            const user_nresults: u32 = if (total_results > 0) total_results - 1 else 1;
 
             // Handle native closure
             if (func_val.isObject()) {
@@ -2631,17 +2635,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                     // Set up call at temporary position
                     const call_reg: u32 = a + 1;
-                    vm.top = vm.base + call_reg + 1 + nargs;
+                    vm.top = vm.base + call_reg + 1 + user_nargs;
 
                     // Execute with error catching
-                    const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), nargs, nresults)) blk: {
+                    const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs, user_nresults)) blk: {
                         // Success: move results and prepend true
-                        var i: u32 = nresults;
+                        var i: u32 = user_nresults;
                         while (i > 0) : (i -= 1) {
                             vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
                         }
                         vm.stack[vm.base + a] = .{ .boolean = true };
-                        break :blk nresults + 1; // true + results
+                        break :blk user_nresults + 1; // true + results
                     } else |err| blk: {
                         // Only catch LuaException; other errors (OOM) propagate
                         if (err != error.LuaException) return err;
@@ -2669,26 +2673,49 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const func_proto = closure.proto;
                 const call_base = vm.base + a + 1;
 
-                // Shift arguments (overwrite function)
-                if (nargs > 0) {
-                    for (0..nargs) |i| {
+                // Match CALL vararg semantics.
+                var vararg_base: u32 = 0;
+                var vararg_count: u32 = 0;
+                if (func_proto.is_vararg and user_nargs > func_proto.numparams) {
+                    vararg_count = user_nargs - func_proto.numparams;
+                    vararg_base = call_base + func_proto.maxstacksize;
+                    var i: u32 = vararg_count;
+                    while (i > 0) {
+                        i -= 1;
+                        vm.stack[vararg_base + i] = vm.stack[call_base + 1 + func_proto.numparams + i];
+                    }
+                }
+
+                // Shift fixed parameters down by 1 (overwrite function slot).
+                const params_to_copy = @min(user_nargs, @as(u32, func_proto.numparams));
+                if (params_to_copy > 0) {
+                    for (0..params_to_copy) |i| {
                         vm.stack[call_base + i] = vm.stack[call_base + 1 + i];
                     }
                 }
 
                 // Fill remaining params with nil
-                if (nargs < func_proto.numparams) {
-                    for (vm.stack[call_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                if (user_nargs < func_proto.numparams) {
+                    for (vm.stack[call_base + user_nargs ..][0 .. func_proto.numparams - user_nargs]) |*slot| {
                         slot.* = .nil;
                     }
                 }
 
                 // Push a protected call frame
-                const pcall_nresults: i16 = @intCast(nresults);
-                const new_ci = try pushCallInfo(vm, func_proto, closure, call_base, vm.base + a, pcall_nresults);
+                const pcall_nresults: i16 = @intCast(user_nresults);
+                const new_ci = try pushCallInfoVararg(
+                    vm,
+                    func_proto,
+                    closure,
+                    call_base,
+                    vm.base + a,
+                    pcall_nresults,
+                    vararg_base,
+                    vararg_count,
+                );
                 new_ci.is_protected = true;
 
-                vm.top = call_base + func_proto.maxstacksize;
+                vm.top = call_base + func_proto.maxstacksize + vararg_count;
                 return .LoopContinue;
             }
 
@@ -2711,16 +2738,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                         // Stack: [func_reg]=table, [func_reg+1..]=args
                         // __call expects: (table, args...) so nargs+1
-                        vm.top = vm.base + call_reg + 1 + nargs;
+                        vm.top = vm.base + call_reg + 1 + user_nargs;
 
-                        const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), nargs + 1, nresults)) blk: {
+                        const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs + 1, user_nresults)) blk: {
                             // Success: move results and prepend true
-                            var i: u32 = nresults;
+                            var i: u32 = user_nresults;
                             while (i > 0) : (i -= 1) {
                                 vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
                             }
                             vm.stack[vm.base + a] = .{ .boolean = true };
-                            break :blk nresults + 1;
+                            break :blk user_nresults + 1;
                         } else |err| blk: {
                             if (err != error.LuaException) return err;
                             vm.stack[vm.base + a] = .{ .boolean = false };
@@ -2745,20 +2772,42 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         const call_base = vm.base + a + 1;
 
                         // Stack already has: [call_base]=table, [call_base+1..]=args
-                        // __call expects (self, args...), so total args = nargs + 1
-                        const total_args = nargs + 1;
+                        // __call expects (self, args...), so total args = user_nargs + 1
+                        const total_user_args = user_nargs + 1;
+
+                        // Match CALL vararg semantics for __call Lua closure.
+                        var vararg_base: u32 = 0;
+                        var vararg_count: u32 = 0;
+                        if (func_proto.is_vararg and total_user_args > func_proto.numparams) {
+                            vararg_count = total_user_args - func_proto.numparams;
+                            vararg_base = call_base + func_proto.maxstacksize;
+                            var i: u32 = vararg_count;
+                            while (i > 0) {
+                                i -= 1;
+                                vm.stack[vararg_base + i] = vm.stack[call_base + func_proto.numparams + i];
+                            }
+                        }
 
                         // Fill remaining params with nil
-                        var i: u32 = total_args;
+                        var i: u32 = total_user_args;
                         while (i < func_proto.numparams) : (i += 1) {
                             vm.stack[call_base + i] = .nil;
                         }
 
-                        const pcall_nresults: i16 = @intCast(nresults);
-                        const new_ci = try pushCallInfo(vm, func_proto, closure, call_base, vm.base + a, pcall_nresults);
+                        const pcall_nresults: i16 = @intCast(user_nresults);
+                        const new_ci = try pushCallInfoVararg(
+                            vm,
+                            func_proto,
+                            closure,
+                            call_base,
+                            vm.base + a,
+                            pcall_nresults,
+                            vararg_base,
+                            vararg_count,
+                        );
                         new_ci.is_protected = true;
 
-                        vm.top = call_base + func_proto.maxstacksize;
+                        vm.top = call_base + func_proto.maxstacksize + vararg_count;
                         return .LoopContinue;
                     }
                 }

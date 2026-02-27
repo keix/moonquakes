@@ -112,15 +112,29 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
         }
 
+        // Match CALL vararg frame layout: fixed params in frame, varargs after maxstacksize.
+        const total_args: u32 = 1 + @as(u32, @intCast(args.len));
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (proto.is_vararg and total_args > proto.numparams) {
+            vararg_count = total_args - proto.numparams;
+            vararg_base = call_base + proto.maxstacksize;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[call_base + proto.numparams + i];
+            }
+        }
+
         // Fill remaining params with nil (total params = 1 + args.len)
-        var i: u32 = 1 + @as(u32, @intCast(args.len));
+        var i: u32 = total_args;
         while (i < proto.numparams) : (i += 1) {
             vm.stack[call_base + i] = .nil;
         }
 
-        vm.top = call_base + proto.maxstacksize;
+        vm.top = call_base + proto.maxstacksize + vararg_count;
 
-        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
+        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
     }
 
     return CallError.NotCallable;
@@ -174,21 +188,37 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
     const call_base = vm.top;
     const result_slot = call_base;
 
-    // Set up arguments
-    for (args, 0..) |arg, i| {
-        vm.stack[call_base + @as(u32, @intCast(i))] = arg;
+    const arg_count: u32 = @intCast(args.len);
+    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
+
+    // Set up fixed parameters
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        vm.stack[call_base + i] = args[i];
     }
 
     // Fill remaining params with nil
-    var i: u32 = @intCast(args.len);
+    i = params_to_copy;
     while (i < proto.numparams) : (i += 1) {
         vm.stack[call_base + i] = .nil;
     }
 
-    vm.top = call_base + proto.maxstacksize;
+    // Match CALL vararg frame layout: extra args live after maxstacksize.
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (proto.is_vararg and arg_count > proto.numparams) {
+        vararg_count = arg_count - proto.numparams;
+        vararg_base = call_base + proto.maxstacksize;
+        var vi: u32 = 0;
+        while (vi < vararg_count) : (vi += 1) {
+            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
+        }
+    }
+
+    vm.top = call_base + proto.maxstacksize + vararg_count;
 
     // Execute until return, then restore caller's frame state
-    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
+    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
 }
 
 /// Execute a Lua function until it returns to saved call depth.
@@ -205,12 +235,14 @@ fn runUntilReturn(
     result_slot: u32,
     saved_base: u32,
     saved_top: u32,
+    vararg_base: u32,
+    vararg_count: u32,
 ) anyerror!TValue {
     // Save current call depth for reentrancy
     const saved_depth = vm.callstack_size;
 
     // Push call info
-    _ = try mnemonics.pushCallInfo(vm, proto, closure, call_base, result_slot, 1);
+    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
 
     // CRITICAL: Ensure vm.base and vm.top are restored even on error
     // Without this, errors in called functions leave the VM in a corrupt state
