@@ -759,42 +759,75 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Reserve stack slots for GC safety
     vm.reserveSlots(func_reg, 5);
-
-    // Get filename argument (required for this implementation)
-    if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    }
-
-    const filename_arg = vm.stack[vm.base + func_reg + 1];
-    const filename_obj = filename_arg.asString() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    const filename = filename_obj.asSlice();
-
-    // Open and read the file
-    const file = std.fs.cwd().openFile(filename, .{}) catch {
-        return vm.raiseString("cannot open file");
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024) catch {
-        return vm.raiseString("cannot read file");
-    };
-    defer vm.gc().allocator.free(content);
-
-    // Create state table with content and position
     const state_table = try vm.gc().allocTable();
-    vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
-
     const content_key = try vm.gc().allocString("_content");
-    vm.stack[vm.base + func_reg + 2] = TValue.fromString(content_key);
-    const content_str = try vm.gc().allocString(content);
-    try state_table.set(TValue.fromString(content_key), TValue.fromString(content_str));
-
     const pos_key = try vm.gc().allocString("_pos");
-    try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+
+    // io.lines() / io.lines(nil, ...) -> iterate current default input
+    const use_default_input = nargs == 0 or vm.stack[vm.base + func_reg + 1].isNil();
+    if (use_default_input) {
+        const io_key = try vm.gc().allocString("io");
+        const io_val = vm.globals().get(TValue.fromString(io_key)) orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        };
+        const io_table = io_val.asTable() orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        };
+
+        const default_input_key = try vm.gc().allocString(IO_DEFAULT_INPUT_KEY);
+        var file_table: *TableObject = undefined;
+        if (io_table.get(TValue.fromString(default_input_key))) |in_val| {
+            if (in_val.asTable()) |t| {
+                file_table = t;
+            } else {
+                file_table = try createStdioHandle(vm, func_reg + 3, "stdin");
+                try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(file_table));
+                const stdin_key = try vm.gc().allocString("stdin");
+                try io_table.set(TValue.fromString(stdin_key), TValue.fromTable(file_table));
+            }
+        } else {
+            file_table = try createStdioHandle(vm, func_reg + 3, "stdin");
+            try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(file_table));
+            const stdin_key = try vm.gc().allocString("stdin");
+            try io_table.set(TValue.fromString(stdin_key), TValue.fromTable(file_table));
+        }
+
+        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+        const content_val = file_table.get(TValue.fromString(output_key)) orelse TValue.fromString(try vm.gc().allocString(""));
+        const content_obj = content_val.asString() orelse try vm.gc().allocString("");
+        try state_table.set(TValue.fromString(content_key), TValue.fromString(content_obj));
+
+        const file_pos_key = try vm.gc().allocString(FILE_POS_KEY);
+        const file_pos_val = file_table.get(TValue.fromString(file_pos_key)) orelse TValue{ .integer = 0 };
+        try state_table.set(TValue.fromString(pos_key), file_pos_val);
+
+        const file_ref_key = try vm.gc().allocString("_file_ref");
+        try state_table.set(TValue.fromString(file_ref_key), TValue.fromTable(file_table));
+    } else {
+        // io.lines(filename, ...)
+        const filename_arg = vm.stack[vm.base + func_reg + 1];
+        const filename_obj = filename_arg.asString() orelse {
+            vm.stack[vm.base + func_reg] = .nil;
+            return;
+        };
+        const filename = filename_obj.asSlice();
+
+        const file = std.fs.cwd().openFile(filename, .{}) catch {
+            return vm.raiseString("cannot open file");
+        };
+        defer file.close();
+
+        const content = file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024) catch {
+            return vm.raiseString("cannot read file");
+        };
+        defer vm.gc().allocator.free(content);
+
+        const content_str = try vm.gc().allocString(content);
+        try state_table.set(TValue.fromString(content_key), TValue.fromString(content_str));
+        try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+    }
 
     const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
     vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);

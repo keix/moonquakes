@@ -3128,13 +3128,22 @@ pub const Parser = struct {
         // The expression should return: iterator function, state, initial control value
         const expr_reg = try self.parseExpr();
 
-        // Check if last instruction was a CALL and patch it to return 3 values
+        // Check if last instruction was a CALL (or trailing MOVE after CALL)
+        // and patch it to return 3 values.
         if (self.proto.code.items.len > code_before) {
             const last_idx = self.proto.code.items.len - 1;
             const last_instr = self.proto.code.items[last_idx];
+            var call_idx_opt: ?usize = null;
             if (last_instr.getOpCode() == .CALL) {
-                // Patch to return 3 values (iterator, state, control)
-                self.proto.patchCallResults(@intCast(last_idx), 3);
+                call_idx_opt = last_idx;
+            } else if (last_instr.getOpCode() == .MOVE and last_idx > code_before) {
+                const prev_idx = last_idx - 1;
+                if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                    call_idx_opt = prev_idx;
+                }
+            }
+            if (call_idx_opt) |call_idx| {
+                self.proto.patchCallResults(@intCast(call_idx), 3);
             }
         }
 
@@ -4025,7 +4034,7 @@ pub const Parser = struct {
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
-        if (last_was_call and self.proto.code.items.len > 0) {
+        if (last_was_call and arg_count > 1 and self.proto.code.items.len > 0) {
             // Find the CALL instruction (might be last, or before a MOVE)
             var call_idx = self.proto.code.items.len - 1;
             if (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
