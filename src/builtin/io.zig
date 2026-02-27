@@ -264,7 +264,7 @@ fn tryHandleMultiRead(
 
     const use_multi_read = blk: {
         if (fmt_count != 1) break :blk true;
-        if (fmt_arg_count == 0 or fmt_arg_start >= vm.top) break :blk true;
+        if (fmt_arg_count == 0) break :blk true;
         const fmt0 = vm.stack[fmt_arg_start].asString() orelse break :blk true;
         const f = fmt0.asSlice();
         break :blk std.mem.eql(u8, f, "n") or std.mem.eql(u8, f, "*n");
@@ -274,7 +274,7 @@ fn tryHandleMultiRead(
     var cur_pos: usize = pos;
     var out_idx: u32 = 0;
     while (out_idx < fmt_count) : (out_idx += 1) {
-        const fmt_val: TValue = if (fmt_arg_count > 0 and out_idx < fmt_arg_count and fmt_arg_start + out_idx < vm.top)
+        const fmt_val: TValue = if (fmt_arg_count > 0 and out_idx < fmt_arg_count)
             vm.stack[fmt_arg_start + out_idx]
         else
             TValue.fromString(try vm.gc().allocString("*l"));
@@ -407,7 +407,13 @@ pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         if (io_val.asTable()) |io_table| {
             const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
             if (io_table.get(TValue.fromString(default_output_key))) |out_val| {
-                if (out_val.asTable() != null) {
+                if (out_val.asTable()) |out_table| {
+                    const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+                    if (out_table.get(TValue.fromString(closed_key))) |closed_val| {
+                        if (closed_val.toBoolean()) {
+                            return vm.raiseString(" output file is closed");
+                        }
+                    }
                     vm.reserveSlots(func_reg, nargs + 3);
                     var i: i64 = @intCast(nargs);
                     while (i > 0) : (i -= 1) {
@@ -908,6 +914,13 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     }
 
     // Get content from state table
+    const err_key = try vm.gc().allocString("_error_msg");
+    if (state_table.get(TValue.fromString(err_key))) |err_val| {
+        if (err_val.asString()) |err_str| {
+            return vm.raiseString(err_str.asSlice());
+        }
+    }
+
     const content_key = try vm.gc().allocString("_content");
     const content_val = state_table.get(TValue.fromString(content_key)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
@@ -1288,9 +1301,9 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
         try file_table.set(TValue.fromString(exitcode_key), .{ .integer = 0 });
 
-        // Store position (0 for append mode)
+        // Store position at end for append mode
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(initial_content.len) });
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -1665,8 +1678,7 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
         if (closed_val.toBoolean()) {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
+            return vm.raiseString(" input file is closed");
         }
     }
 
@@ -2093,6 +2105,31 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         }
     }
 
+    // lines on a non-readable handle should fail when iterator is called.
+    var can_read = true;
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    if (file_table.get(TValue.fromString(mode_key))) |mode_val| {
+        if (mode_val.asString()) |mode_str| {
+            const mode = mode_str.asSlice();
+            can_read = mode.len > 0 and
+                (mode[0] == 'r' or std.mem.indexOfScalar(u8, mode, '+') != null);
+        }
+    }
+
+    if (!can_read) {
+        vm.reserveSlots(func_reg, 5);
+        const state_table = try vm.gc().allocTable();
+        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+        const err_key = try vm.gc().allocString("_error_msg");
+        const err_val = try vm.gc().allocString("file is not readable");
+        try state_table.set(TValue.fromString(err_key), TValue.fromString(err_val));
+        const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
+        vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
+        return;
+    }
+
     // Get content from file handle's _output field
     const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
     const content_val = file_table.get(TValue.fromString(output_key)) orelse {
@@ -2154,6 +2191,26 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             // File is closed
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             return;
+        }
+    }
+
+    // Check read permission from file mode. Non-readable handles must return
+    // (nil, errmsg, errcode) instead of succeeding.
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    if (file_table.get(TValue.fromString(mode_key))) |mode_val| {
+        if (mode_val.asString()) |mode_str| {
+            const mode = mode_str.asSlice();
+            const can_read = mode.len > 0 and
+                (mode[0] == 'r' or std.mem.indexOfScalar(u8, mode, '+') != null);
+            if (!can_read) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("file is not readable");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                return;
+            }
         }
     }
 
