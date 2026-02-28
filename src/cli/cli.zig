@@ -37,6 +37,32 @@ pub const CLI = struct {
             return;
         }
 
+        if (std.mem.eql(u8, arg, "-e")) {
+            if (args.len < 3) {
+                var stderr_writer = std.fs.File.stderr().writer(&.{});
+                const stderr = &stderr_writer.interface;
+                try stderr.print("Error: '-e' expects a chunk argument\n", .{});
+                std.process.exit(1);
+            }
+            const chunk = args[2];
+            const script_args: []const []const u8 = if (args.len > 3)
+                @as([]const []const u8, @ptrCast(args[3..]))
+            else
+                &.{};
+
+            var result = launcher.run(self.allocator, chunk, .{
+                .exec_name = args[0],
+                .script_name = "(command line)",
+                .args = script_args,
+            }) catch |err| switch (err) {
+                error.LuaException => std.process.exit(1),
+                error.CompileFailed => std.process.exit(1),
+                else => return err,
+            };
+            result.deinit(self.allocator);
+            return;
+        }
+
         const file_path = arg;
 
         // Collect script arguments (args after the script file)
@@ -48,6 +74,7 @@ pub const CLI = struct {
 
         // Use launcher for execution with arg support
         var result = launcher.runFile(self.allocator, file_path, .{
+            .exec_name = args[0],
             .script_name = file_path,
             .args = script_args,
         }) catch |err| switch (err) {

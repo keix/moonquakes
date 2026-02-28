@@ -1,10 +1,49 @@
+const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
+const opcodes = @import("../compiler/opcodes.zig");
+const Instruction = opcodes.Instruction;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+
+// Bootstrap frame for first coroutine resume:
+//   CALL   R0, ... (body + resume args)
+//   RETURN R0, ... (propagate all results)
+// This keeps first resume on the same CALL/RETURN path as normal execution.
+//
+// Ownership model:
+// - This proto is runtime-owned immutable static data (not GC-allocated).
+// - It is intentionally never freed and reused by all coroutine starts.
+// - GC may traverse it through CallInfo.func (closure=null path), which is safe
+//   because its code/metadata slices are also static immutable storage.
+var coroutine_bootstrap_code = [_]Instruction{
+    Instruction.initABC(.CALL, 0, 0, 0),
+    Instruction.initABC(.RETURN, 0, 0, 0),
+};
+var coroutine_bootstrap_lineinfo = [_]u32{ 1, 1 };
+var coroutine_bootstrap_proto = object.ProtoObject{
+    .header = object.GCObject.init(.proto, null),
+    .k = &.{},
+    .code = coroutine_bootstrap_code[0..],
+    .protos = &.{},
+    .numparams = 0,
+    .is_vararg = true,
+    // R0=function plus one scratch slot for conservative frame-top handling.
+    .maxstacksize = 2,
+    .nups = 0,
+    .upvalues = &.{},
+    .allocator = std.heap.page_allocator,
+    .source = "[coroutine bootstrap]",
+    .lineinfo = coroutine_bootstrap_lineinfo[0..],
+};
+
+fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
+    if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
+    return co_vm.stack[0];
+}
 
 // Lua 5.4 Coroutine Library
 // Reference: https://www.lua.org/manual/5.4/manual.html#2.6
@@ -32,6 +71,10 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     // For now, store the function at stack[0]
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
+    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
+    if (new_vm.thread.entry_func) |entry_fn| {
+        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
+    }
 
     // Return the thread object
     vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
@@ -40,6 +83,9 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 /// coroutine.resume(co [, val1, ...]) - Starts or continues coroutine co
 /// Returns (true, results...) on success, (false, error_message) on failure
 pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
     if (nargs < 1) {
         return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
     }
@@ -65,15 +111,20 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 2; // skip thread argument
+    const is_first_resume = thread.status == .created;
+    const body = threadEntryBody(thread, co_vm);
 
-    if (co_vm.ci == null) {
+    if (is_first_resume) {
         // First resume - check function type and set up call frame
-        if (co_vm.stack[0].asClosure() == null) {
+        co_vm.stack[0] = body;
+        const is_lua_body = body.asClosure() != null;
+        const is_native_body = body.isObject() and body.object.type == .native_closure;
+        if (!is_lua_body and !is_native_body) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
             return;
         }
-        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
@@ -141,29 +192,23 @@ const CoroutineResult = union(enum) {
 };
 
 /// Set up coroutine for first resume (initialize call frame)
-fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) error{OutOfMemory}!void {
-    const func_val = co_vm.stack[0];
-    const closure = func_val.asClosure().?;
-    const proto = closure.proto;
-
+fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
     // Copy arguments to coroutine stack
     var i: u32 = 0;
     while (i < num_args) : (i += 1) {
         co_vm.stack[1 + i] = caller_stack[arg_base + i];
     }
-    while (i < proto.numparams) : (i += 1) {
-        co_vm.stack[1 + i] = .nil;
-    }
 
-    // Set up initial call frame
-    co_vm.base = 1;
-    co_vm.top = 1 + proto.maxstacksize;
+    // Bootstrap frame executes CALL/RETURN at base 0.
+    co_vm.base = 0;
+    co_vm.top = 1 + num_args;
     co_vm.base_ci = .{
-        .func = proto,
-        .closure = closure,
-        .pc = proto.code.ptr,
+        .func = &coroutine_bootstrap_proto,
+        // Bootstrap bytecode is CALL/RETURN only; no upvalue/env opcodes.
+        .closure = null,
+        .pc = coroutine_bootstrap_proto.code.ptr,
         .savedpc = null,
-        .base = 1,
+        .base = 0,
         .ret_base = 0,
         .nresults = -1,
         .previous = null,
@@ -307,7 +352,7 @@ pub fn nativeCoroutineStatus(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 
     const status_str: []const u8 = switch (thread.status) {
         .running => "running",
-        .suspended => "suspended",
+        .created, .suspended => "suspended",
         .normal => "normal",
         .dead => "dead",
     };
@@ -338,6 +383,10 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
+    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
+    if (new_vm.thread.entry_func) |entry_fn| {
+        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
+    }
 
     // CRITICAL: Protect the new thread from GC before any more allocations.
     // VM.init may increase bytes_allocated (if tracking enabled), and subsequent
@@ -373,6 +422,9 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 /// Internal: __call handler for wrapped coroutine
 /// Called when a wrapped coroutine is invoked as a function
 pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
     // When __call is invoked, the table (wrapper) is at func_reg
     // and original args are at func_reg+1, func_reg+2, ...
     // But nargs includes the wrapper itself as first arg
@@ -403,13 +455,18 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
+    const is_first_resume = thread.status == .created;
+    const body = threadEntryBody(thread, co_vm);
 
-    if (co_vm.ci == null) {
+    if (is_first_resume) {
         // First resume
-        if (co_vm.stack[0].asClosure() == null) {
+        co_vm.stack[0] = body;
+        const is_lua_body = body.asClosure() != null;
+        const is_native_body = body.isObject() and body.object.type == .native_closure;
+        if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
-        try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);

@@ -399,7 +399,8 @@ pub const UserdataObject = struct {
 
 /// Thread Status for coroutines
 pub const ThreadStatus = enum(u8) {
-    suspended, // Created or yielded, ready to be resumed
+    created, // Created and never resumed yet (internal)
+    suspended, // Yielded, ready to be resumed
     running, // Currently executing
     normal, // Resumed another coroutine (waiting for it to finish)
     dead, // Finished execution or errored
@@ -421,6 +422,10 @@ pub const ThreadObject = struct {
     /// Pointer to VM execution state (actually *VM, using anyopaque to avoid circular import)
     /// The VM contains: stack, top, base, ci, callstack, open_upvalues, etc.
     vm: *anyopaque,
+
+    /// Entry function object for first resume.
+    /// Kept on the thread object so wrapper logic does not depend on VM stack layout.
+    entry_func: ?*GCObject = null,
 
     /// Callback to mark VM roots (stack, callframes, upvalues, etc.)
     /// Set by VM.init. GC calls this during mark phase for coroutine threads.

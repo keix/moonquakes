@@ -112,15 +112,29 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
         }
 
+        // Match CALL vararg frame layout: fixed params in frame, varargs after maxstacksize.
+        const total_args: u32 = 1 + @as(u32, @intCast(args.len));
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (proto.is_vararg and total_args > proto.numparams) {
+            vararg_count = total_args - proto.numparams;
+            vararg_base = call_base + proto.maxstacksize;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[call_base + proto.numparams + i];
+            }
+        }
+
         // Fill remaining params with nil (total params = 1 + args.len)
-        var i: u32 = 1 + @as(u32, @intCast(args.len));
+        var i: u32 = total_args;
         while (i < proto.numparams) : (i += 1) {
             vm.stack[call_base + i] = .nil;
         }
 
-        vm.top = call_base + proto.maxstacksize;
+        vm.top = call_base + proto.maxstacksize + vararg_count;
 
-        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
+        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
     }
 
     return CallError.NotCallable;
@@ -147,17 +161,17 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
     // (native functions use vm.base + func_reg to access their frame)
     vm.base = call_base;
     vm.top = call_base + 1 + @as(u32, @intCast(args.len));
+    defer {
+        // Always restore caller frame even if native raises.
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
 
     // Call native function (func_reg = 0 relative to new vm.base)
     try vm.callNative(nc.func.id, 0, @intCast(args.len), 1);
 
-    // Get result before restoring frame state
+    // Get result from native frame.
     const result = vm.stack[result_slot];
-
-    // GC SAFETY: Restore caller's frame state
-    // This ensures the caller's full stack frame is visible to GC
-    vm.base = saved_base;
-    vm.top = saved_top;
 
     return result;
 }
@@ -174,21 +188,37 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
     const call_base = vm.top;
     const result_slot = call_base;
 
-    // Set up arguments
-    for (args, 0..) |arg, i| {
-        vm.stack[call_base + @as(u32, @intCast(i))] = arg;
+    const arg_count: u32 = @intCast(args.len);
+    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
+
+    // Set up fixed parameters
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        vm.stack[call_base + i] = args[i];
     }
 
     // Fill remaining params with nil
-    var i: u32 = @intCast(args.len);
+    i = params_to_copy;
     while (i < proto.numparams) : (i += 1) {
         vm.stack[call_base + i] = .nil;
     }
 
-    vm.top = call_base + proto.maxstacksize;
+    // Match CALL vararg frame layout: extra args live after maxstacksize.
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (proto.is_vararg and arg_count > proto.numparams) {
+        vararg_count = arg_count - proto.numparams;
+        vararg_base = call_base + proto.maxstacksize;
+        var vi: u32 = 0;
+        while (vi < vararg_count) : (vi += 1) {
+            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
+        }
+    }
+
+    vm.top = call_base + proto.maxstacksize + vararg_count;
 
     // Execute until return, then restore caller's frame state
-    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top);
+    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
 }
 
 /// Execute a Lua function until it returns to saved call depth.
@@ -205,24 +235,24 @@ fn runUntilReturn(
     result_slot: u32,
     saved_base: u32,
     saved_top: u32,
+    vararg_base: u32,
+    vararg_count: u32,
 ) anyerror!TValue {
+    const cleanupOnError = struct {
+        fn run(vm2: *VM, saved_depth2: u32, saved_base2: u32, saved_top2: u32) void {
+            while (vm2.callstack_size > saved_depth2) {
+                mnemonics.popCallInfo(vm2);
+            }
+            vm2.base = saved_base2;
+            vm2.top = saved_top2;
+        }
+    }.run;
+
     // Save current call depth for reentrancy
     const saved_depth = vm.callstack_size;
 
     // Push call info
-    _ = try mnemonics.pushCallInfo(vm, proto, closure, call_base, result_slot, 1);
-
-    // CRITICAL: Ensure vm.base and vm.top are restored even on error
-    // Without this, errors in called functions leave the VM in a corrupt state
-    errdefer {
-        // Pop any frames we pushed
-        while (vm.callstack_size > saved_depth) {
-            mnemonics.popCallInfo(vm);
-        }
-        // Restore caller's frame state
-        vm.base = saved_base;
-        vm.top = saved_top;
-    }
+    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
 
     // Execute until we return to saved depth
     var direct_result: ?TValue = null;
@@ -244,6 +274,8 @@ fn runUntilReturn(
             continue;
         };
         const result = mnemonics.do(vm, inst) catch |err| {
+            // Preserve call frames on coroutine yield; resume needs intact state.
+            if (err == error.Yield) return error.Yield;
             // Handle LuaException by unwinding to protected frames (pcall)
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
@@ -278,11 +310,14 @@ fn runUntilReturn(
                     else => "runtime error",
                 };
                 vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                    cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err; // OOM: can't convert, propagate original error
                 });
                 if (mnemonics.handleLuaException(vm)) continue;
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;
             }
+            cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return err;
         };
         switch (result) {

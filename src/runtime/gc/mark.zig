@@ -159,6 +159,9 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
         },
         .thread => {
             const thread_obj: *ThreadObject = @fieldParentPtr("header", obj);
+            if (thread_obj.entry_func) |entry_fn| {
+                markGray(self, entry_fn);
+            }
             if (thread_obj.mark_vm) |mark_fn| {
                 mark_fn(thread_obj.vm, @ptrCast(self));
             }

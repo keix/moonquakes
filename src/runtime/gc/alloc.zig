@@ -268,6 +268,7 @@ pub fn allocThread(
     obj.header = newObjectHeader(self, .thread);
     obj.status = status;
     obj.vm = vm_ptr;
+    obj.entry_func = null;
     obj.mark_vm = mark_vm;
     obj.free_vm = free_vm;
 

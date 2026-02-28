@@ -6,6 +6,41 @@ const call = @import("../vm/call.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const metamethod = @import("../vm/metamethod.zig");
 
+fn stripUtf8Bom(bytes: []const u8) []const u8 {
+    if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
+        return bytes[3..];
+    }
+    return bytes;
+}
+
+fn stripInitialHashLine(bytes: []const u8, preserve_newline: bool) []const u8 {
+    if (bytes.len > 0 and bytes[0] == '#') {
+        var i: usize = 0;
+        while (i < bytes.len and bytes[i] != '\n') : (i += 1) {}
+        if (i < bytes.len) {
+            return if (preserve_newline) bytes[i..] else bytes[i + 1 ..];
+        }
+        return "";
+    }
+    return bytes;
+}
+
+fn preprocessChunkSource(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), true);
+}
+
+fn sourceForBytecodeProbe(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), false);
+}
+
+fn modeAllowsBinary(mode: []const u8) bool {
+    return std.mem.indexOfScalar(u8, mode, 'b') != null;
+}
+
+fn modeAllowsText(mode: []const u8) bool {
+    return std.mem.indexOfScalar(u8, mode, 't') != null;
+}
+
 /// Lua 5.4 Global Functions (Basic Functions)
 /// Corresponds to Lua manual chapter "Basic Functions"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.1
@@ -53,7 +88,6 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 }
 
 /// type(v) - Returns the type of its only argument, coded as a string
-/// If the value is a table with __name metamethod, returns that value instead
 pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
@@ -65,8 +99,16 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     const arg = vm.stack[vm.base + func_reg + 1];
 
-    // Check for __name metamethod on tables
+    // Moonquakes represents file handles as tables internally; present them as userdata.
     if (arg.asTable()) |table| {
+        const closed_key = try vm.gc().allocString("_closed");
+        if (table.get(TValue.fromString(closed_key)) != null) {
+            const type_name = try vm.gc().allocString("userdata");
+            vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
+            return;
+        }
+
+        // Preserve Moonquakes extension: type() returns __name for tables with that metamethod.
         if (table.metatable) |mt| {
             if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
                 if (name_val.asString()) |name_str| {
@@ -133,7 +175,12 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                if (vm.lua_error_value.isNil()) {
+                    const err_fallback = try vm.gc().allocString("error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
+                } else {
+                    vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                }
             }
             // Always clear error value after handling
             vm.lua_error_value = .nil;
@@ -276,6 +323,12 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
                 // For now, common usage is to return a single iterator function
                 if (nresults > 1) vm.stack[vm.base + func_reg + 1] = table_arg;
                 if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
+                if (nresults > 3) {
+                    var i: u32 = 3;
+                    while (i < nresults) : (i += 1) {
+                        vm.stack[vm.base + func_reg + i] = .nil;
+                    }
+                }
                 return;
             }
         }
@@ -293,6 +346,12 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     // Return nil as initial key
     if (nresults > 2) {
         vm.stack[vm.base + func_reg + 2] = .nil;
+    }
+    if (nresults > 3) {
+        var i: u32 = 3;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
 }
 
@@ -318,6 +377,12 @@ pub fn nativeIpairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Return 0 as initial index
     if (nresults > 2) {
         vm.stack[vm.base + func_reg + 2] = .{ .integer = 0 };
+    }
+    if (nresults > 3) {
+        var i: u32 = 3;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
 }
 
@@ -564,6 +629,14 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 /// tonumber(e [, base]) - Tries to convert argument to a number
 pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
+    defer {
+        if (nresults > 1) {
+            var i: u32 = 1;
+            while (i < nresults) : (i += 1) {
+                vm.stack[vm.base + func_reg + i] = .nil;
+            }
+        }
+    }
 
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -588,7 +661,7 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Get optional base (default 10)
         var base: u8 = 10;
-        const has_base = nargs >= 2;
+        const has_base = nargs >= 2 and !vm.stack[vm.base + func_reg + 2].isNil();
         if (has_base) {
             const base_arg = vm.stack[vm.base + func_reg + 2];
             const b = base_arg.toInteger() orelse {
@@ -857,7 +930,6 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const serializer = @import("../compiler/serializer.zig");
-    const object = @import("../runtime/gc/object.zig");
 
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -870,32 +942,91 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     const chunk_arg = vm.stack[vm.base + func_reg + 1];
 
-    // Get env parameter (4th argument, default to globals)
-    const env_table: *object.TableObject = if (nargs >= 4 and !vm.stack[vm.base + func_reg + 4].isNil())
-        vm.stack[vm.base + func_reg + 4].asTable() orelse vm.globals()
+    // Get env parameter (4th argument). If absent, default to globals.
+    // If explicitly provided (including nil), use it as-is.
+    const env_value: TValue = if (nargs >= 4)
+        vm.stack[vm.base + func_reg + 4]
     else
-        vm.globals();
+        TValue.fromTable(vm.globals());
 
-    // Get source string
-    const source = if (chunk_arg.asString()) |str_obj|
-        str_obj.asSlice()
-    else {
-        // TODO: Support reader function
+    // Get mode parameter (3rd argument, default "bt")
+    var mode: []const u8 = "bt";
+    if (nargs >= 3) {
+        if (vm.stack[vm.base + func_reg + 3].asString()) |mode_str| {
+            mode = mode_str.asSlice();
+        }
+    }
+
+    // Get source string or read source through a reader function.
+    var owned_source: ?[]u8 = null;
+    defer if (owned_source) |buf| vm.gc().allocator.free(buf);
+    const source = if (chunk_arg.asString()) |str_obj| blk: {
+        break :blk str_obj.asSlice();
+    } else blk: {
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(vm.gc().allocator);
+
+        while (true) {
+            const piece_val = call.callValue(vm, chunk_arg, &.{}) catch |err| switch (err) {
+                error.LuaException => {
+                    vm.stack[vm.base + func_reg] = .nil;
+                    if (nresults > 1) {
+                        if (vm.lua_error_value.isNil()) {
+                            const err_fallback = try vm.gc().allocString("error");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
+                        } else {
+                            vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                        }
+                    }
+                    vm.lua_error_value = .nil;
+                    return;
+                },
+                else => return err,
+            };
+
+            if (piece_val.isNil()) break;
+            const piece_str = piece_val.asString() orelse {
+                vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("reader function must return a string");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+            try buf.appendSlice(vm.gc().allocator, piece_str.asSlice());
+        }
+
+        owned_source = try buf.toOwnedSlice(vm.gc().allocator);
+        break :blk owned_source.?;
+    };
+
+    const bytecode_probe = sourceForBytecodeProbe(source);
+    const looks_binary = bytecode_probe.len > 0 and bytecode_probe[0] == 0x1B;
+
+    if (looks_binary and !modeAllowsBinary(mode)) {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
-            const err_str = try vm.gc().allocString("load: reader function not yet supported");
+            const err_str = try vm.gc().allocString("attempt to load a binary chunk (mode is 't')");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
         return;
-    };
+    }
+    if (!looks_binary and !modeAllowsText(mode)) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("attempt to load a text chunk (mode is 'b')");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
 
     // Check if this is binary bytecode
-    if (serializer.isBytecode(source)) {
+    if (looks_binary) {
         // Load from bytecode
         vm.gc().inhibitGC();
         defer vm.gc().allowGC();
 
-        const proto = serializer.loadProto(source, vm.gc(), vm.gc().allocator) catch {
+        const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 const err_str = try vm.gc().allocString("invalid bytecode");
@@ -908,7 +1039,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         // Initialize _ENV upvalue (first upvalue) to the environment table
         if (closure.upvalues.len > 0) {
-            const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
+            const env_upval = try vm.gc().allocClosedUpvalue(env_value);
             closure.upvalues[0] = env_upval;
         }
 
@@ -917,7 +1048,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{});
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -957,7 +1088,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue (first upvalue) to the environment table
     if (closure.upvalues.len > 0) {
-        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
+        const env_upval = try vm.gc().allocClosedUpvalue(env_value);
         closure.upvalues[0] = env_upval;
     }
 
@@ -967,7 +1098,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 /// loadfile([filename [, mode [, env]]]) - Loads a chunk from a file
 /// Returns: compiled function, or (nil, error_message) on failure
 pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    const object = @import("../runtime/gc/object.zig");
+    const serializer = @import("../compiler/serializer.zig");
 
     if (nargs < 1) {
         // loadfile() without args reads from stdin - not implemented
@@ -991,11 +1122,20 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    // Get env parameter (3rd argument, default to globals)
-    const env_table: *object.TableObject = if (nargs >= 3 and !vm.stack[vm.base + func_reg + 3].isNil())
-        vm.stack[vm.base + func_reg + 3].asTable() orelse vm.globals()
+    // Get env parameter (3rd argument). If absent, default to globals.
+    // If explicitly provided (including nil), use it as-is.
+    const env_value: TValue = if (nargs >= 3)
+        vm.stack[vm.base + func_reg + 3]
     else
-        vm.globals();
+        TValue.fromTable(vm.globals());
+
+    // Get mode parameter (2nd argument, default "bt")
+    var mode: []const u8 = "bt";
+    if (nargs >= 2) {
+        if (vm.stack[vm.base + func_reg + 2].asString()) |mode_str| {
+            mode = mode_str.asSlice();
+        }
+    }
 
     // Read file contents
     const file = std.fs.cwd().openFile(filename, .{}) catch {
@@ -1018,8 +1158,50 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     };
     defer vm.gc().allocator.free(source);
 
+    const bytecode_probe = sourceForBytecodeProbe(source);
+    const looks_binary = bytecode_probe.len > 0 and bytecode_probe[0] == 0x1B;
+
+    if (looks_binary and !modeAllowsBinary(mode)) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("attempt to load a binary chunk (mode is 't')");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+    if (!looks_binary and !modeAllowsText(mode)) {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("attempt to load a text chunk (mode is 'b')");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    if (looks_binary) {
+        vm.gc().inhibitGC();
+        defer vm.gc().allowGC();
+
+        const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("invalid bytecode");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+
+        const closure = try vm.gc().allocClosure(proto);
+        if (closure.upvalues.len > 0) {
+            const env_upval = try vm.gc().allocClosedUpvalue(env_value);
+            closure.upvalues[0] = env_upval;
+        }
+        vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+        return;
+    }
+
     // Compile the source with filename as source name
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -1059,7 +1241,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Initialize _ENV upvalue (first upvalue) to the environment table
     if (closure.upvalues.len > 0) {
-        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(env_table));
+        const env_upval = try vm.gc().allocClosedUpvalue(env_value);
         closure.upvalues[0] = env_upval;
     }
 

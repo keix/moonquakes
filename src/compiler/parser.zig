@@ -167,6 +167,7 @@ pub const ProtoBuilder = struct {
             .native_ids = .{},
             .const_refs = .{},
             .protos = .{},
+            .is_vararg = parent == null, // Lua main chunk accepts ...
             .maxstacksize = 0,
             .next_reg = 0,
             .locals_top = 0,
@@ -373,9 +374,11 @@ pub const ProtoBuilder = struct {
     /// On success: R(A) = true, R(A+1...) = return values
     /// On failure: R(A) = false, R(A+1) = error message
     /// result_reg is where the status boolean goes; the function is at result_reg+1
-    pub fn emitPcall(self: *ProtoBuilder, result_reg: u8, nargs: u8, nresults: u8) !void {
-        const b: u8 = if (nargs == VARARG_SENTINEL) 0 else nargs + 1;
-        const c: u8 = if (nresults == VARARG_SENTINEL) 0 else nresults + 1;
+    pub fn emitPcall(self: *ProtoBuilder, result_reg: u8, total_args: u8, total_results: u8) !void {
+        // NOTE: PCALL uses direct total counts (function+args, status+values);
+        // CALL uses +1 encoding.
+        const b: u8 = if (total_args == VARARG_SENTINEL) 0 else total_args;
+        const c: u8 = if (total_results == VARARG_SENTINEL) 0 else total_results;
         const instr = Instruction.initABC(.PCALL, result_reg, b, c);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
@@ -821,19 +824,20 @@ pub const ProtoBuilder = struct {
                 try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             } else {
-                // Parse as hex integer, fall back to float on overflow
+                // Parse as hex integer with Lua 5.4 wrap semantics (mod 2^64)
                 if (std.fmt.parseInt(i64, hex_part, 16)) |value| {
                     const idx: u16 = @intCast(self.integers.items.len);
                     try self.integers.append(self.allocator, value);
                     try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
                     return @intCast(self.const_refs.items.len - 1);
                 } else |_| {
-                    // Overflow: parse hex as float
-                    const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
-                    const idx: u16 = @intCast(self.numbers.items.len);
-                    try self.numbers.append(self.allocator, value);
-                    try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
-                    return @intCast(self.const_refs.items.len - 1);
+                    if (parseHexIntegerWrap(lexeme)) |value| {
+                        const idx: u16 = @intCast(self.integers.items.len);
+                        try self.integers.append(self.allocator, value);
+                        try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
+                        return @intCast(self.const_refs.items.len - 1);
+                    }
+                    return error.InvalidNumber;
                 }
             }
         }
@@ -852,6 +856,35 @@ pub const ProtoBuilder = struct {
             try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         }
+    }
+
+    fn parseHexIntegerWrap(lexeme: []const u8) ?i64 {
+        if (lexeme.len < 3) return null;
+        var idx: usize = 0;
+        var neg = false;
+        if (lexeme[idx] == '+' or lexeme[idx] == '-') {
+            neg = lexeme[idx] == '-';
+            idx += 1;
+            if (idx >= lexeme.len) return null;
+        }
+        if (idx + 1 >= lexeme.len) return null;
+        if (lexeme[idx] != '0' or (lexeme[idx + 1] != 'x' and lexeme[idx + 1] != 'X')) return null;
+        idx += 2;
+        if (idx >= lexeme.len) return null;
+
+        var value: u64 = 0;
+        while (idx < lexeme.len) : (idx += 1) {
+            const c = lexeme[idx];
+            const digit: u64 = switch (c) {
+                '0'...'9' => @intCast(c - '0'),
+                'a'...'f' => @intCast(c - 'a' + 10),
+                'A'...'F' => @intCast(c - 'A' + 10),
+                else => return null,
+            };
+            value = (value << 4) | digit;
+        }
+        if (neg) value = 0 -% value;
+        return @bitCast(value);
     }
 
     /// Parse hex float like 0x1.5p10, 0x1p4, 0x1.8p-1
@@ -1229,9 +1262,7 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    try self.parseGenericFunctionCall();
-                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
-                    try self.parseIoCall();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -1243,13 +1274,17 @@ pub const Parser = struct {
                     try self.parseFieldAccessOrMethodCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
-                    try self.parseMethodCallStatement();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Lua allows function-call statements whose prefixexp starts with parentheses,
+                // e.g. (Message or print)("...")
+                _ = try self.parseExpr();
             } else {
                 return error.UnsupportedStatement;
             }
@@ -1658,21 +1693,29 @@ pub const Parser = struct {
                 const last_idx = self.proto.code.items.len - 1;
                 const last_inst = self.proto.code.items[last_idx];
 
-                if (last_inst.getOpCode() == .CALL) {
+                if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                     call_idx = last_idx;
                     call_func_reg = last_inst.a;
-                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                    const prev_inst = self.proto.code.items[last_idx - 1];
-                    if (prev_inst.getOpCode() == .CALL) {
-                        call_idx = last_idx - 1;
-                        call_func_reg = prev_inst.a;
-                        // Remove the single MOVE
-                        _ = self.proto.code.pop();
+                } else {
+                    var scan = last_idx;
+                    var removed_trailing_move = false;
+                    while (true) {
+                        const inst = self.proto.code.items[scan];
+                        if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
+                            call_idx = scan;
+                            call_func_reg = inst.a;
+                            if (removed_trailing_move) _ = self.proto.code.pop();
+                            break;
+                        }
+                        if (inst.getOpCode() != .MOVE) break;
+                        if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
+                        if (scan == 0) break;
+                        scan -= 1;
                     }
                 }
 
                 if (call_idx) |idx| {
-                    // Adjust CALL to return target_count results
+                    // Adjust CALL/PCALL to return target_count results
                     self.proto.code.items[idx].c = target_count + 1;
 
                     // Move results from call_func_reg to first_temp...
@@ -2000,7 +2043,16 @@ pub const Parser = struct {
                 // Extract content between [[ and ]] (or [=[ and ]=] etc.)
                 const start = 2 + level; // skip [[ or [=[ etc.
                 const end = lexeme.len - 2 - level; // skip ]] or ]=] etc.
-                const str_content = lexeme[start..end];
+                var content_start = start;
+                if (content_start < end) {
+                    if (lexeme[content_start] == '\n') {
+                        content_start += 1;
+                    } else if (lexeme[content_start] == '\r') {
+                        content_start += 1;
+                        if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
+                    }
+                }
+                const str_content = lexeme[content_start..end];
                 // Long bracket strings don't process escapes
                 const k = try self.proto.addConstString(str_content);
                 try self.proto.emitLoadK(reg, k);
@@ -2041,13 +2093,7 @@ pub const Parser = struct {
 
             if (is_call_with_parens or is_call_no_parens) {
                 const result_reg = try self.parseFunctionCallExpr();
-                // Handle chained calls: func()(), func()()(), etc.
-                while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
-                    const arg_count = try self.parseCallArgs(result_reg);
-                    try self.proto.emitCallVararg(result_reg, arg_count, 1);
-                    // result_reg now contains the result of the chained call
-                }
-                return result_reg;
+                return try self.parseSuffixChain(result_reg);
             }
             // Check if it's a variable/parameter (includes loop variables) or upvalue
             const var_name = self.current.lexeme;
@@ -2060,11 +2106,16 @@ pub const Parser = struct {
                 }
                 self.advance();
             } else {
-                // Fall back to global lookup via GETTABUP
-                // This handles global tables like `table`, `string`, `io`, `_G`, etc.
                 base_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(var_name);
-                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                if (std.mem.eql(u8, var_name, "_ENV")) {
+                    // _ENV is the environment upvalue itself, not _ENV["_ENV"].
+                    try self.proto.emitGETUPVAL(base_reg, 0);
+                } else {
+                    // Fall back to global lookup via GETTABUP
+                    // This handles global tables like `table`, `string`, `io`, `_G`, etc.
+                    const name_const = try self.proto.addConstString(var_name);
+                    try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                }
                 self.advance();
             }
 
@@ -2107,18 +2158,20 @@ pub const Parser = struct {
                 self.advance(); // consume field name
 
                 const key_const = try self.proto.addConstString(field_name);
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(dst_reg, reg, key_const);
-                reg = dst_reg;
+                const has_call_suffix = (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                    self.isNoParensArg();
 
-                // Check for function call: t.g()
-                if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
-                    self.isNoParensArg())
-                {
-                    const func_reg = reg;
-                    const arg_count = try self.parseCallArgs(func_reg);
-                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                    reg = func_reg;
+                if (has_call_suffix) {
+                    // Overwrite table register when immediately calling a field.
+                    // This keeps CALL results in-place and avoids trailing MOVE
+                    // in parent call-arg contexts.
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                    const arg_count = try self.parseCallArgs(reg);
+                    try self.proto.emitCallVararg(reg, arg_count, 1);
+                } else {
+                    const dst_reg = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst_reg, reg, key_const);
+                    reg = dst_reg;
                 }
             } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2383,19 +2436,41 @@ pub const Parser = struct {
                     false;
 
                 if (is_last_element and self.proto.code.items.len > 0) {
-                    const last_instr = self.proto.code.items[self.proto.code.items.len - 1];
-                    const last_op = last_instr.getOpCode();
-                    if (last_op == .CALL) {
-                        const a = last_instr.getA();
-                        // Only use variable-result optimization if CALL register
+                    var call_idx: ?usize = null;
+                    var call_instr: Instruction = undefined;
+                    var removed_trailing_move = false;
+                    var scan = self.proto.code.items.len - 1;
+                    while (true) {
+                        const inst = self.proto.code.items[scan];
+                        const op = inst.getOpCode();
+                        if (op == .CALL or op == .PCALL) {
+                            call_idx = scan;
+                            call_instr = inst;
+                            if (removed_trailing_move) _ = self.proto.code.pop();
+                            break;
+                        }
+                        if (op != .MOVE) break;
+                        if (!removed_trailing_move and scan == self.proto.code.items.len - 1) {
+                            removed_trailing_move = true;
+                        }
+                        if (scan == 0) break;
+                        scan -= 1;
+                    }
+
+                    if (call_idx) |idx| {
+                        const a = call_instr.getA();
+                        // Only use variable-result optimization if call result register
                         // is immediately after table_reg. For indexed calls like
                         // op[2](...), intermediate registers are used and SETLIST
                         // would copy wrong values.
                         if (a == table_reg + 1) {
-                            // Patch CALL to return variable results (C=0)
-                            const b = last_instr.getB();
-                            self.proto.code.items[self.proto.code.items.len - 1] =
-                                Instruction.initABC(.CALL, a, b, 0);
+                            // Patch CALL/PCALL to return variable results (C=0)
+                            const b = call_instr.getB();
+                            self.proto.code.items[idx] = switch (call_instr.getOpCode()) {
+                                .CALL => Instruction.initABC(.CALL, a, b, 0),
+                                .PCALL => Instruction.initABC(.PCALL, a, b, 0),
+                                else => unreachable,
+                            };
 
                             // Use SETLIST to assign all return values starting at list_index
                             try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);
@@ -2462,7 +2537,16 @@ pub const Parser = struct {
             }
             const start = 2 + level;
             const end = lexeme.len - 2 - level;
-            const str_content = lexeme[start..end];
+            var content_start = start;
+            if (content_start < end) {
+                if (lexeme[content_start] == '\n') {
+                    content_start += 1;
+                } else if (lexeme[content_start] == '\r') {
+                    content_start += 1;
+                    if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
+                }
+            }
+            const str_content = lexeme[content_start..end];
             const k = try self.proto.addConstString(str_content);
             try self.proto.emitLoadK(reg, k);
         } else {
@@ -3024,8 +3108,8 @@ pub const Parser = struct {
         // Close upvalues when loop exits (after FORLOOP falls through)
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
-        // Patch all break jumps to after the loop
-        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        // Patch break jumps to the final CLOSE so to-be-closed state is finalized.
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len - 1));
         for (self.break_jumps.items[break_count..]) |jmp| {
             self.proto.patchJMP(jmp, end_addr);
         }
@@ -3037,7 +3121,8 @@ pub const Parser = struct {
     ///   R(A): iterator function
     ///   R(A+1): state
     ///   R(A+2): control variable
-    ///   R(A+3), R(A+4), ...: loop variables (var1, var2, ...)
+    ///   R(A+3): to-be-closed state (Lua 5.4)
+    ///   R(A+4), R(A+5), ...: loop variables (var1, var2, ...)
     fn parseGenericFor(self: *Parser, first_var_name: []const u8, break_count: usize) ParseError!void {
         // Collect loop variable names
         var var_names: [8][]const u8 = undefined;
@@ -3068,30 +3153,51 @@ pub const Parser = struct {
         const base_reg = self.proto.allocTemp();
         _ = self.proto.allocTemp(); // state
         _ = self.proto.allocTemp(); // control
+        _ = self.proto.allocTemp(); // to-be-closed state
 
         // Record code position before parsing expression
         const code_before = self.proto.code.items.len;
 
         // Parse iterator expression (e.g., pairs(t) or ipairs(t))
-        // The expression should return: iterator function, state, initial control value
+        // The expression should return: iterator function, state, initial control value,
+        // and optional to-be-closed state.
         const expr_reg = try self.parseExpr();
 
-        // Check if last instruction was a CALL and patch it to return 3 values
+        // Check if last instruction was a CALL (or trailing MOVE after CALL)
+        // and patch it to return 4 values.
+        var call_patched_for4 = false;
         if (self.proto.code.items.len > code_before) {
             const last_idx = self.proto.code.items.len - 1;
             const last_instr = self.proto.code.items[last_idx];
+            var call_idx_opt: ?usize = null;
             if (last_instr.getOpCode() == .CALL) {
-                // Patch to return 3 values (iterator, state, control)
-                self.proto.patchCallResults(@intCast(last_idx), 3);
+                call_idx_opt = last_idx;
+            } else if (last_instr.getOpCode() == .MOVE and last_idx > code_before) {
+                const prev_idx = last_idx - 1;
+                if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                    call_idx_opt = prev_idx;
+                }
+            }
+            if (call_idx_opt) |call_idx| {
+                self.proto.patchCallResults(@intCast(call_idx), 4);
+                call_patched_for4 = true;
             }
         }
 
         // Move iterator results to proper positions
-        // The call should have put results at expr_reg, expr_reg+1, expr_reg+2
+        // The call should have put results at expr_reg..expr_reg+3
         if (expr_reg != base_reg) {
             try self.proto.emitMOVE(base_reg, expr_reg);
             try self.proto.emitMOVE(base_reg + 1, expr_reg + 1);
             try self.proto.emitMOVE(base_reg + 2, expr_reg + 2);
+            if (call_patched_for4) {
+                try self.proto.emitMOVE(base_reg + 3, expr_reg + 3);
+            } else {
+                try self.proto.emitLOADNIL(base_reg + 3, 1);
+            }
+        } else if (!call_patched_for4) {
+            // Non-call iterators may produce only one value; ensure tbc state is nil.
+            try self.proto.emitLOADNIL(base_reg + 3, 1);
         }
 
         // Expect 'do'
@@ -3110,17 +3216,20 @@ pub const Parser = struct {
         const saved_locals_top = self.proto.locals_top;
         const saved_var_len = self.proto.variables.items.len;
 
-        // Set next_reg past the control registers and loop variables
-        // Generic for uses: base(iter), base+1(state), base+2(control), base+3..(vars)
-        const GENERIC_FOR_BASE_REGS: u8 = 3; // iter, state, control
+        // Set next_reg past control registers and loop variables.
+        // Generic for uses: base(iter), base+1(state), base+2(control), base+3(tbc), base+4..(vars)
+        const GENERIC_FOR_BASE_REGS: u8 = 4; // iter, state, control, tbc-state
         self.proto.next_reg = base_reg + GENERIC_FOR_BASE_REGS + var_count;
         self.proto.locals_top = base_reg + GENERIC_FOR_BASE_REGS + var_count;
 
-        // Register loop variables (at base_reg + 3, base_reg + 4, ...)
+        // Register loop variables (at base_reg + 4, base_reg + 5, ...)
         var i: u8 = 0;
         while (i < var_count) : (i += 1) {
             try self.proto.addVariable(var_names[i], base_reg + GENERIC_FOR_BASE_REGS + i);
         }
+
+        // Mark to-be-closed state.
+        try self.proto.emit(.TBC, base_reg + 3, 0, 0);
 
         // Mark for loop body
         const loop_body_mark = self.proto.markTemps();
@@ -3140,8 +3249,8 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // Close upvalues for loop variables before TFORCALL (end of iteration)
-        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
+        // Close upvalues and TBC state before TFORCALL (end of iteration)
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -3156,8 +3265,8 @@ pub const Parser = struct {
         // Patch TFORLOOP to jump back to loop start
         self.proto.patchFORInstr(tforloop_addr, loop_start);
 
-        // Close upvalues when loop exits (after TFORLOOP falls through)
-        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
+        // Close upvalues and TBC state when loop exits (after TFORLOOP falls through)
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -3284,6 +3393,9 @@ pub const Parser = struct {
         if (self.loop_depth == 0) {
             return error.BreakOutsideLoop;
         }
+
+        // Ensure to-be-closed variables and upvalues are finalized on break.
+        try self.proto.emit(.CLOSE, 0, 0, 0);
 
         // Emit JMP to be patched later at end of loop
         const jmp_addr = try self.proto.emitPatchableJMP();
@@ -3426,9 +3538,7 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    try self.parseGenericFunctionCall();
-                } else if (std.mem.eql(u8, self.current.lexeme, "io")) {
-                    try self.parseIoCall();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -3440,13 +3550,17 @@ pub const Parser = struct {
                     try self.parseFieldAccessOrMethodCall();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
-                    try self.parseMethodCallStatement();
+                    _ = try self.parseExpr();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "[")) {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
                     return error.UnsupportedStatement;
                 }
+            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+                // Lua allows function-call statements whose prefixexp starts with parentheses,
+                // e.g. (Message or print)("...")
+                _ = try self.parseExpr();
             } else {
                 return error.UnsupportedStatement;
             }
@@ -3572,14 +3686,22 @@ pub const Parser = struct {
                     if (is_call) {
                         call_idx = last_idx;
                         call_func_reg = last_inst.a;
-                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                        const prev_inst = self.proto.code.items[last_idx - 1];
-                        const prev_is_call = prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL;
-                        if (prev_is_call) {
-                            call_idx = last_idx - 1;
-                            call_func_reg = prev_inst.a;
-                            // Remove the single MOVE - we'll emit multiple MOVEs below
-                            _ = self.proto.code.pop();
+                    } else {
+                        var scan = last_idx;
+                        var removed_trailing_move = false;
+                        while (true) {
+                            const inst = self.proto.code.items[scan];
+                            const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
+                            if (scan_is_call) {
+                                call_idx = scan;
+                                call_func_reg = inst.a;
+                                if (removed_trailing_move) _ = self.proto.code.pop();
+                                break;
+                            }
+                            if (inst.getOpCode() != .MOVE) break;
+                            if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
+                            if (scan == 0) break;
+                            scan -= 1;
                         }
                     }
 
@@ -3815,12 +3937,12 @@ pub const Parser = struct {
         // parseCallArgs expects func_reg and places args at func_reg+1, func_reg+2...
         // For PCALL: result_reg = status, result_reg+1 = function, result_reg+2... = args
         // So we pass result_reg as "func_reg" and it places pcall's arguments correctly
-        const arg_count = try self.parseCallArgs(result_reg);
+        const total_args = try self.parseCallArgs(result_reg);
 
         // Emit PCALL instruction
         // nresults = 2 means status + 1 return value (typical usage)
         // Use VARARG_SENTINEL for variable results if caller wants multiple
-        try self.proto.emitPcall(result_reg, arg_count, 2);
+        try self.proto.emitPcall(result_reg, total_args, 2);
 
         // Return the result register (where status boolean is stored)
         // Note: caller may need to handle multiple return values
@@ -3879,6 +4001,22 @@ pub const Parser = struct {
         var last_was_call = false;
         var last_was_vararg = false;
 
+        const detectTailCallInRange = struct {
+            fn run(code: []Instruction, start: usize) bool {
+                if (code.len <= start) return false;
+                var idx = code.len;
+                while (idx > start) {
+                    idx -= 1;
+                    const inst = code[idx];
+                    if (inst.getOpCode() == .CALL) {
+                        return true;
+                    }
+                    if (inst.getOpCode() != .MOVE) break;
+                }
+                return false;
+            }
+        }.run;
+
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
             // Single argument without parentheses
@@ -3917,9 +4055,7 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(func_reg + 1, arg_reg);
                 }
                 arg_count = 1;
-                // Check if this argument resulted in a CALL instruction
-                last_was_call = self.proto.code.items.len > code_len_before and
-                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
+                last_was_call = detectTailCallInRange(self.proto.code.items, code_len_before);
             }
 
             // Parse additional arguments
@@ -3941,12 +4077,12 @@ pub const Parser = struct {
                 const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
                 arg_count += 1;
+                const target_reg = func_reg + arg_count;
+                const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
                 if (next_arg != func_reg + arg_count) {
-                    try self.proto.emitMOVE(func_reg + arg_count, next_arg);
+                    try self.proto.emitMOVE(target_reg, next_arg);
                 }
-                // Check if this (last) argument resulted in a CALL instruction
-                last_was_call = self.proto.code.items.len > code_len_before2 and
-                    self.proto.code.items[self.proto.code.items.len - 1].getOpCode() == .CALL;
+                last_was_call = arg_is_call;
             }
         }
 
@@ -3963,10 +4099,10 @@ pub const Parser = struct {
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
-        if (last_was_call and self.proto.code.items.len > 0) {
+        if (last_was_call and arg_count > 1 and self.proto.code.items.len > 0) {
             // Find the CALL instruction (might be last, or before a MOVE)
             var call_idx = self.proto.code.items.len - 1;
-            if (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
+            while (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
                 call_idx -= 1;
             }
             if (self.proto.code.items[call_idx].getOpCode() == .CALL) {
@@ -4037,7 +4173,10 @@ pub const Parser = struct {
 
         // Check for no-parens call
         if (self.isNoParensArg()) {
-            const arg_reg = try self.parseExpr();
+            const arg_reg = if (self.current.kind == .String)
+                try self.parseStringLiteral()
+            else
+                try self.parseTableConstructor();
             if (arg_reg != func_reg + 2) {
                 try self.proto.emitMOVE(func_reg + 2, arg_reg);
             }
@@ -4180,15 +4319,19 @@ pub const Parser = struct {
                     // Could support more chaining here, but for now error
                     return error.UnsupportedStatement;
                 }
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
+                self.isNoParensArg())
+            {
                 // Function call: t.field(args) - e.g., table.insert(t, v)
                 const field_const = try self.proto.addConstString(field_name);
                 const func_reg = self.proto.allocTemp();
                 try self.proto.emitGETFIELD(func_reg, base_reg, field_const);
 
-                // Parse arguments and emit call
+                // Parse arguments and emit call (keep 1 result so chained suffixes like
+                // io.input():close() can continue in statement context)
                 const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                _ = try self.parseSuffixChain(func_reg);
                 return;
             } else {
                 // Unknown pattern after field access
@@ -4729,6 +4872,52 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                 '\'' => {
                     try result.append(allocator, '\'');
                     i += 2;
+                },
+                'x' => {
+                    if (i + 3 < input.len) {
+                        const h1 = input[i + 2];
+                        const h2 = input[i + 3];
+                        const v1_opt: ?u8 = if (h1 >= '0' and h1 <= '9')
+                            h1 - '0'
+                        else if (h1 >= 'a' and h1 <= 'f')
+                            10 + (h1 - 'a')
+                        else if (h1 >= 'A' and h1 <= 'F')
+                            10 + (h1 - 'A')
+                        else
+                            null;
+                        const v2_opt: ?u8 = if (h2 >= '0' and h2 <= '9')
+                            h2 - '0'
+                        else if (h2 >= 'a' and h2 <= 'f')
+                            10 + (h2 - 'a')
+                        else if (h2 >= 'A' and h2 <= 'F')
+                            10 + (h2 - 'A')
+                        else
+                            null;
+                        if (v1_opt != null and v2_opt != null) {
+                            try result.append(allocator, (v1_opt.? << 4) | v2_opt.?);
+                            i += 4;
+                        } else {
+                            // Invalid \x escape; preserve backslash.
+                            try result.append(allocator, input[i]);
+                            i += 1;
+                        }
+                    } else {
+                        // Truncated \x escape; preserve backslash.
+                        try result.append(allocator, input[i]);
+                        i += 1;
+                    }
+                },
+                '0'...'9' => {
+                    // Decimal byte escape: \ddd (1-3 digits)
+                    var j = i + 1;
+                    var val: u16 = 0;
+                    var digits: u8 = 0;
+                    while (j < input.len and digits < 3 and input[j] >= '0' and input[j] <= '9') : (j += 1) {
+                        val = val * 10 + @as(u16, input[j] - '0');
+                        digits += 1;
+                    }
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    i = j;
                 },
                 else => {
                     // Unknown escape - keep as-is

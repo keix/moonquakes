@@ -39,7 +39,7 @@ pub const GCState = enum(u8) {
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
-const GC_THRESHOLD = 64 * 1024; // 64KB initial threshold
+const GC_THRESHOLD = 256 * 1024; // 256KB initial threshold
 
 /// VTable for tracking allocator (uses GC as context directly)
 const tracking_vtable = std.mem.Allocator.VTable{

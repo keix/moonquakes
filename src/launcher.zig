@@ -20,6 +20,8 @@ pub const OwnedReturnValue = owned.OwnedReturnValue;
 
 /// Execution options for script launch
 pub const RunOptions = struct {
+    /// Executable name/path (becomes arg[-1] in CLI convention)
+    exec_name: []const u8 = "",
     /// Script name (becomes arg[0])
     script_name: []const u8 = "",
     /// Script arguments (become arg[1], arg[2], ...)
@@ -34,18 +36,20 @@ pub const RunOptions = struct {
 pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
     const arg_table = try gc.allocTable();
 
+    // arg[-1] = executable name/path (when available)
+    if (options.exec_name.len > 0) {
+        const exec_str = try gc.allocString(options.exec_name);
+        try arg_table.set(.{ .integer = -1 }, TValue.fromString(exec_str));
+    }
+
     // arg[0] = script name
-    const key_0 = try gc.allocString("0");
     const script_str = try gc.allocString(options.script_name);
-    try arg_table.set(TValue.fromString(key_0), TValue.fromString(script_str));
+    try arg_table.set(.{ .integer = 0 }, TValue.fromString(script_str));
 
     // arg[1], arg[2], ... = script arguments
-    var key_buffer: [32]u8 = undefined;
     for (options.args, 0..) |arg, i| {
-        const key_slice = std.fmt.bufPrint(&key_buffer, "{d}", .{i + 1}) catch continue;
-        const key_str = try gc.allocString(key_slice);
         const arg_str = try gc.allocString(arg);
-        try arg_table.set(TValue.fromString(key_str), TValue.fromString(arg_str));
+        try arg_table.set(.{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
     }
 
     // Set arg global

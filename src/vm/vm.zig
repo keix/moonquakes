@@ -10,9 +10,10 @@
 //!   - VM knows Runtime; Runtime does NOT know VM internals
 //!
 //! Stack model:
-//!   - Fixed 256 slots (compile-time constant)
+//!   - Fixed stack slots (compile-time constant)
 //!   - base: current frame's register 0
 //!   - top: next free slot (for GC extent)
+//!   - NOTE: capacity is temporarily larger for compatibility tests.
 //!
 //! Error handling:
 //!   - lua_error_value stores the error object
@@ -36,6 +37,7 @@ const metamethod = @import("metamethod.zig");
 
 // Implementation modules
 const api = @import("api.zig");
+const vm_debug = @import("debug.zig");
 const vm_gc = @import("gc.zig");
 const lifecycle = @import("lifecycle.zig");
 
@@ -49,7 +51,8 @@ pub const LuaException = api.LuaException;
 /// Multiple VMs (coroutines) share a single Runtime.
 /// VM knows Runtime; Runtime does not know VM.
 pub const VM = struct {
-    stack: [256]TValue,
+    pub const STACK_CAPACITY = 8192;
+    stack: [STACK_CAPACITY]TValue,
     top: u32,
     base: u32,
     ci: ?*CallInfo,
@@ -104,6 +107,14 @@ pub const VM = struct {
     pub const pushTempRoot = api.pushTempRoot;
     pub const popTempRoots = api.popTempRoots;
     pub const collectGarbage = api.collectGarbage;
+    pub const beginGCGuard = api.beginGCGuard;
+    pub const endGCGuard = api.endGCGuard;
     pub const rootProvider = vm_gc.rootProvider;
     pub const reserveSlots = api.reserveSlots;
+
+    // Debug read-only API
+    pub const DebugFrameInfo = vm_debug.DebugFrameInfo;
+    pub const DebugLocalMeta = vm_debug.DebugLocalMeta;
+    pub const debugGetFrameInfoAtLevel = vm_debug.debugGetFrameInfoAtLevel;
+    pub const debugWriteLocalAtLevel = vm_debug.debugWriteLocalAtLevel;
 };

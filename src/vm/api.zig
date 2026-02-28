@@ -83,6 +83,19 @@ pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfM
 }
 
 pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // Clear slots that may become results without clobbering incoming arguments.
+    // Native call layout is [func_reg]=callee/self, [func_reg+1 .. func_reg+nargs]=args.
+    // Some natives read func_reg as self (e.g., __call handlers), so do not clear it.
+    if (nresults > 0) {
+        const base_slot = self.base + func_reg;
+        const args_end = base_slot + 1 + nargs;
+        const result_end = base_slot + nresults;
+        if (result_end > args_end) {
+            for (self.stack[args_end..result_end]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+    }
     try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }
 
@@ -106,13 +119,9 @@ pub fn popTempRoots(self: *VM, n: u8) void {
 
 pub fn collectGarbage(self: *VM) void {
     const gc_ptr = gc(self);
-    const before = gc_ptr.bytes_allocated;
     gc_ptr.collect();
     // Run queued finalizers at this safe point
     gc_ptr.drainFinalizers();
-    if (@import("builtin").mode != .ReleaseFast) {
-        std.log.info("GC: {} -> {} bytes, next at {}", .{ before, gc_ptr.bytes_allocated, gc_ptr.next_gc });
-    }
 }
 
 /// Reserve stack slots before GC-triggering operations.
@@ -120,4 +129,15 @@ pub fn collectGarbage(self: *VM) void {
 pub fn reserveSlots(self: *VM, func_reg: u32, count: u32) void {
     const needed = self.base + func_reg + count;
     if (self.top < needed) self.top = needed;
+}
+
+/// Begin a VM-level GC guard for sensitive sections.
+/// Must be paired with endGCGuard(), typically via defer.
+pub fn beginGCGuard(self: *VM) void {
+    gc(self).inhibitGC();
+}
+
+/// End a VM-level GC guard started by beginGCGuard().
+pub fn endGCGuard(self: *VM) void {
+    gc(self).allowGC();
 }
