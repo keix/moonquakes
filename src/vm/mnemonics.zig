@@ -2369,9 +2369,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .Continue;
             }
 
-            // Compatibility-first: defer __close validity to close-time behavior.
-            // This avoids rejecting generic-for states that are valid in 5.4 flows.
-            _ = metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt);
+            // Non-false/non-nil values must provide __close at TBC time.
+            if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt) == null) {
+                return error.NoCloseMetamethod;
+            }
 
             // Mark this register as to-be-closed
             ci.markTBC(a);

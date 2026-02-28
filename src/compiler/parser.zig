@@ -167,6 +167,7 @@ pub const ProtoBuilder = struct {
             .native_ids = .{},
             .const_refs = .{},
             .protos = .{},
+            .is_vararg = parent == null, // Lua main chunk accepts ...
             .maxstacksize = 0,
             .next_reg = 0,
             .locals_top = 0,
@@ -2105,11 +2106,16 @@ pub const Parser = struct {
                 }
                 self.advance();
             } else {
-                // Fall back to global lookup via GETTABUP
-                // This handles global tables like `table`, `string`, `io`, `_G`, etc.
                 base_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(var_name);
-                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                if (std.mem.eql(u8, var_name, "_ENV")) {
+                    // _ENV is the environment upvalue itself, not _ENV["_ENV"].
+                    try self.proto.emitGETUPVAL(base_reg, 0);
+                } else {
+                    // Fall back to global lookup via GETTABUP
+                    // This handles global tables like `table`, `string`, `io`, `_G`, etc.
+                    const name_const = try self.proto.addConstString(var_name);
+                    try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                }
                 self.advance();
             }
 
@@ -4875,6 +4881,18 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                         try result.append(allocator, input[i]);
                         i += 1;
                     }
+                },
+                '0'...'9' => {
+                    // Decimal byte escape: \ddd (1-3 digits)
+                    var j = i + 1;
+                    var val: u16 = 0;
+                    var digits: u8 = 0;
+                    while (j < input.len and digits < 3 and input[j] >= '0' and input[j] <= '9') : (j += 1) {
+                        val = val * 10 + @as(u16, input[j] - '0');
+                        digits += 1;
+                    }
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    i = j;
                 },
                 else => {
                     // Unknown escape - keep as-is

@@ -16,6 +16,7 @@ const FILE_MODE_KEY = "_mode";
 const FILE_POS_KEY = "_pos";
 const FILE_TMPFILE_KEY = "_tmpfile";
 const FILE_STDIO_KEY = "_stdio"; // "stdin", "stdout", or "stderr"
+const FILE_BUFMODE_KEY = "_bufmode"; // "full" (default), "line", "no"
 
 // Keys for io table default handles
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
@@ -95,6 +96,10 @@ fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
     const mode_key = try gc.allocString(FILE_MODE_KEY);
     const mode_str = try gc.allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
     try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+    const bufmode_key = try gc.allocString(FILE_BUFMODE_KEY);
+    const bufmode_str = try gc.allocString("full");
+    try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
     const pos_key = try gc.allocString(FILE_POS_KEY);
     try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
@@ -304,18 +309,17 @@ fn tryHandleMultiRead(
         }
 
         const fmt_obj = fmt_val.asString() orelse return vm.raiseString("invalid format");
-        const fmt = fmt_obj.asSlice();
+        const fmt = canonicalReadFormat(fmt_obj.asSlice()) orelse return vm.raiseString("invalid format");
 
-        if (std.mem.eql(u8, fmt, "*a") or std.mem.eql(u8, fmt, "a")) {
+        if (std.mem.eql(u8, fmt, "a")) {
             vm.stack[vm.base + func_reg + out_idx] = TValue.fromString(try vm.gc().allocString(content[cur_pos..]));
             cur_pos = content.len;
             continue;
         }
 
-        if (std.mem.eql(u8, fmt, "*l") or std.mem.eql(u8, fmt, "l") or
-            std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L"))
+        if (std.mem.eql(u8, fmt, "l") or std.mem.eql(u8, fmt, "L"))
         {
-            const keep_nl = std.mem.eql(u8, fmt, "*L") or std.mem.eql(u8, fmt, "L");
+            const keep_nl = std.mem.eql(u8, fmt, "L");
             if (cur_pos >= content.len) {
                 vm.stack[vm.base + func_reg + out_idx] = .nil;
                 break;
@@ -328,7 +332,7 @@ fn tryHandleMultiRead(
             continue;
         }
 
-        if (std.mem.eql(u8, fmt, "*n") or std.mem.eql(u8, fmt, "n")) {
+        if (std.mem.eql(u8, fmt, "n")) {
             const res = readLuaNumberFromContent(content, cur_pos);
             cur_pos = res.new_pos;
             if (res.value) |num| {
@@ -352,6 +356,26 @@ fn tryHandleMultiRead(
 
     try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
     return true;
+}
+
+fn canonicalReadFormat(fmt: []const u8) ?[]const u8 {
+    if (fmt.len == 0) return null;
+    if (fmt[0] == '*') {
+        if (fmt.len == 2 and (fmt[1] == 'a' or fmt[1] == 'l' or fmt[1] == 'L' or fmt[1] == 'n')) {
+            return fmt[1..2];
+        }
+        if (std.mem.eql(u8, fmt, "*all")) return "a";
+        if (std.mem.eql(u8, fmt, "*line")) return "l";
+        if (std.mem.eql(u8, fmt, "*number")) return "n";
+        return null;
+    }
+    if (fmt.len == 1 and (fmt[0] == 'a' or fmt[0] == 'l' or fmt[0] == 'L' or fmt[0] == 'n')) {
+        return fmt;
+    }
+    if (std.mem.eql(u8, fmt, "all")) return "a";
+    if (std.mem.eql(u8, fmt, "line")) return "l";
+    if (std.mem.eql(u8, fmt, "number")) return "n";
+    return null;
 }
 
 fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
@@ -381,6 +405,32 @@ fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
     const file = std.fs.cwd().createFile(filename, .{}) catch return;
     defer file.close();
     file.writeAll(out_str.asSlice()) catch {};
+}
+
+fn refreshReadableFileTable(vm: anytype, file_table: *TableObject) !void {
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key)) != null) return;
+
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    const mode_val = file_table.get(TValue.fromString(mode_key)) orelse return;
+    const mode_str = mode_val.asString() orelse return;
+    const mode = mode_str.asSlice();
+    const can_read = mode.len > 0 and
+        (mode[0] == 'r' or std.mem.indexOfScalar(u8, mode, '+') != null);
+    if (!can_read) return;
+
+    const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+    const filename_val = file_table.get(TValue.fromString(filename_key)) orelse return;
+    const filename_obj = filename_val.asString() orelse return;
+    const file = std.fs.cwd().openFile(filename_obj.asSlice(), .{}) catch return;
+    defer file.close();
+
+    const content = file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024) catch return;
+    defer vm.gc().allocator.free(content);
+
+    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+    const content_str = try vm.gc().allocString(content);
+    try file_table.set(TValue.fromString(output_key), TValue.fromString(content_str));
 }
 
 fn createLinesIteratorWrapper(vm: anytype, temp_slot: u32, state_table: *TableObject) !*TableObject {
@@ -689,12 +739,20 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const content_str = try vm.gc().allocString(content);
         try file_table.set(TValue.fromString(output_key), TValue.fromString(content_str));
 
+        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+        const filename_copy = try vm.gc().allocString(filename);
+        try file_table.set(TValue.fromString(filename_key), TValue.fromString(filename_copy));
+
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
         try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
 
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString("r");
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode_str = try vm.gc().allocString("full");
+        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
         try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
@@ -742,6 +800,10 @@ fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*Tabl
     const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
     const mode_str = try vm.gc().allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
     try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+    const bufmode_str = try vm.gc().allocString("full");
+    try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
     // Position
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
@@ -1208,6 +1270,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const output_str = try vm.gc().allocString(content);
         try file_table.set(TValue.fromString(output_key), TValue.fromString(output_str));
 
+        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+        const filename_copy = try vm.gc().allocString(filename);
+        try file_table.set(TValue.fromString(filename_key), TValue.fromString(filename_copy));
+
         // Store closed flag
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
         try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
@@ -1220,6 +1286,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString(mode);
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode_str = try vm.gc().allocString("full");
+        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         // Store read position (0 for beginning)
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
@@ -1267,6 +1337,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString(mode);
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode_str = try vm.gc().allocString("full");
+        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         // Store closed flag
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -1323,6 +1397,10 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString(mode);
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode_str = try vm.gc().allocString("full");
+        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         // Store closed flag
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -1422,6 +1500,10 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString("w");
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode_str = try vm.gc().allocString("full");
+        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         // Store closed flag
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -1713,12 +1795,14 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         }
     }
 
+    try refreshReadableFileTable(vm, file_table);
+
     // Get format argument (default to "*l")
-    var format: []const u8 = "*l";
+    var format: []const u8 = "l";
     if (nargs >= 1) {
         const fmt_arg = vm.stack[vm.base + func_reg + 1];
         if (fmt_arg.asString()) |s| {
-            format = s.asSlice();
+            format = canonicalReadFormat(s.asSlice()) orelse return vm.raiseString("invalid format");
         }
     }
 
@@ -1754,7 +1838,7 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     // Handle different formats
-    if (std.mem.eql(u8, format, "*a") or std.mem.eql(u8, format, "a")) {
+    if (std.mem.eql(u8, format, "a")) {
         // Read all from current position
         const remaining = content[pos..];
         if (remaining.len == 0) {
@@ -1765,7 +1849,7 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
             vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
         }
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(content.len) });
-    } else if (std.mem.eql(u8, format, "*l") or std.mem.eql(u8, format, "l")) {
+    } else if (std.mem.eql(u8, format, "l")) {
         // Read line (without newline)
         if (pos >= content.len) {
             vm.stack[vm.base + func_reg] = .nil;
@@ -1781,7 +1865,7 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         const new_pos: i64 = @intCast(if (end < content.len) end + 1 else end);
         try file_table.set(TValue.fromString(pos_key), .{ .integer = new_pos });
-    } else if (std.mem.eql(u8, format, "*L") or std.mem.eql(u8, format, "L")) {
+    } else if (std.mem.eql(u8, format, "L")) {
         // Read line (with newline)
         if (pos >= content.len) {
             vm.stack[vm.base + func_reg] = .nil;
@@ -2152,6 +2236,7 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
         if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
+        if (nresults > 3) vm.stack[vm.base + func_reg + 3] = .nil;
         return;
     }
 
@@ -2209,6 +2294,9 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (nresults > 2) {
         vm.stack[vm.base + func_reg + 2] = .nil;
     }
+    if (nresults > 3) {
+        vm.stack[vm.base + func_reg + 3] = .nil;
+    }
 }
 
 /// file:read(...) - Reads from file according to given formats
@@ -2256,12 +2344,14 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
     }
 
+    try refreshReadableFileTable(vm, file_table);
+
     // Get format argument (default to "*l")
-    var format: []const u8 = "*l";
+    var format: []const u8 = "l";
     if (nargs > 1) {
         const fmt_arg = vm.stack[vm.base + func_reg + 2];
         if (fmt_arg.asString()) |s| {
-            format = s.asSlice();
+            format = canonicalReadFormat(s.asSlice()) orelse return vm.raiseString("invalid format");
         }
     }
 
@@ -2297,7 +2387,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     }
 
     // Handle different formats
-    if (std.mem.eql(u8, format, "*a") or std.mem.eql(u8, format, "a")) {
+    if (std.mem.eql(u8, format, "a")) {
         // Read all from current position
         const remaining = content[pos..];
         if (remaining.len == 0) {
@@ -2310,7 +2400,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
         // Update position to end
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(content.len) });
-    } else if (std.mem.eql(u8, format, "*l") or std.mem.eql(u8, format, "l")) {
+    } else if (std.mem.eql(u8, format, "l")) {
         // Read line (without newline)
         if (pos >= content.len) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -2330,7 +2420,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // Update position (skip past newline if present)
         const new_pos: i64 = @intCast(if (end < content.len) end + 1 else end);
         try file_table.set(TValue.fromString(pos_key), .{ .integer = new_pos });
-    } else if (std.mem.eql(u8, format, "*L") or std.mem.eql(u8, format, "L")) {
+    } else if (std.mem.eql(u8, format, "L")) {
         // Read line (with newline)
         if (pos >= content.len) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -2350,7 +2440,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Update position
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end) });
-    } else if (std.mem.eql(u8, format, "*n") or std.mem.eql(u8, format, "n")) {
+    } else if (std.mem.eql(u8, format, "n")) {
         const res = readLuaNumberFromContent(content, pos);
         if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse .nil;
         try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(res.new_pos) });
@@ -2516,8 +2606,12 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         return;
     }
 
-    // In our memory-buffered implementation, buffering mode doesn't affect behavior
-    // but we accept it for compatibility and return success
+    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+    try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(mode_str));
+    if (std.mem.eql(u8, mode, "no")) {
+        try flushBufferedFileTable(vm, file_table);
+    }
+
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
     }
@@ -2630,6 +2724,19 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const new_str = try vm.gc().allocString(new_content.items);
     try file_table.set(TValue.fromString(output_key), TValue.fromString(new_str));
     try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end_pos) });
+
+    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+    const bufmode = if (file_table.get(TValue.fromString(bufmode_key))) |v|
+        if (v.asString()) |s| s.asSlice() else "full"
+    else
+        "full";
+    if (std.mem.eql(u8, bufmode, "no")) {
+        try flushBufferedFileTable(vm, file_table);
+    } else if (std.mem.eql(u8, bufmode, "line")) {
+        if (std.mem.indexOfScalar(u8, write_buf.items, '\n') != null) {
+            try flushBufferedFileTable(vm, file_table);
+        }
+    }
 
     // Return the file handle for chaining
     if (nresults > 0) {
