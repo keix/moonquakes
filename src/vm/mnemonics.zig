@@ -1778,17 +1778,20 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 // Protected frame: prepend true and shift results by 1
                 if (is_protected) {
+                    const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
+                    const copy_count: u32 = if (nresults < 0) ret_count else @min(ret_count, expected);
                     vm.stack[dst_base] = .{ .boolean = true };
-                    if (ret_count == 0) {
-                        // No return values from function
-                        vm.top = caller_frame_max;
-                    } else {
-                        // Copy return values to dst_base + 1
-                        for (0..ret_count) |i| {
+                    if (copy_count > 0) {
+                        for (0..copy_count) |i| {
                             vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
                         }
-                        vm.top = caller_frame_max;
                     }
+                    if (nresults >= 0 and expected > copy_count) {
+                        for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
+                            slot.* = .nil;
+                        }
+                    }
+                    vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
                     return .LoopContinue;
                 }
 
@@ -1868,7 +1871,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Protected frame: return (true) with no additional values
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
-                    vm.top = caller_frame_max;
+                    vm.top = if (nresults < 0) dst_base + 1 else caller_frame_max;
                     return .LoopContinue;
                 }
 
@@ -1911,8 +1914,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Protected frame: return (true, value)
                 if (is_protected) {
                     vm.stack[dst_base] = .{ .boolean = true };
-                    vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
-                    vm.top = caller_frame_max;
+                    if (nresults != 0) {
+                        vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
+                    }
+                    vm.top = if (nresults < 0) dst_base + 2 else caller_frame_max;
                     return .LoopContinue;
                 }
 
@@ -2649,7 +2654,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const arg_start = vm.base + a + 2;
                 break :blk vm.top - arg_start;
             };
-            const user_nresults: u32 = if (total_results > 0) total_results - 1 else 1;
+            const user_nresults: u32 = if (total_results > 0) total_results - 1 else 0;
 
             // Handle native closure
             if (func_val.isObject()) {
@@ -2664,13 +2669,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                     // Execute with error catching
                     const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs, user_nresults)) blk: {
+                        const actual_results: u32 = if (total_results == 0)
+                            vm.top - (vm.base + call_reg)
+                        else
+                            user_nresults;
                         // Success: move results and prepend true
-                        var i: u32 = user_nresults;
+                        var i: u32 = actual_results;
                         while (i > 0) : (i -= 1) {
                             vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
                         }
                         vm.stack[vm.base + a] = .{ .boolean = true };
-                        break :blk user_nresults + 1; // true + results
+                        break :blk actual_results + 1; // true + results
                     } else |err| blk: {
                         // Only catch LuaException; other errors (OOM) propagate
                         if (err != error.LuaException) return err;
@@ -2693,7 +2702,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             slot.* = .nil;
                         }
                     }
-                    vm.top = frame_max;
+                    vm.top = if (total_results == 0) result_end else frame_max;
                     return .Continue;
                 }
             }
@@ -2732,7 +2741,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 // Push a protected call frame
-                const pcall_nresults: i16 = @intCast(user_nresults);
+                const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
                 const new_ci = try pushCallInfoVararg(
                     vm,
                     func_proto,
@@ -2771,13 +2780,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         vm.top = vm.base + call_reg + 1 + user_nargs;
 
                         const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs + 1, user_nresults)) blk: {
+                            const actual_results: u32 = if (total_results == 0)
+                                vm.top - (vm.base + call_reg)
+                            else
+                                user_nresults;
                             // Success: move results and prepend true
-                            var i: u32 = user_nresults;
+                            var i: u32 = actual_results;
                             while (i > 0) : (i -= 1) {
                                 vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
                             }
                             vm.stack[vm.base + a] = .{ .boolean = true };
-                            break :blk user_nresults + 1;
+                            break :blk actual_results + 1;
                         } else |err| blk: {
                             if (err != error.LuaException) return err;
                             vm.stack[vm.base + a] = .{ .boolean = false };
@@ -2792,7 +2805,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 slot.* = .nil;
                             }
                         }
-                        vm.top = frame_max;
+                        vm.top = if (total_results == 0) result_end else frame_max;
                         return .Continue;
                     }
 
@@ -2824,7 +2837,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             vm.stack[call_base + i] = .nil;
                         }
 
-                        const pcall_nresults: i16 = @intCast(user_nresults);
+                        const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
                         const new_ci = try pushCallInfoVararg(
                             vm,
                             func_proto,

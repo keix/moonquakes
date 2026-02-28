@@ -4151,7 +4151,10 @@ pub const Parser = struct {
 
         // Check for no-parens call
         if (self.isNoParensArg()) {
-            const arg_reg = try self.parseExpr();
+            const arg_reg = if (self.current.kind == .String)
+                try self.parseStringLiteral()
+            else
+                try self.parseTableConstructor();
             if (arg_reg != func_reg + 2) {
                 try self.proto.emitMOVE(func_reg + 2, arg_reg);
             }

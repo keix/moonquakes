@@ -17,6 +17,8 @@ const FILE_POS_KEY = "_pos";
 const FILE_TMPFILE_KEY = "_tmpfile";
 const FILE_STDIO_KEY = "_stdio"; // "stdin", "stdout", or "stderr"
 const FILE_BUFMODE_KEY = "_bufmode"; // "full" (default), "line", "no"
+const FILE_POPEN_CMD_KEY = "_popen_cmd";
+const FILE_POPEN_MODE_KEY = "_popen_mode";
 
 // Keys for io table default handles
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
@@ -317,8 +319,7 @@ fn tryHandleMultiRead(
             continue;
         }
 
-        if (std.mem.eql(u8, fmt, "l") or std.mem.eql(u8, fmt, "L"))
-        {
+        if (std.mem.eql(u8, fmt, "l") or std.mem.eql(u8, fmt, "L")) {
             const keep_nl = std.mem.eql(u8, fmt, "L");
             if (cur_pos >= content.len) {
                 vm.stack[vm.base + func_reg + out_idx] = .nil;
@@ -1562,13 +1563,24 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     };
     const cmd = cmd_str.asSlice();
 
-    // Run the command and capture output
-    const result = runCommand(vm.gc().allocator, cmd) catch {
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .nil;
-        }
-        return;
-    };
+    var mode: []const u8 = "r";
+    if (nargs >= 2) {
+        const mode_arg = vm.stack[vm.base + func_reg + 2];
+        const mode_str = mode_arg.asString() orelse return vm.raiseString("invalid mode");
+        mode = mode_str.asSlice();
+    }
+    if (!std.mem.eql(u8, mode, "r") and !std.mem.eql(u8, mode, "w")) {
+        return vm.raiseString("invalid mode");
+    }
+    var result: ?CommandResult = null;
+    if (std.mem.eql(u8, mode, "r")) {
+        result = runCommand(vm.gc().allocator, cmd) catch {
+            if (nresults > 0) {
+                vm.stack[vm.base + func_reg] = .nil;
+            }
+            return;
+        };
+    }
 
     // GC SAFETY CONTRACT:
     // Native functions must protect allocated objects from GC.
@@ -1600,17 +1612,30 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // output_key must be protected before allocating output_str
     const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
     vm.stack[vm.base + func_reg + 1] = TValue.fromString(output_key);
-    const output_str = try vm.gc().allocString(result.output);
+    const output_str = if (result) |res|
+        try vm.gc().allocString(res.output)
+    else
+        try vm.gc().allocString("");
     try file_table.set(TValue.fromString(output_key), TValue.fromString(output_str));
-    vm.gc().allocator.free(result.output);
+    if (result) |res| vm.gc().allocator.free(res.output);
 
     // Store exit code
     const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-    try file_table.set(TValue.fromString(exitcode_key), .{ .integer = result.exit_code });
+    try file_table.set(TValue.fromString(exitcode_key), .{ .integer = if (result) |res| res.exit_code else 0 });
 
     // Store closed flag
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
+
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    const mode_str_obj = try vm.gc().allocString(mode);
+    try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str_obj));
+
+    const popen_cmd_key = try vm.gc().allocString(FILE_POPEN_CMD_KEY);
+    const cmd_copy = try vm.gc().allocString(cmd);
+    try file_table.set(TValue.fromString(popen_cmd_key), TValue.fromString(cmd_copy));
+    const popen_mode_key = try vm.gc().allocString(FILE_POPEN_MODE_KEY);
+    try file_table.set(TValue.fromString(popen_mode_key), TValue.fromString(mode_str_obj));
 
     // Create metatable with file methods (use func_reg + 2 as temp slot)
     const mt = try createFileMetatable(vm, func_reg + 2);
@@ -1666,7 +1691,7 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
 
     const exit_code: i64 = switch (term) {
         .Exited => |code| code,
-        .Signal => |sig| -@as(i64, sig),
+        .Signal => |sig| if (std.mem.startsWith(u8, cmd, "sh -c ")) @as(i64, 128 + sig) else -@as(i64, sig),
         .Stopped => |sig| -@as(i64, sig),
         .Unknown => |val| -@as(i64, val),
     };
@@ -1677,6 +1702,44 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
     return .{
         .output = output,
         .exit_code = exit_code,
+    };
+}
+
+fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []const u8) !i64 {
+    const argv = [_][]const u8{ "/bin/sh", "-c", cmd };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    try child.spawn();
+
+    if (child.stdin) |stdin_file| {
+        try stdin_file.writeAll(input);
+        stdin_file.close();
+        child.stdin = null; // prevent double-close in Child.cleanupStreams()
+    }
+
+    if (child.stdout) |*stdout_file| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = try stdout_file.read(&buf);
+            if (n == 0) break;
+        }
+    }
+    if (child.stderr) |*stderr_file| {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = try stderr_file.read(&buf);
+            if (n == 0) break;
+        }
+    }
+
+    const term = try child.wait();
+    return switch (term) {
+        .Exited => |code| code,
+        .Signal => |sig| if (std.mem.startsWith(u8, cmd, "sh -c ")) @as(i64, 128 + sig) else -@as(i64, sig),
+        .Stopped => |sig| -@as(i64, sig),
+        .Unknown => |val| -@as(i64, val),
     };
 }
 
@@ -2023,6 +2086,36 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     var write_error: bool = false;
 
+    const popen_cmd_key = try vm.gc().allocString(FILE_POPEN_CMD_KEY);
+    const popen_mode_key = try vm.gc().allocString(FILE_POPEN_MODE_KEY);
+    if (file_table.get(TValue.fromString(popen_cmd_key))) |cmd_val| {
+        if (cmd_val.asString()) |cmd_str| {
+            const popen_mode = if (file_table.get(TValue.fromString(popen_mode_key))) |mv|
+                if (mv.asString()) |ms| ms.asSlice() else "r"
+            else
+                "r";
+            if (std.mem.eql(u8, popen_mode, "w")) {
+                const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+                const input = if (file_table.get(TValue.fromString(output_key))) |v|
+                    if (v.asString()) |s| s.asSlice() else ""
+                else
+                    "";
+                const code = runCommandWithInput(vm.gc().allocator, cmd_str.asSlice(), input) catch {
+                    write_error = true;
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                    if (nresults > 1) {
+                        const err_str = try vm.gc().allocString("popen failed");
+                        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                    }
+                    try file_table.set(TValue.fromString(closed_key), .{ .boolean = true });
+                    return;
+                };
+                const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
+                try file_table.set(TValue.fromString(exitcode_key), .{ .integer = code });
+            }
+        }
+    }
+
     if (file_table.get(TValue.fromString(mode_key))) |mode_val| {
         if (mode_val.asString()) |mode_str| {
             const mode = mode_str.asSlice();
@@ -2091,19 +2184,21 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
     const exit_code = if (file_table.get(TValue.fromString(exitcode_key))) |v| v.toInteger() orelse 0 else 0;
 
-    // Return: ok, "exit", code
-    // ok is true if exit_code == 0, nil otherwise
+    // Return: ok, "exit"/"signal", code
+    // ok is true only for normal exit code 0, nil otherwise.
     const ok: TValue = if (exit_code == 0) .{ .boolean = true } else .nil;
+    const status: []const u8 = if (exit_code < 0) "signal" else "exit";
+    const code_out: i64 = if (exit_code < 0) -exit_code else exit_code;
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = ok;
     }
     if (nresults > 1) {
-        const exit_str = try vm.gc().allocString("exit");
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_str);
+        const status_str = try vm.gc().allocString(status);
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(status_str);
     }
     if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = exit_code };
+        vm.stack[vm.base + func_reg + 2] = .{ .integer = code_out };
     }
 }
 
