@@ -1,3 +1,4 @@
+const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ThreadStatus = object.ThreadStatus;
@@ -40,6 +41,9 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 /// coroutine.resume(co [, val1, ...]) - Starts or continues coroutine co
 /// Returns (true, results...) on success, (false, error_message) on failure
 pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
+
     if (nargs < 1) {
         return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
     }
@@ -390,6 +394,8 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Store thread at index 1
     try wrapper.set(.{ .integer = 1 }, TValue.fromThread(new_vm.thread));
+    // Store original body function at index 2 to recover from stale coroutine stack[0].
+    try wrapper.set(.{ .integer = 2 }, func_arg);
 
     // Create metatable with __call
     const metatable = try vm.gc().allocTable();
@@ -410,6 +416,9 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 /// Internal: __call handler for wrapped coroutine
 /// Called when a wrapped coroutine is invoked as a function
 pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
+
     // When __call is invoked, the table (wrapper) is at func_reg
     // and original args are at func_reg+1, func_reg+2, ...
     // But nargs includes the wrapper itself as first arg
@@ -442,9 +451,13 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
 
     if (co_vm.ci == null) {
+        if (wrapper.get(.{ .integer = 2 })) |body| {
+            co_vm.stack[0] = body;
+        }
         // First resume
-        const is_lua_body = co_vm.stack[0].asClosure() != null;
-        const is_native_body = co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+        const body = co_vm.stack[0];
+        const is_lua_body = body.asClosure() != null;
+        const is_native_body = body.isObject() and body.object.type == .native_closure;
         if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
@@ -462,7 +475,8 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     thread.status = .running;
     vm.rt.setCurrentThread(thread);
 
-    const exec_result = if (co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
+    const is_native_first = co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+    const exec_result = if (is_native_first)
         executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults else 1)
     else
         executeCoroutine(co_vm);

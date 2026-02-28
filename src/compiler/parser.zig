@@ -2436,19 +2436,41 @@ pub const Parser = struct {
                     false;
 
                 if (is_last_element and self.proto.code.items.len > 0) {
-                    const last_instr = self.proto.code.items[self.proto.code.items.len - 1];
-                    const last_op = last_instr.getOpCode();
-                    if (last_op == .CALL) {
-                        const a = last_instr.getA();
-                        // Only use variable-result optimization if CALL register
+                    var call_idx: ?usize = null;
+                    var call_instr: Instruction = undefined;
+                    var removed_trailing_move = false;
+                    var scan = self.proto.code.items.len - 1;
+                    while (true) {
+                        const inst = self.proto.code.items[scan];
+                        const op = inst.getOpCode();
+                        if (op == .CALL or op == .PCALL) {
+                            call_idx = scan;
+                            call_instr = inst;
+                            if (removed_trailing_move) _ = self.proto.code.pop();
+                            break;
+                        }
+                        if (op != .MOVE) break;
+                        if (!removed_trailing_move and scan == self.proto.code.items.len - 1) {
+                            removed_trailing_move = true;
+                        }
+                        if (scan == 0) break;
+                        scan -= 1;
+                    }
+
+                    if (call_idx) |idx| {
+                        const a = call_instr.getA();
+                        // Only use variable-result optimization if call result register
                         // is immediately after table_reg. For indexed calls like
                         // op[2](...), intermediate registers are used and SETLIST
                         // would copy wrong values.
                         if (a == table_reg + 1) {
-                            // Patch CALL to return variable results (C=0)
-                            const b = last_instr.getB();
-                            self.proto.code.items[self.proto.code.items.len - 1] =
-                                Instruction.initABC(.CALL, a, b, 0);
+                            // Patch CALL/PCALL to return variable results (C=0)
+                            const b = call_instr.getB();
+                            self.proto.code.items[idx] = switch (call_instr.getOpCode()) {
+                                .CALL => Instruction.initABC(.CALL, a, b, 0),
+                                .PCALL => Instruction.initABC(.PCALL, a, b, 0),
+                                else => unreachable,
+                            };
 
                             // Use SETLIST to assign all return values starting at list_index
                             try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);

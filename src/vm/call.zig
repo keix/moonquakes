@@ -238,23 +238,21 @@ fn runUntilReturn(
     vararg_base: u32,
     vararg_count: u32,
 ) anyerror!TValue {
+    const cleanupOnError = struct {
+        fn run(vm2: *VM, saved_depth2: u32, saved_base2: u32, saved_top2: u32) void {
+            while (vm2.callstack_size > saved_depth2) {
+                mnemonics.popCallInfo(vm2);
+            }
+            vm2.base = saved_base2;
+            vm2.top = saved_top2;
+        }
+    }.run;
+
     // Save current call depth for reentrancy
     const saved_depth = vm.callstack_size;
 
     // Push call info
     _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
-
-    // CRITICAL: Ensure vm.base and vm.top are restored even on error
-    // Without this, errors in called functions leave the VM in a corrupt state
-    errdefer {
-        // Pop any frames we pushed
-        while (vm.callstack_size > saved_depth) {
-            mnemonics.popCallInfo(vm);
-        }
-        // Restore caller's frame state
-        vm.base = saved_base;
-        vm.top = saved_top;
-    }
 
     // Execute until we return to saved depth
     var direct_result: ?TValue = null;
@@ -276,6 +274,8 @@ fn runUntilReturn(
             continue;
         };
         const result = mnemonics.do(vm, inst) catch |err| {
+            // Preserve call frames on coroutine yield; resume needs intact state.
+            if (err == error.Yield) return error.Yield;
             // Handle LuaException by unwinding to protected frames (pcall)
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
@@ -310,11 +310,14 @@ fn runUntilReturn(
                     else => "runtime error",
                 };
                 vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                    cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err; // OOM: can't convert, propagate original error
                 });
                 if (mnemonics.handleLuaException(vm)) continue;
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;
             }
+            cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return err;
         };
         switch (result) {

@@ -24,6 +24,17 @@ const FILE_POPEN_MODE_KEY = "_popen_mode";
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
 const IO_DEFAULT_OUTPUT_KEY = "_defaultOutput";
 
+fn makeShellScript(allocator: std.mem.Allocator, cmd: []const u8) ![]u8 {
+    if (std.mem.trim(u8, cmd, " \t\r\n").len == 0) {
+        return allocator.dupe(u8, "exit 0");
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "mq_status=0\n{{ {s}; mq_status=$?; }}\nexit $mq_status",
+        .{cmd},
+    );
+}
+
 pub fn initStdioHandles(io_table: *TableObject, gc: *GC) !void {
     const stdin_handle = try createStdioHandleInit(gc, "stdin");
     const stdout_handle = try createStdioHandleInit(gc, "stdout");
@@ -1655,8 +1666,11 @@ const CommandResult = struct {
 
 /// Run a shell command and capture its output
 fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
-    // Use /bin/sh -c to run the command (handles pipes, redirects, etc.)
-    const argv = [_][]const u8{ "/bin/sh", "-c", cmd };
+    // Run via shell and force explicit status propagation from the outer shell.
+    // Compound-command wrapping prevents `sh` from exec-optimizing simple commands.
+    const script = try makeShellScript(allocator, cmd);
+    defer allocator.free(script);
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
 
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Pipe;
@@ -1706,7 +1720,9 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
 }
 
 fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []const u8) !i64 {
-    const argv = [_][]const u8{ "/bin/sh", "-c", cmd };
+    const script = try makeShellScript(allocator, cmd);
+    defer allocator.free(script);
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
     var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;

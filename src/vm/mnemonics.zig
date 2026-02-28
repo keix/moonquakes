@@ -509,8 +509,17 @@ pub fn handleLuaException(vm: *VM) bool {
             // Place (false, error_value) in return slots
             vm.stack[ret_base] = .{ .boolean = false };
             vm.stack[ret_base + 1] = vm.lua_error_value;
+            if (ci.nresults >= 0) {
+                const expected: u32 = @intCast(ci.nresults);
+                if (expected > 1) {
+                    var i: u32 = 1;
+                    while (i < expected) : (i += 1) {
+                        vm.stack[ret_base + 1 + i] = .nil;
+                    }
+                }
+            }
             vm.lua_error_value = .nil; // Clear after use
-            vm.top = ret_base + 2;
+            vm.top = if (ci.nresults < 0) ret_base + 2 else vm.base + vm.ci.?.func.maxstacksize;
 
             return true;
         }
