@@ -19,7 +19,7 @@ pub fn init(rt: *Runtime) !*VM {
     errdefer rt.allocator.destroy(self);
 
     const is_main = rt.main_thread == null;
-    const initial_status: ThreadStatus = if (is_main) .running else .suspended;
+    const initial_status: ThreadStatus = if (is_main) .running else .created;
     const free_vm: ?*const fn (*anyopaque, std.mem.Allocator) void = if (is_main) null else &vm_gc.vmFreeCallback;
 
     // mark_vm = null initially; set after VM is initialized to avoid marking undefined fields

@@ -69,8 +69,9 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 2; // skip thread argument
+    const is_first_resume = thread.status == .created;
 
-    if (co_vm.ci == null) {
+    if (is_first_resume) {
         // First resume - check function type and set up call frame
         const is_lua_body = co_vm.stack[0].asClosure() != null;
         const is_native_body = co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
@@ -95,7 +96,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     // Execute the coroutine
-    const exec_result = if (co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
+    const exec_result = if (is_first_resume and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
         executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults - 1 else 1)
     else
         executeCoroutine(co_vm);
@@ -348,7 +349,7 @@ pub fn nativeCoroutineStatus(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 
     const status_str: []const u8 = switch (thread.status) {
         .running => "running",
-        .suspended => "suspended",
+        .created, .suspended => "suspended",
         .normal => "normal",
         .dead => "dead",
     };
@@ -449,8 +450,9 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
+    const is_first_resume = thread.status == .created;
 
-    if (co_vm.ci == null) {
+    if (is_first_resume) {
         if (wrapper.get(.{ .integer = 2 })) |body| {
             co_vm.stack[0] = body;
         }
@@ -475,7 +477,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     thread.status = .running;
     vm.rt.setCurrentThread(thread);
 
-    const is_native_first = co_vm.ci == null and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+    const is_native_first = is_first_resume and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
     const exec_result = if (is_native_first)
         executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults else 1)
     else

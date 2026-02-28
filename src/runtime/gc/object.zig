@@ -399,7 +399,8 @@ pub const UserdataObject = struct {
 
 /// Thread Status for coroutines
 pub const ThreadStatus = enum(u8) {
-    suspended, // Created or yielded, ready to be resumed
+    created, // Created and never resumed yet (internal)
+    suspended, // Yielded, ready to be resumed
     running, // Currently executing
     normal, // Resumed another coroutine (waiting for it to finish)
     dead, // Finished execution or errored
