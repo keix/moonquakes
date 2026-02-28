@@ -107,6 +107,8 @@ pub const VM = struct {
     pub const pushTempRoot = api.pushTempRoot;
     pub const popTempRoots = api.popTempRoots;
     pub const collectGarbage = api.collectGarbage;
+    pub const beginGCGuard = api.beginGCGuard;
+    pub const endGCGuard = api.endGCGuard;
     pub const rootProvider = vm_gc.rootProvider;
     pub const reserveSlots = api.reserveSlots;
 

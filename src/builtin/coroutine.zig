@@ -50,8 +50,8 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 /// coroutine.resume(co [, val1, ...]) - Starts or continues coroutine co
 /// Returns (true, results...) on success, (false, error_message) on failure
 pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    vm.gc().inhibitGC();
-    defer vm.gc().allowGC();
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
 
     if (nargs < 1) {
         return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
@@ -430,8 +430,8 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 /// Internal: __call handler for wrapped coroutine
 /// Called when a wrapped coroutine is invoked as a function
 pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    vm.gc().inhibitGC();
-    defer vm.gc().allowGC();
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
 
     // When __call is invoked, the table (wrapper) is at func_reg
     // and original args are at func_reg+1, func_reg+2, ...

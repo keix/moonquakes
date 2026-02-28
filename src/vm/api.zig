@@ -130,3 +130,14 @@ pub fn reserveSlots(self: *VM, func_reg: u32, count: u32) void {
     const needed = self.base + func_reg + count;
     if (self.top < needed) self.top = needed;
 }
+
+/// Begin a VM-level GC guard for sensitive sections.
+/// Must be paired with endGCGuard(), typically via defer.
+pub fn beginGCGuard(self: *VM) void {
+    gc(self).inhibitGC();
+}
+
+/// End a VM-level GC guard started by beginGCGuard().
+pub fn endGCGuard(self: *VM) void {
+    gc(self).allowGC();
+}
