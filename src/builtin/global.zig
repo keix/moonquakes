@@ -140,7 +140,12 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                if (vm.lua_error_value.isNil()) {
+                    const err_fallback = try vm.gc().allocString("error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
+                } else {
+                    vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                }
             }
             // Always clear error value after handling
             vm.lua_error_value = .nil;
@@ -891,17 +896,47 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     else
         vm.globals();
 
-    // Get source string
-    const source = if (chunk_arg.asString()) |str_obj|
-        str_obj.asSlice()
-    else {
-        // TODO: Support reader function
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("load: reader function not yet supported");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    // Get source string or read source through a reader function.
+    var owned_source: ?[]u8 = null;
+    defer if (owned_source) |buf| vm.gc().allocator.free(buf);
+    const source = if (chunk_arg.asString()) |str_obj| blk: {
+        break :blk str_obj.asSlice();
+    } else blk: {
+        var buf: std.ArrayList(u8) = .{};
+        defer buf.deinit(vm.gc().allocator);
+
+        while (true) {
+            const piece_val = call.callValue(vm, chunk_arg, &.{}) catch |err| switch (err) {
+                error.LuaException => {
+                    vm.stack[vm.base + func_reg] = .nil;
+                    if (nresults > 1) {
+                        if (vm.lua_error_value.isNil()) {
+                            const err_fallback = try vm.gc().allocString("error");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
+                        } else {
+                            vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                        }
+                    }
+                    vm.lua_error_value = .nil;
+                    return;
+                },
+                else => return err,
+            };
+
+            if (piece_val.isNil()) break;
+            const piece_str = piece_val.asString() orelse {
+                vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("reader function must return a string");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+            try buf.appendSlice(vm.gc().allocator, piece_str.asSlice());
         }
-        return;
+
+        owned_source = try buf.toOwnedSlice(vm.gc().allocator);
+        break :blk owned_source.?;
     };
 
     // Check if this is binary bytecode

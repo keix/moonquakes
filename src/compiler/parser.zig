@@ -1692,7 +1692,7 @@ pub const Parser = struct {
                 const last_idx = self.proto.code.items.len - 1;
                 const last_inst = self.proto.code.items[last_idx];
 
-                if (last_inst.getOpCode() == .CALL) {
+                if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                     call_idx = last_idx;
                     call_func_reg = last_inst.a;
                 } else {
@@ -1700,7 +1700,7 @@ pub const Parser = struct {
                     var removed_trailing_move = false;
                     while (true) {
                         const inst = self.proto.code.items[scan];
-                        if (inst.getOpCode() == .CALL) {
+                        if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
                             call_idx = scan;
                             call_func_reg = inst.a;
                             if (removed_trailing_move) _ = self.proto.code.pop();
@@ -1714,7 +1714,7 @@ pub const Parser = struct {
                 }
 
                 if (call_idx) |idx| {
-                    // Adjust CALL to return target_count results
+                    // Adjust CALL/PCALL to return target_count results
                     self.proto.code.items[idx].c = target_count + 1;
 
                     // Move results from call_func_reg to first_temp...

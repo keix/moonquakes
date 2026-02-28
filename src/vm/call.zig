@@ -161,17 +161,17 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
     // (native functions use vm.base + func_reg to access their frame)
     vm.base = call_base;
     vm.top = call_base + 1 + @as(u32, @intCast(args.len));
+    defer {
+        // Always restore caller frame even if native raises.
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
 
     // Call native function (func_reg = 0 relative to new vm.base)
     try vm.callNative(nc.func.id, 0, @intCast(args.len), 1);
 
-    // Get result before restoring frame state
+    // Get result from native frame.
     const result = vm.stack[result_slot];
-
-    // GC SAFETY: Restore caller's frame state
-    // This ensures the caller's full stack frame is visible to GC
-    vm.base = saved_base;
-    vm.top = saved_top;
 
     return result;
 }

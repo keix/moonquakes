@@ -2676,7 +2676,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                         // Failure: set false and error value
                         vm.stack[vm.base + a] = .{ .boolean = false };
-                        vm.stack[vm.base + a + 1] = vm.lua_error_value;
+                        if (vm.lua_error_value.isNil()) {
+                            const err_fallback = try vm.gc().allocString("error");
+                            vm.stack[vm.base + a + 1] = TValue.fromString(err_fallback);
+                        } else {
+                            vm.stack[vm.base + a + 1] = vm.lua_error_value;
+                        }
                         vm.lua_error_value = .nil;
                         break :blk 2; // false + error value
                     };

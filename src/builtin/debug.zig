@@ -419,7 +419,6 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         const stack_pos = ci.base + @as(u32, @intCast(local_idx));
         const value = vm.stack[stack_pos];
 
-        // Generate a name since we don't have locvar info
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
 

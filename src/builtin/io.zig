@@ -1102,6 +1102,15 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     vm.top = vm.base + func_reg + 1;
 }
 
+pub fn nativeIoLinesUnreadableIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = func_reg;
+    _ = nargs;
+    _ = nresults;
+    const s = try vm.gc().allocString("file is not readable");
+    vm.lua_error_value = TValue.fromString(s);
+    return error.LuaException;
+}
+
 /// io.open(filename [, mode]) - Opens a file in specified mode
 /// Returns file handle or nil, errmsg on error
 /// Supports: "r" (read), "w" (write), "a" (append), and variants with "+" and "b"
@@ -2115,16 +2124,10 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     if (!can_read) {
-        vm.reserveSlots(func_reg, 5);
-        const state_table = try vm.gc().allocTable();
-        const err_key = try vm.gc().allocString("_error_msg");
-        const err_val = try vm.gc().allocString("file is not readable");
-        try state_table.set(TValue.fromString(err_key), TValue.fromString(err_val));
-        const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
-        vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
+        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_unreadable_iterator });
+        vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
         if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
-        vm.top = vm.base + func_reg + 1;
         return;
     }
 
@@ -2152,6 +2155,23 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     const pos_key = try vm.gc().allocString("_pos");
     try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+
+    // file:lines(self, fmt1, fmt2, ...) passes format args after self.
+    const fmt_count: u32 = if (nargs > 1) nargs - 1 else 0;
+    const fmt_start: u32 = func_reg + 2;
+    if (fmt_count > 0) {
+        const fmts_key = try vm.gc().allocString("_fmts");
+        const fmt_count_key = try vm.gc().allocString("_fmt_count");
+        const fmts_table = try vm.gc().allocTable();
+        try state_table.set(TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
+        try state_table.set(TValue.fromString(fmt_count_key), .{ .integer = @intCast(fmt_count) });
+
+        var i: u32 = 0;
+        while (i < fmt_count) : (i += 1) {
+            const fmt_val = vm.stack[vm.base + fmt_start + i];
+            try fmts_table.set(.{ .integer = @as(i64, @intCast(i)) + 1 }, fmt_val);
+        }
+    }
 
     const wrapper = try createLinesIteratorWrapper(vm, func_reg + 3, state_table);
     vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);
