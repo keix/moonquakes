@@ -3,9 +3,42 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
+const opcodes = @import("../compiler/opcodes.zig");
+const Instruction = opcodes.Instruction;
 const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+
+// Bootstrap frame for first coroutine resume:
+//   CALL   R0, ... (body + resume args)
+//   RETURN R0, ... (propagate all results)
+// This keeps first resume on the same CALL/RETURN path as normal execution.
+//
+// Ownership model:
+// - This proto is runtime-owned immutable static data (not GC-allocated).
+// - It is intentionally never freed and reused by all coroutine starts.
+// - GC may traverse it through CallInfo.func (closure=null path), which is safe
+//   because its code/metadata slices are also static immutable storage.
+var coroutine_bootstrap_code = [_]Instruction{
+    Instruction.initABC(.CALL, 0, 0, 0),
+    Instruction.initABC(.RETURN, 0, 0, 0),
+};
+var coroutine_bootstrap_lineinfo = [_]u32{ 1, 1 };
+var coroutine_bootstrap_proto = object.ProtoObject{
+    .header = object.GCObject.init(.proto, null),
+    .k = &.{},
+    .code = coroutine_bootstrap_code[0..],
+    .protos = &.{},
+    .numparams = 0,
+    .is_vararg = true,
+    // R0=function plus one scratch slot for conservative frame-top handling.
+    .maxstacksize = 2,
+    .nups = 0,
+    .upvalues = &.{},
+    .allocator = std.heap.page_allocator,
+    .source = "[coroutine bootstrap]",
+    .lineinfo = coroutine_bootstrap_lineinfo[0..],
+};
 
 fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
     if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
@@ -91,9 +124,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
             return;
         }
-        if (is_lua_body) {
-            try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
-        }
+        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
@@ -107,10 +138,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     // Execute the coroutine
-    const exec_result = if (is_first_resume and body.isObject() and body.object.type == .native_closure)
-        executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults - 1 else 1)
-    else
-        executeCoroutine(co_vm);
+    const exec_result = executeCoroutine(co_vm);
 
     // Restore caller status
     caller_thread.status = .running;
@@ -163,60 +191,24 @@ const CoroutineResult = union(enum) {
     errored: TValue,
 };
 
-fn executeNativeCoroutineFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32, want_results: u32) CoroutineResult {
-    const func_val = co_vm.stack[0];
-    if (!(func_val.isObject() and func_val.object.type == .native_closure)) {
-        const err_str = co_vm.gc().allocString("coroutine body must be a Lua function") catch return .{ .errored = .nil };
-        return .{ .errored = TValue.fromString(err_str) };
-    }
-
-    const nc = object.getObject(object.NativeClosureObject, func_val.object);
-
-    var i: u32 = 0;
-    while (i < num_args) : (i += 1) {
-        co_vm.stack[1 + i] = caller_stack[arg_base + i];
-    }
-
-    var r: u32 = 0;
-    while (r < want_results) : (r += 1) {
-        co_vm.stack[r] = .nil;
-    }
-    co_vm.top = 1 + num_args;
-
-    co_vm.callNative(nc.func.id, 0, num_args, want_results) catch |err| {
-        if (err == error.LuaException) return .{ .errored = co_vm.lua_error_value };
-        const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
-        return .{ .errored = TValue.fromString(err_str) };
-    };
-
-    co_vm.top = want_results;
-    return .{ .completed = want_results };
-}
-
 /// Set up coroutine for first resume (initialize call frame)
-fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) error{OutOfMemory}!void {
-    const func_val = co_vm.stack[0];
-    const closure = func_val.asClosure().?;
-    const proto = closure.proto;
-
+fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
     // Copy arguments to coroutine stack
     var i: u32 = 0;
     while (i < num_args) : (i += 1) {
         co_vm.stack[1 + i] = caller_stack[arg_base + i];
     }
-    while (i < proto.numparams) : (i += 1) {
-        co_vm.stack[1 + i] = .nil;
-    }
 
-    // Set up initial call frame
-    co_vm.base = 1;
-    co_vm.top = 1 + proto.maxstacksize;
+    // Bootstrap frame executes CALL/RETURN at base 0.
+    co_vm.base = 0;
+    co_vm.top = 1 + num_args;
     co_vm.base_ci = .{
-        .func = proto,
-        .closure = closure,
-        .pc = proto.code.ptr,
+        .func = &coroutine_bootstrap_proto,
+        // Bootstrap bytecode is CALL/RETURN only; no upvalue/env opcodes.
+        .closure = null,
+        .pc = coroutine_bootstrap_proto.code.ptr,
         .savedpc = null,
-        .base = 1,
+        .base = 0,
         .ret_base = 0,
         .nresults = -1,
         .previous = null,
@@ -474,9 +466,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
-        if (is_lua_body) {
-            try setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
-        }
+        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
     } else {
         // Resume after yield
         setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
@@ -488,11 +478,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     thread.status = .running;
     vm.rt.setCurrentThread(thread);
 
-    const is_native_first = is_first_resume and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
-    const exec_result = if (is_native_first)
-        executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults else 1)
-    else
-        executeCoroutine(co_vm);
+    const exec_result = executeCoroutine(co_vm);
 
     caller_thread.status = .running;
     vm.rt.setCurrentThread(caller_thread);
