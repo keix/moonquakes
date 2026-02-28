@@ -423,6 +423,10 @@ pub const ThreadObject = struct {
     /// The VM contains: stack, top, base, ci, callstack, open_upvalues, etc.
     vm: *anyopaque,
 
+    /// Entry function object for first resume.
+    /// Kept on the thread object so wrapper logic does not depend on VM stack layout.
+    entry_func: ?*GCObject = null,
+
     /// Callback to mark VM roots (stack, callframes, upvalues, etc.)
     /// Set by VM.init. GC calls this during mark phase for coroutine threads.
     /// Main thread is marked via its RootProvider registration.

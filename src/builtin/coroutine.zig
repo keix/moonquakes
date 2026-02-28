@@ -7,6 +7,11 @@ const VM = @import("../vm/vm.zig").VM;
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
 
+fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
+    if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
+    return co_vm.stack[0];
+}
+
 // Lua 5.4 Coroutine Library
 // Reference: https://www.lua.org/manual/5.4/manual.html#2.6
 
@@ -33,6 +38,10 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     // For now, store the function at stack[0]
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
+    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
+    if (new_vm.thread.entry_func) |entry_fn| {
+        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
+    }
 
     // Return the thread object
     vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
@@ -70,11 +79,13 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 2; // skip thread argument
     const is_first_resume = thread.status == .created;
+    const body = threadEntryBody(thread, co_vm);
 
     if (is_first_resume) {
         // First resume - check function type and set up call frame
-        const is_lua_body = co_vm.stack[0].asClosure() != null;
-        const is_native_body = co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure;
+        co_vm.stack[0] = body;
+        const is_lua_body = body.asClosure() != null;
+        const is_native_body = body.isObject() and body.object.type == .native_closure;
         if (!is_lua_body and !is_native_body) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
@@ -96,7 +107,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     // Execute the coroutine
-    const exec_result = if (is_first_resume and co_vm.stack[0].isObject() and co_vm.stack[0].object.type == .native_closure)
+    const exec_result = if (is_first_resume and body.isObject() and body.object.type == .native_closure)
         executeNativeCoroutineFirstResume(co_vm, &vm.stack, arg_base, num_args, if (nresults > 0) nresults - 1 else 1)
     else
         executeCoroutine(co_vm);
@@ -380,6 +391,10 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
+    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
+    if (new_vm.thread.entry_func) |entry_fn| {
+        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
+    }
 
     // CRITICAL: Protect the new thread from GC before any more allocations.
     // VM.init may increase bytes_allocated (if tracking enabled), and subsequent
@@ -395,8 +410,6 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Store thread at index 1
     try wrapper.set(.{ .integer = 1 }, TValue.fromThread(new_vm.thread));
-    // Store original body function at index 2 to recover from stale coroutine stack[0].
-    try wrapper.set(.{ .integer = 2 }, func_arg);
 
     // Create metatable with __call
     const metatable = try vm.gc().allocTable();
@@ -451,13 +464,11 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
     const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
     const is_first_resume = thread.status == .created;
+    const body = threadEntryBody(thread, co_vm);
 
     if (is_first_resume) {
-        if (wrapper.get(.{ .integer = 2 })) |body| {
-            co_vm.stack[0] = body;
-        }
         // First resume
-        const body = co_vm.stack[0];
+        co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
         const is_native_body = body.isObject() and body.object.type == .native_closure;
         if (!is_lua_body and !is_native_body) {
