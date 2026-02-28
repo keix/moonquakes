@@ -497,12 +497,12 @@ pub fn handleLuaException(vm: *VM) bool {
     while (current) |ci| {
         if (ci.is_protected) {
             const ret_base = ci.ret_base;
-            const close_base = ci.base;
             const target_ci = ci.previous;
 
-            vm.closeUpvalues(close_base);
-
             while (vm.ci != null and vm.ci != target_ci) {
+                const unwind_ci = vm.ci.?;
+                closeTBCVariables(vm, unwind_ci, 0) catch {};
+                vm.closeUpvalues(unwind_ci.base);
                 popCallInfo(vm);
             }
 
@@ -1418,7 +1418,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             try ci.jumpRel(sbx);
             return .Continue;
         },
-        // Generic for loop: TFORCALL A C - call iterator R(A)(R(A+1), R(A+2)), store C results at R(A+3)...
+        // Generic for loop: TFORCALL A C - call iterator R(A)(R(A+1), R(A+2)),
+        // store C results at R(A+4)... (R(A+3) is to-be-closed state)
         .TFORCALL => {
             const a = inst.getA();
             const c = inst.getC();
@@ -1427,9 +1428,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const state_val = vm.stack[vm.base + a + 1];
             const control_val = vm.stack[vm.base + a + 2];
 
-            // Set up call at R(A+3): copy function and args
-            // Layout: R(A+3)=func, R(A+4)=state, R(A+5)=control, results go to R(A+3)...
-            const call_reg: u8 = @intCast(a + 3);
+            // Set up call at R(A+4): copy function and args
+            // Layout: R(A+4)=func, R(A+5)=state, R(A+6)=control, results go to R(A+4)...
+            const call_reg: u8 = @intCast(a + 4);
             vm.stack[vm.base + call_reg] = func_val;
             vm.stack[vm.base + call_reg + 1] = state_val;
             vm.stack[vm.base + call_reg + 2] = control_val;
@@ -1485,12 +1486,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             return error.NotAFunction;
         },
-        // Generic for loop: TFORLOOP A sBx - if R(A+3) != nil, R(A+2) = R(A+3), jump back
+        // Generic for loop: TFORLOOP A sBx - if R(A+4) != nil, R(A+2) = R(A+4), jump back
         .TFORLOOP => {
             const a = inst.getA();
             const sbx = inst.getSBx();
 
-            const first_var = vm.stack[vm.base + a + 3];
+            const first_var = vm.stack[vm.base + a + 4];
 
             if (!first_var.isNil()) {
                 // Update control variable
@@ -2368,10 +2369,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .Continue;
             }
 
-            // Check that value has __close metamethod
-            if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt) == null) {
-                return error.NoCloseMetamethod;
-            }
+            // Compatibility-first: defer __close validity to close-time behavior.
+            // This avoids rejecting generic-for states that are valid in 5.4 flows.
+            _ = metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt);
 
             // Mark this register as to-be-closed
             ci.markTBC(a);

@@ -253,6 +253,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Determine target closure
     var target_closure: ?*ClosureObject = null;
+    var current_line: i64 = -1;
     const func_name: ?[]const u8 = null;
 
     if (f_arg.toInteger()) |level| {
@@ -266,10 +267,8 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             return;
         }
 
-        const ulevel: usize = @intCast(level);
-
         // Level 0 is getinfo itself - which is native, so we return C info
-        if (ulevel == 0) {
+        if (level == 0) {
             const result_table = try vm.gc().allocTable();
             if (want_source) {
                 const what_key = try vm.gc().allocString("what");
@@ -279,20 +278,12 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             return;
         }
 
-        // Find the closure at stack level
-        // callstack_size is the number of Lua frames
-        // level 1 = callstack[callstack_size - 1]
-        // level 2 = callstack[callstack_size - 2]
-        // etc.
-
-        if (ulevel > vm.callstack_size) {
+        const frame_info = vm.debugGetFrameInfoAtLevel(level) orelse {
             vm.stack[vm.base + func_reg] = TValue.nil;
             return;
-        }
-
-        const stack_idx = vm.callstack_size - ulevel;
-        const ci = &vm.callstack[stack_idx];
-        target_closure = ci.closure;
+        };
+        target_closure = frame_info.closure;
+        current_line = frame_info.current_line;
 
         // Try to get function name from the caller's call site
         // This is complex - would require analyzing the calling code's bytecode
@@ -336,7 +327,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_line) {
             const currentline_key = try vm.gc().allocString("currentline");
-            try result_table.set(TValue.fromString(currentline_key), .{ .integer = -1 });
+            try result_table.set(TValue.fromString(currentline_key), .{ .integer = current_line });
         }
 
         if (want_tailcall) {
@@ -390,43 +381,29 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 
     // Handle f as stack level
     if (f_arg.toInteger()) |level| {
-        if (level < 0) {
+        if (level < 1) {
             if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
             return;
         }
 
-        const ulevel: usize = @intCast(level);
-
-        // Level 0 is getlocal itself (native), level 1 is caller, etc.
-        if (ulevel == 0 or ulevel > vm.callstack_size) {
+        const local_meta = vm.debugWriteLocalAtLevel(level, @intCast(local_idx), func_reg + 1) orelse {
             if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
             return;
-        }
+        };
 
-        // Get the call frame at that level
-        const stack_idx = vm.callstack_size - ulevel;
-        const ci = &vm.callstack[stack_idx];
-
-        // Check if local index is within the frame's stack range
-        // Locals are at base + 0, base + 1, etc.
-        const max_locals = ci.func.maxstacksize;
-        if (local_idx >= max_locals) {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-            return;
-        }
-
-        // Get the value from the stack
-        const stack_pos = ci.base + @as(u32, @intCast(local_idx));
-        const value = vm.stack[stack_pos];
-
+        // Heuristic for Lua 5.4 generic-for internals: the iterator state
+        // locals are reported as "(for state)". We do not store locvar names,
+        // so infer from TBC marker range [r-3, r] when available.
         var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
+        const name = blk: {
+            if (local_meta.is_for_state) {
+                break :blk "(for state)";
+            }
+            break :blk std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
+        };
 
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
-        }
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = value;
         }
         return;
     }

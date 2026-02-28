@@ -6,6 +6,24 @@ const call = @import("../vm/call.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const metamethod = @import("../vm/metamethod.zig");
 
+fn stripUtf8Bom(bytes: []const u8) []const u8 {
+    if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
+        return bytes[3..];
+    }
+    return bytes;
+}
+
+fn preprocessChunkSource(bytes: []const u8) []const u8 {
+    const no_bom = stripUtf8Bom(bytes);
+    if (no_bom.len > 0 and no_bom[0] == '#') {
+        var i: usize = 0;
+        while (i < no_bom.len and no_bom[i] != '\n') : (i += 1) {}
+        if (i < no_bom.len) return no_bom[i + 1 ..];
+        return "";
+    }
+    return no_bom;
+}
+
 /// Lua 5.4 Global Functions (Basic Functions)
 /// Corresponds to Lua manual chapter "Basic Functions"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.1
@@ -967,7 +985,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{});
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -1069,7 +1087,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     defer vm.gc().allocator.free(source);
 
     // Compile the source with filename as source name
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{ .source_name = filename });
+    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);

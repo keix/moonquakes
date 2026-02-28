@@ -37,6 +37,7 @@ const metamethod = @import("metamethod.zig");
 
 // Implementation modules
 const api = @import("api.zig");
+const vm_debug = @import("debug.zig");
 const vm_gc = @import("gc.zig");
 const lifecycle = @import("lifecycle.zig");
 
@@ -108,4 +109,10 @@ pub const VM = struct {
     pub const collectGarbage = api.collectGarbage;
     pub const rootProvider = vm_gc.rootProvider;
     pub const reserveSlots = api.reserveSlots;
+
+    // Debug read-only API
+    pub const DebugFrameInfo = vm_debug.DebugFrameInfo;
+    pub const DebugLocalMeta = vm_debug.DebugLocalMeta;
+    pub const debugGetFrameInfoAtLevel = vm_debug.debugGetFrameInfoAtLevel;
+    pub const debugWriteLocalAtLevel = vm_debug.debugWriteLocalAtLevel;
 };

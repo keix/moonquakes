@@ -769,6 +769,7 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     const use_default_input = nargs == 0 or vm.stack[vm.base + func_reg + 1].isNil();
     const fmt_count: u32 = if (nargs > 0) nargs - 1 else 0;
     const fmt_start: u32 = func_reg + 2;
+    var toclose_handle: TValue = .nil;
     if (fmt_count > 250) {
         return vm.raiseString("too many arguments");
     }
@@ -834,6 +835,26 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const content_str = try vm.gc().allocString(content);
         try state_table.set(TValue.fromString(content_key), TValue.fromString(content_str));
         try state_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+
+        // For Lua 5.4 generic-for with to-be-closed, io.lines(filename, ...)
+        // provides a closeable file handle as the 4th state value.
+        const file_table = try vm.gc().allocTable();
+        if (!vm.pushTempRoot(TValue.fromTable(file_table))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+        try file_table.set(TValue.fromString(output_key), TValue.fromString(content_str));
+        const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+        try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
+        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+        const mode_str = try vm.gc().allocString("r");
+        try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+        const pos2_key = try vm.gc().allocString(FILE_POS_KEY);
+        try file_table.set(TValue.fromString(pos2_key), .{ .integer = 0 });
+        const temp_slot = func_reg + nargs + 4;
+        vm.reserveSlots(temp_slot, 4);
+        const mt = try createFileMetatable(vm, temp_slot);
+        file_table.metatable = mt;
+        toclose_handle = TValue.fromTable(file_table);
     }
 
     if (fmt_count > 0) {
@@ -861,6 +882,9 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Return nil as initial control variable
     if (nresults > 2) {
         vm.stack[vm.base + func_reg + 2] = .nil;
+    }
+    if (nresults > 3) {
+        vm.stack[vm.base + func_reg + 3] = toclose_handle;
     }
 }
 

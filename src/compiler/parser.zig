@@ -3080,8 +3080,8 @@ pub const Parser = struct {
         // Close upvalues when loop exits (after FORLOOP falls through)
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
-        // Patch all break jumps to after the loop
-        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        // Patch break jumps to the final CLOSE so to-be-closed state is finalized.
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len - 1));
         for (self.break_jumps.items[break_count..]) |jmp| {
             self.proto.patchJMP(jmp, end_addr);
         }
@@ -3093,7 +3093,8 @@ pub const Parser = struct {
     ///   R(A): iterator function
     ///   R(A+1): state
     ///   R(A+2): control variable
-    ///   R(A+3), R(A+4), ...: loop variables (var1, var2, ...)
+    ///   R(A+3): to-be-closed state (Lua 5.4)
+    ///   R(A+4), R(A+5), ...: loop variables (var1, var2, ...)
     fn parseGenericFor(self: *Parser, first_var_name: []const u8, break_count: usize) ParseError!void {
         // Collect loop variable names
         var var_names: [8][]const u8 = undefined;
@@ -3124,16 +3125,19 @@ pub const Parser = struct {
         const base_reg = self.proto.allocTemp();
         _ = self.proto.allocTemp(); // state
         _ = self.proto.allocTemp(); // control
+        _ = self.proto.allocTemp(); // to-be-closed state
 
         // Record code position before parsing expression
         const code_before = self.proto.code.items.len;
 
         // Parse iterator expression (e.g., pairs(t) or ipairs(t))
-        // The expression should return: iterator function, state, initial control value
+        // The expression should return: iterator function, state, initial control value,
+        // and optional to-be-closed state.
         const expr_reg = try self.parseExpr();
 
         // Check if last instruction was a CALL (or trailing MOVE after CALL)
-        // and patch it to return 3 values.
+        // and patch it to return 4 values.
+        var call_patched_for4 = false;
         if (self.proto.code.items.len > code_before) {
             const last_idx = self.proto.code.items.len - 1;
             const last_instr = self.proto.code.items[last_idx];
@@ -3147,16 +3151,25 @@ pub const Parser = struct {
                 }
             }
             if (call_idx_opt) |call_idx| {
-                self.proto.patchCallResults(@intCast(call_idx), 3);
+                self.proto.patchCallResults(@intCast(call_idx), 4);
+                call_patched_for4 = true;
             }
         }
 
         // Move iterator results to proper positions
-        // The call should have put results at expr_reg, expr_reg+1, expr_reg+2
+        // The call should have put results at expr_reg..expr_reg+3
         if (expr_reg != base_reg) {
             try self.proto.emitMOVE(base_reg, expr_reg);
             try self.proto.emitMOVE(base_reg + 1, expr_reg + 1);
             try self.proto.emitMOVE(base_reg + 2, expr_reg + 2);
+            if (call_patched_for4) {
+                try self.proto.emitMOVE(base_reg + 3, expr_reg + 3);
+            } else {
+                try self.proto.emitLOADNIL(base_reg + 3, 1);
+            }
+        } else if (!call_patched_for4) {
+            // Non-call iterators may produce only one value; ensure tbc state is nil.
+            try self.proto.emitLOADNIL(base_reg + 3, 1);
         }
 
         // Expect 'do'
@@ -3175,17 +3188,20 @@ pub const Parser = struct {
         const saved_locals_top = self.proto.locals_top;
         const saved_var_len = self.proto.variables.items.len;
 
-        // Set next_reg past the control registers and loop variables
-        // Generic for uses: base(iter), base+1(state), base+2(control), base+3..(vars)
-        const GENERIC_FOR_BASE_REGS: u8 = 3; // iter, state, control
+        // Set next_reg past control registers and loop variables.
+        // Generic for uses: base(iter), base+1(state), base+2(control), base+3(tbc), base+4..(vars)
+        const GENERIC_FOR_BASE_REGS: u8 = 4; // iter, state, control, tbc-state
         self.proto.next_reg = base_reg + GENERIC_FOR_BASE_REGS + var_count;
         self.proto.locals_top = base_reg + GENERIC_FOR_BASE_REGS + var_count;
 
-        // Register loop variables (at base_reg + 3, base_reg + 4, ...)
+        // Register loop variables (at base_reg + 4, base_reg + 5, ...)
         var i: u8 = 0;
         while (i < var_count) : (i += 1) {
             try self.proto.addVariable(var_names[i], base_reg + GENERIC_FOR_BASE_REGS + i);
         }
+
+        // Mark to-be-closed state.
+        try self.proto.emit(.TBC, base_reg + 3, 0, 0);
 
         // Mark for loop body
         const loop_body_mark = self.proto.markTemps();
@@ -3205,8 +3221,8 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // Close upvalues for loop variables before TFORCALL (end of iteration)
-        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
+        // Close upvalues and TBC state before TFORCALL (end of iteration)
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -3221,8 +3237,8 @@ pub const Parser = struct {
         // Patch TFORLOOP to jump back to loop start
         self.proto.patchFORInstr(tforloop_addr, loop_start);
 
-        // Close upvalues when loop exits (after TFORLOOP falls through)
-        try self.proto.emit(.CLOSE, base_reg + GENERIC_FOR_BASE_REGS, 0, 0);
+        // Close upvalues and TBC state when loop exits (after TFORLOOP falls through)
+        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -3349,6 +3365,9 @@ pub const Parser = struct {
         if (self.loop_depth == 0) {
             return error.BreakOutsideLoop;
         }
+
+        // Ensure to-be-closed variables and upvalues are finalized on break.
+        try self.proto.emit(.CLOSE, 0, 0, 0);
 
         // Emit JMP to be patched later at end of loop
         const jmp_addr = try self.proto.emitPatchableJMP();
@@ -4822,6 +4841,40 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                 '\'' => {
                     try result.append(allocator, '\'');
                     i += 2;
+                },
+                'x' => {
+                    if (i + 3 < input.len) {
+                        const h1 = input[i + 2];
+                        const h2 = input[i + 3];
+                        const v1_opt: ?u8 = if (h1 >= '0' and h1 <= '9')
+                            h1 - '0'
+                        else if (h1 >= 'a' and h1 <= 'f')
+                            10 + (h1 - 'a')
+                        else if (h1 >= 'A' and h1 <= 'F')
+                            10 + (h1 - 'A')
+                        else
+                            null;
+                        const v2_opt: ?u8 = if (h2 >= '0' and h2 <= '9')
+                            h2 - '0'
+                        else if (h2 >= 'a' and h2 <= 'f')
+                            10 + (h2 - 'a')
+                        else if (h2 >= 'A' and h2 <= 'F')
+                            10 + (h2 - 'A')
+                        else
+                            null;
+                        if (v1_opt != null and v2_opt != null) {
+                            try result.append(allocator, (v1_opt.? << 4) | v2_opt.?);
+                            i += 4;
+                        } else {
+                            // Invalid \x escape; preserve backslash.
+                            try result.append(allocator, input[i]);
+                            i += 1;
+                        }
+                    } else {
+                        // Truncated \x escape; preserve backslash.
+                        try result.append(allocator, input[i]);
+                        i += 1;
+                    }
                 },
                 else => {
                     // Unknown escape - keep as-is
