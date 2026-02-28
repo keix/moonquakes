@@ -352,25 +352,14 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             }
         },
         .Signal => |sig| {
-            if (std.mem.startsWith(u8, cmd, "sh -c ")) {
-                vm.stack[vm.base + func_reg] = .nil;
-                if (nresults >= 2) {
-                    const exit_key = try vm.gc().allocString("exit");
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_key);
-                }
-                if (nresults >= 3) {
-                    vm.stack[vm.base + func_reg + 2] = .{ .integer = @as(i64, @intCast(128 + sig)) };
-                }
-            } else {
-                // Killed by signal
-                vm.stack[vm.base + func_reg] = .nil;
-                if (nresults >= 2) {
-                    const sig_key = try vm.gc().allocString("signal");
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(sig_key);
-                }
-                if (nresults >= 3) {
-                    vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(sig) };
-                }
+            // Killed by signal
+            vm.stack[vm.base + func_reg] = .nil;
+            if (nresults >= 2) {
+                const sig_key = try vm.gc().allocString("signal");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(sig_key);
+            }
+            if (nresults >= 3) {
+                vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(sig) };
             }
         },
         else => {

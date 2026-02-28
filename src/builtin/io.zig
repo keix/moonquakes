@@ -1691,7 +1691,7 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
 
     const exit_code: i64 = switch (term) {
         .Exited => |code| code,
-        .Signal => |sig| if (std.mem.startsWith(u8, cmd, "sh -c ")) @as(i64, 128 + sig) else -@as(i64, sig),
+        .Signal => |sig| -@as(i64, sig),
         .Stopped => |sig| -@as(i64, sig),
         .Unknown => |val| -@as(i64, val),
     };
@@ -1737,7 +1737,7 @@ fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []c
     const term = try child.wait();
     return switch (term) {
         .Exited => |code| code,
-        .Signal => |sig| if (std.mem.startsWith(u8, cmd, "sh -c ")) @as(i64, 128 + sig) else -@as(i64, sig),
+        .Signal => |sig| -@as(i64, sig),
         .Stopped => |sig| -@as(i64, sig),
         .Unknown => |val| -@as(i64, val),
     };
