@@ -438,6 +438,7 @@ pub const ProtoBuilder = struct {
             const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
             try self.code.append(self.allocator, instr);
             try self.lineinfo.append(self.allocator, self.current_line);
+            self.updateMaxStack(dst + 1);
         } else {
             // Load upvalue to temp, load key to another temp, then GETTABLE
             const upval_temp = self.allocTemp();
@@ -447,6 +448,7 @@ pub const ProtoBuilder = struct {
             const instr = Instruction.initABC(.GETTABLE, dst, upval_temp, key_temp);
             try self.code.append(self.allocator, instr);
             try self.lineinfo.append(self.allocator, self.current_line);
+            self.updateMaxStack(dst + 1);
         }
     }
 
@@ -513,6 +515,7 @@ pub const ProtoBuilder = struct {
             try self.code.append(self.allocator, skip_instr);
             try self.lineinfo.append(self.allocator, self.current_line);
         }
+        self.updateMaxStack(dst + 1);
     }
 
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
@@ -532,6 +535,7 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
+        self.updateMaxStack(dst + 1);
     }
 
     /// Emit GETUPVAL instruction: R[A] := UpValue[B]
@@ -3672,29 +3676,34 @@ pub const Parser = struct {
             }
 
             // Handle multiple return values: if single expression assigns to multiple vars,
-            // adjust the last CALL/PCALL instruction's nresults to match var_count
+            // adjust the last CALL/PCALL/VARARG instruction's nresults to match var_count
             var handled_multi_return = false;
             if (expr_count == 1 and var_count > 1) {
-                // Find the CALL or PCALL instruction (may be last or before a MOVE)
+                // Find the CALL, PCALL, or VARARG instruction (may be last or before a MOVE)
                 if (self.proto.code.items.len > 0) {
-                    var call_idx: ?usize = null;
-                    var call_func_reg: u8 = 0;
+                    var target_idx: ?usize = null;
+                    var target_reg: u8 = 0;
+                    var is_vararg = false;
                     const last_idx = self.proto.code.items.len - 1;
                     const last_inst = self.proto.code.items[last_idx];
 
                     const is_call = last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL;
-                    if (is_call) {
-                        call_idx = last_idx;
-                        call_func_reg = last_inst.a;
+                    const is_va = last_inst.getOpCode() == .VARARG;
+                    if (is_call or is_va) {
+                        target_idx = last_idx;
+                        target_reg = last_inst.a;
+                        is_vararg = is_va;
                     } else {
                         var scan = last_idx;
                         var removed_trailing_move = false;
                         while (true) {
                             const inst = self.proto.code.items[scan];
                             const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
-                            if (scan_is_call) {
-                                call_idx = scan;
-                                call_func_reg = inst.a;
+                            const scan_is_va = inst.getOpCode() == .VARARG;
+                            if (scan_is_call or scan_is_va) {
+                                target_idx = scan;
+                                target_reg = inst.a;
+                                is_vararg = scan_is_va;
                                 if (removed_trailing_move) _ = self.proto.code.pop();
                                 break;
                             }
@@ -3705,14 +3714,14 @@ pub const Parser = struct {
                         }
                     }
 
-                    if (call_idx) |idx| {
-                        // Adjust CALL/PCALL to return var_count results
+                    if (target_idx) |idx| {
+                        // Adjust CALL/PCALL/VARARG to return var_count results
                         self.proto.code.items[idx].c = var_count + 1;
 
-                        // Emit MOVEs to copy results from call_func_reg to first_reg...
+                        // Emit MOVEs to copy results from target_reg to first_reg...
                         var vi: u8 = 0;
                         while (vi < var_count) : (vi += 1) {
-                            const src = call_func_reg + vi;
+                            const src = target_reg + vi;
                             const dst = first_reg + vi;
                             if (src != dst) {
                                 try self.proto.emitMOVE(dst, src);
@@ -4099,18 +4108,22 @@ pub const Parser = struct {
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
-        if (last_was_call and arg_count > 1 and self.proto.code.items.len > 0) {
-            // Find the CALL instruction (might be last, or before a MOVE)
-            var call_idx = self.proto.code.items.len - 1;
-            while (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
-                call_idx -= 1;
-            }
-            if (self.proto.code.items[call_idx].getOpCode() == .CALL) {
+        // IMPORTANT: Only do this when the CALL result is directly at the target register.
+        // If a MOVE was emitted after the CALL, MULTRET won't work because vm.top
+        // reflects the original CALL position, not the MOVE destination.
+        if (last_was_call and arg_count >= 1 and self.proto.code.items.len > 0) {
+            const last_idx = self.proto.code.items.len - 1;
+            const last_inst = self.proto.code.items[last_idx];
+
+            // Only enable MULTRET if the last instruction is CALL (no MOVE after it)
+            if (last_inst.getOpCode() == .CALL) {
                 // Change C to 0 (variable returns)
-                self.proto.code.items[call_idx].c = 0;
+                self.proto.code.items[last_idx].c = 0;
                 // Return VARARG_SENTINEL to indicate variable argument count
                 return ProtoBuilder.VARARG_SENTINEL;
             }
+            // If there's a MOVE after the CALL, don't use MULTRET - the single value
+            // copied by MOVE is correct, but vm.top would be wrong for B=0 argument parsing.
         }
 
         return arg_count;
