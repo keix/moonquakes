@@ -2173,9 +2173,11 @@ pub const Parser = struct {
                     const arg_count = try self.parseCallArgs(reg);
                     try self.proto.emitCallVararg(reg, arg_count, 1);
                 } else {
-                    const dst_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(dst_reg, reg, key_const);
-                    reg = dst_reg;
+                    // Reuse the table register for the field value since we don't
+                    // need the table after accessing the field. This reduces register
+                    // pressure and helps with MULTRET when used as call arguments.
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                    // reg stays the same
                 }
             } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2187,9 +2189,9 @@ pub const Parser = struct {
                 }
                 self.advance(); // consume ']'
 
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETTABLE(dst_reg, reg, key_reg);
-                reg = dst_reg;
+                // Reuse the table register for the indexed value
+                try self.proto.emitGETTABLE(reg, reg, key_reg);
+                // reg stays the same
 
                 // Check for function call: t["key"]() or t[k]()
                 if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
@@ -4058,10 +4060,20 @@ pub const Parser = struct {
                 last_was_vararg = true;
             } else {
                 // Parse first argument
+                const target_reg = func_reg + 1;
+                // Set next_reg to target so allocTemp() returns correct register for this arg
+                const saved_next_reg = self.proto.next_reg;
+                if (self.proto.next_reg < target_reg) {
+                    self.proto.next_reg = target_reg;
+                }
                 const code_len_before = self.proto.code.items.len;
                 const arg_reg = try self.parseExpr();
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                // Restore next_reg to max of saved and current
+                if (self.proto.next_reg < saved_next_reg) {
+                    self.proto.next_reg = saved_next_reg;
+                }
+                if (arg_reg != target_reg) {
+                    try self.proto.emitMOVE(target_reg, arg_reg);
                 }
                 arg_count = 1;
                 last_was_call = detectTailCallInRange(self.proto.code.items, code_len_before);
@@ -4083,12 +4095,21 @@ pub const Parser = struct {
                     break; // ... must be last argument
                 }
 
-                const code_len_before2 = self.proto.code.items.len;
-                const next_arg = try self.parseExpr();
                 arg_count += 1;
                 const target_reg = func_reg + arg_count;
+                // Set next_reg to target so allocTemp() returns correct register for this arg
+                const saved_next_reg = self.proto.next_reg;
+                if (self.proto.next_reg < target_reg) {
+                    self.proto.next_reg = target_reg;
+                }
+                const code_len_before2 = self.proto.code.items.len;
+                const next_arg = try self.parseExpr();
                 const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
-                if (next_arg != func_reg + arg_count) {
+                // Restore next_reg to max of saved and current (in case parseExpr allocated more)
+                if (self.proto.next_reg < saved_next_reg) {
+                    self.proto.next_reg = saved_next_reg;
+                }
+                if (next_arg != target_reg) {
                     try self.proto.emitMOVE(target_reg, next_arg);
                 }
                 last_was_call = arg_is_call;
@@ -4108,22 +4129,17 @@ pub const Parser = struct {
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
-        // IMPORTANT: Only do this when the CALL result is directly at the target register.
-        // If a MOVE was emitted after the CALL, MULTRET won't work because vm.top
-        // reflects the original CALL position, not the MOVE destination.
         if (last_was_call and arg_count >= 1 and self.proto.code.items.len > 0) {
             const last_idx = self.proto.code.items.len - 1;
             const last_inst = self.proto.code.items[last_idx];
 
-            // Only enable MULTRET if the last instruction is CALL (no MOVE after it)
+            // Only enable MULTRET if the last instruction is CALL (no MOVE after it).
+            // With register reuse in parseSuffixChain, MOVE after CALL should not occur
+            // for chained field accesses like table.unpack().
             if (last_inst.getOpCode() == .CALL) {
-                // Change C to 0 (variable returns)
                 self.proto.code.items[last_idx].c = 0;
-                // Return VARARG_SENTINEL to indicate variable argument count
                 return ProtoBuilder.VARARG_SENTINEL;
             }
-            // If there's a MOVE after the CALL, don't use MULTRET - the single value
-            // copied by MOVE is correct, but vm.top would be wrong for B=0 argument parsing.
         }
 
         return arg_count;
