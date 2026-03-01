@@ -4069,9 +4069,7 @@ pub const Parser = struct {
                 const code_len_before = self.proto.code.items.len;
                 const arg_reg = try self.parseExpr();
                 // Restore next_reg to max of saved and current
-                if (self.proto.next_reg < saved_next_reg) {
-                    self.proto.next_reg = saved_next_reg;
-                }
+                self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
                 if (arg_reg != target_reg) {
                     try self.proto.emitMOVE(target_reg, arg_reg);
                 }
@@ -4106,9 +4104,7 @@ pub const Parser = struct {
                 const next_arg = try self.parseExpr();
                 const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
                 // Restore next_reg to max of saved and current (in case parseExpr allocated more)
-                if (self.proto.next_reg < saved_next_reg) {
-                    self.proto.next_reg = saved_next_reg;
-                }
+                self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
                 if (next_arg != target_reg) {
                     try self.proto.emitMOVE(target_reg, next_arg);
                 }
