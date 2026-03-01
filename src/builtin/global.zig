@@ -578,6 +578,7 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     }
 
@@ -588,6 +589,7 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     if (index_arg.asString()) |str| {
         if (std.mem.eql(u8, str.asSlice(), "#")) {
             vm.stack[vm.base + func_reg] = .{ .integer = @intCast(extra_args) };
+            vm.top = vm.base + func_reg + 1;
             return;
         }
     }
@@ -595,6 +597,7 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Otherwise, index should be a number
     const index = index_arg.toInteger() orelse {
         vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     };
 
@@ -605,25 +608,35 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     if (start_idx < 1 or start_idx > @as(i64, @intCast(extra_args))) {
-        // Out of range - return nothing
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .nil;
-        }
+        // Out of range - return nothing (0 values)
+        // CALL handler will fill result slot with nil if nresults > 0
+        vm.top = vm.base + func_reg;
         return;
     }
 
-    // Return arguments from start_idx onwards
+    // Calculate how many values to return
     const start: u32 = @intCast(start_idx);
+    const count = extra_args - start + 1;
+
+    // Limit by nresults if fixed (nresults > 0)
+    const actual_count: u32 = if (nresults > 0) @min(count, nresults) else count;
+
+    // Return arguments from start_idx onwards
     var i: u32 = 0;
-    while (i < nresults and (start + i) <= extra_args) : (i += 1) {
+    while (i < actual_count) : (i += 1) {
         // Arguments start at func_reg + 2 (func_reg + 1 is the index)
         vm.stack[vm.base + func_reg + i] = vm.stack[vm.base + func_reg + 1 + start + i];
     }
 
-    // Fill remaining result slots with nil
-    while (i < nresults) : (i += 1) {
-        vm.stack[vm.base + func_reg + i] = .nil;
+    // Fill remaining result slots with nil if needed
+    if (nresults > 0) {
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
+
+    // Update vm.top for variable return count
+    vm.top = vm.base + func_reg + actual_count;
 }
 
 /// tonumber(e [, base]) - Tries to convert argument to a number

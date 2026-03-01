@@ -438,6 +438,7 @@ pub const ProtoBuilder = struct {
             const instr = Instruction.initABC(.GETTABUP, dst, upval, @intCast(key_const));
             try self.code.append(self.allocator, instr);
             try self.lineinfo.append(self.allocator, self.current_line);
+            self.updateMaxStack(dst + 1);
         } else {
             // Load upvalue to temp, load key to another temp, then GETTABLE
             const upval_temp = self.allocTemp();
@@ -447,6 +448,7 @@ pub const ProtoBuilder = struct {
             const instr = Instruction.initABC(.GETTABLE, dst, upval_temp, key_temp);
             try self.code.append(self.allocator, instr);
             try self.lineinfo.append(self.allocator, self.current_line);
+            self.updateMaxStack(dst + 1);
         }
     }
 
@@ -513,6 +515,7 @@ pub const ProtoBuilder = struct {
             try self.code.append(self.allocator, skip_instr);
             try self.lineinfo.append(self.allocator, self.current_line);
         }
+        self.updateMaxStack(dst + 1);
     }
 
     pub fn emitLOADNIL(self: *ProtoBuilder, dst: u8, count: u8) !void {
@@ -532,6 +535,7 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(.MOVE, dst, src, 0);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
+        self.updateMaxStack(dst + 1);
     }
 
     /// Emit GETUPVAL instruction: R[A] := UpValue[B]
@@ -2169,9 +2173,11 @@ pub const Parser = struct {
                     const arg_count = try self.parseCallArgs(reg);
                     try self.proto.emitCallVararg(reg, arg_count, 1);
                 } else {
-                    const dst_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(dst_reg, reg, key_const);
-                    reg = dst_reg;
+                    // Reuse the table register for the field value since we don't
+                    // need the table after accessing the field. This reduces register
+                    // pressure and helps with MULTRET when used as call arguments.
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                    // reg stays the same
                 }
             } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2183,9 +2189,9 @@ pub const Parser = struct {
                 }
                 self.advance(); // consume ']'
 
-                const dst_reg = self.proto.allocTemp();
-                try self.proto.emitGETTABLE(dst_reg, reg, key_reg);
-                reg = dst_reg;
+                // Reuse the table register for the indexed value
+                try self.proto.emitGETTABLE(reg, reg, key_reg);
+                // reg stays the same
 
                 // Check for function call: t["key"]() or t[k]()
                 if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
@@ -3672,29 +3678,34 @@ pub const Parser = struct {
             }
 
             // Handle multiple return values: if single expression assigns to multiple vars,
-            // adjust the last CALL/PCALL instruction's nresults to match var_count
+            // adjust the last CALL/PCALL/VARARG instruction's nresults to match var_count
             var handled_multi_return = false;
             if (expr_count == 1 and var_count > 1) {
-                // Find the CALL or PCALL instruction (may be last or before a MOVE)
+                // Find the CALL, PCALL, or VARARG instruction (may be last or before a MOVE)
                 if (self.proto.code.items.len > 0) {
-                    var call_idx: ?usize = null;
-                    var call_func_reg: u8 = 0;
+                    var target_idx: ?usize = null;
+                    var target_reg: u8 = 0;
+                    var is_vararg = false;
                     const last_idx = self.proto.code.items.len - 1;
                     const last_inst = self.proto.code.items[last_idx];
 
                     const is_call = last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL;
-                    if (is_call) {
-                        call_idx = last_idx;
-                        call_func_reg = last_inst.a;
+                    const is_va = last_inst.getOpCode() == .VARARG;
+                    if (is_call or is_va) {
+                        target_idx = last_idx;
+                        target_reg = last_inst.a;
+                        is_vararg = is_va;
                     } else {
                         var scan = last_idx;
                         var removed_trailing_move = false;
                         while (true) {
                             const inst = self.proto.code.items[scan];
                             const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
-                            if (scan_is_call) {
-                                call_idx = scan;
-                                call_func_reg = inst.a;
+                            const scan_is_va = inst.getOpCode() == .VARARG;
+                            if (scan_is_call or scan_is_va) {
+                                target_idx = scan;
+                                target_reg = inst.a;
+                                is_vararg = scan_is_va;
                                 if (removed_trailing_move) _ = self.proto.code.pop();
                                 break;
                             }
@@ -3705,14 +3716,14 @@ pub const Parser = struct {
                         }
                     }
 
-                    if (call_idx) |idx| {
-                        // Adjust CALL/PCALL to return var_count results
+                    if (target_idx) |idx| {
+                        // Adjust CALL/PCALL/VARARG to return var_count results
                         self.proto.code.items[idx].c = var_count + 1;
 
-                        // Emit MOVEs to copy results from call_func_reg to first_reg...
+                        // Emit MOVEs to copy results from target_reg to first_reg...
                         var vi: u8 = 0;
                         while (vi < var_count) : (vi += 1) {
-                            const src = call_func_reg + vi;
+                            const src = target_reg + vi;
                             const dst = first_reg + vi;
                             if (src != dst) {
                                 try self.proto.emitMOVE(dst, src);
@@ -4049,10 +4060,18 @@ pub const Parser = struct {
                 last_was_vararg = true;
             } else {
                 // Parse first argument
+                const target_reg = func_reg + 1;
+                // Set next_reg to target so allocTemp() returns correct register for this arg
+                const saved_next_reg = self.proto.next_reg;
+                if (self.proto.next_reg < target_reg) {
+                    self.proto.next_reg = target_reg;
+                }
                 const code_len_before = self.proto.code.items.len;
                 const arg_reg = try self.parseExpr();
-                if (arg_reg != func_reg + 1) {
-                    try self.proto.emitMOVE(func_reg + 1, arg_reg);
+                // Restore next_reg to max of saved and current
+                self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
+                if (arg_reg != target_reg) {
+                    try self.proto.emitMOVE(target_reg, arg_reg);
                 }
                 arg_count = 1;
                 last_was_call = detectTailCallInRange(self.proto.code.items, code_len_before);
@@ -4074,12 +4093,19 @@ pub const Parser = struct {
                     break; // ... must be last argument
                 }
 
-                const code_len_before2 = self.proto.code.items.len;
-                const next_arg = try self.parseExpr();
                 arg_count += 1;
                 const target_reg = func_reg + arg_count;
+                // Set next_reg to target so allocTemp() returns correct register for this arg
+                const saved_next_reg = self.proto.next_reg;
+                if (self.proto.next_reg < target_reg) {
+                    self.proto.next_reg = target_reg;
+                }
+                const code_len_before2 = self.proto.code.items.len;
+                const next_arg = try self.parseExpr();
                 const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
-                if (next_arg != func_reg + arg_count) {
+                // Restore next_reg to max of saved and current (in case parseExpr allocated more)
+                self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
+                if (next_arg != target_reg) {
                     try self.proto.emitMOVE(target_reg, next_arg);
                 }
                 last_was_call = arg_is_call;
@@ -4099,16 +4125,15 @@ pub const Parser = struct {
 
         // If the last argument was a function call, modify it to return all values
         // and return VARARG_SENTINEL to indicate variable argument count (B=0 in CALL)
-        if (last_was_call and arg_count > 1 and self.proto.code.items.len > 0) {
-            // Find the CALL instruction (might be last, or before a MOVE)
-            var call_idx = self.proto.code.items.len - 1;
-            while (self.proto.code.items[call_idx].getOpCode() == .MOVE and call_idx > 0) {
-                call_idx -= 1;
-            }
-            if (self.proto.code.items[call_idx].getOpCode() == .CALL) {
-                // Change C to 0 (variable returns)
-                self.proto.code.items[call_idx].c = 0;
-                // Return VARARG_SENTINEL to indicate variable argument count
+        if (last_was_call and arg_count >= 1 and self.proto.code.items.len > 0) {
+            const last_idx = self.proto.code.items.len - 1;
+            const last_inst = self.proto.code.items[last_idx];
+
+            // Only enable MULTRET if the last instruction is CALL (no MOVE after it).
+            // With register reuse in parseSuffixChain, MOVE after CALL should not occur
+            // for chained field accesses like table.unpack().
+            if (last_inst.getOpCode() == .CALL) {
+                self.proto.code.items[last_idx].c = 0;
                 return ProtoBuilder.VARARG_SENTINEL;
             }
         }

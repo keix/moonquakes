@@ -37,13 +37,19 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, stack_room: u32) u32 {
     // by compatibility tests while keeping C=0 conservative by default.
     return switch (id) {
         .table_unpack => 0, // C=0 sentinel: callee decides actual result count.
+        .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
+        .select => 0, // C=0 sentinel: callee decides based on index and arg count.
+        .next => 2, // next returns key, value
         else => 1,
     };
 }
 
 fn nativeKeepsTopForCall(id: NativeFnId, c: u8) bool {
-    if (c == 0 and id == .table_unpack) return true;
-    return false;
+    if (c > 0) return false;
+    return switch (id) {
+        .table_unpack, .string_byte, .select => true,
+        else => false,
+    };
 }
 
 fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32 {
@@ -1526,7 +1532,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     const nc = object.getObject(NativeClosureObject, obj);
                     const nargs: u32 = if (b > 0) b - 1 else blk: {
                         const arg_start = vm.base + a + 1;
-                        break :blk vm.top - arg_start;
+                        break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
                     };
                     // Remember frame extent before call
                     const frame_max = vm.base + ci.func.maxstacksize;
@@ -1535,18 +1541,30 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);
-                    // GC SAFETY: Clear stack slots that may contain stale pointers.
-                    // After call completes, slots from result_end to frame_max might have
-                    // stale object pointers from previous operations. Clear them to nil
-                    // so GC doesn't try to mark freed objects.
-                    const result_end = if (nresults == 0) vm.top else vm.base + a + nresults;
+
+                    // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
+                    // by setting vm.top = vm.base + a. When the caller expects fixed results
+                    // (nresults > 0), fill those slots with nil and advance vm.top.
+                    // This handles cases like: local x = select(10, 1,2,3) -> x = nil
+                    const result_base = vm.base + a;
+                    if (nresults > 0 and vm.top == result_base) {
+                        // Native returned 0 values but caller expects nresults
+                        for (vm.stack[result_base .. result_base + nresults]) |*slot| {
+                            slot.* = .nil;
+                        }
+                        vm.top = result_base + nresults;
+                    }
+
+                    // GC SAFETY: Clear stale pointers beyond result area
+                    const result_end = if (nresults == 0) vm.top else result_base + nresults;
                     if (result_end < frame_max) {
                         for (vm.stack[result_end..frame_max]) |*slot| {
                             slot.* = .nil;
                         }
                     }
-                    // Keep conservative frame top except for explicit compat MULTRET natives.
-                    vm.top = if (nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
+                    // For MULTRET (C=0), caller depends on vm.top to know result count.
+                    // For fixed results (C>0), keep conservative frame top.
+                    vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
                     return .LoopContinue;
                 }
             }
@@ -1570,9 +1588,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 var vararg_count: u32 = 0;
 
                 if (func_proto.is_vararg and nargs > func_proto.numparams) {
-                    // Store varargs at the end of the new frame
+                    // Store varargs beyond the frame to avoid collision with nested calls.
+                    // We use vm.top (the current stack extent) plus a buffer to ensure
+                    // varargs are safe from being overwritten by any nested function's
+                    // frame, which could extend beyond the caller's maxstacksize.
                     vararg_count = nargs - func_proto.numparams;
-                    vararg_base = new_base + func_proto.maxstacksize;
+                    // Use max of (new_base + maxstacksize) and (vm.top) to find a safe location
+                    // Add extra buffer for nested call frames
+                    const min_vararg_base = new_base + func_proto.maxstacksize;
+                    vararg_base = @max(min_vararg_base, vm.top) + 32; // 32-slot buffer for nested calls
 
                     // Copy varargs to their storage location (after maxstacksize)
                     // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
@@ -1604,7 +1628,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
 
                 // Extend top to include vararg storage if needed
-                const frame_top = new_base + func_proto.maxstacksize + vararg_count;
+                const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
                 vm.top = frame_top;
                 return .LoopContinue;
             }
@@ -1662,23 +1686,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 if (func_proto.is_vararg and nargs > func_proto.numparams) {
                     vararg_count = nargs - func_proto.numparams;
-                    vararg_base = new_base + func_proto.maxstacksize;
+                    // Store varargs beyond the frame with buffer for nested calls
+                    const min_vararg_base = new_base + func_proto.maxstacksize;
+                    vararg_base = @max(min_vararg_base, vm.top) + 32;
 
                     // Copy varargs to storage location
-                    // Check overlap direction to determine copy order
+                    // Always copy backwards since dest > src
                     const src_start = vm.base + a + 1 + func_proto.numparams;
-                    if (vararg_base > src_start) {
-                        // Destination is after source - copy backwards
-                        var i: u32 = vararg_count;
-                        while (i > 0) {
-                            i -= 1;
-                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
-                        }
-                    } else {
-                        // Destination is before source - copy forwards
-                        for (0..vararg_count) |i| {
-                            vm.stack[vararg_base + i] = vm.stack[src_start + i];
-                        }
+                    var i: u32 = vararg_count;
+                    while (i > 0) {
+                        i -= 1;
+                        vm.stack[vararg_base + i] = vm.stack[src_start + i];
                     }
                 }
 
@@ -1712,7 +1730,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 current_ci.tbc_bitmap = 0; // Reset TBC tracking
 
                 vm.base = new_base;
-                vm.top = new_base + func_proto.maxstacksize + vararg_count;
+                vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
 
                 return .LoopContinue;
             }
@@ -1732,12 +1750,29 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     const nresults = current_ci.nresults;
 
                     vm.top = vm.base + a + 1 + nargs;
-                    // Native returns variable results, we'll handle them
-                    try vm.callNative(nc.func.id, a, nargs, if (nresults < 0) 1 else @intCast(nresults));
+
+                    // For MULTRET (nresults < 0), use nativeDesiredResultsForCall to determine
+                    // how many results the native function returns
+                    const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
+                    const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
+                    const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
+                    try vm.callNative(nc.func.id, a, nargs, native_nresults);
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
-                        const actual_nresults: u32 = if (nresults < 0) 1 else @intCast(nresults);
+                        // For MULTRET, determine actual result count:
+                        // - If native_nresults > 0, use that count
+                        // - If native_nresults == 0, native set vm.top, calculate from that
+                        // For fixed results, copy the requested amount
+                        const actual_nresults: u32 = if (nresults < 0) blk: {
+                            if (native_nresults > 0) {
+                                break :blk native_nresults;
+                            } else {
+                                // Native function set vm.top to indicate result count
+                                const result_base = vm.base + a;
+                                break :blk if (vm.top > result_base) vm.top - result_base else 0;
+                            }
+                        } else @intCast(nresults);
 
                         // Copy results from vm.base + a to ret_base
                         for (0..actual_nresults) |i| {
@@ -2726,7 +2761,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 var vararg_count: u32 = 0;
                 if (func_proto.is_vararg and user_nargs > func_proto.numparams) {
                     vararg_count = user_nargs - func_proto.numparams;
-                    vararg_base = call_base + func_proto.maxstacksize;
+                    // Store varargs beyond the frame with buffer for nested calls
+                    const min_vararg_base = call_base + func_proto.maxstacksize;
+                    vararg_base = @max(min_vararg_base, vm.top) + 32;
                     var i: u32 = vararg_count;
                     while (i > 0) {
                         i -= 1;
@@ -2763,7 +2800,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 );
                 new_ci.is_protected = true;
 
-                vm.top = call_base + func_proto.maxstacksize + vararg_count;
+                vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + func_proto.maxstacksize;
                 return .LoopContinue;
             }
 
@@ -2832,7 +2869,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         var vararg_count: u32 = 0;
                         if (func_proto.is_vararg and total_user_args > func_proto.numparams) {
                             vararg_count = total_user_args - func_proto.numparams;
-                            vararg_base = call_base + func_proto.maxstacksize;
+                            // Store varargs beyond the frame with buffer for nested calls
+                            const min_vararg_base = call_base + func_proto.maxstacksize;
+                            vararg_base = @max(min_vararg_base, vm.top) + 32;
                             var i: u32 = vararg_count;
                             while (i > 0) {
                                 i -= 1;
@@ -2841,9 +2880,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
 
                         // Fill remaining params with nil
-                        var i: u32 = total_user_args;
-                        while (i < func_proto.numparams) : (i += 1) {
-                            vm.stack[call_base + i] = .nil;
+                        var pf: u32 = total_user_args;
+                        while (pf < func_proto.numparams) : (pf += 1) {
+                            vm.stack[call_base + pf] = .nil;
                         }
 
                         const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
@@ -2859,7 +2898,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         );
                         new_ci.is_protected = true;
 
-                        vm.top = call_base + func_proto.maxstacksize + vararg_count;
+                        vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + func_proto.maxstacksize;
                         return .LoopContinue;
                     }
                 }

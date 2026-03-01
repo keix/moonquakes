@@ -228,11 +228,10 @@ pub fn nativeStringLower(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// string.byte(s [, i [, j]]) - Returns internal numeric codes of characters in string
 pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
         vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg; // No results
         return;
     };
     const str = str_obj.asSlice();
@@ -240,6 +239,7 @@ pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
     if (len == 0) {
         vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg; // No results
         return;
     }
 
@@ -266,20 +266,34 @@ pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     if (j > len) j = len;
 
     if (i > j or i > len) {
-        vm.stack[vm.base + func_reg] = .nil;
+        // Return nothing (0 values) - CALL handler fills result slot with nil
+        vm.top = vm.base + func_reg;
         return;
     }
 
+    // Calculate how many values to return
+    const count: u32 = @intCast(j - i + 1);
+
+    // Limit by nresults if fixed (nresults > 0)
+    const actual_count: u32 = if (nresults > 0) @min(count, nresults) else count;
+
     // Return byte values
     const start: usize = @intCast(i - 1);
-    const end: usize = @intCast(j);
-    var result_count: u32 = 0;
-
-    for (start..end) |idx| {
-        if (result_count >= nresults) break;
-        vm.stack[vm.base + func_reg + result_count] = .{ .integer = str[idx] };
-        result_count += 1;
+    var result_idx: u32 = 0;
+    while (result_idx < actual_count) : (result_idx += 1) {
+        vm.stack[vm.base + func_reg + result_idx] = .{ .integer = str[start + result_idx] };
     }
+
+    // Fill remaining result slots with nil if needed
+    if (nresults > 0) {
+        var fill_idx: u32 = actual_count;
+        while (fill_idx < nresults) : (fill_idx += 1) {
+            vm.stack[vm.base + func_reg + fill_idx] = .nil;
+        }
+    }
+
+    // Update vm.top for variable return count
+    vm.top = vm.base + func_reg + actual_count;
 }
 
 /// string.char(...) - Returns string with characters having given numeric codes

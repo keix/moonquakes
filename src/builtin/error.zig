@@ -30,9 +30,19 @@ pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         return vm.raiseString("assertion failed!");
     }
 
-    // Return the first argument if assertion succeeds
+    // Return all arguments if assertion succeeds (Lua behavior)
+    // Arguments are at func_reg+1, func_reg+2, ..., func_reg+nargs
+    // Results go to func_reg, func_reg+1, ..., func_reg+actual_results-1
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = value;
+        const actual_results = @min(nargs, nresults);
+        var i: u32 = 0;
+        while (i < actual_results) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = vm.stack[vm.base + func_reg + 1 + i];
+        }
+        // Fill remaining result slots with nil if nresults > nargs
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
 }
 
