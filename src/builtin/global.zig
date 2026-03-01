@@ -608,7 +608,8 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     if (start_idx < 1 or start_idx > @as(i64, @intCast(extra_args))) {
-        // Out of range - return nothing
+        // Out of range - return nothing (0 values)
+        // CALL handler will fill result slot with nil if nresults > 0
         vm.top = vm.base + func_reg;
         return;
     }

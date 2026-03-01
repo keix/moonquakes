@@ -1541,11 +1541,22 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
                     try vm.callNative(nc.func.id, a, nargs, nresults);
-                    // GC SAFETY: Clear stack slots that may contain stale pointers.
-                    // After call completes, slots from result_end to frame_max might have
-                    // stale object pointers from previous operations. Clear them to nil
-                    // so GC doesn't try to mark freed objects.
-                    const result_end = if (nresults == 0) vm.top else vm.base + a + nresults;
+
+                    // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
+                    // by setting vm.top = vm.base + a. When the caller expects fixed results
+                    // (nresults > 0), fill those slots with nil and advance vm.top.
+                    // This handles cases like: local x = select(10, 1,2,3) -> x = nil
+                    const result_base = vm.base + a;
+                    if (nresults > 0 and vm.top == result_base) {
+                        // Native returned 0 values but caller expects nresults
+                        for (vm.stack[result_base .. result_base + nresults]) |*slot| {
+                            slot.* = .nil;
+                        }
+                        vm.top = result_base + nresults;
+                    }
+
+                    // GC SAFETY: Clear stale pointers beyond result area
+                    const result_end = if (nresults == 0) vm.top else result_base + nresults;
                     if (result_end < frame_max) {
                         for (vm.stack[result_end..frame_max]) |*slot| {
                             slot.* = .nil;

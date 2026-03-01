@@ -266,7 +266,8 @@ pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     if (j > len) j = len;
 
     if (i > j or i > len) {
-        vm.top = vm.base + func_reg; // No results
+        // Return nothing (0 values) - CALL handler fills result slot with nil
+        vm.top = vm.base + func_reg;
         return;
     }
 
