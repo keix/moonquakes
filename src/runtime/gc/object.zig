@@ -475,8 +475,8 @@ pub const FileObject = struct {
     kind: FileKind,
     /// Buffering mode
     bufmode: BufMode,
-    /// Internal write buffer
-    buffer: std.ArrayList(u8),
+    /// Internal write buffer (Unmanaged for explicit allocator control)
+    buffer: std.ArrayListUnmanaged(u8),
     /// Allocator for buffer operations
     allocator: std.mem.Allocator,
     /// OS file handle (null for stdio, which uses std.fs directly)
@@ -502,7 +502,7 @@ pub const FileObject = struct {
             .header = GCObject.init(.file, next_obj),
             .kind = kind,
             .bufmode = bufmode,
-            .buffer = .{ .items = &.{}, .capacity = 0 },
+            .buffer = .{},
             .allocator = allocator,
             .handle = null, // stdio uses std.fs.File.stdout() etc. directly
             .closed = false,
@@ -520,7 +520,7 @@ pub const FileObject = struct {
             .bufmode = .full,
             .allocator = allocator,
             .metatable = null,
-            .buffer = .{ .items = &.{}, .capacity = 0 },
+            .buffer = .{},
             .handle = handle,
             .closed = false,
             .filename = null,
@@ -562,26 +562,13 @@ pub const FileObject = struct {
 
     /// Internal: write data directly to destination
     fn flushData(self: *FileObject, data: []const u8) !void {
-        switch (self.kind) {
-            .stdout => {
-                const stdout = std.fs.File.stdout();
-                stdout.writeAll(data) catch return error.WriteError;
-            },
-            .stderr => {
-                const stderr = std.fs.File.stderr();
-                stderr.writeAll(data) catch return error.WriteError;
-            },
-            .stdin => {
-                return error.WriteError; // Can't write to stdin
-            },
-            .file, .popen => {
-                if (self.handle) |h| {
-                    h.writeAll(data) catch return error.WriteError;
-                } else {
-                    return error.WriteError;
-                }
-            },
-        }
+        const file = switch (self.kind) {
+            .stdout => std.fs.File.stdout(),
+            .stderr => std.fs.File.stderr(),
+            .stdin => return error.WriteError, // Can't write to stdin
+            .file, .popen => self.handle orelse return error.WriteError,
+        };
+        file.writeAll(data) catch return error.WriteError;
     }
 
     /// Close the file

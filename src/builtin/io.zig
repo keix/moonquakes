@@ -2730,9 +2730,20 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Get the file handle and perform seek
         if (file_obj.handle) |handle| {
-            // Calculate absolute position
+            // Calculate absolute position with underflow check
             const abs_pos: u64 = switch (whence_mode) {
-                .set => @intCast(offset),
+                .set => blk: {
+                    if (offset < 0) {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        if (nresults > 1) {
+                            const err_str = try vm.gc().allocString("Invalid argument");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                        }
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        return;
+                    }
+                    break :blk @intCast(offset);
+                },
                 .cur => blk: {
                     const pos = handle.getPos() catch {
                         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
@@ -2742,7 +2753,17 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                         }
                         return;
                     };
-                    break :blk @intCast(@as(i64, @intCast(pos)) + offset);
+                    const new_pos = @as(i64, @intCast(pos)) + offset;
+                    if (new_pos < 0) {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        if (nresults > 1) {
+                            const err_str = try vm.gc().allocString("Invalid argument");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                        }
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        return;
+                    }
+                    break :blk @intCast(new_pos);
                 },
                 .end => blk: {
                     const end_pos = handle.getEndPos() catch {
@@ -2753,7 +2774,17 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                         }
                         return;
                     };
-                    break :blk @intCast(@as(i64, @intCast(end_pos)) + offset);
+                    const new_pos = @as(i64, @intCast(end_pos)) + offset;
+                    if (new_pos < 0) {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        if (nresults > 1) {
+                            const err_str = try vm.gc().allocString("Invalid argument");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                        }
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        return;
+                    }
+                    break :blk @intCast(new_pos);
                 },
             };
 
@@ -2854,8 +2885,17 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     }
 
-    // Clamp to valid range
-    if (new_pos < 0) new_pos = 0;
+    // Check for underflow - return error instead of clamping
+    if (new_pos < 0) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("Invalid argument");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+        return;
+    }
+    // Clamp to end of file (seeking past end is allowed, returns end position)
     if (new_pos > content_len) new_pos = content_len;
 
     // Update position
