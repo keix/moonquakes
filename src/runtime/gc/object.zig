@@ -529,25 +529,24 @@ pub const FileObject = struct {
     }
 
     /// Write data to the file (buffered according to bufmode)
+    /// Buffer is always the source of truth - all writes go through buffer first,
+    /// then bufmode decides when to flush to OS.
     pub fn write(self: *FileObject, data: []const u8) !void {
         if (self.closed) return error.FileClosed;
 
+        // All writes go to buffer first
+        try self.buffer.appendSlice(self.allocator, data);
+
+        // bufmode decides when to flush
         switch (self.bufmode) {
-            .no => {
-                // Unbuffered: write directly
-                try self.flushData(data);
-            },
+            .no => try self.flush(), // Unbuffered: flush immediately
             .line => {
-                // Line buffered: buffer and flush on newline
-                try self.buffer.appendSlice(self.allocator, data);
+                // Line buffered: flush on newline
                 if (std.mem.lastIndexOfScalar(u8, data, '\n') != null) {
                     try self.flush();
                 }
             },
-            .full => {
-                // Fully buffered: just append to buffer
-                try self.buffer.appendSlice(self.allocator, data);
-            },
+            .full => {}, // Fully buffered: wait for explicit flush
         }
     }
 
