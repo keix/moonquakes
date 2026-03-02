@@ -31,7 +31,6 @@ pub const BitwiseOp = enum { band, bor, bxor };
 const native_multret_cap: u32 = 256;
 
 fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, stack_room: u32) u32 {
-    _ = stack_room;
     if (c > 0) return c - 1;
     // COMPAT HACK: allow MULTRET only for specific natives that are required
     // by compatibility tests while keeping C=0 conservative by default.
@@ -40,6 +39,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, stack_room: u32) u32 {
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .next => 2, // next returns key, value
+        .coroutine_resume => @min(native_multret_cap, stack_room), // variable: true + results
         else => 1,
     };
 }
@@ -54,9 +54,12 @@ fn nativeKeepsTopForCall(id: NativeFnId, c: u8) bool {
 
 fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32 {
     if (nresults >= 0) return @intCast(nresults);
-    // COMPAT HACK: io.lines iterator must expand for generic-for and table ctor.
+    // MULTRET: these natives can return variable number of results
     return switch (id) {
-        .io_lines_iterator => @min(native_multret_cap, stack_room),
+        .io_lines_iterator,
+        .coroutine_resume,
+        .coroutine_wrap_call,
+        => @min(native_multret_cap, stack_room),
         else => 1,
     };
 }
@@ -3325,6 +3328,16 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
         const stack_room: u32 = @intCast(vm.stack.len - (vm.base + base_slot));
         const actual_nresults = nativeDesiredResultsForMM(nc.func.id, nresults, stack_room);
         try vm.callNative(nc.func.id, base_slot, nargs + 1, actual_nresults);
+
+        // Update vm.top after native call completes
+        // MULTRET-capable natives set vm.top themselves; others need fixed update
+        const is_multret_native = nresults < 0 and switch (nc.func.id) {
+            .io_lines_iterator, .coroutine_resume, .coroutine_wrap_call => true,
+            else => false,
+        };
+        if (!is_multret_native) {
+            vm.top = vm.base + base_slot + actual_nresults;
+        }
         return .LoopContinue;
     }
 
