@@ -21,6 +21,7 @@ const FILE_STDIO_KEY = "_stdio"; // "stdin", "stdout", or "stderr"
 const FILE_BUFMODE_KEY = "_bufmode"; // "full" (default), "line", "no"
 const FILE_POPEN_CMD_KEY = "_popen_cmd";
 const FILE_POPEN_MODE_KEY = "_popen_mode";
+const FILE_IMPL_KEY = "_impl"; // FileObject reference for delegation
 
 // Keys for io table default handles
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
@@ -522,6 +523,22 @@ pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         if (io_val.asTable()) |io_table| {
             const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
             if (io_table.get(TValue.fromString(default_output_key))) |out_val| {
+                // Handle FileObject-based default output
+                if (out_val.asFile()) |file_obj| {
+                    if (file_obj.closed) {
+                        return vm.raiseString(" output file is closed");
+                    }
+                    vm.reserveSlots(func_reg, nargs + 3);
+                    var i: i64 = @intCast(nargs);
+                    while (i > 0) : (i -= 1) {
+                        const src = func_reg + @as(u32, @intCast(i));
+                        const dst = func_reg + @as(u32, @intCast(i)) + 1;
+                        vm.stack[vm.base + dst] = vm.stack[vm.base + src];
+                    }
+                    vm.stack[vm.base + func_reg + 1] = out_val;
+                    return nativeFileWrite(vm, func_reg, nargs + 1, nresults);
+                }
+                // Handle table-based default output
                 if (out_val.asTable()) |out_table| {
                     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
                     if (out_table.get(TValue.fromString(closed_key))) |closed_val| {
@@ -596,6 +613,85 @@ pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 /// Without argument: closes the default output file
 /// Returns: true on success, or nil + error message on failure
 pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // Handle FileObject-based files first
+    if (nargs >= 1) {
+        const arg = vm.stack[vm.base + func_reg + 1];
+        if (arg.asFile()) |file_obj| {
+            // Standard files cannot be closed in Lua
+            if (file_obj.isStdio()) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+            if (file_obj.closed) {
+                return vm.raiseString("closed file");
+            }
+            file_obj.close() catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                return;
+            };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            return;
+        }
+    } else {
+        // Check if default output is a FileObject or table with _impl
+        const io_key = try vm.gc().allocString("io");
+        if (vm.globals().get(TValue.fromString(io_key))) |io_val| {
+            if (io_val.asTable()) |io_table| {
+                const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
+                if (io_table.get(TValue.fromString(default_output_key))) |output_val| {
+                    // Direct FileObject
+                    if (output_val.asFile()) |file_obj| {
+                        // Standard files cannot be closed
+                        if (file_obj.isStdio()) {
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            return;
+                        }
+                        if (file_obj.closed) {
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            if (nresults > 1) {
+                                const err_str = try vm.gc().allocString("file already closed");
+                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                            }
+                            return;
+                        }
+                        file_obj.close() catch {
+                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                            return;
+                        };
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                        return;
+                    }
+                    // Table with _impl delegation
+                    if (output_val.asTable()) |out_table| {
+                        const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+                        if (out_table.get(TValue.fromString(impl_key))) |impl_val| {
+                            if (impl_val.asFile()) |file_obj| {
+                                if (file_obj.closed) {
+                                    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                                    if (nresults > 1) {
+                                        const err_str = try vm.gc().allocString("file already closed");
+                                        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                                    }
+                                    return;
+                                }
+                                file_obj.close() catch {
+                                    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                                    return;
+                                };
+                                // Sync table's closed flag
+                                const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+                                try out_table.set(TValue.fromString(closed_key), .{ .boolean = true });
+                                if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Legacy: table-based file handles
     var file_table: *TableObject = undefined;
 
     if (nargs >= 1) {
@@ -730,8 +826,32 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 /// io.flush() - Saves any written data to default output file
 pub fn nativeIoFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nargs;
-    // stdout is unbuffered in Zig, so flush is a no-op
-    // but we return true for compatibility
+
+    // Check if default output is a FileObject that needs flushing
+    const io_key = try vm.gc().allocString("io");
+    if (vm.globals().get(TValue.fromString(io_key))) |io_val| {
+        if (io_val.asTable()) |io_table| {
+            const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
+            if (io_table.get(TValue.fromString(default_output_key))) |output_val| {
+                if (output_val.asFile()) |file_obj| {
+                    file_obj.flush() catch {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        return;
+                    };
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                    return;
+                }
+                // Handle table-based output
+                if (output_val.asTable()) |out_table| {
+                    try flushBufferedFileTable(vm, out_table);
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                    return;
+                }
+            }
+        }
+    }
+
+    // Default: stdout is unbuffered, return true for compatibility
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
     }
@@ -1379,8 +1499,8 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Handle write mode ("w" - truncate or create)
     if (primary_mode == 'w') {
-        // Validate path and apply truncation semantics at open time
-        const probe_file = std.fs.cwd().createFile(filename, .{}) catch {
+        // Open/create file with truncation
+        const os_file = std.fs.cwd().createFile(filename, .{}) catch {
             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 const err_str = try vm.gc().allocString("cannot open file");
@@ -1389,18 +1509,19 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
             if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
             return;
         };
-        probe_file.close();
 
-        // Create file handle table with empty buffer
+        // Create FileObject to manage the OS handle
+        const file_obj = try vm.gc().allocFile(os_file);
+
+        // Create file handle table (legacy shell)
         const file_table = try vm.gc().allocTable();
         vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
 
-        // Store empty output buffer
-        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-        const empty_str = try vm.gc().allocString("");
-        try file_table.set(TValue.fromString(output_key), TValue.fromString(empty_str));
+        // Store FileObject reference for delegation
+        const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+        try file_table.set(TValue.fromString(impl_key), TValue.fromFile(file_obj));
 
-        // Store filename for writing on close
+        // Store filename for error messages
         const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
         const filename_str = try vm.gc().allocString(filename);
         try file_table.set(TValue.fromString(filename_key), TValue.fromString(filename_str));
@@ -1410,21 +1531,9 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_str = try vm.gc().allocString(mode);
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
 
-        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-        const bufmode_str = try vm.gc().allocString("full");
-        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
-
-        // Store closed flag
+        // Store closed flag (synced with FileObject)
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
         try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
-
-        // Store exit code (0 for regular files)
-        const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-        try file_table.set(TValue.fromString(exitcode_key), .{ .integer = 0 });
-
-        // Store position (0 for write mode)
-        const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -1438,29 +1547,32 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Handle append mode ("a" - append or create)
     if (primary_mode == 'a') {
-        // Try to read existing content
-        var initial_content: []const u8 = "";
-        var owned_content: ?[]u8 = null;
-        defer if (owned_content) |c| vm.gc().allocator.free(c);
+        // Open file for appending (create if doesn't exist)
+        const os_file = std.fs.cwd().createFile(filename, .{ .truncate = false }) catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("cannot open file");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            return;
+        };
 
-        if (std.fs.cwd().openFile(filename, .{})) |file| {
-            defer file.close();
-            if (file.readToEndAlloc(vm.gc().allocator, 10 * 1024 * 1024)) |content| {
-                owned_content = content;
-                initial_content = content;
-            } else |_| {}
-        } else |_| {}
+        // Seek to end for append semantics
+        os_file.seekFromEnd(0) catch {};
 
-        // Create file handle table
+        // Create FileObject to manage the OS handle
+        const file_obj = try vm.gc().allocFile(os_file);
+
+        // Create file handle table (legacy shell)
         const file_table = try vm.gc().allocTable();
         vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
 
-        // Store initial content (existing file content or empty)
-        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-        const content_str = try vm.gc().allocString(initial_content);
-        try file_table.set(TValue.fromString(output_key), TValue.fromString(content_str));
+        // Store FileObject reference for delegation
+        const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+        try file_table.set(TValue.fromString(impl_key), TValue.fromFile(file_obj));
 
-        // Store filename for writing on close
+        // Store filename for error messages
         const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
         const filename_str = try vm.gc().allocString(filename);
         try file_table.set(TValue.fromString(filename_key), TValue.fromString(filename_str));
@@ -1470,21 +1582,9 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const mode_str = try vm.gc().allocString(mode);
         try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
 
-        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-        const bufmode_str = try vm.gc().allocString("full");
-        try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
-
-        // Store closed flag
+        // Store closed flag (synced with FileObject)
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
         try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
-
-        // Store exit code (0 for regular files)
-        const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-        try file_table.set(TValue.fromString(exitcode_key), .{ .integer = 0 });
-
-        // Store position at end for append mode
-        const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(initial_content.len) });
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -2203,6 +2303,32 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return vm.raiseString("got no value");
     };
 
+    // Check for FileObject delegation via _impl
+    const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+    if (file_table.get(TValue.fromString(impl_key))) |impl_val| {
+        if (impl_val.asFile()) |file_obj| {
+            // Check if already closed
+            if (file_obj.closed) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+            // Close the FileObject (flushes and closes OS handle)
+            file_obj.close() catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("close error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+            // Sync table's closed flag
+            const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+            try file_table.set(TValue.fromString(closed_key), .{ .boolean = true });
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            return;
+        }
+    }
+
     // Standard files cannot be closed in Lua
     const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
     if (file_table.get(TValue.fromString(stdio_key)) != null) {
@@ -2387,6 +2513,31 @@ pub fn nativeFileFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
+
+    // Check for FileObject delegation via _impl
+    const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+    if (file_table.get(TValue.fromString(impl_key))) |impl_val| {
+        if (impl_val.asFile()) |file_obj| {
+            if (file_obj.closed) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("file is closed");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            }
+            file_obj.flush() catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("flush error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = self_arg;
+            return;
+        }
+    }
 
     // Check if closed
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
@@ -2923,14 +3074,82 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         return;
     }
 
-    // Get the file handle table (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Get mode argument first
+    const mode_arg = vm.stack[vm.base + func_reg + 2];
+    const mode_str = mode_arg.asString() orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("bad argument #1 (string expected)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+    const mode = mode_str.asSlice();
+
+    // Validate and convert mode
+    const bufmode: object.BufMode = if (std.mem.eql(u8, mode, "no"))
+        .no
+    else if (std.mem.eql(u8, mode, "full"))
+        .full
+    else if (std.mem.eql(u8, mode, "line"))
+        .line
+    else {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("bad argument #1 (invalid mode)");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    };
+
+    // Handle FileObject directly
+    if (self_arg.asFile()) |file_obj| {
+        if (file_obj.closed) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("file is closed");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        }
+        file_obj.bufmode = bufmode;
+        if (bufmode == .no) {
+            file_obj.flush() catch {};
+        }
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        return;
+    }
+
+    // Handle table-based file handle
     const file_table = self_arg.asTable() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
 
-    // Check if closed
+    // Check for FileObject delegation via _impl
+    const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+    if (file_table.get(TValue.fromString(impl_key))) |impl_val| {
+        if (impl_val.asFile()) |file_obj| {
+            if (file_obj.closed) {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("file is closed");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            }
+            file_obj.bufmode = bufmode;
+            if (bufmode == .no) {
+                file_obj.flush() catch {};
+            }
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            return;
+        }
+    }
+
+    // Legacy table-based handling
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
         if (closed_val.toBoolean()) {
@@ -2943,34 +3162,9 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         }
     }
 
-    // Get mode argument
-    const mode_arg = vm.stack[vm.base + func_reg + 2];
-    const mode_str = mode_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("bad argument #1 (string expected)");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    };
-    const mode = mode_str.asSlice();
-
-    // Validate mode
-    if (!std.mem.eql(u8, mode, "no") and
-        !std.mem.eql(u8, mode, "full") and
-        !std.mem.eql(u8, mode, "line"))
-    {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("bad argument #1 (invalid mode)");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    }
-
     const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
     try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(mode_str));
-    if (std.mem.eql(u8, mode, "no")) {
+    if (bufmode == .no) {
         try flushBufferedFileTable(vm, file_table);
     }
 
@@ -3057,6 +3251,14 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     };
+
+    // Check for FileObject delegation via _impl
+    const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
+    if (file_table.get(TValue.fromString(impl_key))) |impl_val| {
+        if (impl_val.asFile()) |file_obj| {
+            return nativeFileWriteFileObject(vm, file_obj, self_arg, func_reg, nargs, nresults);
+        }
+    }
 
     // Check if closed
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
