@@ -130,7 +130,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .table => "table",
             .closure, .native_closure => "function",
             .upvalue => "upvalue",
-            .userdata => "userdata",
+            .userdata, .file => "userdata", // file handles are userdata in Lua
             .proto => "proto",
             .thread => "thread",
         },

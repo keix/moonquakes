@@ -305,6 +305,14 @@ pub const REPL = struct {
                     .proto => try stdout.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                     .upvalue => try stdout.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                     .thread => try stdout.print("thread: 0x{x}", .{@intFromPtr(obj)}),
+                    .file => {
+                        const file_obj: *object.FileObject = @fieldParentPtr("header", obj);
+                        if (file_obj.closed) {
+                            try stdout.writeAll("file (closed)");
+                        } else {
+                            try stdout.print("file (0x{x})", .{@intFromPtr(obj)});
+                        }
+                    },
                 }
             },
         }

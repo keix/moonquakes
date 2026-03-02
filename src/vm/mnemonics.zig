@@ -3127,13 +3127,22 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
     return null;
 }
 
-/// Dispatch __index metamethod for non-table values (strings, numbers, etc.)
-/// Uses shared metatables from gc.shared_mt
+/// Dispatch __index metamethod for non-table values (strings, numbers, userdata, files, etc.)
+/// Uses shared metatables from gc.shared_mt, or individual metatables for userdata/files
 fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, result_reg: u8) !?ExecuteResult {
-    // Get shared metatable for this value type
-    const mt = vm.gc().shared_mt.getForValue(value) orelse {
-        // No shared metatable - cannot index this value type
-        return error.NotATable;
+    // Check for individual metatable first (FileObject, Userdata)
+    const mt = blk: {
+        if (value.asFile()) |file_obj| {
+            break :blk file_obj.metatable orelse return error.NotATable;
+        }
+        if (value.asUserdata()) |ud| {
+            break :blk ud.metatable orelse return error.NotATable;
+        }
+        // Get shared metatable for primitive types
+        break :blk vm.gc().shared_mt.getForValue(value) orelse {
+            // No shared metatable - cannot index this value type
+            return error.NotATable;
+        };
     };
 
     // Look up __index in the metatable

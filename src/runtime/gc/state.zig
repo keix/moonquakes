@@ -470,4 +470,6 @@ pub const GC = struct {
     pub const allocNativeClosure = alloc_mod.allocNativeClosure;
     pub const allocUserdata = alloc_mod.allocUserdata;
     pub const allocThread = alloc_mod.allocThread;
+    pub const allocStdioFile = alloc_mod.allocStdioFile;
+    pub const allocFile = alloc_mod.allocFile;
 };

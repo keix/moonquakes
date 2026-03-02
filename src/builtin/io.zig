@@ -2,6 +2,8 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
+const FileObject = object.FileObject;
+const FileKind = object.FileKind;
 const GC = @import("../runtime/gc/gc.zig").GC;
 
 /// Lua 5.4 Input and Output Library
@@ -36,9 +38,10 @@ fn makeShellScript(allocator: std.mem.Allocator, cmd: []const u8) ![]u8 {
 }
 
 pub fn initStdioHandles(io_table: *TableObject, gc: *GC) !void {
-    const stdin_handle = try createStdioHandleInit(gc, "stdin");
-    const stdout_handle = try createStdioHandleInit(gc, "stdout");
-    const stderr_handle = try createStdioHandleInit(gc, "stderr");
+    // Use FileObject-based stdio handles
+    const stdin_handle = try createStdioFileObjectInit(gc, "stdin");
+    const stdout_handle = try createStdioFileObjectInit(gc, "stdout");
+    const stderr_handle = try createStdioFileObjectInit(gc, "stderr");
 
     const stdin_key = try gc.allocString("stdin");
     const stdout_key = try gc.allocString("stdout");
@@ -46,11 +49,11 @@ pub fn initStdioHandles(io_table: *TableObject, gc: *GC) !void {
     const default_input_key = try gc.allocString(IO_DEFAULT_INPUT_KEY);
     const default_output_key = try gc.allocString(IO_DEFAULT_OUTPUT_KEY);
 
-    try io_table.set(TValue.fromString(stdin_key), TValue.fromTable(stdin_handle));
-    try io_table.set(TValue.fromString(stdout_key), TValue.fromTable(stdout_handle));
-    try io_table.set(TValue.fromString(stderr_key), TValue.fromTable(stderr_handle));
-    try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(stdin_handle));
-    try io_table.set(TValue.fromString(default_output_key), TValue.fromTable(stdout_handle));
+    try io_table.set(TValue.fromString(stdin_key), TValue.fromFile(stdin_handle));
+    try io_table.set(TValue.fromString(stdout_key), TValue.fromFile(stdout_handle));
+    try io_table.set(TValue.fromString(stderr_key), TValue.fromFile(stderr_handle));
+    try io_table.set(TValue.fromString(default_input_key), TValue.fromFile(stdin_handle));
+    try io_table.set(TValue.fromString(default_output_key), TValue.fromFile(stdout_handle));
 }
 
 fn createFileMetatableInit(gc: *GC) !*TableObject {
@@ -126,6 +129,21 @@ fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
 
     file_table.metatable = try createFileMetatableInit(gc);
     return file_table;
+}
+
+/// Create a FileObject-based stdio handle (new implementation)
+fn createStdioFileObjectInit(gc: *GC, stdio_type: []const u8) !*FileObject {
+    const kind: FileKind = if (std.mem.eql(u8, stdio_type, "stdin"))
+        .stdin
+    else if (std.mem.eql(u8, stdio_type, "stdout"))
+        .stdout
+    else
+        .stderr;
+
+    const file_obj = try gc.allocStdioFile(kind);
+    file_obj.mode = try gc.allocString(if (kind == .stdin) "r" else "w");
+    file_obj.metatable = try createFileMetatableInit(gc);
+    return file_obj;
 }
 
 fn isValidOpenMode(mode: []const u8) bool {
@@ -814,7 +832,14 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         return;
     }
 
-    // If it's a file handle (table), set as default input
+    // If it's a FileObject, set as default input
+    if (arg.asFile()) |_| {
+        try io_table.set(TValue.fromString(default_input_key), arg);
+        if (nresults > 0) vm.stack[vm.base + func_reg] = arg;
+        return;
+    }
+
+    // Legacy: if it's a file handle (table), set as default input
     if (arg.asTable()) |file_table| {
         try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(file_table));
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
@@ -1571,10 +1596,29 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     }
 
-    // If it's a file handle (table), set as default output
+    // If it's a FileObject, set as default output
+    if (arg.asFile()) |_| {
+        // Flush old output if different
+        if (io_table.get(TValue.fromString(default_output_key))) |old_val| {
+            if (old_val.asFile()) |old_file| {
+                if (old_val.object != arg.object) {
+                    old_file.flush() catch {};
+                }
+            } else if (old_val.asTable()) |old_file| {
+                try flushBufferedFileTable(vm, old_file);
+            }
+        }
+        try io_table.set(TValue.fromString(default_output_key), arg);
+        if (nresults > 0) vm.stack[vm.base + func_reg] = arg;
+        return;
+    }
+
+    // Legacy: if it's a file handle (table), set as default output
     if (arg.asTable()) |file_table| {
         if (io_table.get(TValue.fromString(default_output_key))) |old_val| {
-            if (old_val.asTable()) |old_file| {
+            if (old_val.asFile()) |old_file| {
+                old_file.flush() catch {};
+            } else if (old_val.asTable()) |old_file| {
                 if (old_file != file_table) {
                     try flushBufferedFileTable(vm, old_file);
                 }
@@ -2078,6 +2122,20 @@ pub fn nativeIoType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     }
 
     const arg = vm.stack[vm.base + func_reg + 1];
+
+    // Handle FileObject-based handles
+    if (arg.asFile()) |file_obj| {
+        if (file_obj.closed) {
+            const result = try vm.gc().allocString("closed file");
+            vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        } else {
+            const result = try vm.gc().allocString("file");
+            vm.stack[vm.base + func_reg] = TValue.fromString(result);
+        }
+        return;
+    }
+
+    // Legacy: table-based file handles
     const file_table = arg.asTable() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -2108,8 +2166,39 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return vm.raiseString("got no value");
     }
 
-    // Get the file handle table (self)
+    // Get the file handle (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Handle FileObject-based handles
+    if (self_arg.asFile()) |file_obj| {
+        // Standard files cannot be closed in Lua
+        if (file_obj.isStdio()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+
+        // Check if already closed
+        if (file_obj.closed) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            return;
+        }
+
+        // Close the file
+        file_obj.close() catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("close error");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+
+        // Return true on success
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        return;
+    }
+
+    // Legacy: table-based file handles
     const file_table = self_arg.asTable() orelse {
         return vm.raiseString("got no value");
     };
@@ -2263,8 +2352,37 @@ pub fn nativeFileFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return;
     }
 
-    // Get the file handle table (self)
+    // Get the file handle (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Handle FileObject-based handles
+    if (self_arg.asFile()) |file_obj| {
+        if (file_obj.closed) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("file is closed");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        }
+
+        file_obj.flush() catch {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("flush error");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            return;
+        };
+
+        // Return file handle for chaining
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = self_arg;
+        }
+        return;
+    }
+
+    // Legacy: table-based file handles
     const file_table = self_arg.asTable() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -2550,15 +2668,121 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 /// file:seek([whence [, offset]]) - Sets and gets file position
 /// whence: "set" (from beginning), "cur" (from current), "end" (from end)
 /// offset: number (default 0)
-/// Returns: new position from beginning of file
+/// Returns: new position from beginning of file, or (nil, errmsg, errno) on error
 pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
     }
 
-    // Get the file handle table (self)
+    // Get the file handle (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Handle FileObject
+    if (self_arg.asFile()) |file_obj| {
+        // Check if closed
+        if (file_obj.closed) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("attempt to use a closed file");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 9 }; // EBADF
+            return;
+        }
+
+        // Standard input/output/error are not seekable (they're pipes/ttys)
+        if (file_obj.kind == .stdin or file_obj.kind == .stdout or file_obj.kind == .stderr) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+            if (nresults > 1) {
+                const err_str = try vm.gc().allocString("Illegal seek");
+                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+            }
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 29 }; // ESPIPE
+            return;
+        }
+
+        // Get whence argument (default "cur")
+        var whence_mode: enum { set, cur, end } = .cur;
+        var offset: i64 = 0;
+
+        if (nargs > 1) {
+            const whence_arg = vm.stack[vm.base + func_reg + 2];
+            if (whence_arg.asString()) |s| {
+                const slice = s.asSlice();
+                if (std.mem.eql(u8, slice, "set")) {
+                    whence_mode = .set;
+                } else if (std.mem.eql(u8, slice, "cur")) {
+                    whence_mode = .cur;
+                } else if (std.mem.eql(u8, slice, "end")) {
+                    whence_mode = .end;
+                } else {
+                    // Invalid whence - return nil
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                    return;
+                }
+            }
+        }
+
+        if (nargs > 2) {
+            offset = vm.stack[vm.base + func_reg + 3].toInteger() orelse 0;
+        }
+
+        // Get the file handle and perform seek
+        if (file_obj.handle) |handle| {
+            // Calculate absolute position
+            const abs_pos: u64 = switch (whence_mode) {
+                .set => @intCast(offset),
+                .cur => blk: {
+                    const pos = handle.getPos() catch {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        if (nresults > 1) {
+                            const err_str = try vm.gc().allocString("seek error");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                        }
+                        return;
+                    };
+                    break :blk @intCast(@as(i64, @intCast(pos)) + offset);
+                },
+                .end => blk: {
+                    const end_pos = handle.getEndPos() catch {
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                        if (nresults > 1) {
+                            const err_str = try vm.gc().allocString("seek error");
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                        }
+                        return;
+                    };
+                    break :blk @intCast(@as(i64, @intCast(end_pos)) + offset);
+                },
+            };
+
+            handle.seekTo(abs_pos) catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("seek error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+
+            // Get new position and return it
+            const new_pos = handle.getPos() catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                return;
+            };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .integer = @intCast(new_pos) };
+            return;
+        } else {
+            // No handle - use buffer position
+            // For files that are buffered only, track position in buffer
+            // For now, return 0 (start of buffer)
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+            return;
+        }
+    }
+
+    // Fall back to table-based file handle
     const file_table = self_arg.asTable() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;
@@ -2571,10 +2795,10 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             if (std.mem.eql(u8, stdio_str.asSlice(), "stdin")) {
                 if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                 if (nresults > 1) {
-                    const err_str = try vm.gc().allocString("not seekable");
+                    const err_str = try vm.gc().allocString("Illegal seek");
                     vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                 }
-                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 29 }; // ESPIPE
                 return;
             }
         }
@@ -2715,6 +2939,63 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 }
 
+/// FileObject-based write implementation
+fn nativeFileWriteFileObject(vm: anytype, file_obj: *FileObject, self_arg: TValue, func_reg: u32, nargs: u32, nresults: u32) !void {
+    // Check if closed
+    if (file_obj.closed) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("file is closed");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    // Check write permission (stdin is not writable)
+    if (file_obj.kind == .stdin) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("file is not writable");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    // Convert each argument to string and write
+    const string = @import("string.zig");
+    const saved_top = vm.top;
+    defer vm.top = saved_top;
+
+    var i: u32 = 1; // Start from 1 (skip self)
+    while (i < nargs) : (i += 1) {
+        const tmp_reg = vm.top;
+        vm.top += 2;
+
+        const arg_reg = func_reg + 1 + i;
+        vm.stack[vm.base + tmp_reg + 1] = vm.stack[vm.base + arg_reg];
+        try string.nativeToString(vm, tmp_reg, 1, 1);
+
+        const result = vm.stack[vm.base + tmp_reg];
+        if (result.asString()) |str_val| {
+            file_obj.write(str_val.asSlice()) catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("write error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+        }
+
+        vm.top -= 2;
+    }
+
+    // Return the file handle for chaining
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = self_arg;
+    }
+}
+
 /// file:write(...) - Writes values to file
 /// Appends string representations to the file's output buffer
 pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
@@ -2723,8 +3004,15 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return;
     }
 
-    // Get the file handle table (self)
+    // Get the file handle (self)
     const self_arg = vm.stack[vm.base + func_reg + 1];
+
+    // Handle FileObject-based handles
+    if (self_arg.asFile()) |file_obj| {
+        return nativeFileWriteFileObject(vm, file_obj, self_arg, func_reg, nargs, nresults);
+    }
+
+    // Legacy: table-based file handles
     const file_table = self_arg.asTable() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         return;

@@ -18,6 +18,8 @@ const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
 const ThreadObject = object.ThreadObject;
 const ThreadStatus = object.ThreadStatus;
+const FileObject = object.FileObject;
+const FileKind = object.FileKind;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
@@ -271,6 +273,37 @@ pub fn allocThread(
     obj.entry_func = null;
     obj.mark_vm = mark_vm;
     obj.free_vm = free_vm;
+
+    // Add to GC object list
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a new FileObject for stdio (stdout, stderr, stdin)
+/// These never close their underlying handles.
+pub fn allocStdioFile(self: anytype, kind: FileKind) !*FileObject {
+    const obj = try allocObject(self, FileObject, 0);
+
+    // Initialize using FileObject.initStdio
+    obj.* = FileObject.initStdio(self.allocator, kind, self.objects);
+    // Set mark bit for survival
+    obj.header.mark_bit = self.current_mark;
+
+    // Add to GC object list
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a new FileObject for a regular file
+pub fn allocFile(self: anytype, handle: std.fs.File) !*FileObject {
+    const obj = try allocObject(self, FileObject, 0);
+
+    // Initialize using FileObject.initFile
+    obj.* = FileObject.initFile(self.allocator, handle, self.objects);
+    // Set mark bit for survival
+    obj.header.mark_bit = self.current_mark;
 
     // Add to GC object list
     self.objects = &obj.header;

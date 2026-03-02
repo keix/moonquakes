@@ -102,6 +102,11 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             .upvalue => TValue.fromString(try vm.gc().allocString("<upvalue>")),
             .proto => TValue.fromString(try vm.gc().allocString("<proto>")),
             .thread => TValue.fromString(try vm.gc().allocString("<thread>")),
+            .file => ret: {
+                const file_obj = @import("../runtime/gc/object.zig").getObject(@import("../runtime/gc/object.zig").FileObject, obj);
+                const s = if (file_obj.closed) "file (closed)" else "file (open)";
+                break :ret TValue.fromString(try vm.gc().allocString(s));
+            },
         },
     };
 

@@ -26,6 +26,7 @@ const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UserdataObject = object.UserdataObject;
 const ThreadObject = object.ThreadObject;
+const FileObject = object.FileObject;
 
 /// TValue: Lua value representation
 /// - Immediate values: nil, boolean, integer, number
@@ -85,6 +86,10 @@ pub const TValue = union(enum) {
         return self == .object and self.object.type == .thread;
     }
 
+    pub fn isFile(self: TValue) bool {
+        return self == .object and self.object.type == .file;
+    }
+
     pub fn asString(self: TValue) ?*StringObject {
         if (self == .object and self.object.type == .string) {
             return object.getObject(StringObject, self.object);
@@ -123,6 +128,13 @@ pub const TValue = union(enum) {
     pub fn asThread(self: TValue) ?*ThreadObject {
         if (self == .object and self.object.type == .thread) {
             return object.getObject(ThreadObject, self.object);
+        }
+        return null;
+    }
+
+    pub fn asFile(self: TValue) ?*FileObject {
+        if (self == .object and self.object.type == .file) {
+            return object.getObject(FileObject, self.object);
         }
         return null;
     }
@@ -207,6 +219,10 @@ pub const TValue = union(enum) {
         return .{ .object = &thread.header };
     }
 
+    pub fn fromFile(file: *FileObject) TValue {
+        return .{ .object = &file.header };
+    }
+
     pub fn format(
         self: TValue,
         comptime fmt: []const u8,
@@ -232,6 +248,7 @@ pub const TValue = union(enum) {
                 .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                 .thread => try writer.print("thread: 0x{x}", .{@intFromPtr(obj)}),
+                .file => try writer.print("file (0x{x})", .{@intFromPtr(obj)}),
             },
         }
     }

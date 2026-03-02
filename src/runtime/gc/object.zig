@@ -32,6 +32,7 @@ pub const GCObjectType = enum(u8) {
     userdata,
     proto,
     thread,
+    file,
 };
 
 /// Common header for all GC-managed objects
@@ -442,6 +443,177 @@ pub const ThreadObject = struct {
     /// Get VM pointer (casts from anyopaque)
     pub fn getVM(self: *ThreadObject) *anyopaque {
         return self.vm;
+    }
+};
+
+/// File kind for FileObject
+pub const FileKind = enum(u8) {
+    file, // Regular disk file
+    stdout, // Standard output
+    stderr, // Standard error
+    stdin, // Standard input
+    popen, // Process pipe
+};
+
+/// Buffering mode for FileObject
+pub const BufMode = enum(u8) {
+    full, // Flush on close or explicit flush
+    line, // Flush on newline
+    no, // Flush immediately (unbuffered)
+};
+
+/// File Object - GC-managed file handle
+///
+/// Represents a Lua FILE* handle with proper ownership and buffering.
+/// Unified representation for stdio (stdout/stderr/stdin) and regular files.
+///
+/// Memory layout: [FileObject header][buffer bytes...]
+/// Buffer is managed via std.ArrayList to support dynamic growth.
+pub const FileObject = struct {
+    header: GCObject,
+    /// Kind of file (regular file, stdio, or pipe)
+    kind: FileKind,
+    /// Buffering mode
+    bufmode: BufMode,
+    /// Internal write buffer
+    buffer: std.ArrayList(u8),
+    /// Allocator for buffer operations
+    allocator: std.mem.Allocator,
+    /// OS file handle (null for stdio, which uses std.fs directly)
+    handle: ?std.fs.File,
+    /// Whether the file has been closed
+    closed: bool,
+    /// Filename for error messages (null for stdio)
+    filename: ?*StringObject,
+    /// File mode string (e.g., "r", "w", "a")
+    mode: ?*StringObject,
+    /// Metatable for file methods (write, read, close, etc.)
+    metatable: ?*TableObject,
+
+    /// Initialize a FileObject for stdio
+    pub fn initStdio(allocator: std.mem.Allocator, kind: FileKind, next_obj: ?*GCObject) FileObject {
+        const bufmode: BufMode = switch (kind) {
+            .stdout => .line,
+            .stderr => .no,
+            .stdin => .no,
+            else => .full,
+        };
+        return .{
+            .header = GCObject.init(.file, next_obj),
+            .kind = kind,
+            .bufmode = bufmode,
+            .buffer = .{ .items = &.{}, .capacity = 0 },
+            .allocator = allocator,
+            .handle = null, // stdio uses std.fs.File.stdout() etc. directly
+            .closed = false,
+            .filename = null,
+            .mode = null,
+            .metatable = null,
+        };
+    }
+
+    /// Initialize a FileObject for a regular file
+    pub fn initFile(allocator: std.mem.Allocator, handle: std.fs.File, next_obj: ?*GCObject) FileObject {
+        return .{
+            .header = GCObject.init(.file, next_obj),
+            .kind = .file,
+            .bufmode = .full,
+            .allocator = allocator,
+            .metatable = null,
+            .buffer = .{ .items = &.{}, .capacity = 0 },
+            .handle = handle,
+            .closed = false,
+            .filename = null,
+            .mode = null,
+        };
+    }
+
+    /// Write data to the file (buffered according to bufmode)
+    pub fn write(self: *FileObject, data: []const u8) !void {
+        if (self.closed) return error.FileClosed;
+
+        switch (self.bufmode) {
+            .no => {
+                // Unbuffered: write directly
+                try self.flushData(data);
+            },
+            .line => {
+                // Line buffered: buffer and flush on newline
+                try self.buffer.appendSlice(self.allocator, data);
+                if (std.mem.lastIndexOfScalar(u8, data, '\n') != null) {
+                    try self.flush();
+                }
+            },
+            .full => {
+                // Fully buffered: just append to buffer
+                try self.buffer.appendSlice(self.allocator, data);
+            },
+        }
+    }
+
+    /// Flush buffered data to the destination
+    pub fn flush(self: *FileObject) !void {
+        if (self.closed) return error.FileClosed;
+        if (self.buffer.items.len == 0) return;
+
+        try self.flushData(self.buffer.items);
+        self.buffer.clearRetainingCapacity();
+    }
+
+    /// Internal: write data directly to destination
+    fn flushData(self: *FileObject, data: []const u8) !void {
+        switch (self.kind) {
+            .stdout => {
+                const stdout = std.fs.File.stdout();
+                stdout.writeAll(data) catch return error.WriteError;
+            },
+            .stderr => {
+                const stderr = std.fs.File.stderr();
+                stderr.writeAll(data) catch return error.WriteError;
+            },
+            .stdin => {
+                return error.WriteError; // Can't write to stdin
+            },
+            .file, .popen => {
+                if (self.handle) |h| {
+                    h.writeAll(data) catch return error.WriteError;
+                } else {
+                    return error.WriteError;
+                }
+            },
+        }
+    }
+
+    /// Close the file
+    pub fn close(self: *FileObject) !void {
+        if (self.closed) return error.FileClosed;
+
+        // Flush any remaining buffer
+        self.flush() catch {};
+
+        // Close the OS handle for regular files
+        if (self.kind == .file or self.kind == .popen) {
+            if (self.handle) |h| {
+                h.close();
+            }
+        }
+
+        self.closed = true;
+    }
+
+    /// Clean up resources (called by GC during sweep)
+    pub fn deinit(self: *FileObject) void {
+        // Close file if still open
+        if (!self.closed) {
+            self.close() catch {};
+        }
+        // Free the buffer
+        self.buffer.deinit(self.allocator);
+    }
+
+    /// Check if this is a stdio handle (stdout, stderr, stdin)
+    pub fn isStdio(self: *const FileObject) bool {
+        return self.kind == .stdout or self.kind == .stderr or self.kind == .stdin;
     }
 };
 
