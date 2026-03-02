@@ -185,6 +185,10 @@ pub fn getMetatable(value: TValue, shared: *const SharedMetatables) ?*TableObjec
     if (value.asUserdata()) |ud| {
         return ud.metatable;
     }
+    // FileObject has its own metatable
+    if (value.asFile()) |file| {
+        return file.metatable;
+    }
     // Primitive types use shared metatables
     return shared.getForValue(value);
 }

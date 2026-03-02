@@ -148,6 +148,14 @@ fn printValue(writer: anytype, val: TValue) !void {
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                 .thread => try writer.print("thread: 0x{x}", .{@intFromPtr(obj)}),
+                .file => {
+                    const file_obj: *object.FileObject = @fieldParentPtr("header", obj);
+                    if (file_obj.closed) {
+                        try writer.writeAll("file (closed)");
+                    } else {
+                        try writer.print("file (0x{x})", .{@intFromPtr(obj)});
+                    }
+                },
             }
         },
     }

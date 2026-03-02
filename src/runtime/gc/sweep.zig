@@ -15,6 +15,7 @@ const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
 const ThreadObject = object.ThreadObject;
+const FileObject = object.FileObject;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const TValue = @import("../value.zig").TValue;
@@ -153,6 +154,15 @@ pub fn freeObjectFinal(self: anytype, obj: *GCObject) void {
             const size = @sizeOf(ThreadObject);
             self.bytes_allocated -= size;
             const memory = @as([*]u8, @ptrCast(thread_obj))[0..size];
+            self.allocator.free(memory);
+        },
+        .file => {
+            const file_obj: *FileObject = @fieldParentPtr("header", obj);
+            // Close file and free buffer
+            file_obj.deinit();
+            const size = @sizeOf(FileObject);
+            self.bytes_allocated -= size;
+            const memory = @as([*]u8, @ptrCast(file_obj))[0..size];
             self.allocator.free(memory);
         },
     }

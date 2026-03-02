@@ -13,6 +13,7 @@ const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
 const ThreadObject = object.ThreadObject;
+const FileObject = object.FileObject;
 const TValue = @import("../value.zig").TValue;
 
 pub fn isMarked(self: anytype, obj: *const GCObject) bool {
@@ -164,6 +165,20 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
             }
             if (thread_obj.mark_vm) |mark_fn| {
                 mark_fn(thread_obj.vm, @ptrCast(self));
+            }
+        },
+        .file => {
+            const file_obj: *FileObject = @fieldParentPtr("header", obj);
+            // Mark metatable
+            if (file_obj.metatable) |mt| {
+                markGray(self, &mt.header);
+            }
+            // Mark referenced strings (filename, mode)
+            if (file_obj.filename) |fname| {
+                markGray(self, &fname.header);
+            }
+            if (file_obj.mode) |m| {
+                markGray(self, &m.header);
             }
         },
     }

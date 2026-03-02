@@ -154,12 +154,15 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
             // Return (true, results...)
             vm.stack[vm.base + func_reg] = .{ .boolean = true };
 
-            // Copy return values
-            const max_results = if (nresults == 0) 0 else nresults - 1;
+            // Copy return values (nresults includes the leading true)
+            const max_copy: u32 = if (nresults == 0) 0 else nresults - 1;
+            const actual_copy = @min(result_count, max_copy);
             var j: u32 = 0;
-            while (j < result_count and j < max_results) : (j += 1) {
+            while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[j];
             }
+            // Update vm.top for MULTRET support (true + actual results)
+            vm.top = vm.base + func_reg + 1 + actual_copy;
         },
         .yielded => |yield_info| {
             // Coroutine yielded - keep as suspended
@@ -169,17 +172,22 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
             vm.stack[vm.base + func_reg] = .{ .boolean = true };
 
             // Copy yield values from coroutine stack to caller stack
-            const max_results = if (nresults == 0) 0 else nresults - 1;
+            const max_copy: u32 = if (nresults == 0) 0 else nresults - 1;
+            const actual_copy = @min(yield_info.count, max_copy);
             var j: u32 = 0;
-            while (j < yield_info.count and j < max_results) : (j += 1) {
+            while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[yield_info.base + j];
             }
+            // Update vm.top for MULTRET support (true + actual results)
+            vm.top = vm.base + func_reg + 1 + actual_copy;
         },
         .errored => |err_val| {
             // Coroutine errored - mark as dead
             thread.status = .dead;
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = err_val;
+            // Update vm.top for MULTRET support (false + error message)
+            vm.top = vm.base + func_reg + 2;
         },
     }
 }
@@ -477,31 +485,37 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     caller_thread.status = .normal;
     thread.status = .running;
     vm.rt.setCurrentThread(thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
 
     const exec_result = executeCoroutine(co_vm);
 
     caller_thread.status = .running;
     vm.rt.setCurrentThread(caller_thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
 
     // Handle result - wrap propagates errors instead of returning false
     switch (exec_result) {
         .completed => |result_count| {
             thread.status = .dead;
             // Return results directly (no leading true)
-            const max_results = nresults;
+            const actual_copy = @min(result_count, nresults);
             var j: u32 = 0;
-            while (j < result_count and j < max_results) : (j += 1) {
+            while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[j];
             }
+            // Update vm.top for MULTRET support
+            vm.top = vm.base + func_reg + actual_copy;
         },
         .yielded => |yield_info| {
             thread.status = .suspended;
             // Return yield values directly (no leading true)
-            const max_results = nresults;
+            const actual_copy = @min(yield_info.count, nresults);
             var j: u32 = 0;
-            while (j < yield_info.count and j < max_results) : (j += 1) {
+            while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[yield_info.base + j];
             }
+            // Update vm.top for MULTRET support
+            vm.top = vm.base + func_reg + actual_copy;
         },
         .errored => |err_val| {
             thread.status = .dead;
