@@ -2836,16 +2836,34 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     try file_table.set(TValue.fromString(output_key), TValue.fromString(new_str));
     try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end_pos) });
 
-    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-    const bufmode = if (file_table.get(TValue.fromString(bufmode_key))) |v|
-        if (v.asString()) |s| s.asSlice() else "full"
-    else
-        "full";
-    if (std.mem.eql(u8, bufmode, "no")) {
-        try flushBufferedFileTable(vm, file_table);
-    } else if (std.mem.eql(u8, bufmode, "line")) {
-        if (std.mem.indexOfScalar(u8, write_buf.items, '\n') != null) {
+    // For stdio handles, write directly to the real stdout/stderr
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key))) |stdio_val| {
+        if (stdio_val.asString()) |stdio_str| {
+            const stdio_name = stdio_str.asSlice();
+            if (std.mem.eql(u8, stdio_name, "stdout")) {
+                var stdout_writer = std.fs.File.stdout().writer(&.{});
+                const stdout = &stdout_writer.interface;
+                try stdout.writeAll(write_buf.items);
+            } else if (std.mem.eql(u8, stdio_name, "stderr")) {
+                var stderr_writer = std.fs.File.stderr().writer(&.{});
+                const stderr = &stderr_writer.interface;
+                try stderr.writeAll(write_buf.items);
+            }
+        }
+    } else {
+        // Regular files: use buffering
+        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+        const bufmode = if (file_table.get(TValue.fromString(bufmode_key))) |v|
+            if (v.asString()) |s| s.asSlice() else "full"
+        else
+            "full";
+        if (std.mem.eql(u8, bufmode, "no")) {
             try flushBufferedFileTable(vm, file_table);
+        } else if (std.mem.eql(u8, bufmode, "line")) {
+            if (std.mem.indexOfScalar(u8, write_buf.items, '\n') != null) {
+                try flushBufferedFileTable(vm, file_table);
+            }
         }
     }
 

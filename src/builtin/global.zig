@@ -408,7 +408,8 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         return;
     };
 
-    const next_index = current_index + 1;
+    // Use wrapping addition - Lua integers wrap around on overflow
+    const next_index = current_index +% 1;
 
     // Use integer key directly (Lua 5.4 supports any TValue as key)
     const key = TValue{ .integer = next_index };
