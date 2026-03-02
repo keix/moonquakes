@@ -252,33 +252,61 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 }
 
 /// next(table [, index]) - Allows traversal of all fields of a table
-pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+/// If index is nil, returns first key-value pair (or nil if empty)
+/// If index is a valid key, returns next key-value pair (or nil if last)
+/// If index is not in table, raises "invalid key" error
+pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
     if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #1 to 'next' (table expected)");
     }
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
     const table = table_arg.asTable() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #1 to 'next' (table expected)");
     };
 
     // Get optional index (nil means start from beginning)
     const index_arg = if (nargs >= 2) vm.stack[vm.base + func_reg + 2] else TValue.nil;
 
-    // Iterate through hash_part
+    // If index is nil, start from beginning
+    if (index_arg.isNil()) {
+        var iter = table.hash_part.iterator();
+        if (iter.next()) |entry| {
+            vm.stack[vm.base + func_reg] = entry.key_ptr.*;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = entry.value_ptr.*;
+            }
+            return;
+        }
+        // Empty table
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = .nil;
+        }
+        return;
+    }
+
+    // Index is not nil - must be a valid key in the table
+    // Note: Lua 5.4 allows deleting keys during iteration, but our
+    // implementation removes entries on nil assignment. This means
+    // next(t, deleted_key) will raise an error. A proper fix requires
+    // table tombstones or stateful iterators.
+    if (table.get(index_arg) == null) {
+        return vm.raiseString("invalid key to 'next'");
+    }
+
+    // Find the key and return the next one
     var iter = table.hash_part.iterator();
-    var found_current = index_arg.isNil();
+    var found_current = false;
 
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
 
         if (found_current) {
-            // Return this key-value pair (key is already TValue)
+            // Return this key-value pair
             vm.stack[vm.base + func_reg] = key;
             if (nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = value;
@@ -286,13 +314,13 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             return;
         }
 
-        // Check if this is the current key (using TValue equality)
+        // Check if this is the current key
         if (key.eql(index_arg)) {
             found_current = true;
         }
     }
 
-    // No more entries
+    // No more entries after the current key
     vm.stack[vm.base + func_reg] = .nil;
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = .nil;
@@ -302,10 +330,9 @@ pub fn nativeNext(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 /// pairs(t) - Returns three values for iterating over table
 /// If t has __pairs metamethod, calls it and returns its results
 /// Otherwise returns: next function, table, nil (default behavior)
-pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn nativePairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #1 to 'pairs' (table expected, got no value)");
     }
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
@@ -357,17 +384,36 @@ pub fn nativePairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
 /// ipairs(t) - Returns three values for iterating over array part of table
 /// Returns iterator function, table, and 0 (initial index)
-pub fn nativeIpairs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+/// Per Lua 5.4 spec, ipairs() always returns the same iterator function.
+pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #1 to 'ipairs' (table expected, got no value)");
     }
 
     const table_arg = vm.stack[vm.base + func_reg + 1];
 
-    // Return ipairs_iterator function
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
-    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
+    // Get or create cached singleton iterator (ipairs{} == ipairs{} must be true)
+    const cache_key = try vm.gc().allocString("_ipairs_iter");
+    const globals = vm.globals();
+    const iter_val = if (globals.get(TValue.fromString(cache_key))) |cached| blk: {
+        if (cached.asNativeClosure()) |nc| {
+            if (nc.func.id == .ipairs_iterator) {
+                break :blk cached;
+            }
+        }
+        // Cache is invalid, recreate
+        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
+        const val = TValue.fromNativeClosure(iter_nc);
+        try globals.set(TValue.fromString(cache_key), val);
+        break :blk val;
+    } else blk: {
+        // No cache, create and store
+        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
+        const val = TValue.fromNativeClosure(iter_nc);
+        try globals.set(TValue.fromString(cache_key), val);
+        break :blk val;
+    };
+    vm.stack[vm.base + func_reg] = iter_val;
 
     // Return the table
     if (nresults > 1) {

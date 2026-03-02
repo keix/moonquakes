@@ -706,8 +706,12 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         try checkFieldIntBound(vm, "min", min);
         try checkFieldIntBound(vm, "sec", sec);
 
-        const tm_year = year - 1900;
-        if (tm_year < std.math.minInt(i32) or tm_year > std.math.maxInt(i32)) {
+        // Check bounds before computing tm_year to prevent overflow.
+        // tm_year = year - 1900 must: (1) not overflow i64, (2) fit in i32.
+        // Safe range: year in [minInt(i32) + 1900, maxInt(i32) + 1900]
+        const min_year = @as(i64, std.math.minInt(i32)) + 1900;
+        const max_year = @as(i64, std.math.maxInt(i32)) + 1900;
+        if (year < min_year or year > max_year) {
             return vm.raiseString("field 'year' is out-of-bound");
         }
 

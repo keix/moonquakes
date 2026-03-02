@@ -108,6 +108,34 @@ pub fn initGlobalEnvironment(globals: *TableObject, gc: *GC) !void {
 
     // Coroutine Library (Chapter 2.6) - skeleton
     try initCoroutineLibrary(globals, gc);
+
+    // Register standard libraries in package.loaded (required by Lua semantics)
+    try registerStdLibsInPackageLoaded(globals, gc);
+}
+
+/// Register standard libraries in package.loaded so they are recognized as loaded modules
+fn registerStdLibsInPackageLoaded(globals: *TableObject, gc: *GC) !void {
+    const package_key = try gc.allocString("package");
+    const package_table = (globals.get(TValue.fromString(package_key)) orelse return).asTable() orelse return;
+
+    const loaded_key = try gc.allocString("loaded");
+    const loaded_table = (package_table.get(TValue.fromString(loaded_key)) orelse return).asTable() orelse return;
+
+    // Standard library names to register
+    const lib_names = [_][]const u8{
+        "string", "math", "table", "io", "os", "debug", "utf8", "coroutine", "package",
+    };
+
+    for (lib_names) |name| {
+        const key = try gc.allocString(name);
+        if (globals.get(TValue.fromString(key))) |lib_val| {
+            try loaded_table.set(TValue.fromString(key), lib_val);
+        }
+    }
+
+    // Also register _G as the loaded base library (for compat)
+    const g_key = try gc.allocString("_G");
+    try loaded_table.set(TValue.fromString(g_key), TValue.fromTable(globals));
 }
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.

@@ -111,7 +111,14 @@ fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
     try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
 
     const bufmode_key = try gc.allocString(FILE_BUFMODE_KEY);
-    const bufmode_str = try gc.allocString("full");
+    // Default buffering: stdout=line, stderr=no (unbuffered), stdin=full
+    const bufmode = if (std.mem.eql(u8, stdio_type, "stderr"))
+        "no"
+    else if (std.mem.eql(u8, stdio_type, "stdout"))
+        "line"
+    else
+        "full";
+    const bufmode_str = try gc.allocString(bufmode);
     try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
     const pos_key = try gc.allocString(FILE_POS_KEY);
@@ -390,15 +397,42 @@ fn canonicalReadFormat(fmt: []const u8) ?[]const u8 {
     return null;
 }
 
-fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
-    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
-    if (file_table.get(TValue.fromString(stdio_key)) != null) return;
-
+/// Unified flush: writes buffer to destination (stdio or file) and clears buffer.
+fn flushToDestination(vm: anytype, file_table: *TableObject) !void {
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
         if (closed_val.toBoolean()) return;
     }
 
+    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+    const out_val = file_table.get(TValue.fromString(output_key)) orelse return;
+    const out_str = out_val.asString() orelse return;
+    const content = out_str.asSlice();
+    if (content.len == 0) return;
+
+    // Check if stdio handle
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    if (file_table.get(TValue.fromString(stdio_key))) |stdio_val| {
+        if (stdio_val.asString()) |stdio_str| {
+            const name = stdio_str.asSlice();
+            if (std.mem.eql(u8, name, "stdout")) {
+                var writer = std.fs.File.stdout().writer(&.{});
+                writer.interface.writeAll(content) catch {};
+            } else if (std.mem.eql(u8, name, "stderr")) {
+                var writer = std.fs.File.stderr().writer(&.{});
+                writer.interface.writeAll(content) catch {};
+            }
+            // Clear buffer after flush
+            const empty = try vm.gc().allocString("");
+            try file_table.set(TValue.fromString(output_key), TValue.fromString(empty));
+            // Reset position to 0
+            const pos_key = try vm.gc().allocString(FILE_POS_KEY);
+            try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+            return;
+        }
+    }
+
+    // Regular file: check write mode
     const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
     const mode_val = file_table.get(TValue.fromString(mode_key)) orelse return;
     const mode_str = mode_val.asString() orelse return;
@@ -410,13 +444,14 @@ fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
     const fn_str = fn_val.asString() orelse return;
     const filename = fn_str.asSlice();
 
-    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-    const out_val = file_table.get(TValue.fromString(output_key)) orelse return;
-    const out_str = out_val.asString() orelse return;
-
     const file = std.fs.cwd().createFile(filename, .{}) catch return;
     defer file.close();
-    file.writeAll(out_str.asSlice()) catch {};
+    file.writeAll(content) catch {};
+}
+
+/// Legacy wrapper for backward compatibility
+fn flushBufferedFileTable(vm: anytype, file_table: *TableObject) !void {
+    try flushToDestination(vm, file_table);
 }
 
 fn refreshReadableFileTable(vm: anytype, file_table: *TableObject) !void {
@@ -2248,60 +2283,12 @@ pub fn nativeFileFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         }
     }
 
-    // Check if this is a write/append mode file
-    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
-    const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+    // Use unified flush for both stdio and regular files
+    try flushToDestination(vm, file_table);
 
-    if (file_table.get(TValue.fromString(mode_key))) |mode_val| {
-        if (mode_val.asString()) |mode_str| {
-            const mode = mode_str.asSlice();
-            if (mode.len > 0 and (mode[0] == 'w' or mode[0] == 'a')) {
-                // This is a write/append mode file - flush to disk
-                if (file_table.get(TValue.fromString(filename_key))) |fn_val| {
-                    if (fn_val.asString()) |fn_str| {
-                        const filename = fn_str.asSlice();
-
-                        // Get the output buffer
-                        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-                        const content = if (file_table.get(TValue.fromString(output_key))) |v|
-                            if (v.asString()) |s| s.asSlice() else ""
-                        else
-                            "";
-
-                        // Write to file
-                        const file = std.fs.cwd().createFile(filename, .{}) catch {
-                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-                            if (nresults > 1) {
-                                const err_str = try vm.gc().allocString("cannot write file");
-                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-                            }
-                            return;
-                        };
-                        defer file.close();
-
-                        file.writeAll(content) catch {
-                            if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-                            if (nresults > 1) {
-                                const err_str = try vm.gc().allocString("write error");
-                                vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-                            }
-                            return;
-                        };
-
-                        // Success
-                        if (nresults > 0) {
-                            vm.stack[vm.base + func_reg] = .{ .boolean = true };
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    // For read mode or files without filename, flush is a no-op but returns true
+    // Success - return the file handle for chaining
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = self_arg;
     }
 }
 
@@ -2836,36 +2823,20 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     try file_table.set(TValue.fromString(output_key), TValue.fromString(new_str));
     try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end_pos) });
 
-    // For stdio handles, write directly to the real stdout/stderr
-    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
-    if (file_table.get(TValue.fromString(stdio_key))) |stdio_val| {
-        if (stdio_val.asString()) |stdio_str| {
-            const stdio_name = stdio_str.asSlice();
-            if (std.mem.eql(u8, stdio_name, "stdout")) {
-                var stdout_writer = std.fs.File.stdout().writer(&.{});
-                const stdout = &stdout_writer.interface;
-                try stdout.writeAll(write_buf.items);
-            } else if (std.mem.eql(u8, stdio_name, "stderr")) {
-                var stderr_writer = std.fs.File.stderr().writer(&.{});
-                const stderr = &stderr_writer.interface;
-                try stderr.writeAll(write_buf.items);
-            }
-        }
-    } else {
-        // Regular files: use buffering
-        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-        const bufmode = if (file_table.get(TValue.fromString(bufmode_key))) |v|
-            if (v.asString()) |s| s.asSlice() else "full"
-        else
-            "full";
-        if (std.mem.eql(u8, bufmode, "no")) {
-            try flushBufferedFileTable(vm, file_table);
-        } else if (std.mem.eql(u8, bufmode, "line")) {
-            if (std.mem.indexOfScalar(u8, write_buf.items, '\n') != null) {
-                try flushBufferedFileTable(vm, file_table);
-            }
+    // Auto-flush based on buffering mode (unified for stdio and files)
+    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+    const bufmode = if (file_table.get(TValue.fromString(bufmode_key))) |v|
+        if (v.asString()) |s| s.asSlice() else "full"
+    else
+        "full";
+    if (std.mem.eql(u8, bufmode, "no")) {
+        try flushToDestination(vm, file_table);
+    } else if (std.mem.eql(u8, bufmode, "line")) {
+        if (std.mem.indexOfScalar(u8, write_buf.items, '\n') != null) {
+            try flushToDestination(vm, file_table);
         }
     }
+    // "full" mode: no auto-flush, wait for explicit flush or close
 
     // Return the file handle for chaining
     if (nresults > 0) {
