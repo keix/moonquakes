@@ -154,15 +154,25 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
             // Return (true, results...)
             vm.stack[vm.base + func_reg] = .{ .boolean = true };
 
-            // Copy return values (nresults includes the leading true)
-            const max_copy: u32 = if (nresults == 0) 0 else nresults - 1;
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
+            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
+            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
             const actual_copy = @min(result_count, max_copy);
             var j: u32 = 0;
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[j];
             }
-            // Update vm.top for MULTRET support (true + actual results)
-            vm.top = vm.base + func_reg + 1 + actual_copy;
+            if (nresults > 0 and actual_copy < expected_payload) {
+                var k = actual_copy;
+                while (k < expected_payload) : (k += 1) {
+                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
+                }
+            }
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + 1 + actual_copy
+            else
+                vm.base + func_reg + 1 + expected_payload;
         },
         .yielded => |yield_info| {
             // Coroutine yielded - keep as suspended
@@ -172,14 +182,25 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
             vm.stack[vm.base + func_reg] = .{ .boolean = true };
 
             // Copy yield values from coroutine stack to caller stack
-            const max_copy: u32 = if (nresults == 0) 0 else nresults - 1;
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
+            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
+            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
             const actual_copy = @min(yield_info.count, max_copy);
             var j: u32 = 0;
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[yield_info.base + j];
             }
-            // Update vm.top for MULTRET support (true + actual results)
-            vm.top = vm.base + func_reg + 1 + actual_copy;
+            if (nresults > 0 and actual_copy < expected_payload) {
+                var k = actual_copy;
+                while (k < expected_payload) : (k += 1) {
+                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
+                }
+            }
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + 1 + actual_copy
+            else
+                vm.base + func_reg + 1 + expected_payload;
         },
         .errored => |err_val| {
             // Coroutine errored - mark as dead
@@ -498,47 +519,46 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         .completed => |result_count| {
             thread.status = .dead;
             // Return results directly (no leading true)
-            const actual_copy = @min(result_count, nresults);
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const expected_count: u32 = if (nresults == 0) 0 else @min(nresults, stack_room);
+            const max_copy: u32 = if (nresults == 0) stack_room else expected_count;
+            const actual_copy = @min(result_count, max_copy);
             var j: u32 = 0;
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[j];
             }
-            if (actual_copy < nresults) {
-                // Fixed-result callers expect missing results as nil.
-                // For MULTRET calls nresults can be a large cap, so avoid
-                // touching many slots and only write a terminator nil.
-                if (nresults <= 64) {
-                    var k = actual_copy;
-                    while (k < nresults) : (k += 1) {
-                        vm.stack[vm.base + func_reg + k] = .nil;
-                    }
-                } else {
-                    vm.stack[vm.base + func_reg + actual_copy] = .nil;
+            if (nresults > 0 and actual_copy < expected_count) {
+                var k = actual_copy;
+                while (k < expected_count) : (k += 1) {
+                    vm.stack[vm.base + func_reg + k] = .nil;
                 }
             }
-            // Update vm.top for MULTRET support
-            vm.top = vm.base + func_reg + actual_copy;
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + actual_copy
+            else
+                vm.base + func_reg + expected_count;
         },
         .yielded => |yield_info| {
             thread.status = .suspended;
             // Return yield values directly (no leading true)
-            const actual_copy = @min(yield_info.count, nresults);
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const expected_count: u32 = if (nresults == 0) 0 else @min(nresults, stack_room);
+            const max_copy: u32 = if (nresults == 0) stack_room else expected_count;
+            const actual_copy = @min(yield_info.count, max_copy);
             var j: u32 = 0;
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[yield_info.base + j];
             }
-            if (actual_copy < nresults) {
-                if (nresults <= 64) {
-                    var k = actual_copy;
-                    while (k < nresults) : (k += 1) {
-                        vm.stack[vm.base + func_reg + k] = .nil;
-                    }
-                } else {
-                    vm.stack[vm.base + func_reg + actual_copy] = .nil;
+            if (nresults > 0 and actual_copy < expected_count) {
+                var k = actual_copy;
+                while (k < expected_count) : (k += 1) {
+                    vm.stack[vm.base + func_reg + k] = .nil;
                 }
             }
-            // Update vm.top for MULTRET support
-            vm.top = vm.base + func_reg + actual_copy;
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + actual_copy
+            else
+                vm.base + func_reg + expected_count;
         },
         .errored => |err_val| {
             thread.status = .dead;

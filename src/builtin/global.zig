@@ -294,8 +294,7 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     // first entry (Lua-compatible behavior for deletion during traversal).
     // Otherwise, reject as invalid key.
     if (table.get(index_arg) == null) {
-        const key_hash = @TypeOf(table.*).TValueKeyContext.hash(.{}, index_arg);
-        if (!table.deleted_keys.contains(key_hash)) {
+        if (!table.deleted_keys.contains(index_arg)) {
             return vm.raiseString("invalid key to 'next'");
         }
 

@@ -24,7 +24,7 @@ fn getTableLength(table: *TableObject) i64 {
 pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    if (nargs < 2) return vm.raiseString("bad argument to 'insert'");
+    if (nargs < 2 or nargs > 3) return vm.raiseString("wrong number of arguments to 'insert'");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
@@ -66,6 +66,7 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 /// Returns the removed element. Default pos is #list (removes last element).
 pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) return vm.raiseString("bad argument #1 to 'remove' (table expected)");
+    if (nargs > 2) return vm.raiseString("wrong number of arguments to 'remove'");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];

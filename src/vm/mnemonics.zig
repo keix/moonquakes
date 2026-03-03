@@ -31,7 +31,7 @@ pub const BitwiseOp = enum { band, bor, bxor };
 
 const native_multret_cap: u32 = 256;
 
-fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, stack_room: u32) u32 {
+fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
     if (c > 0) return c - 1;
     // COMPAT HACK: allow MULTRET only for specific natives that are required
     // by compatibility tests while keeping C=0 conservative by default.
@@ -40,7 +40,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, stack_room: u32) u32 {
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .next => 2, // next returns key, value
-        .coroutine_resume => @min(native_multret_cap, stack_room), // variable: true + results
+        .coroutine_resume => 0, // C=0 sentinel: callee decides actual result count.
         else => 1,
     };
 }
@@ -57,10 +57,10 @@ fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32
     if (nresults >= 0) return @intCast(nresults);
     // MULTRET: these natives can return variable number of results
     return switch (id) {
-        .io_lines_iterator,
         .coroutine_resume,
         .coroutine_wrap_call,
-        => @min(native_multret_cap, stack_room),
+        => 0,
+        .io_lines_iterator => @min(native_multret_cap, stack_room),
         else => 1,
     };
 }
@@ -240,8 +240,17 @@ fn parseStringIntForBitwise(slice: []const u8) !i64 {
 
     // Integer-like strings use modulo 2^64.
     if (!is_float_like) {
-        const mag = std.fmt.parseUnsigned(u128, body, base) catch return error.ArithmeticError;
-        var bits: u64 = @truncate(mag);
+        var bits: u64 = 0;
+        for (body) |ch| {
+            const digit: u8 = switch (ch) {
+                '0'...'9' => ch - '0',
+                'a'...'f' => 10 + (ch - 'a'),
+                'A'...'F' => 10 + (ch - 'A'),
+                else => return error.ArithmeticError,
+            };
+            if (digit >= base) return error.ArithmeticError;
+            bits = bits *% @as(u64, base) +% @as(u64, digit);
+        }
         if (negative) bits = 0 -% bits;
         return @bitCast(bits);
     }
