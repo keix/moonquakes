@@ -503,6 +503,19 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[j];
             }
+            if (actual_copy < nresults) {
+                // Fixed-result callers expect missing results as nil.
+                // For MULTRET calls nresults can be a large cap, so avoid
+                // touching many slots and only write a terminator nil.
+                if (nresults <= 64) {
+                    var k = actual_copy;
+                    while (k < nresults) : (k += 1) {
+                        vm.stack[vm.base + func_reg + k] = .nil;
+                    }
+                } else {
+                    vm.stack[vm.base + func_reg + actual_copy] = .nil;
+                }
+            }
             // Update vm.top for MULTRET support
             vm.top = vm.base + func_reg + actual_copy;
         },
@@ -513,6 +526,16 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
             var j: u32 = 0;
             while (j < actual_copy) : (j += 1) {
                 vm.stack[vm.base + func_reg + j] = co_vm.stack[yield_info.base + j];
+            }
+            if (actual_copy < nresults) {
+                if (nresults <= 64) {
+                    var k = actual_copy;
+                    while (k < nresults) : (k += 1) {
+                        vm.stack[vm.base + func_reg + k] = .nil;
+                    }
+                } else {
+                    vm.stack[vm.base + func_reg + actual_copy] = .nil;
+                }
             }
             // Update vm.top for MULTRET support
             vm.top = vm.base + func_reg + actual_copy;

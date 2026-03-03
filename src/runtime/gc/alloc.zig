@@ -102,6 +102,7 @@ pub fn allocTable(self: anytype) !*TableObject {
     // TODO: Use tracking allocator for HashMap memory accounting
     // Currently disabled due to potential GC interaction issues
     obj.hash_part = TableObject.HashMap.init(self.allocator);
+    obj.deleted_keys = TableObject.DeletedKeySet.init(self.allocator);
     obj.allocator = self.allocator;
     obj.metatable = null; // No metatable by default
 

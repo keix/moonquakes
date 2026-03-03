@@ -188,6 +188,11 @@ pub const TableObject = struct {
         std.hash_map.default_max_load_percentage,
     );
 
+    /// Stores hashes of keys explicitly deleted from this table.
+    /// This allows `next(t, k)` to continue iteration when `k` was
+    /// removed during traversal, while still rejecting arbitrary invalid keys.
+    pub const DeletedKeySet = std.AutoHashMap(u64, void);
+
     /// Weak table mode for __mode metamethod
     pub const WeakMode = enum(u2) {
         none = 0, // Strong table (default)
@@ -198,6 +203,7 @@ pub const TableObject = struct {
 
     header: GCObject,
     hash_part: HashMap,
+    deleted_keys: DeletedKeySet,
     allocator: std.mem.Allocator,
     /// Metatable for metamethod dispatch (null if no metatable)
     metatable: ?*TableObject,
@@ -224,16 +230,22 @@ pub const TableObject = struct {
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
         if (key.isNil()) return error.InvalidTableKey;
         if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
+        const key_hash = TValueKeyContext.hash(.{}, key);
         // Setting to nil removes the entry
         if (value.isNil()) {
-            _ = self.hash_part.remove(key);
+            if (self.hash_part.contains(key)) {
+                _ = self.hash_part.remove(key);
+                try self.deleted_keys.put(key_hash, {});
+            }
         } else {
             try self.hash_part.put(key, value);
+            _ = self.deleted_keys.remove(key_hash);
         }
     }
 
     /// Clean up internal data structures (called by GC during sweep)
     pub fn deinit(self: *TableObject) void {
+        self.deleted_keys.deinit();
         self.hash_part.deinit();
     }
 };

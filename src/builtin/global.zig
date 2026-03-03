@@ -288,13 +288,31 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         return;
     }
 
-    // Index is not nil - must be a valid key in the table
-    // Note: Lua 5.4 allows deleting keys during iteration, but our
-    // implementation removes entries on nil assignment. This means
-    // next(t, deleted_key) will raise an error. A proper fix requires
-    // table tombstones or stateful iterators.
+    // Index is not nil.
+    // If key is currently present, continue from it.
+    // If key was explicitly deleted from this table, restart from current
+    // first entry (Lua-compatible behavior for deletion during traversal).
+    // Otherwise, reject as invalid key.
     if (table.get(index_arg) == null) {
-        return vm.raiseString("invalid key to 'next'");
+        const key_hash = @TypeOf(table.*).TValueKeyContext.hash(.{}, index_arg);
+        if (!table.deleted_keys.contains(key_hash)) {
+            return vm.raiseString("invalid key to 'next'");
+        }
+
+        var deleted_iter = table.hash_part.iterator();
+        if (deleted_iter.next()) |entry| {
+            vm.stack[vm.base + func_reg] = entry.key_ptr.*;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = entry.value_ptr.*;
+            }
+            return;
+        }
+
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = .nil;
+        }
+        return;
     }
 
     // Find the key and return the next one

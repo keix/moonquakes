@@ -8,6 +8,7 @@ const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
+const StringObject = object.StringObject;
 const metamethod = @import("metamethod.zig");
 const MetaEvent = metamethod.MetaEvent;
 const builtin = @import("../builtin/dispatch.zig");
@@ -191,6 +192,10 @@ pub fn bitwiseBinary(vm: *VM, inst: Instruction, comptime tag: BitwiseOp) !void 
 fn toIntForBitwise(v: *const TValue) !i64 {
     if (v.isInteger()) {
         return v.integer;
+    } else if (v.* == .object and v.object.type == .string) {
+        const str = object.getObject(StringObject, v.object);
+        const slice = std.mem.trim(u8, str.asSlice(), " \t\n\r");
+        return parseStringIntForBitwise(slice);
     } else if (v.toNumber()) |n| {
         if (@floor(n) != n) return error.IntegerRepresentation;
         const min_f = @as(f64, @floatFromInt(std.math.minInt(i64)));
@@ -206,6 +211,51 @@ fn toIntForBitwise(v: *const TValue) !i64 {
         return error.IntegerRepresentation;
     }
     return error.ArithmeticError;
+}
+
+fn parseStringIntForBitwise(slice: []const u8) !i64 {
+    if (slice.len == 0) return error.ArithmeticError;
+
+    var i: usize = 0;
+    var negative = false;
+    if (slice[i] == '+' or slice[i] == '-') {
+        negative = slice[i] == '-';
+        i += 1;
+        if (i >= slice.len) return error.ArithmeticError;
+    }
+
+    var base: u8 = 10;
+    const is_hex = i + 1 < slice.len and slice[i] == '0' and (slice[i + 1] == 'x' or slice[i + 1] == 'X');
+    if (is_hex) {
+        base = 16;
+        i += 2;
+        if (i >= slice.len) return error.ArithmeticError;
+    }
+
+    const body = slice[i..];
+    const has_dot = std.mem.indexOfScalar(u8, body, '.') != null;
+    const has_p_exp = std.mem.indexOfAny(u8, body, "pP") != null;
+    const has_e_exp = std.mem.indexOfAny(u8, body, "eE") != null;
+    const is_float_like = has_dot or has_p_exp or (!is_hex and has_e_exp);
+
+    // Integer-like strings use modulo 2^64.
+    if (!is_float_like) {
+        const mag = std.fmt.parseUnsigned(u128, body, base) catch return error.ArithmeticError;
+        var bits: u64 = @truncate(mag);
+        if (negative) bits = 0 -% bits;
+        return @bitCast(bits);
+    }
+
+    // Float-like strings must have exact integer representation in i64 range.
+    const n = std.fmt.parseFloat(f64, slice) catch return error.ArithmeticError;
+    if (@floor(n) != n) return error.IntegerRepresentation;
+    const min_f = @as(f64, @floatFromInt(std.math.minInt(i64)));
+    const max_f = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+    if (n < min_f or n > max_f) return error.IntegerRepresentation;
+    if (n == max_f) return error.IntegerRepresentation;
+    const i64v: i64 = @intFromFloat(n);
+    if (@as(f64, @floatFromInt(i64v)) != n) return error.IntegerRepresentation;
+    return i64v;
 }
 
 fn floatToIntExact(n: f64) ?i64 {
@@ -236,7 +286,11 @@ fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
 }
 
 fn shlInt(value: i64, shift: i64) i64 {
-    if (shift < 0) return shrInt(value, -shift);
+    if (shift < 0) {
+        // abs(minInt) overflows in two's complement; Lua treats huge shifts as zero.
+        if (shift == std.math.minInt(i64)) return 0;
+        return shrInt(value, -shift);
+    }
     if (shift >= 64) return 0;
     const u: u64 = @bitCast(value);
     const res: u64 = u << @intCast(shift);
@@ -244,7 +298,10 @@ fn shlInt(value: i64, shift: i64) i64 {
 }
 
 fn shrInt(value: i64, shift: i64) i64 {
-    if (shift < 0) return shlInt(value, -shift);
+    if (shift < 0) {
+        if (shift == std.math.minInt(i64)) return 0;
+        return shlInt(value, -shift);
+    }
     if (shift >= 64) return 0;
     const u: u64 = @bitCast(value);
     const res: u64 = u >> @intCast(shift);
@@ -591,7 +648,21 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.ArithmeticError => blk: {
+                        const op_name: ?[]const u8 = switch (inst.getOpCode()) {
+                            .BAND, .BANDK => "'band'",
+                            .BOR, .BORK => "'bor'",
+                            .BXOR, .BXORK => "'bxor'",
+                            .BNOT => "'bnot'",
+                            .SHL, .SHLI => "'shl'",
+                            .SHR, .SHRI => "'shr'",
+                            else => null,
+                        };
+                        if (op_name) |name| {
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform bitwise operation {s} on a non-numeric value", .{name}) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
+                        break :blk "attempt to perform arithmetic on a non-numeric value";
+                    },
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
                     error.IntegerRepresentation => blk: {
