@@ -24,11 +24,11 @@ fn getTableLength(table: *TableObject) i64 {
 pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    if (nargs < 2) return error.BadArgument;
+    if (nargs < 2 or nargs > 3) return vm.raiseString("wrong number of arguments to 'insert'");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
-    const table = tbl_arg.asTable() orelse return error.BadArgument;
+    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'insert' (table expected)");
 
     const len = getTableLength(table);
 
@@ -40,10 +40,10 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     } else {
         // table.insert(list, pos, value): insert at pos, shift elements
         const pos_arg = vm.stack[vm.base + func_reg + 2];
-        const pos = pos_arg.toInteger() orelse return error.BadArgument;
+        const pos = pos_arg.toInteger() orelse return vm.raiseString("bad argument #2 to 'insert' (number expected)");
         const value = vm.stack[vm.base + func_reg + 3];
 
-        if (pos < 1 or pos > len + 1) return error.BadArgument;
+        if (pos < 1 or pos > len + 1) return vm.raiseString("position out of bounds");
 
         // Shift elements from len down to pos
         var i: i64 = len;
@@ -65,22 +65,47 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 /// table.remove(list [, pos]) - Removes element from table
 /// Returns the removed element. Default pos is #list (removes last element).
 pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 1) return error.BadArgument;
+    if (nargs < 1) return vm.raiseString("bad argument #1 to 'remove' (table expected)");
+    if (nargs > 2) return vm.raiseString("wrong number of arguments to 'remove'");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
-    const table = tbl_arg.asTable() orelse return error.BadArgument;
+    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'remove' (table expected)");
 
     const len = getTableLength(table);
 
     // Determine position (default is last element)
     const pos: i64 = if (nargs >= 2) blk: {
         const pos_arg = vm.stack[vm.base + func_reg + 2];
-        break :blk pos_arg.toInteger() orelse return error.BadArgument;
+        break :blk pos_arg.toInteger() orelse return vm.raiseString("bad argument #2 to 'remove' (number expected)");
     } else len;
 
-    // Handle empty table or invalid position
-    if (len == 0 or pos < 1 or pos > len) {
+    // Lua compatibility for empty tables:
+    // - table.remove(t) removes key 0 (because default pos is #t, which is 0)
+    // - table.remove(t, 0) returns nil
+    if (len == 0) {
+        if (nargs < 2) {
+            const zero_key = TValue{ .integer = 0 };
+            const removed_value = table.get(zero_key) orelse .nil;
+            try table.set(zero_key, .nil);
+            if (nresults > 0) {
+                vm.stack[vm.base + func_reg] = removed_value;
+            }
+            return;
+        }
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .nil;
+        }
+        return;
+    }
+
+    // Non-empty list behavior:
+    // - pos < 1: error
+    // - pos > len: return nil
+    if (pos < 1) {
+        return vm.raiseString("position out of bounds");
+    }
+    if (pos > len) {
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = .nil;
         }

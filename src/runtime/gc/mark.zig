@@ -123,6 +123,13 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
                     markGrayValue(self, entry.value_ptr.*);
                 }
             }
+
+            // Deleted-key tombstones can hold collectable keys; mark them so
+            // key identity remains valid for next(t, k) checks.
+            var deleted_iter = table.deleted_keys.iterator();
+            while (deleted_iter.next()) |entry| {
+                markGrayValue(self, entry.key_ptr.*);
+            }
         },
         .closure => {
             const closure: *ClosureObject = @fieldParentPtr("header", obj);
