@@ -1266,7 +1266,13 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    _ = try self.parseExpr();
+                    const expr_reg = try self.parseExpr();
+                    if (self.current.kind == .Symbol and
+                        (std.mem.eql(u8, self.current.lexeme, "=") or
+                            std.mem.eql(u8, self.current.lexeme, ",")))
+                    {
+                        try self.parseSuffixAssignmentFromExpr(expr_reg);
+                    }
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -1288,7 +1294,13 @@ pub const Parser = struct {
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
                 // Lua allows function-call statements whose prefixexp starts with parentheses,
                 // e.g. (Message or print)("...")
-                _ = try self.parseExpr();
+                const expr_reg = try self.parseExpr();
+                if (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, "=") or
+                        std.mem.eql(u8, self.current.lexeme, ",")))
+                {
+                    try self.parseSuffixAssignmentFromExpr(expr_reg);
+                }
             } else {
                 return error.UnsupportedStatement;
             }
@@ -1304,6 +1316,46 @@ pub const Parser = struct {
 
         // Auto-append return nil if no explicit return was encountered
         try self.autoReturnNil();
+    }
+
+    /// Reinterpret a parsed suffix expression as assignment target.
+    /// Supports patterns like:
+    ///   getmetatable(t).x = v
+    ///   f()[k], a = v1, v2
+    fn parseSuffixAssignmentFromExpr(self: *Parser, expr_reg: u8) ParseError!void {
+        if (self.proto.code.items.len == 0) return error.UnsupportedStatement;
+
+        const last_idx = self.proto.code.items.len - 1;
+        const last_inst = self.proto.code.items[last_idx];
+        const target: AssignTarget = switch (last_inst.getOpCode()) {
+            .GETFIELD => blk: {
+                if (last_inst.a != expr_reg) return error.UnsupportedStatement;
+                break :blk .{ .field = .{ .table_reg = last_inst.b, .field_const = last_inst.c } };
+            },
+            .GETTABLE => blk: {
+                if (last_inst.a != expr_reg) return error.UnsupportedStatement;
+                break :blk .{ .index = .{ .table_reg = last_inst.b, .key_reg = last_inst.c } };
+            },
+            else => return error.UnsupportedStatement,
+        };
+
+        _ = self.proto.code.pop();
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            return self.parseMultipleAssignmentWithFirstTarget(target);
+        }
+
+        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
+            return error.ExpectedEquals;
+        }
+        self.advance(); // consume '='
+        const value_reg = try self.parseExpr();
+
+        switch (target) {
+            .field => |f| try self.proto.emitSETFIELD(f.table_reg, f.field_const, value_reg),
+            .index => |idx| try self.proto.emitSETTABLE(idx.table_reg, idx.key_reg, value_reg),
+            .variable => unreachable,
+        }
     }
 
     // Statement parsing
@@ -4885,6 +4937,19 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                 'r' => {
                     try result.append(allocator, '\r');
                     i += 2;
+                },
+                '\n' => {
+                    // Backslash-newline line continuation inside short strings.
+                    try result.append(allocator, '\n');
+                    i += 2;
+                },
+                '\r' => {
+                    // Handle CR and CRLF as a single newline continuation.
+                    try result.append(allocator, '\n');
+                    i += 2;
+                    if (i < input.len and input[i] == '\n') {
+                        i += 1;
+                    }
                 },
                 '\\' => {
                     try result.append(allocator, '\\');

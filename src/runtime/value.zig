@@ -293,7 +293,19 @@ pub const TValue = union(enum) {
                 .number => |bn| an == bn,
                 else => false,
             },
-            .object => |ao| b == .object and ao == b.object,
+            .object => |ao| switch (b) {
+                .object => |bo| {
+                    if (ao == bo) return true;
+                    if (ao.type == .string and bo.type == .string) {
+                        const as = object.getObject(StringObject, ao);
+                        const bs = object.getObject(StringObject, bo);
+                        if (as.hash != bs.hash or as.len != bs.len) return false;
+                        return std.mem.eql(u8, as.asSlice(), bs.asSlice());
+                    }
+                    return false;
+                },
+                else => false,
+            },
         };
     }
 };

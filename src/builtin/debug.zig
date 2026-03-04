@@ -491,9 +491,13 @@ pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
     // Try to set metatable based on value type
     if (value.asTable()) |table| {
         // Table: set individual metatable (no protection check in debug.setmetatable)
+        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
+        // for metatable pointer updates.
         table.metatable = new_mt;
     } else if (value.asUserdata()) |ud| {
         // Userdata: set individual metatable
+        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
+        // for metatable pointer updates.
         ud.metatable = new_mt;
     } else {
         // Primitive type: set shared metatable

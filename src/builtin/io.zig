@@ -308,7 +308,7 @@ fn tryHandleMultiRead(
 
     const use_multi_read = blk: {
         if (fmt_count != 1) break :blk true;
-        if (fmt_arg_count == 0) break :blk true;
+        if (fmt_arg_count == 0) break :blk false;
         const fmt0 = vm.stack[fmt_arg_start].asString() orelse break :blk true;
         const f = fmt0.asSlice();
         break :blk std.mem.eql(u8, f, "n") or std.mem.eql(u8, f, "*n");
@@ -2017,7 +2017,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
 pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
-    // Get default input file
+    // Delegate to default input handle's file:read(self, ...) path.
     const io_key = try vm.gc().allocString("io");
     const io_val = vm.globals().get(TValue.fromString(io_key)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
@@ -2029,119 +2029,41 @@ pub fn nativeIoRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     };
 
     const default_input_key = try vm.gc().allocString(IO_DEFAULT_INPUT_KEY);
-    var file_table: *TableObject = undefined;
-
+    var input_handle: TValue = .nil;
     if (io_table.get(TValue.fromString(default_input_key))) |input_val| {
-        file_table = input_val.asTable() orelse {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
-        };
+        input_handle = input_val;
     } else {
-        // Create stdin handle if not set
-        file_table = try createStdioHandle(vm, func_reg + 1, "stdin");
-        try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(file_table));
-
+        // Create stdin handle if not set.
+        const file_table = try createStdioHandle(vm, func_reg + 1, "stdin");
+        input_handle = TValue.fromTable(file_table);
+        try io_table.set(TValue.fromString(default_input_key), input_handle);
         const stdin_key = try vm.gc().allocString("stdin");
-        try io_table.set(TValue.fromString(stdin_key), TValue.fromTable(file_table));
+        try io_table.set(TValue.fromString(stdin_key), input_handle);
     }
 
-    // Check if closed
-    const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-    if (file_table.get(TValue.fromString(closed_key))) |closed_val| {
-        if (closed_val.toBoolean()) {
+    if (input_handle.asFile() != null) {
+        if (input_handle.asFile().?.closed) {
             return vm.raiseString(" input file is closed");
         }
-    }
-
-    try refreshReadableFileTable(vm, file_table);
-
-    // Get format argument (default to "*l")
-    var format: []const u8 = "l";
-    if (nargs >= 1) {
-        const fmt_arg = vm.stack[vm.base + func_reg + 1];
-        if (fmt_arg.asString()) |s| {
-            format = canonicalReadFormat(s.asSlice()) orelse return vm.raiseString("invalid format");
+    } else if (input_handle.asTable()) |tbl| {
+        const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+        if (tbl.get(TValue.fromString(closed_key))) |closed_val| {
+            if (closed_val.toBoolean()) return vm.raiseString(" input file is closed");
         }
-    }
-
-    // Get stored content
-    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-    const content_val = file_table.get(TValue.fromString(output_key)) orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    const content_str = content_val.asString() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
-    };
-    const content = content_str.asSlice();
-
-    // Get current position
-    const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue{ .integer = 0 };
-    const pos_i64 = pos_val.toInteger() orelse 0;
-    const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
-
-    if (try tryHandleMultiRead(
-        vm,
-        file_table,
-        func_reg,
-        nargs,
-        nresults,
-        vm.base + func_reg + 1,
-        if (nargs > 0) nargs else 1,
-        content,
-    )) {
-        return;
-    }
-
-    // Handle different formats
-    if (std.mem.eql(u8, format, "a")) {
-        // Read all from current position
-        const remaining = content[pos..];
-        if (remaining.len == 0) {
-            const empty_str = try vm.gc().allocString("");
-            vm.stack[vm.base + func_reg] = TValue.fromString(empty_str);
-        } else {
-            const result_str = try vm.gc().allocString(remaining);
-            vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
-        }
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(content.len) });
-    } else if (std.mem.eql(u8, format, "l")) {
-        // Read line (without newline)
-        if (pos >= content.len) {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
-        }
-
-        var end: usize = pos;
-        while (end < content.len and content[end] != '\n') : (end += 1) {}
-
-        const line = content[pos..end];
-        const line_str = try vm.gc().allocString(line);
-        vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
-
-        const new_pos: i64 = @intCast(if (end < content.len) end + 1 else end);
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = new_pos });
-    } else if (std.mem.eql(u8, format, "L")) {
-        // Read line (with newline)
-        if (pos >= content.len) {
-            vm.stack[vm.base + func_reg] = .nil;
-            return;
-        }
-
-        var end: usize = pos;
-        while (end < content.len and content[end] != '\n') : (end += 1) {}
-        if (end < content.len) end += 1;
-
-        const line = content[pos..end];
-        const line_str = try vm.gc().allocString(line);
-        vm.stack[vm.base + func_reg] = TValue.fromString(line_str);
-
-        try file_table.set(TValue.fromString(pos_key), .{ .integer = @intCast(end) });
     } else {
-        return vm.raiseString("invalid format");
+        vm.stack[vm.base + func_reg] = .nil;
+        return;
     }
+
+    vm.reserveSlots(func_reg, nargs + 3);
+    var i: i64 = @intCast(nargs);
+    while (i > 0) : (i -= 1) {
+        const src = func_reg + @as(u32, @intCast(i));
+        const dst = func_reg + @as(u32, @intCast(i)) + 1;
+        vm.stack[vm.base + dst] = vm.stack[vm.base + src];
+    }
+    vm.stack[vm.base + func_reg + 1] = input_handle;
+    return nativeFileRead(vm, func_reg, nargs + 1, nresults);
 }
 
 /// io.tmpfile() - Returns a handle for a temporary file

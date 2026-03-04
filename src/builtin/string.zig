@@ -2,8 +2,8 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
-const mnemonics = @import("../vm/mnemonics.zig");
 const object = @import("../runtime/gc/object.zig");
+const StringObject = object.StringObject;
 const VM = @import("../vm/vm.zig").VM;
 
 /// Lua 5.4 String Library
@@ -45,26 +45,47 @@ fn formatInteger(buf: []u8, i: i64) []const u8 {
 }
 
 pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
     if (nresults == 0) return;
 
     const arg = if (nargs > 0) vm.stack[vm.base + func_reg + 1] else TValue.nil;
+    const str_obj = try toStringValue(vm, arg);
+    vm.stack[vm.base + func_reg] = TValue.fromString(str_obj);
+    if (nresults > 1) {
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
+    }
+}
 
-    // Stack buffer for number formatting (64 bytes covers i64 range and f64)
+fn callMetamethodUnary(vm: *VM, mm: TValue, value: TValue) !TValue {
+    if (!vm.pushTempRoot(mm)) return error.OutOfMemory;
+    if (!vm.pushTempRoot(value)) {
+        vm.popTempRoots(1);
+        return error.OutOfMemory;
+    }
+    defer vm.popTempRoots(2);
+
+    return call.callValue(vm, mm, &[_]TValue{value}) catch |err| switch (err) {
+        call.CallError.NotCallable => vm.raiseString("attempt to call a non-function value"),
+        else => err,
+    };
+}
+
+fn toStringValue(vm: *VM, arg: TValue) !*StringObject {
+    if (arg.asString()) |s| return s;
+
     var buf: [64]u8 = undefined;
-
-    const result = switch (arg) {
-        .number => |n| ret: {
-            const formatted = formatNumber(&buf, n);
-            break :ret TValue.fromString(try vm.gc().allocString(formatted));
-        },
-        .integer => |i| ret: {
-            const formatted = formatInteger(&buf, i);
-            break :ret TValue.fromString(try vm.gc().allocString(formatted));
-        },
-        .nil => TValue.fromString(try vm.gc().allocString("nil")),
-        .boolean => |b| TValue.fromString(try vm.gc().allocString(if (b) "true" else "false")),
+    return switch (arg) {
+        .number => |n| vm.gc().allocString(formatNumber(&buf, n)),
+        .integer => |i| vm.gc().allocString(formatInteger(&buf, i)),
+        .nil => vm.gc().allocString("nil"),
+        .boolean => |b| vm.gc().allocString(if (b) "true" else "false"),
         .object => |obj| switch (obj.type) {
-            .string => arg,
+            .string => unreachable,
             .table, .userdata => ret: {
                 // Moonquakes file handles are tables internally; mimic Lua file tostring().
                 if (obj.type == .table) {
@@ -72,51 +93,45 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                         const closed_key = try vm.gc().allocString("_closed");
                         if (tbl.get(TValue.fromString(closed_key))) |closed_val| {
                             const s = if (closed_val.toBoolean()) "file (closed)" else "file (open)";
-                            break :ret TValue.fromString(try vm.gc().allocString(s));
+                            break :ret vm.gc().allocString(s);
                         }
                     }
                 }
-                // Check for __tostring metamethod
+
                 if (metamethod.getMetamethod(arg, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
-                    if (mm.asClosure()) |closure| {
-                        // Save and restore vm.top since executeSyncMM modifies it
-                        const saved_top = vm.top;
-                        const mm_result = try mnemonics.executeSyncMM(vm, closure, &[_]TValue{arg});
-                        vm.top = saved_top;
-                        // __tostring should return a string
-                        if (mm_result.asString()) |_| {
-                            break :ret mm_result;
-                        }
-                        // If not a string, fall through to default
-                    }
-                    // Note: Native __tostring is not supported (very rare in practice)
+                    const mm_result = try callMetamethodUnary(vm, mm, arg);
+                    return mm_result.asString() orelse vm.raiseString("'__tostring' must return a string");
                 }
-                // Default representation
-                if (obj.type == .table) {
-                    break :ret TValue.fromString(try vm.gc().allocString("<table>"));
-                } else {
-                    break :ret TValue.fromString(try vm.gc().allocString("<userdata>"));
-                }
+
+                const default_name = if (obj.type == .table) "table" else "userdata";
+                const type_name = getObjectDisplayName(vm, arg, default_name);
+                const formatted = try formatObjectAddress(vm, type_name, obj);
+                return formatted.asString().?;
             },
-            .closure, .native_closure => TValue.fromString(try vm.gc().allocString("<function>")),
-            .upvalue => TValue.fromString(try vm.gc().allocString("<upvalue>")),
-            .proto => TValue.fromString(try vm.gc().allocString("<proto>")),
-            .thread => TValue.fromString(try vm.gc().allocString("<thread>")),
+            .closure, .native_closure => (try formatObjectAddress(vm, "function", obj)).asString().?,
+            .upvalue => vm.gc().allocString("<upvalue>"),
+            .proto => vm.gc().allocString("<proto>"),
+            .thread => (try formatObjectAddress(vm, "thread", obj)).asString().?,
             .file => ret: {
                 const file_obj = @import("../runtime/gc/object.zig").getObject(@import("../runtime/gc/object.zig").FileObject, obj);
                 const s = if (file_obj.closed) "file (closed)" else "file (open)";
-                break :ret TValue.fromString(try vm.gc().allocString(s));
+                break :ret vm.gc().allocString(s);
             },
         },
     };
+}
 
-    vm.stack[vm.base + func_reg] = result;
-    if (nresults > 1) {
-        var i: u32 = 1;
-        while (i < nresults) : (i += 1) {
-            vm.stack[vm.base + func_reg + i] = .nil;
-        }
+fn getObjectDisplayName(vm: anytype, val: TValue, default_name: []const u8) []const u8 {
+    if (metamethod.getMetamethod(val, .name, &vm.gc().mm_keys, &vm.gc().shared_mt)) |name_val| {
+        if (name_val.asString()) |s| return s.asSlice();
     }
+    return default_name;
+}
+
+fn formatObjectAddress(vm: anytype, prefix: []const u8, obj: *object.GCObject) !TValue {
+    var buf: [96]u8 = undefined;
+    const repr = std.fmt.bufPrint(&buf, "{s}: 0x{x}", .{ prefix, @intFromPtr(obj) }) catch "object";
+    return TValue.fromString(try vm.gc().allocString(repr));
 }
 
 /// string.len(s) - Returns the length of string s
@@ -318,12 +333,13 @@ pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         const arg = vm.stack[vm.base + func_reg + 1 + i];
-        const code = arg.toInteger() orelse 0;
-        if (code >= 0 and code <= 255) {
-            buf[i] = @intCast(@as(u64, @bitCast(code)));
-        } else {
-            buf[i] = 0;
+        const code = arg.toInteger() orelse {
+            return vm.raiseString("value out of range");
+        };
+        if (code < 0 or code > 255) {
+            return vm.raiseString("value out of range");
         }
+        buf[i] = @intCast(@as(u64, @bitCast(code)));
     }
 
     const result = try vm.gc().allocString(buf);
@@ -366,8 +382,21 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     const count: usize = @intCast(n);
 
-    // Calculate result size
-    const result_len = str.len * count + sep.len * (count - 1);
+    // Calculate result size with overflow/limit checks (Lua-compatible "too large").
+    const max_len: usize = @intCast(std.math.maxInt(i32));
+    const repeated_len = std.math.mul(usize, str.len, count) catch {
+        return vm.raiseString("resulting string too large");
+    };
+    const sep_count = count - 1;
+    const sep_total_len = std.math.mul(usize, sep.len, sep_count) catch {
+        return vm.raiseString("resulting string too large");
+    };
+    const result_len = std.math.add(usize, repeated_len, sep_total_len) catch {
+        return vm.raiseString("resulting string too large");
+    };
+    if (result_len >= max_len) {
+        return vm.raiseString("resulting string too large");
+    }
 
     // Allocate buffer
     const buf = try vm.gc().allocator.alloc(u8, result_len);
@@ -913,9 +942,20 @@ const PatternMatcher = struct {
     }
 };
 
-/// string.gmatch(s, pattern) - Returns iterator for all matches of pattern in string s
-/// Returns: iterator function, state table {s=string, p=pattern, pos=0}, nil
-/// State table stores position internally, updated by iterator
+fn getGmatchStateMap(vm: *VM) !*object.TableObject {
+    // TODO(lua54-strings): move this hidden registry map out of globals into a dedicated VM registry slot.
+    const key = try vm.gc().allocString("__gmatch_states");
+    const globals = vm.globals();
+    const key_val = TValue.fromString(key);
+    if (globals.get(key_val)) |existing| {
+        if (existing.asTable()) |tbl| return tbl;
+    }
+    const tbl = try vm.gc().allocTable();
+    try globals.set(key_val, TValue.fromTable(tbl));
+    return tbl;
+}
+
+/// string.gmatch(s, pattern) - Returns iterator function for all matches of pattern in string s
 pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
@@ -947,16 +987,16 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     try state_table.set(TValue.fromString(key_p), pat_arg);
     try state_table.set(TValue.fromString(key_pos), .{ .integer = 0 });
 
-    // Return iterator function
+    // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .string_gmatch_iterator });
+    const state_map = try getGmatchStateMap(vm);
+    try state_map.set(TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
-    // Return state table (for-in will pass this to iterator)
+    // Generic-for still accepts (f, s, var), but gmatch keeps state privately.
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state_table);
+        vm.stack[vm.base + func_reg + 1] = .nil;
     }
-
-    // Return nil as initial control variable (we track position in state table)
     if (nresults > 2) {
         vm.stack[vm.base + func_reg + 2] = .nil;
     }
@@ -969,21 +1009,29 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
-    if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+    // Accept explicit state argument (for generic-for) or recover private state by iterator identity.
+    var state_table: ?*object.TableObject = null;
+    if (nargs >= 1) {
+        const state_arg = vm.stack[vm.base + func_reg + 1];
+        state_table = state_arg.asTable();
     }
-
-    // Get state table
-    const state_arg = vm.stack[vm.base + func_reg + 1];
-    const state_table = state_arg.asTable() orelse {
+    if (state_table == null) {
+        if (vm.stack[vm.base + func_reg].asNativeClosure()) |iter_nc| {
+            if (getGmatchStateMap(vm) catch null) |state_map| {
+                if (state_map.get(TValue.fromNativeClosure(iter_nc))) |st| {
+                    state_table = st.asTable();
+                }
+            }
+        }
+    }
+    const state = state_table orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
 
     // Get string from state table
     const key_s = try vm.gc().allocString("s");
-    const str_val = state_table.get(TValue.fromString(key_s)) orelse {
+    const str_val = state.get(TValue.fromString(key_s)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -995,7 +1043,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get pattern from state table
     const key_p = try vm.gc().allocString("p");
-    const pat_val = state_table.get(TValue.fromString(key_p)) orelse {
+    const pat_val = state.get(TValue.fromString(key_p)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -1007,7 +1055,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
     // Get current position from state table
     const key_pos = try vm.gc().allocString("pos");
-    const pos_val = state_table.get(TValue.fromString(key_pos)) orelse {
+    const pos_val = state.get(TValue.fromString(key_pos)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -1043,7 +1091,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try state_table.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
+            try state.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {
@@ -1368,6 +1416,7 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         i += 1; // Skip '%'
         if (i >= fmt.len) break;
+        const conv_start = i - 1;
 
         // Handle %%
         if (fmt[i] == '%') {
@@ -1397,152 +1446,320 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         // Parse width
         var width: usize = 0;
+        var width_digits: usize = 0;
         while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
             width = width * 10 + (fmt[i] - '0');
+            width_digits += 1;
             i += 1;
         }
 
         // Parse precision
         var precision: ?usize = null;
+        var precision_digits: usize = 0;
         if (i < fmt.len and fmt[i] == '.') {
             i += 1;
             precision = 0;
             while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
                 precision.? = precision.? * 10 + (fmt[i] - '0');
+                precision_digits += 1;
                 i += 1;
             }
         }
 
         if (i >= fmt.len) break;
 
+        const conv_len = i - conv_start + 1;
+        if (conv_len > 200 or width_digits > 3 or precision_digits > 3) {
+            return vm.raiseString("format too long");
+        }
+        if (width_digits > 2 or precision_digits > 2) {
+            return vm.raiseString("invalid conversion");
+        }
+
         const spec = fmt[i];
         i += 1;
 
         // Get next argument if needed
-        const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
+        if (arg_idx > nargs) return vm.raiseString("no value");
+        const arg = vm.stack[vm.base + func_reg + arg_idx];
         arg_idx += 1;
 
         // Format based on specifier
         switch (spec) {
             's' => {
+                if (zero_pad or show_sign or space_sign or alt_form) return vm.raiseString("invalid conversion");
                 // String - convert any value to string (like tostring)
-                var str_buf: [64]u8 = undefined;
-                const str = if (arg.asString()) |s|
-                    s.asSlice()
-                else if (arg.isNil())
-                    "nil"
-                else if (arg.isBoolean())
-                    if (arg.boolean) "true" else "false"
-                else if (arg.toInteger()) |int_val|
-                    std.fmt.bufPrint(&str_buf, "{d}", .{int_val}) catch "?"
-                else if (arg.toNumber()) |num_val|
-                    std.fmt.bufPrint(&str_buf, "{d}", .{num_val}) catch "?"
-                else
-                    "?";
+                const str_obj = try toStringValue(vm, arg);
+                const str_val = TValue.fromString(str_obj);
+                if (!vm.pushTempRoot(str_val)) return error.OutOfMemory;
+                defer vm.popTempRoots(1);
+                const str = str_obj.asSlice();
+                if ((width > 0 or precision != null) and std.mem.indexOfScalar(u8, str, 0) != null) {
+                    return vm.raiseString("string contains zeros");
+                }
                 const effective_str = if (precision) |p| str[0..@min(p, str.len)] else str;
                 try padAndAppend(allocator, &result, effective_str, width, left_justify, ' ');
             },
             'd', 'i' => {
+                if (alt_form) return vm.raiseString("invalid conversion");
                 // Integer - Lua 5.4: error if number has no integer representation
                 const val = arg.toInteger() orelse return error.FormatError;
-                var buf: [32]u8 = undefined;
-                const num_str = formatIntBuf(&buf, val, show_sign, space_sign);
-                const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
-                try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
+                var abs_buf: [32]u8 = undefined;
+                const abs_u: u64 = if (val < 0) @bitCast(0 -% @as(i64, val)) else @intCast(val);
+                const raw_digits = std.fmt.bufPrint(&abs_buf, "{d}", .{abs_u}) catch "0";
+                const digits = if (precision != null and precision.? == 0 and abs_u == 0) "" else raw_digits;
+                const zeros = if (precision) |p| if (p > digits.len) p - digits.len else 0 else 0;
+                const sign_char: ?u8 = if (val < 0) '-' else if (show_sign) '+' else if (space_sign) ' ' else null;
+                const head_len: usize = @intFromBool(sign_char != null);
+                const body_len = zeros + digits.len;
+
+                if (left_justify) {
+                    if (sign_char) |c| try result.append(allocator, c);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                    const used = head_len + body_len;
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                } else if (zero_pad and precision == null and width > head_len + body_len) {
+                    if (sign_char) |c| try result.append(allocator, c);
+                    try result.appendNTimes(allocator, '0', width - head_len - body_len);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                } else {
+                    const used = head_len + body_len;
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                    if (sign_char) |c| try result.append(allocator, c);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                }
             },
             'u' => {
                 // Unsigned integer - Lua 5.4: error if number has no integer representation
                 const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&buf, "{d}", .{uval}) catch "0";
-                const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
-                try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
+                const raw_digits = std.fmt.bufPrint(&buf, "{d}", .{uval}) catch "0";
+                const digits = if (precision != null and precision.? == 0 and uval == 0) "" else raw_digits;
+                const zeros = if (precision) |p| if (p > digits.len) p - digits.len else 0 else 0;
+                const used = zeros + digits.len;
+                if (left_justify) {
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                } else if (zero_pad and precision == null and width > used) {
+                    try result.appendNTimes(allocator, '0', width - used);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                } else {
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                }
             },
             'x', 'X' => {
                 // Hexadecimal - Lua 5.4: error if number has no integer representation
                 const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
-                const num_str = if (spec == 'x')
+                const raw_digits = if (spec == 'x')
                     std.fmt.bufPrint(&buf, "{x}", .{uval}) catch "0"
                 else
                     std.fmt.bufPrint(&buf, "{X}", .{uval}) catch "0";
-                if (alt_form and uval != 0) {
-                    try result.appendSlice(allocator, if (spec == 'x') "0x" else "0X");
+                const digits = if (precision != null and precision.? == 0 and uval == 0) "" else raw_digits;
+                const zeros = if (precision) |p| if (p > digits.len) p - digits.len else 0 else 0;
+                const prefix = if (alt_form and uval != 0) (if (spec == 'x') "0x" else "0X") else "";
+                const used = prefix.len + zeros + digits.len;
+                if (left_justify) {
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                } else if (zero_pad and precision == null and width > used) {
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', width - used);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                } else {
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
                 }
-                const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
-                try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
             'o' => {
                 // Octal - Lua 5.4: error if number has no integer representation
                 const val = arg.toInteger() orelse return error.FormatError;
                 const uval: u64 = @bitCast(val);
                 var buf: [32]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&buf, "{o}", .{uval}) catch "0";
-                if (alt_form and uval != 0) {
-                    try result.append(allocator, '0');
+                const raw_digits = std.fmt.bufPrint(&buf, "{o}", .{uval}) catch "0";
+                const digits = if (precision != null and precision.? == 0 and uval == 0) "" else raw_digits;
+                const zeros = if (precision) |p| if (p > digits.len) p - digits.len else 0 else 0;
+                const prefix = if (alt_form and (uval != 0 or digits.len == 0)) "0" else "";
+                const used = prefix.len + zeros + digits.len;
+                if (left_justify) {
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                } else if (zero_pad and precision == null and width > used) {
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', width - used);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
+                } else {
+                    if (width > used) try result.appendNTimes(allocator, ' ', width - used);
+                    try result.appendSlice(allocator, prefix);
+                    try result.appendNTimes(allocator, '0', zeros);
+                    try result.appendSlice(allocator, digits);
                 }
-                const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
-                try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
-            'f', 'F' => {
+            'f' => {
                 // Float
                 const val = arg.toNumber() orelse 0.0;
                 const prec = precision orelse 6;
-                var buf: [64]u8 = undefined;
-                const num_str = formatFloatBuf(&buf, val, prec, show_sign, space_sign);
+                // %.99f over huge magnitudes needs a much larger fixed buffer.
+                var buf: [4096]u8 = undefined;
+                var num_str = formatFloatBuf(&buf, val, prec, show_sign, space_sign);
+                if (alt_form and prec == 0 and std.mem.indexOfAny(u8, num_str, ".eE") == null and !std.mem.eql(u8, num_str, "(float)")) {
+                    var alt_buf: [4097]u8 = undefined;
+                    @memcpy(alt_buf[0..num_str.len], num_str);
+                    alt_buf[num_str.len] = '.';
+                    num_str = alt_buf[0 .. num_str.len + 1];
+                }
                 const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
-                try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
+                if (pad_char == '0' and !left_justify and width > num_str.len and num_str.len > 0 and
+                    (num_str[0] == '+' or num_str[0] == '-' or num_str[0] == ' '))
+                {
+                    try result.append(allocator, num_str[0]);
+                    try result.appendNTimes(allocator, '0', width - num_str.len);
+                    try result.appendSlice(allocator, num_str[1..]);
+                } else {
+                    try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
+                }
             },
             'e', 'E' => {
                 // Scientific notation
                 const val = arg.toNumber() orelse 0.0;
                 const prec = precision orelse 6;
-                var buf: [64]u8 = undefined;
-                const num_str = if (spec == 'e')
-                    std.fmt.bufPrint(&buf, "{e}", .{val}) catch "0"
-                else
-                    std.fmt.bufPrint(&buf, "{E}", .{val}) catch "0";
-                _ = prec; // TODO: Apply precision
+                var buf: [256]u8 = undefined;
+                const num_str = formatScientificBuf(&buf, val, prec, spec == 'E', show_sign, space_sign);
                 const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
                 try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
             'g', 'G' => {
                 // General (shortest of %e or %f)
                 const val = arg.toNumber() orelse 0.0;
-                var buf: [64]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&buf, "{d}", .{val}) catch "0";
+                const prec = precision orelse 6;
+                var buf: [512]u8 = undefined;
+                const num_str = formatGeneralBuf(&buf, val, prec, spec == 'G', show_sign, space_sign, alt_form);
                 const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
                 try padAndAppend(allocator, &result, num_str, width, left_justify, pad_char);
             },
+            'a', 'A' => {
+                // Hexadecimal float notation.
+                const val = arg.toNumber() orelse 0.0;
+                var buf: [256]u8 = undefined;
+                const core_raw = std.fmt.bufPrint(&buf, "{x}", .{val}) catch "(float)";
+
+                var adjusted_buf: [256]u8 = undefined;
+                const adjusted = blk: {
+                    // TODO(lua54-strings): implement hex-float precision rounding (currently truncates/pads).
+                    const prec = precision orelse break :blk core_raw;
+
+                    const p_idx = std.mem.indexOfAny(u8, core_raw, "pP") orelse break :blk core_raw;
+                    const dot_idx_opt = std.mem.indexOfScalar(u8, core_raw[0..p_idx], '.');
+                    if (dot_idx_opt == null) break :blk core_raw;
+                    const dot_idx = dot_idx_opt.?;
+
+                    var w: usize = 0;
+                    @memcpy(adjusted_buf[w .. w + dot_idx + 1], core_raw[0 .. dot_idx + 1]);
+                    w += dot_idx + 1;
+
+                    const frac = core_raw[dot_idx + 1 .. p_idx];
+                    const keep = @min(prec, frac.len);
+                    if (keep > 0) {
+                        @memcpy(adjusted_buf[w .. w + keep], frac[0..keep]);
+                        w += keep;
+                    }
+                    if (prec > keep) {
+                        @memset(adjusted_buf[w .. w + (prec - keep)], '0');
+                        w += prec - keep;
+                    }
+
+                    @memcpy(adjusted_buf[w .. w + (core_raw.len - p_idx)], core_raw[p_idx..]);
+                    w += core_raw.len - p_idx;
+                    break :blk adjusted_buf[0..w];
+                };
+
+                var upper_buf: [256]u8 = undefined;
+                const core = if (spec == 'A') blk: {
+                    var idx: usize = 0;
+                    while (idx < adjusted.len) : (idx += 1) {
+                        upper_buf[idx] = std.ascii.toUpper(adjusted[idx]);
+                    }
+                    break :blk upper_buf[0..adjusted.len];
+                } else adjusted;
+
+                var with_sign: [257]u8 = undefined;
+                var out = core;
+                if (val >= 0 and (show_sign or space_sign)) {
+                    with_sign[0] = if (show_sign) '+' else ' ';
+                    @memcpy(with_sign[1 .. 1 + core.len], core);
+                    out = with_sign[0 .. 1 + core.len];
+                }
+                const pad_char: u8 = if (zero_pad and !left_justify) '0' else ' ';
+                try padAndAppend(allocator, &result, out, width, left_justify, pad_char);
+            },
             'c' => {
+                if (zero_pad or show_sign or space_sign or alt_form or precision != null) return vm.raiseString("invalid conversion");
                 // Character
                 const val = arg.toInteger() orelse 0;
                 if (val >= 0 and val <= 255) {
-                    try result.append(allocator, @intCast(@as(u64, @bitCast(val))));
+                    var ch: [1]u8 = .{@intCast(@as(u64, @bitCast(val)))};
+                    try padAndAppend(allocator, &result, &ch, width, left_justify, ' ');
                 }
+            },
+            'p' => {
+                if (zero_pad or show_sign or space_sign or alt_form or precision != null) return vm.raiseString("invalid conversion");
+                // Pointer-like formatting (Lua compatibility): non-objects => "(null)".
+                var buf: [48]u8 = undefined;
+                const ptr_str: []const u8 = if (arg == .object)
+                    std.fmt.bufPrint(&buf, "0x{x}", .{@intFromPtr(arg.object)}) catch "(null)"
+                else
+                    "(null)";
+                try padAndAppend(allocator, &result, ptr_str, width, left_justify, ' ');
             },
             'q' => {
-                // Quoted string
-                const str = if (arg.asString()) |s| s.asSlice() else "nil";
-                try result.append(allocator, '"');
-                for (str) |c| {
-                    switch (c) {
-                        '"' => try result.appendSlice(allocator, "\\\""),
-                        '\\' => try result.appendSlice(allocator, "\\\\"),
-                        '\n' => try result.appendSlice(allocator, "\\n"),
-                        '\r' => try result.appendSlice(allocator, "\\r"),
-                        '\t' => try result.appendSlice(allocator, "\\t"),
-                        else => try result.append(allocator, c),
-                    }
+                if (left_justify or show_sign or space_sign or alt_form or zero_pad or width > 0 or precision != null) {
+                    return vm.raiseString("specifier '%q' cannot have modifiers");
                 }
-                try result.append(allocator, '"');
+                // Lua %q: produce a loadable literal for strings/numbers/booleans/nil.
+                // TODO(lua54-strings): tighten numeric canonicalization to match PUC-Lua byte-for-byte.
+                switch (arg) {
+                    .nil => try result.appendSlice(allocator, "nil"),
+                    .boolean => |b| try result.appendSlice(allocator, if (b) "true" else "false"),
+                    .integer => |ival| {
+                        if (ival == std.math.minInt(i64)) {
+                            // Preserve integer type on reload (direct literal may parse as float).
+                            try result.appendSlice(allocator, "(-9223372036854775807-1)");
+                        } else {
+                            var buf: [32]u8 = undefined;
+                            const lit = std.fmt.bufPrint(&buf, "{d}", .{ival}) catch "0";
+                            try result.appendSlice(allocator, lit);
+                        }
+                    },
+                    .number => |nval| try appendLuaQNumberLiteral(allocator, &result, nval),
+                    .object => |obj| {
+                        if (obj.type == .string) {
+                            const str = object.getObject(StringObject, obj).asSlice();
+                            try appendLuaQuotedString(allocator, &result, str);
+                        } else {
+                            return vm.raiseString("value has no literal form");
+                        }
+                    },
+                }
             },
             else => {
-                // Unknown specifier, output as-is
-                try result.append(allocator, '%');
-                try result.append(allocator, spec);
+                return vm.raiseString("invalid conversion");
             },
         }
     }
@@ -1572,22 +1789,152 @@ fn formatIntBuf(buf: []u8, val: i64, show_sign: bool, space_sign: bool) []const 
 
 /// Helper: Format float to buffer with precision
 fn formatFloatBuf(buf: []u8, val: f64, precision: usize, show_sign: bool, space_sign: bool) []const u8 {
-    // Build format result manually
-    var writer = std.io.fixedBufferStream(buf);
-    const w = writer.writer();
-
+    var start: usize = 0;
     if (val >= 0) {
         if (show_sign) {
-            w.writeByte('+') catch {};
+            if (buf.len == 0) return "(float)";
+            buf[0] = '+';
+            start = 1;
         } else if (space_sign) {
-            w.writeByte(' ') catch {};
+            if (buf.len == 0) return "(float)";
+            buf[0] = ' ';
+            start = 1;
         }
     }
 
-    // Format with precision
-    std.fmt.format(w, "{d:.[1]}", .{ val, precision }) catch {};
+    const rendered = std.fmt.float.render(buf[start..], val, .{
+        .mode = .decimal,
+        .precision = precision,
+    }) catch return "(float)";
 
-    return writer.getWritten();
+    return buf[0 .. start + rendered.len];
+}
+
+fn formatScientificBuf(buf: []u8, val: f64, precision: usize, upper: bool, show_sign: bool, space_sign: bool) []const u8 {
+    var tmp: [256]u8 = undefined;
+    const raw = std.fmt.float.render(&tmp, val, .{
+        .mode = .scientific,
+        .precision = precision,
+    }) catch return "(float)";
+
+    var w: usize = 0;
+    if (val >= 0) {
+        if (show_sign) {
+            if (w >= buf.len) return "(float)";
+            buf[w] = '+';
+            w += 1;
+        } else if (space_sign) {
+            if (w >= buf.len) return "(float)";
+            buf[w] = ' ';
+            w += 1;
+        }
+    }
+
+    const e_idx = std.mem.indexOfAny(u8, raw, "eE") orelse {
+        var i: usize = 0;
+        while (i < raw.len and w < buf.len) : (i += 1) {
+            buf[w] = if (upper) std.ascii.toUpper(raw[i]) else raw[i];
+            w += 1;
+        }
+        return buf[0..w];
+    };
+
+    if (w + e_idx + 1 >= buf.len) return "(float)";
+    @memcpy(buf[w .. w + e_idx], raw[0..e_idx]);
+    w += e_idx;
+    buf[w] = if (upper) 'E' else 'e';
+    w += 1;
+
+    var p = e_idx + 1;
+    var exp_neg = false;
+    if (p < raw.len and (raw[p] == '+' or raw[p] == '-')) {
+        exp_neg = raw[p] == '-';
+        p += 1;
+    }
+    var exp_val: usize = 0;
+    var saw_digit = false;
+    while (p < raw.len and raw[p] >= '0' and raw[p] <= '9') : (p += 1) {
+        saw_digit = true;
+        exp_val = exp_val * 10 + @as(usize, @intCast(raw[p] - '0'));
+    }
+    if (!saw_digit) return "(float)";
+
+    if (w >= buf.len) return "(float)";
+    buf[w] = if (exp_neg) '-' else '+';
+    w += 1;
+
+    var exp_buf: [20]u8 = undefined;
+    const exp_digits = std.fmt.bufPrint(&exp_buf, "{d}", .{exp_val}) catch "0";
+    if (exp_digits.len < 2) {
+        if (w >= buf.len) return "(float)";
+        buf[w] = '0';
+        w += 1;
+    }
+    if (w + exp_digits.len > buf.len) return "(float)";
+    @memcpy(buf[w .. w + exp_digits.len], exp_digits);
+    w += exp_digits.len;
+
+    return buf[0..w];
+}
+
+fn trimFloatTrailingZeros(buf: []u8) []const u8 {
+    const e_idx = std.mem.indexOfAny(u8, buf, "eE");
+    var end = e_idx orelse buf.len;
+    if (std.mem.indexOfScalar(u8, buf[0..end], '.')) |dot_idx| {
+        while (end > dot_idx + 1 and buf[end - 1] == '0') : (end -= 1) {}
+        if (end > dot_idx and buf[end - 1] == '.') end -= 1;
+    }
+    if (e_idx) |ei| {
+        if (end == ei) return buf;
+        const tail_len = buf.len - ei;
+        @memmove(buf[end .. end + tail_len], buf[ei..]);
+        return buf[0 .. end + tail_len];
+    }
+    return buf[0..end];
+}
+
+fn formatGeneralBuf(
+    buf: []u8,
+    val: f64,
+    precision_in: usize,
+    upper: bool,
+    show_sign: bool,
+    space_sign: bool,
+    alt_form: bool,
+) []const u8 {
+    const precision = if (precision_in == 0) 1 else precision_in;
+    if (!std.math.isFinite(val)) {
+        return formatScientificBuf(buf, val, precision - 1, upper, show_sign, space_sign);
+    }
+
+    const abs_val = @abs(val);
+    const exp10: i64 = if (abs_val == 0) 0 else @intFromFloat(@floor(std.math.log10(abs_val)));
+    const use_scientific = exp10 < -4 or exp10 >= @as(i64, @intCast(precision));
+
+    if (use_scientific) {
+        var tmp: [256]u8 = undefined;
+        var s = formatScientificBuf(&tmp, val, precision - 1, upper, show_sign, space_sign);
+        if (!alt_form) s = trimFloatTrailingZeros(tmp[0..s.len]);
+        if (s.len > buf.len) return "(float)";
+        @memcpy(buf[0..s.len], s);
+        return buf[0..s.len];
+    }
+
+    const frac_prec_i: i64 = @as(i64, @intCast(precision)) - (exp10 + 1);
+    const frac_prec: usize = if (frac_prec_i > 0) @intCast(frac_prec_i) else 0;
+    var tmp: [256]u8 = undefined;
+    var s = formatFloatBuf(&tmp, val, frac_prec, show_sign, space_sign);
+    if (!alt_form) s = trimFloatTrailingZeros(tmp[0..s.len]);
+    if (upper) {
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            buf[i] = std.ascii.toUpper(s[i]);
+        }
+        return buf[0..s.len];
+    }
+    if (s.len > buf.len) return "(float)";
+    @memcpy(buf[0..s.len], s);
+    return buf[0..s.len];
 }
 
 /// Helper: Pad string to width and append to result
@@ -1606,6 +1953,69 @@ fn padAndAppend(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: [
         try result.appendNTimes(allocator, pad_char, padding);
         try result.appendSlice(allocator, str);
     }
+}
+
+fn appendLuaQNumberLiteral(allocator: std.mem.Allocator, result: *std.ArrayList(u8), n: f64) !void {
+    if (std.math.isNan(n)) {
+        try result.appendSlice(allocator, "(0/0)");
+        return;
+    }
+    if (std.math.isInf(n)) {
+        if (n < 0) {
+            try result.appendSlice(allocator, "(-1/0)");
+        } else {
+            try result.appendSlice(allocator, "(1/0)");
+        }
+        return;
+    }
+
+    var buf: [128]u8 = undefined;
+    const lit = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "0";
+    try result.appendSlice(allocator, lit);
+
+    // Keep float type for integral-looking finite numbers.
+    const has_dot = std.mem.indexOfScalar(u8, lit, '.') != null;
+    const has_exp = std.mem.indexOfAny(u8, lit, "eE") != null;
+    if (!has_dot and !has_exp) {
+        try result.appendSlice(allocator, ".0");
+    }
+}
+
+fn appendLuaQuotedString(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: []const u8) !void {
+    try result.append(allocator, '"');
+    for (str, 0..) |c, idx| {
+        switch (c) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            else => {
+                if (c == 0) {
+                    const next_is_digit = idx + 1 < str.len and std.ascii.isDigit(str[idx + 1]);
+                    if (next_is_digit) {
+                        try result.appendSlice(allocator, "\\000");
+                    } else {
+                        try result.appendSlice(allocator, "\\0");
+                    }
+                } else if (c < 32 or c == 127) {
+                    try appendOctalEscape(allocator, result, c);
+                } else {
+                    try result.append(allocator, c);
+                }
+            },
+        }
+    }
+    try result.append(allocator, '"');
+}
+
+fn appendOctalEscape(allocator: std.mem.Allocator, result: *std.ArrayList(u8), c: u8) !void {
+    var esc: [4]u8 = undefined;
+    esc[0] = '\\';
+    esc[1] = @as(u8, '0') + ((c >> 6) & 0x7);
+    esc[2] = @as(u8, '0') + ((c >> 3) & 0x7);
+    esc[3] = @as(u8, '0') + (c & 0x7);
+    try result.appendSlice(allocator, &esc);
 }
 
 /// string.dump(function [, strip]) - Returns binary representation of function

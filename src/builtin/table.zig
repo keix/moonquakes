@@ -262,11 +262,11 @@ fn compareForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
 pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
-    if (nargs < 1) return error.BadArgument;
+    if (nargs < 1) return vm.raiseString("bad argument #1 to 'concat' (table expected)");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
-    const table = tbl_arg.asTable() orelse return error.BadArgument;
+    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'concat' (table expected)");
 
     const len = getTableLength(table);
 
@@ -350,7 +350,9 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
             };
         } else {
             // Non-string/number element - error in Lua
-            return error.BadArgument;
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "invalid value at index {d}", .{i}) catch "invalid value";
+            return vm.raiseString(msg);
         }
     }
 
