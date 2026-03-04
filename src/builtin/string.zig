@@ -45,6 +45,9 @@ fn formatInteger(buf: []u8, i: i64) []const u8 {
 }
 
 pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
     if (nresults == 0) return;
 
     const arg = if (nargs > 0) vm.stack[vm.base + func_reg + 1] else TValue.nil;
@@ -56,7 +59,6 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             vm.stack[vm.base + func_reg + i] = .nil;
         }
     }
-    vm.top = vm.base + func_reg + 1;
 }
 
 fn callMetamethodUnary(vm: *VM, mm: TValue, value: TValue) !TValue {
