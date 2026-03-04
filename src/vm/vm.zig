@@ -74,9 +74,9 @@ pub const VM = struct {
     rt: *Runtime,
     thread: *ThreadObject,
 
-    // TODO(gc): Revisit fixed size (8). Deep native/metamethod nesting may need
-    // a growable temp-root stack to avoid fragile OOM paths.
-    temp_roots: [8]TValue = [_]TValue{.nil} ** 8,
+    // TODO(gc): Revisit fixed size. A growable temp-root stack would remove
+    // remaining depth limits in deeply nested native/metamethod paths.
+    temp_roots: [32]TValue = [_]TValue{.nil} ** 32,
     temp_roots_count: u8 = 0,
 
     hook_func: ?*ClosureObject = null,
