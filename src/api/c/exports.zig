@@ -44,9 +44,10 @@ pub export fn mq_newstate() ?*mq_State {
 pub export fn mq_close(state: ?*mq_State) void {
     const s = state orelse return;
     const real: *State = @ptrCast(@alignCast(s));
+    const rt = real.vm.rt;
 
     real.vm.deinit();
-    real.vm.rt.deinit();
+    rt.deinit();
 
     std.heap.c_allocator.destroy(real);
 }
