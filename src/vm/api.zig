@@ -40,6 +40,7 @@ pub fn closeUpvalues(self: *VM, level: u32) void {
         if (uv_level < level) break;
         self.open_upvalues = uv.next_open;
         uv.close();
+        self.gc().barrierBackValue(&uv.header, uv.closed);
     }
 }
 

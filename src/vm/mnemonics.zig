@@ -65,6 +65,18 @@ fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32
     };
 }
 
+fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
+    try table.set(key, value);
+    vm.gc().barrierBackValue(&table.header, value);
+}
+
+fn upvalueSetWithBarrier(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
+    upvalue.set(value);
+    if (upvalue.isClosed()) {
+        vm.gc().barrierBackValue(&upvalue.header, value);
+    }
+}
+
 pub fn luaFloorDiv(a: f64, b: f64) f64 {
     return @floor(a / b);
 }
@@ -2116,7 +2128,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                try env_table.set(TValue.fromString(key), value);
+                try tableSetWithBarrier(vm, env_table, TValue.fromString(key), value);
             } else {
                 return error.InvalidTableKey;
             }
@@ -2141,9 +2153,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             if (ci.closure) |closure| {
                 if (b < closure.upvalues.len) {
-                    // TODO(gc): If incremental/generational GC is enabled,
-                    // apply write barrier for upvalue assignments.
-                    closure.upvalues[b].set(vm.stack[vm.base + a]);
+                    upvalueSetWithBarrier(vm, closure.upvalues[b], vm.stack[vm.base + a]);
                 }
             }
             return .Continue;
@@ -2214,7 +2224,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 } else {
                     // Integer, number, boolean, etc. - use TValue key directly
-                    try table.set(key_val, value);
+                    try tableSetWithBarrier(vm, table, key_val, value);
                 }
             } else {
                 return error.InvalidTableOperation;
@@ -2266,7 +2276,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (table_val.asTable()) |table| {
                 const key = TValue{ .integer = @intCast(b) };
                 // Direct set (SETI typically doesn't trigger __newindex for existing keys)
-                try table.set(key, value);
+                try tableSetWithBarrier(vm, table, key, value);
             } else {
                 return error.InvalidTableOperation;
             }
@@ -2554,7 +2564,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 // Set value in table (handles __newindex if needed)
                 // Note: SETLIST uses raw set, not dispatchNewindexMM
-                try table.set(key, value);
+                try tableSetWithBarrier(vm, table, key, value);
             }
 
             return .Continue;
@@ -3297,20 +3307,20 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
     const key_val = TValue.fromString(key);
     // Fast path: key already exists in table - just update it
     if (table.get(key_val) != null) {
-        try table.set(key_val, value);
+        try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     }
 
     // Check for __newindex metamethod
     const mt = table.metatable orelse {
         // No metatable, just set the value
-        try table.set(key_val, value);
+        try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
     const newindex_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex))) orelse {
         // No __newindex, just set the value
-        try table.set(key_val, value);
+        try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
@@ -3360,7 +3370,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
     }
 
     // __newindex is not a valid type, just set normally
-    try table.set(TValue.fromString(key), value);
+    try tableSetWithBarrier(vm, table, TValue.fromString(key), value);
     return null;
 }
 
