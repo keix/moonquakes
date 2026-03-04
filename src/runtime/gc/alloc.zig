@@ -68,12 +68,14 @@ pub fn newObjectHeader(self: anytype, obj_type: GCObjectType) GCObject {
 
 /// Allocate a new string object
 pub fn allocString(self: anytype, str: []const u8) !*StringObject {
-    // TODO(lua54-strings): intern only short strings (PUC-Lua style) and
-    // bypass interning for long strings to match pointer-identity behavior.
-    // Candidate policy: intern when len <= 40.
-    // Check intern table for existing string
-    if (self.strings.get(str)) |existing| {
-        return existing;
+    // Lua-compatible policy: intern only short strings.
+    const short_string_max_len: usize = 40;
+    const should_intern = str.len <= short_string_max_len;
+    if (should_intern) {
+        // Check intern table for existing short string
+        if (self.strings.get(str)) |existing| {
+            return existing;
+        }
     }
 
     // Allocate new StringObject
@@ -90,8 +92,10 @@ pub fn allocString(self: anytype, str: []const u8) !*StringObject {
     // Add to GC object list
     self.objects = &obj.header;
 
-    // Add to intern table (key is the inline string data)
-    try self.strings.put(obj.asSlice(), obj);
+    // Add short strings to intern table (key is inline string data)
+    if (should_intern) {
+        try self.strings.put(obj.asSlice(), obj);
+    }
 
     return obj;
 }
