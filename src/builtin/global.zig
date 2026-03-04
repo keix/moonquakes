@@ -539,13 +539,10 @@ pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Set the new metatable (nil clears it)
     if (mt_arg.isNil()) {
-        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
-        // when changing object metatable references.
         table.metatable = null;
     } else if (mt_arg.asTable()) |new_mt| {
-        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
-        // when changing object metatable references.
         table.metatable = new_mt;
+        vm.gc().barrierBack(&table.header, &new_mt.header);
     } else {
         return vm.raiseString("bad argument #2 to 'setmetatable' (nil or table expected)");
     }

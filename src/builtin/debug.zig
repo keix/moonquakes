@@ -491,16 +491,16 @@ pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
     // Try to set metatable based on value type
     if (value.asTable()) |table| {
         // Table: set individual metatable (no protection check in debug.setmetatable)
-        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
-        // for metatable pointer updates.
         table.metatable = new_mt;
+        if (new_mt) |mt| vm.gc().barrierBack(&table.header, &mt.header);
     } else if (value.asUserdata()) |ud| {
         // Userdata: set individual metatable
-        // TODO(gc): If incremental/generational GC is enabled, apply write barrier
-        // for metatable pointer updates.
         ud.metatable = new_mt;
+        if (new_mt) |mt| vm.gc().barrierBack(&ud.header, &mt.header);
     } else {
         // Primitive type: set shared metatable
+        // TODO(gc): shared_mt is not a GCObject parent, so incremental marking needs
+        // a root-write path (or immediate mark) when setting shared metatables.
         _ = vm.gc().shared_mt.setForValue(value, new_mt);
     }
 
