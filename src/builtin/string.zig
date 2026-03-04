@@ -4,6 +4,7 @@ const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const object = @import("../runtime/gc/object.zig");
+const StringObject = object.StringObject;
 const VM = @import("../vm/vm.zig").VM;
 
 /// Lua 5.4 String Library
@@ -1524,20 +1525,26 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 }
             },
             'q' => {
-                // Quoted string
-                const str = if (arg.asString()) |s| s.asSlice() else "nil";
-                try result.append(allocator, '"');
-                for (str) |c| {
-                    switch (c) {
-                        '"' => try result.appendSlice(allocator, "\\\""),
-                        '\\' => try result.appendSlice(allocator, "\\\\"),
-                        '\n' => try result.appendSlice(allocator, "\\n"),
-                        '\r' => try result.appendSlice(allocator, "\\r"),
-                        '\t' => try result.appendSlice(allocator, "\\t"),
-                        else => try result.append(allocator, c),
-                    }
+                // Lua %q: produce a loadable literal for strings/numbers/booleans/nil.
+                // TODO(lua54-strings): tighten numeric canonicalization to match PUC-Lua byte-for-byte.
+                switch (arg) {
+                    .nil => try result.appendSlice(allocator, "nil"),
+                    .boolean => |b| try result.appendSlice(allocator, if (b) "true" else "false"),
+                    .integer => |ival| {
+                        var buf: [32]u8 = undefined;
+                        const lit = std.fmt.bufPrint(&buf, "{d}", .{ival}) catch "0";
+                        try result.appendSlice(allocator, lit);
+                    },
+                    .number => |nval| try appendLuaQNumberLiteral(allocator, &result, nval),
+                    .object => |obj| {
+                        if (obj.type == .string) {
+                            const str = object.getObject(StringObject, obj).asSlice();
+                            try appendLuaQuotedString(allocator, &result, str);
+                        } else {
+                            return vm.raiseString("value has no literal form");
+                        }
+                    },
                 }
-                try result.append(allocator, '"');
             },
             else => {
                 // Unknown specifier, output as-is
@@ -1606,6 +1613,69 @@ fn padAndAppend(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: [
         try result.appendNTimes(allocator, pad_char, padding);
         try result.appendSlice(allocator, str);
     }
+}
+
+fn appendLuaQNumberLiteral(allocator: std.mem.Allocator, result: *std.ArrayList(u8), n: f64) !void {
+    if (std.math.isNan(n)) {
+        try result.appendSlice(allocator, "(0/0)");
+        return;
+    }
+    if (std.math.isInf(n)) {
+        if (n < 0) {
+            try result.appendSlice(allocator, "(-1/0)");
+        } else {
+            try result.appendSlice(allocator, "(1/0)");
+        }
+        return;
+    }
+
+    var buf: [128]u8 = undefined;
+    const lit = std.fmt.bufPrint(&buf, "{d}", .{n}) catch "0";
+    try result.appendSlice(allocator, lit);
+
+    // Keep float type for integral-looking finite numbers.
+    const has_dot = std.mem.indexOfScalar(u8, lit, '.') != null;
+    const has_exp = std.mem.indexOfAny(u8, lit, "eE") != null;
+    if (!has_dot and !has_exp) {
+        try result.appendSlice(allocator, ".0");
+    }
+}
+
+fn appendLuaQuotedString(allocator: std.mem.Allocator, result: *std.ArrayList(u8), str: []const u8) !void {
+    try result.append(allocator, '"');
+    for (str, 0..) |c, idx| {
+        switch (c) {
+            '"' => try result.appendSlice(allocator, "\\\""),
+            '\\' => try result.appendSlice(allocator, "\\\\"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            else => {
+                if (c == 0) {
+                    const next_is_digit = idx + 1 < str.len and std.ascii.isDigit(str[idx + 1]);
+                    if (next_is_digit) {
+                        try result.appendSlice(allocator, "\\000");
+                    } else {
+                        try result.appendSlice(allocator, "\\0");
+                    }
+                } else if (c < 32 or c == 127) {
+                    try appendOctalEscape(allocator, result, c);
+                } else {
+                    try result.append(allocator, c);
+                }
+            },
+        }
+    }
+    try result.append(allocator, '"');
+}
+
+fn appendOctalEscape(allocator: std.mem.Allocator, result: *std.ArrayList(u8), c: u8) !void {
+    var esc: [4]u8 = undefined;
+    esc[0] = '\\';
+    esc[1] = @as(u8, '0') + ((c >> 6) & 0x7);
+    esc[2] = @as(u8, '0') + ((c >> 3) & 0x7);
+    esc[3] = @as(u8, '0') + (c & 0x7);
+    try result.appendSlice(allocator, &esc);
 }
 
 /// string.dump(function [, strip]) - Returns binary representation of function

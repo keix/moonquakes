@@ -68,6 +68,9 @@ pub fn newObjectHeader(self: anytype, obj_type: GCObjectType) GCObject {
 
 /// Allocate a new string object
 pub fn allocString(self: anytype, str: []const u8) !*StringObject {
+    // TODO(lua54-strings): intern only short strings (PUC-Lua style) and
+    // bypass interning for long strings to match pointer-identity behavior.
+    // Candidate policy: intern when len <= 40.
     // Check intern table for existing string
     if (self.strings.get(str)) |existing| {
         return existing;
