@@ -357,6 +357,8 @@ pub const GC = struct {
             // Note: finalizer_queued stays true to prevent re-finalization.
             // Lua semantics: once finalized, object is not finalized again
             // (unless setmetatable is called to set a new __gc).
+            // TODO(gc): Audit/reset policy when __gc is changed after finalization
+            // to ensure behavior matches Lua 5.4 edge cases.
         }
 
         self.finalizer_queue.clearRetainingCapacity();

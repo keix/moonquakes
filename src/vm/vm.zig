@@ -74,6 +74,8 @@ pub const VM = struct {
     rt: *Runtime,
     thread: *ThreadObject,
 
+    // TODO(gc): Revisit fixed size (8). Deep native/metamethod nesting may need
+    // a growable temp-root stack to avoid fragile OOM paths.
     temp_roots: [8]TValue = [_]TValue{.nil} ** 8,
     temp_roots_count: u8 = 0,
 

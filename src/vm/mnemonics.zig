@@ -2141,6 +2141,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             if (ci.closure) |closure| {
                 if (b < closure.upvalues.len) {
+                    // TODO(gc): If incremental/generational GC is enabled,
+                    // apply write barrier for upvalue assignments.
                     closure.upvalues[b].set(vm.stack[vm.base + a]);
                 }
             }
