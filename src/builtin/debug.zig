@@ -499,8 +499,13 @@ pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
         if (new_mt) |mt| vm.gc().barrierBack(&ud.header, &mt.header);
     } else {
         // Primitive type: set shared metatable
-        // TODO(gc): shared_mt is not a GCObject parent, so incremental marking needs
-        // a root-write path (or immediate mark) when setting shared metatables.
+        if (new_mt) |mt| {
+            // shared_mt is a GC root, not a GCObject parent. If this root is updated
+            // during mark phase, make the new target reachable immediately.
+            if (vm.gc().gc_state == .mark) {
+                vm.gc().markGray(&mt.header);
+            }
+        }
         _ = vm.gc().shared_mt.setForValue(value, new_mt);
     }
 
