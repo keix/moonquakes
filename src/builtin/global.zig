@@ -360,13 +360,18 @@ pub fn nativePairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.pairs)))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
-                var mm_results = [_]TValue{ .nil, .nil, .nil };
-                try call.callValueInto(vm, pairs_mm, &[_]TValue{table_arg}, mm_results[0..]);
                 const copy_n: u32 = @min(nresults, 3);
                 var i: u32 = 0;
                 while (i < copy_n) : (i += 1) {
-                    vm.stack[vm.base + func_reg + i] = mm_results[i];
+                    vm.stack[vm.base + func_reg + i] = .nil;
                 }
+                // Keep a stable extra slot nil for common generic-for shape.
+                if (nresults > 3) vm.stack[vm.base + func_reg + 3] = .nil;
+
+                // Route Lua return placement directly into caller-visible result slots.
+                // This preserves results even if __pairs yields across this native frame.
+                const result_slice = vm.stack[vm.base + func_reg .. vm.base + func_reg + copy_n];
+                try call.callValueIntoAt(vm, pairs_mm, &[_]TValue{table_arg}, result_slice, vm.base + func_reg);
                 if (nresults > copy_n) {
                     i = copy_n;
                     while (i < nresults) : (i += 1) {

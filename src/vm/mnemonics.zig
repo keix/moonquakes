@@ -859,8 +859,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer +% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .add)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb + nc };
             }
             return .Continue;
@@ -877,8 +883,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer -% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .sub)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb - nc };
             }
             return .Continue;
@@ -895,8 +907,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer *% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mul)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb * nc };
             }
             return .Continue;
@@ -909,8 +927,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .div)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             // Division by zero returns inf/-inf/nan per IEEE 754
             vm.stack[vm.base + a] = .{ .number = nb / nc };
             return .Continue;
@@ -928,8 +952,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .integer = res };
                 return .Continue;
             }
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .idiv)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb, nc) };
             return .Continue;
         },
@@ -946,8 +976,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .integer = res };
                 return .Continue;
             }
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mod)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = luaMod(nb, nc) };
             return .Continue;
         },
@@ -959,8 +995,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .pow)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = std.math.pow(f64, nb, nc) };
             return .Continue;
         },
@@ -2161,10 +2203,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                const value = env_table.get(TValue.fromString(key)) orelse .nil;
-                vm.stack[vm.base + a] = value;
                 vm.last_field_reg = a;
                 vm.last_field_key = key;
+                if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableKey;
             }
@@ -2187,7 +2230,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                try tableSetWithBarrier(vm, env_table, TValue.fromString(key), value);
+                if (try dispatchNewindexMM(vm, env_table, key, TValue.fromTable(env_table), value)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableKey;
             }
@@ -2243,6 +2288,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
                                 if (index_mm.asTable()) |index_table| {
                                     vm.stack[vm.base + a] = index_table.get(key_val) orelse .nil;
+                                } else if (index_mm.asClosure()) |closure| {
+                                    const proto = closure.proto;
+                                    const new_base = vm.top;
+                                    vm.stack[new_base] = table_val;
+                                    vm.stack[new_base + 1] = key_val;
+                                    var i: u32 = 2;
+                                    while (i < proto.numparams) : (i += 1) {
+                                        vm.stack[new_base + i] = .nil;
+                                    }
+                                    vm.top = new_base + proto.maxstacksize;
+                                    _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + a), 1);
+                                    return .LoopContinue;
+                                } else if (index_mm.isObject() and index_mm.object.type == .native_closure) {
+                                    const nc = object.getObject(NativeClosureObject, index_mm.object);
+                                    const temp = vm.top;
+                                    vm.stack[temp] = index_mm;
+                                    vm.stack[temp + 1] = table_val;
+                                    vm.stack[temp + 2] = key_val;
+                                    vm.top = temp + 3;
+                                    try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                                    vm.stack[vm.base + a] = vm.stack[temp];
+                                    vm.top = temp;
                                 } else {
                                     vm.stack[vm.base + a] = .nil;
                                 }
@@ -2282,8 +2349,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         return result;
                     }
                 } else {
-                    // Integer, number, boolean, etc. - use TValue key directly
-                    try tableSetWithBarrier(vm, table, key_val, value);
+                    // Integer, number, boolean, etc.
+                    if (try dispatchNewindexMMValue(vm, table, key_val, table_val, value)) |result| {
+                        return result;
+                    }
                 }
             } else {
                 return error.InvalidTableOperation;
@@ -2309,6 +2378,28 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
                             if (index_mm.asTable()) |index_table| {
                                 vm.stack[vm.base + a] = index_table.get(key) orelse .nil;
+                            } else if (index_mm.asClosure()) |closure| {
+                                const proto = closure.proto;
+                                const new_base = vm.top;
+                                vm.stack[new_base] = table_val;
+                                vm.stack[new_base + 1] = key;
+                                var i: u32 = 2;
+                                while (i < proto.numparams) : (i += 1) {
+                                    vm.stack[new_base + i] = .nil;
+                                }
+                                vm.top = new_base + proto.maxstacksize;
+                                _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + a), 1);
+                                return .LoopContinue;
+                            } else if (index_mm.isObject() and index_mm.object.type == .native_closure) {
+                                const nc = object.getObject(NativeClosureObject, index_mm.object);
+                                const temp = vm.top;
+                                vm.stack[temp] = index_mm;
+                                vm.stack[temp + 1] = table_val;
+                                vm.stack[temp + 2] = key;
+                                vm.top = temp + 3;
+                                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+                                vm.stack[vm.base + a] = vm.stack[temp];
+                                vm.top = temp;
                             } else {
                                 vm.stack[vm.base + a] = .nil;
                             }
@@ -2334,8 +2425,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 const key = TValue{ .integer = @intCast(b) };
-                // Direct set (SETI typically doesn't trigger __newindex for existing keys)
-                try tableSetWithBarrier(vm, table, key, value);
+                if (try dispatchNewindexMMValue(vm, table, key, table_val, value)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableOperation;
             }
@@ -2659,35 +2751,35 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         // Metamethod dispatch opcodes
         // These are emitted after arithmetic operations for metamethod fallback
         .MMBIN => {
-            // MMBIN A B C: metamethod for binary operation R[B] op R[C]
-            // A encodes the metamethod event (add, sub, mul, etc.)
+            // MMBIN A B C: metamethod for binary operation R[A] op R[B]
+            // C encodes the metamethod event (add, sub, mul, etc.)
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
 
+            const va = vm.stack[vm.base + a];
             const vb = vm.stack[vm.base + b];
-            const vc = vm.stack[vm.base + c];
 
-            // Decode metamethod event from A
-            const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(va, vb, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                 // No metamethod found - arithmetic error
                 return error.ArithmeticError;
             };
 
-            // Call the metamethod: mm(vb, vc) -> result at b
+            // Call the metamethod: mm(va, vb) -> result at a
             // Set up call: function at temp, args at temp+1, temp+2
             const temp = vm.top;
             vm.stack[temp] = mm;
-            vm.stack[temp + 1] = vb;
-            vm.stack[temp + 2] = vc;
+            vm.stack[temp + 1] = va;
+            vm.stack[temp + 2] = vb;
             vm.top = temp + 3;
 
             // If metamethod is a closure, push call frame
             if (mm.asClosure()) |closure| {
-                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + b), 1);
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
                 return .LoopContinue;
             }
 
@@ -2695,8 +2787,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (mm.isObject() and mm.object.type == .native_closure) {
                 const nc = object.getObject(NativeClosureObject, mm.object);
                 try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-                // Result is at temp, move to b
-                vm.stack[vm.base + b] = vm.stack[temp];
+                // Result is at temp, move to a
+                vm.stack[vm.base + a] = vm.stack[temp];
                 vm.top = temp;
                 return .Continue;
             }
@@ -3112,6 +3204,13 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     return try callBinMetamethod(vm, mm, vb, vc, a);
 }
 
+fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime event: MetaEvent) !?ExecuteResult {
+    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+        return null;
+    };
+    return try callBinMetamethod(vm, mm, vb, vc, result_reg);
+}
+
 /// Check if both values can be used for arithmetic (fast path)
 /// Lua 5.4: numbers and strings (coercible to numbers) are allowed
 fn canDoArith(a: TValue, b: TValue) bool {
@@ -3363,7 +3462,10 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 /// If __newindex is a table, set the key in that table
 /// If __newindex is a function, call it with (table, key, value)
 fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringObject, table_val: TValue, value: TValue) !?ExecuteResult {
-    const key_val = TValue.fromString(key);
+    return try dispatchNewindexMMValue(vm, table, TValue.fromString(key), table_val, value);
+}
+
+fn dispatchNewindexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, value: TValue) !?ExecuteResult {
     // Fast path: key already exists in table - just update it
     if (table.get(key_val) != null) {
         try tableSetWithBarrier(vm, table, key_val, value);
@@ -3372,21 +3474,18 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
 
     // Check for __newindex metamethod
     const mt = table.metatable orelse {
-        // No metatable, just set the value
         try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
     const newindex_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex))) orelse {
-        // No __newindex, just set the value
         try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
     // __newindex is a table: set in that table instead
     if (newindex_mm.asTable()) |newindex_table| {
-        // Recursive __newindex dispatch
-        return try dispatchNewindexMM(vm, newindex_table, key, newindex_mm, value);
+        return try dispatchNewindexMMValue(vm, newindex_table, key_val, newindex_mm, value);
     }
 
     // __newindex is a function: call it with (table, key, value)
@@ -3394,20 +3493,16 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         const proto = closure.proto;
         const new_base = vm.top;
 
-        // Set up parameters: table, key, value
         vm.stack[new_base] = table_val;
-        vm.stack[new_base + 1] = TValue.fromString(key);
+        vm.stack[new_base + 1] = key_val;
         vm.stack[new_base + 2] = value;
 
-        // Fill remaining parameters with nil if needed
         var i: u32 = 3;
         while (i < proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
         vm.top = new_base + proto.maxstacksize;
-
-        // __newindex doesn't return a value, but we still need to call it
         _ = try pushCallInfo(vm, proto, closure, new_base, new_base, 0);
         return .LoopContinue;
     }
@@ -3419,7 +3514,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
 
         vm.stack[temp] = newindex_mm;
         vm.stack[temp + 1] = table_val;
-        vm.stack[temp + 2] = TValue.fromString(key);
+        vm.stack[temp + 2] = key_val;
         vm.stack[temp + 3] = value;
         vm.top = temp + 4;
 
@@ -3429,7 +3524,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
     }
 
     // __newindex is not a valid type, just set normally
-    try tableSetWithBarrier(vm, table, TValue.fromString(key), value);
+    try tableSetWithBarrier(vm, table, key_val, value);
     return null;
 }
 

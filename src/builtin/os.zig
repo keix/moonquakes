@@ -688,8 +688,6 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// os.time([table]) - Returns the current time when called without arguments
 pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     if (nargs >= 1 and vm.stack[vm.base + func_reg + 1] != .nil) {
         const table = vm.stack[vm.base + func_reg + 1].asTable() orelse return vm.raiseString("table expected");
 
@@ -743,13 +741,17 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         try writeDateField(table, vm, "yday", .{ .integer = normalized.yday });
         try writeDateField(table, vm, "isdst", .{ .boolean = false });
 
-        vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+        }
         return;
     }
 
     // Return current Unix timestamp (seconds since epoch)
     const timestamp = std.time.timestamp();
-    vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+    }
 }
 
 /// os.tmpname() - Returns a string with a file name that can be used for a temporary file

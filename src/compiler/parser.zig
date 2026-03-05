@@ -1283,8 +1283,10 @@ pub const Parser = struct {
                     // Multiple assignment: a, b, c = expr, expr, ...
                     try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Check for chained method call: t.a:method() or field assignment
-                    try self.parseFieldAccessOrMethodCall();
+                    // Field/index chains are handled by parseAssignment, which also
+                    // supports call statements (t.x(), t:x()) and multi-assign starts
+                    // like "t.x, t.y = ...".
+                    try self.parseAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
                     _ = try self.parseExpr();
@@ -1513,10 +1515,15 @@ pub const Parser = struct {
                     },
                 }
             } else {
-                // Global variable: load from _ENV
                 table_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(name);
-                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                if (std.mem.eql(u8, name, "_ENV")) {
+                    // _ENV is the environment upvalue itself.
+                    try self.proto.emitGETUPVAL(table_reg, 0);
+                } else {
+                    // Global variable: load from _ENV
+                    const name_const = try self.proto.addConstString(name);
+                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                }
             }
 
             // Parse field chain: .a.b.c or [key] until we hit '='
@@ -1650,6 +1657,12 @@ pub const Parser = struct {
             }
 
             const value_reg = try self.parseExpr();
+
+            if (std.mem.eql(u8, name, "_ENV")) {
+                // _ENV is the environment upvalue itself.
+                try self.proto.emitSETUPVAL(value_reg, 0);
+                return;
+            }
 
             if (try self.proto.resolveVariable(name)) |loc| {
                 switch (loc) {
@@ -1806,6 +1819,10 @@ pub const Parser = struct {
 
             switch (target) {
                 .variable => |var_name| {
+                    if (std.mem.eql(u8, var_name, "_ENV")) {
+                        try self.proto.emitSETUPVAL(value_reg, 0);
+                        continue;
+                    }
                     if (try self.proto.resolveVariable(var_name)) |loc| {
                         switch (loc) {
                             .local => |local_reg| {
@@ -1852,8 +1869,12 @@ pub const Parser = struct {
                 }
             } else {
                 table_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(base_name);
-                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                if (std.mem.eql(u8, base_name, "_ENV")) {
+                    try self.proto.emitGETUPVAL(table_reg, 0);
+                } else {
+                    const name_const = try self.proto.addConstString(base_name);
+                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                }
             }
 
             // Parse field chain until we hit ',' or '='
@@ -2003,6 +2024,10 @@ pub const Parser = struct {
 
             switch (target) {
                 .variable => |var_name| {
+                    if (std.mem.eql(u8, var_name, "_ENV")) {
+                        try self.proto.emitSETUPVAL(value_reg, 0);
+                        continue;
+                    }
                     if (try self.proto.resolveVariable(var_name)) |loc| {
                         switch (loc) {
                             .local => |local_reg| {
@@ -4324,10 +4349,14 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
             }
         } else {
-            // Fall back to global lookup via GETTABUP
             base_reg = self.proto.allocTemp();
-            const name_const = try self.proto.addConstString(base_name);
-            try self.proto.emitGETTABUP(base_reg, 0, name_const);
+            if (std.mem.eql(u8, base_name, "_ENV")) {
+                try self.proto.emitGETUPVAL(base_reg, 0);
+            } else {
+                // Fall back to global lookup via GETTABUP
+                const name_const = try self.proto.addConstString(base_name);
+                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+            }
         }
         self.advance(); // consume base name
 
