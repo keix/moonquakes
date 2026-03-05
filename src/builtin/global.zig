@@ -360,15 +360,15 @@ pub fn nativePairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.pairs)))) |pairs_mm| {
                 // Call __pairs(t) and return its results
                 // __pairs should return (iterator, state, initial_key)
-                const result = try call.callValue(vm, pairs_mm, &[_]TValue{table_arg});
-                vm.stack[vm.base + func_reg] = result;
-                // Note: callValue only returns first result
-                // For full multi-return support, we'd need callValueMulti
-                // For now, common usage is to return a single iterator function
-                if (nresults > 1) vm.stack[vm.base + func_reg + 1] = table_arg;
-                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;
-                if (nresults > 3) {
-                    var i: u32 = 3;
+                var mm_results = [_]TValue{ .nil, .nil, .nil };
+                try call.callValueInto(vm, pairs_mm, &[_]TValue{table_arg}, mm_results[0..]);
+                const copy_n: u32 = @min(nresults, 3);
+                var i: u32 = 0;
+                while (i < copy_n) : (i += 1) {
+                    vm.stack[vm.base + func_reg + i] = mm_results[i];
+                }
+                if (nresults > copy_n) {
+                    i = copy_n;
                     while (i < nresults) : (i += 1) {
                         vm.stack[vm.base + func_reg + i] = .nil;
                     }
@@ -476,7 +476,22 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     // Use integer key directly (Lua 5.4 supports any TValue as key)
     const key = TValue{ .integer = next_index };
-    const value = table.get(key);
+    var value = table.get(key);
+
+    // Lua-compatible fallback: ipairs uses t[i], so __index must be honored
+    // when the raw array slot is absent.
+    if (value == null or value.?.isNil()) {
+        if (metamethod.getMetamethod(table_arg, .index, &vm.gc().mm_keys, &vm.gc().shared_mt)) |index_mm| {
+            if (index_mm.asTable()) |idx_table| {
+                value = idx_table.get(key);
+            } else {
+                // TODO(vm): support full chained __index semantics.
+                // For now, function __index is enough for Lua test coverage.
+                const mm_result = try call.callValueSafe(vm, index_mm, &[_]TValue{ table_arg, key });
+                value = mm_result;
+            }
+        }
+    }
 
     if (value == null or value.?.isNil()) {
         // No more elements

@@ -1152,6 +1152,7 @@ pub const Parser = struct {
     current: Token,
     proto: *ProtoBuilder,
     break_jumps: std.ArrayList(u32),
+    loop_close_regs: std.ArrayList(u8),
     loop_depth: usize,
     /// Error message buffer for detailed parse error reporting
     error_msg: [256]u8 = undefined,
@@ -1163,6 +1164,7 @@ pub const Parser = struct {
             .proto = proto,
             .current = undefined,
             .break_jumps = .{},
+            .loop_close_regs = .{},
             .loop_depth = 0,
         };
         p.advance();
@@ -1186,6 +1188,7 @@ pub const Parser = struct {
 
     pub fn deinit(self: *Parser) void {
         self.break_jumps.deinit(self.proto.allocator);
+        self.loop_close_regs.deinit(self.proto.allocator);
     }
 
     fn advance(self: *Parser) void {
@@ -3129,6 +3132,8 @@ pub const Parser = struct {
 
         // Register loop variable (user_var is at base_reg + 3)
         try self.proto.addVariable(loop_var_name, base_reg + 3);
+        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
+        defer _ = self.loop_close_regs.pop();
 
         // Mark for loop body - each iteration resets to this point
         const loop_body_mark = self.proto.markTemps();
@@ -3288,6 +3293,8 @@ pub const Parser = struct {
 
         // Mark to-be-closed state.
         try self.proto.emit(.TBC, base_reg + 3, 0, 0);
+        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
+        defer _ = self.loop_close_regs.pop();
 
         // Mark for loop body
         const loop_body_mark = self.proto.markTemps();
@@ -3365,6 +3372,9 @@ pub const Parser = struct {
 
         // Mark for loop body
         const body_mark = self.proto.markTemps();
+        const break_close_reg = self.proto.locals_top;
+        try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
+        defer _ = self.loop_close_regs.pop();
         try self.proto.enterScope();
 
         // Parse loop body
@@ -3409,6 +3419,9 @@ pub const Parser = struct {
 
         // Mark for loop body
         const body_mark = self.proto.markTemps();
+        const break_close_reg = self.proto.locals_top;
+        try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
+        defer _ = self.loop_close_regs.pop();
         try self.proto.enterScope();
 
         // Parse loop body (stops at 'until')
@@ -3452,8 +3465,10 @@ pub const Parser = struct {
             return error.BreakOutsideLoop;
         }
 
-        // Ensure to-be-closed variables and upvalues are finalized on break.
-        try self.proto.emit(.CLOSE, 0, 0, 0);
+        // Close only variables that belong to the current loop scope.
+        // Using CLOSE 0 would also close unrelated outer upvalues.
+        const close_reg = self.loop_close_regs.items[self.loop_close_regs.items.len - 1];
+        try self.proto.emit(.CLOSE, close_reg, 0, 0);
 
         // Emit JMP to be patched later at end of loop
         const jmp_addr = try self.proto.emitPatchableJMP();

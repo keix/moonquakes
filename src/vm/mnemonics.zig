@@ -665,6 +665,9 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
                 err == error.InvalidTableOperation or
+                err == error.InvalidForLoopInit or
+                err == error.InvalidForLoopLimit or
+                err == error.InvalidForLoopStep or
                 err == error.FormatError)
             {
                 var msg_buf: [128]u8 = undefined;
@@ -697,6 +700,9 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",
                     error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.InvalidForLoopInit => "'for' initial value must be a number",
+                    error.InvalidForLoopLimit => "'for' limit must be a number",
+                    error.InvalidForLoopStep => "'for' step is zero",
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
@@ -1451,18 +1457,71 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const v_limit = vm.stack[vm.base + a + 1];
             const v_step = vm.stack[vm.base + a + 2];
 
-            if (v_init.isInteger() and v_limit.isInteger() and v_step.isInteger()) {
+            if (v_init.isInteger() and v_step.isInteger()) {
                 const ii = v_init.integer;
                 const is = v_step.integer;
                 if (is == 0) return error.InvalidForLoopStep;
+
+                var il: i64 = undefined;
+                if (v_limit.isInteger()) {
+                    il = v_limit.integer;
+                } else {
+                    const lnum = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
+                    if (std.math.isNan(lnum)) return error.InvalidForLoopLimit;
+
+                    if (std.math.isPositiveInf(lnum)) {
+                        if (is < 0) {
+                            // finite integer start cannot reach +inf with negative step
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        il = std.math.maxInt(i64);
+                    } else if (std.math.isNegativeInf(lnum)) {
+                        if (is > 0) {
+                            // finite integer start cannot reach -inf with positive step
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        il = std.math.minInt(i64);
+                    } else {
+                        const adj = if (is > 0) @floor(lnum) else @ceil(lnum);
+                        if (is > 0 and adj < @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                            // Finite limit is below i64 range: positive-step integer loop
+                            // can never reach it from any finite i64 start.
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        if (is < 0 and adj > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                            // Finite limit is above i64 range: negative-step integer loop
+                            // can never reach it from any finite i64 start.
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        if (adj >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                            il = std.math.maxInt(i64);
+                        } else if (adj <= @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                            il = std.math.minInt(i64);
+                        } else {
+                            il = @as(i64, @intFromFloat(adj));
+                        }
+                    }
+                }
+                vm.stack[vm.base + a + 1] = .{ .integer = il };
 
                 const sub_result = @subWithOverflow(ii, is);
                 if (sub_result[1] == 0) {
                     vm.stack[vm.base + a] = .{ .integer = sub_result[0] };
                 } else {
-                    const i = @as(f64, @floatFromInt(ii));
-                    const s = @as(f64, @floatFromInt(is));
-                    vm.stack[vm.base + a] = .{ .number = i - s };
+                    // Integer overflow on (init - step): keep integer semantics
+                    // without falling back to imprecise float math near 2^63.
+                    const should_run = if (is > 0) (ii <= il) else (ii >= il);
+                    if (!should_run) {
+                        try ci.jumpRel(sbx);
+                        return .Continue;
+                    }
+                    vm.stack[vm.base + a] = .{ .integer = ii };
+                    vm.stack[vm.base + a + 3] = .{ .integer = ii };
+                    return .Continue;
                 }
             } else {
                 const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
