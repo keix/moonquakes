@@ -3,6 +3,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
 const call = @import("../vm/call.zig");
+const metamethod = @import("../vm/metamethod.zig");
 
 /// Lua 5.4 Table Library
 /// Corresponds to Lua manual chapter "Table Manipulation"
@@ -20,6 +21,63 @@ fn getTableLength(table: *TableObject) i64 {
     return len;
 }
 
+fn rawSetWithBarrier(vm: anytype, table: *TableObject, key: TValue, value: TValue) !void {
+    try table.set(key, value);
+    vm.gc().barrierBackValue(&table.header, value);
+}
+
+fn callValueManaged(vm: anytype, fn_val: TValue, args: []const TValue) !TValue {
+    var pushed: u8 = 0;
+    if (!vm.pushTempRoot(fn_val)) return error.OutOfMemory;
+    pushed += 1;
+    for (args) |arg| {
+        if (!vm.pushTempRoot(arg)) {
+            vm.popTempRoots(pushed);
+            return error.OutOfMemory;
+        }
+        pushed += 1;
+    }
+    defer vm.popTempRoots(pushed);
+
+    return call.callValueSafe(vm, fn_val, args) catch |err| switch (err) {
+        call.CallError.NotCallable => vm.raiseString("attempt to call a non-function value"),
+        else => err,
+    };
+}
+
+fn getLengthMM(vm: anytype, table_val: TValue, table: *TableObject) !i64 {
+    if (metamethod.getMetamethod(table_val, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |len_mm| {
+        const result = try callValueManaged(vm, len_mm, &[_]TValue{table_val});
+        return result.toInteger() orelse vm.raiseString("'__len' must return an integer");
+    }
+    return getTableLength(table);
+}
+
+fn getAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue) !TValue {
+    if (table.get(key)) |v| return v;
+    if (metamethod.getMetamethod(table_val, .index, &vm.gc().mm_keys, &vm.gc().shared_mt)) |index_mm| {
+        if (index_mm.asTable()) |index_table| {
+            return index_table.get(key) orelse .nil;
+        }
+        return callValueManaged(vm, index_mm, &[_]TValue{ table_val, key });
+    }
+    return .nil;
+}
+
+fn setAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue, value: TValue) !void {
+    if (table.get(key) != null) {
+        return rawSetWithBarrier(vm, table, key, value);
+    }
+    if (metamethod.getMetamethod(table_val, .newindex, &vm.gc().mm_keys, &vm.gc().shared_mt)) |newindex_mm| {
+        if (newindex_mm.asTable()) |newindex_table| {
+            return rawSetWithBarrier(vm, newindex_table, key, value);
+        }
+        _ = try callValueManaged(vm, newindex_mm, &[_]TValue{ table_val, key, value });
+        return;
+    }
+    return rawSetWithBarrier(vm, table, key, value);
+}
+
 /// table.insert(list, [pos,] value) - Inserts element into table
 pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
@@ -30,13 +88,13 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'insert' (table expected)");
 
-    const len = getTableLength(table);
+    const len = try getLengthMM(vm, tbl_arg, table);
 
     if (nargs == 2) {
         // table.insert(list, value): insert at end
         const value = vm.stack[vm.base + func_reg + 2];
         const key = TValue{ .integer = len + 1 };
-        try table.set(key, value);
+        try setAt(vm, tbl_arg, table, key, value);
     } else {
         // table.insert(list, pos, value): insert at pos, shift elements
         const pos_arg = vm.stack[vm.base + func_reg + 2];
@@ -50,13 +108,13 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         while (i >= pos) : (i -= 1) {
             const src_key = TValue{ .integer = i };
             const dst_key = TValue{ .integer = i + 1 };
-            const val = table.get(src_key) orelse .nil;
-            try table.set(dst_key, val);
+            const val = try getAt(vm, tbl_arg, table, src_key);
+            try setAt(vm, tbl_arg, table, dst_key, val);
         }
 
         // Insert the new value at pos
         const key = TValue{ .integer = pos };
-        try table.set(key, value);
+        try setAt(vm, tbl_arg, table, key, value);
     }
 
     // table.insert returns nothing
@@ -72,7 +130,7 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'remove' (table expected)");
 
-    const len = getTableLength(table);
+    const len = try getLengthMM(vm, tbl_arg, table);
 
     // Determine position (default is last element)
     const pos: i64 = if (nargs >= 2) blk: {
@@ -86,8 +144,8 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     if (len == 0) {
         if (nargs < 2) {
             const zero_key = TValue{ .integer = 0 };
-            const removed_value = table.get(zero_key) orelse .nil;
-            try table.set(zero_key, .nil);
+            const removed_value = try getAt(vm, tbl_arg, table, zero_key);
+            try setAt(vm, tbl_arg, table, zero_key, .nil);
             if (nresults > 0) {
                 vm.stack[vm.base + func_reg] = removed_value;
             }
@@ -114,20 +172,20 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
     // Get the element to remove (to return it)
     const remove_key = TValue{ .integer = pos };
-    const removed_value = table.get(remove_key) orelse .nil;
+    const removed_value = try getAt(vm, tbl_arg, table, remove_key);
 
     // Shift elements down from pos+1 to len
     var i: i64 = pos;
     while (i < len) : (i += 1) {
         const src_key = TValue{ .integer = i + 1 };
         const dst_key = TValue{ .integer = i };
-        const val = table.get(src_key) orelse .nil;
-        try table.set(dst_key, val);
+        const val = try getAt(vm, tbl_arg, table, src_key);
+        try setAt(vm, tbl_arg, table, dst_key, val);
     }
 
     // Remove the last element (now duplicated)
     const last_key = TValue{ .integer = len };
-    try table.set(last_key, .nil);
+    try setAt(vm, tbl_arg, table, last_key, .nil);
 
     // Return the removed value
     if (nresults > 0) {
@@ -161,7 +219,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         break :blk null;
     } else null;
 
-    const len = getTableLength(table);
+    const len = try getLengthMM(vm, tbl_arg, table);
     if (len <= 1) return; // Already sorted
 
     // Collect all elements into a temporary array
@@ -172,7 +230,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     var i: i64 = 1;
     while (i <= len) : (i += 1) {
         const key = TValue{ .integer = i };
-        const val = table.get(key) orelse .nil;
+        const val = try getAt(vm, tbl_arg, table, key);
         elements.appendAssumeCapacity(val);
     }
 
@@ -203,7 +261,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     i = 1;
     for (elements.items) |val| {
         const key = TValue{ .integer = i };
-        try table.set(key, val);
+        try setAt(vm, tbl_arg, table, key, val);
         i += 1;
     }
 
@@ -218,7 +276,7 @@ fn compareForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
     if (comp) |comp_fn| {
         // Call comparator with (a, b) - returns true if a < b
         var args: [2]TValue = .{ a, b };
-        const result = call.callValue(vm, comp_fn, &args) catch |err| {
+        const result = call.callValueSafe(vm, comp_fn, &args) catch |err| {
             if (err == call.CallError.NotCallable) return false;
             return err;
         };
@@ -231,7 +289,7 @@ fn compareForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
         // comp(a, b) is false or nil
         // For stable sort behavior, only swap if comp(b, a) is true
         args = .{ b, a };
-        const reverse = call.callValue(vm, comp_fn, &args) catch |err| {
+        const reverse = call.callValueSafe(vm, comp_fn, &args) catch |err| {
             if (err == call.CallError.NotCallable) return false;
             return err;
         };
@@ -268,7 +326,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'concat' (table expected)");
 
-    const len = getTableLength(table);
+    const len = try getLengthMM(vm, tbl_arg, table);
 
     // Get separator (default empty string)
     const sep: []const u8 = if (nargs >= 2) blk: {
@@ -320,7 +378,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         }
 
         const key = TValue{ .integer = i };
-        const val = table.get(key) orelse .nil;
+        const val = try getAt(vm, tbl_arg, table, key);
 
         // Convert value to string
         if (val.asString()) |s| {
@@ -461,7 +519,7 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
     const table = tbl_arg.asTable() orelse return error.BadArgument;
 
-    const len = getTableLength(table);
+    const len = try getLengthMM(vm, tbl_arg, table);
 
     // Get start index (default 1)
     const start: i64 = if (nargs >= 2) blk: {
@@ -485,7 +543,7 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     var i: u32 = 0;
     while (i < actual_count) : (i += 1) {
         const key = TValue{ .integer = start + @as(i64, i) };
-        const val = table.get(key) orelse .nil;
+        const val = try getAt(vm, tbl_arg, table, key);
         vm.stack[vm.base + func_reg + i] = val;
     }
 
@@ -497,6 +555,8 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         }
     }
 
-    // Update vm.top for variable return count
-    vm.top = vm.base + func_reg + actual_count;
+    vm.top = if (nresults > 0)
+        vm.base + func_reg + nresults
+    else
+        vm.base + func_reg + actual_count;
 }

@@ -1152,6 +1152,7 @@ pub const Parser = struct {
     current: Token,
     proto: *ProtoBuilder,
     break_jumps: std.ArrayList(u32),
+    loop_close_regs: std.ArrayList(u8),
     loop_depth: usize,
     /// Error message buffer for detailed parse error reporting
     error_msg: [256]u8 = undefined,
@@ -1163,6 +1164,7 @@ pub const Parser = struct {
             .proto = proto,
             .current = undefined,
             .break_jumps = .{},
+            .loop_close_regs = .{},
             .loop_depth = 0,
         };
         p.advance();
@@ -1186,6 +1188,7 @@ pub const Parser = struct {
 
     pub fn deinit(self: *Parser) void {
         self.break_jumps.deinit(self.proto.allocator);
+        self.loop_close_regs.deinit(self.proto.allocator);
     }
 
     fn advance(self: *Parser) void {
@@ -1280,8 +1283,13 @@ pub const Parser = struct {
                     // Multiple assignment: a, b, c = expr, expr, ...
                     try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Check for chained method call: t.a:method() or field assignment
-                    try self.parseFieldAccessOrMethodCall();
+                    // Prefer assignment parser for targets like "t.x = ..." / "t.x, t.y = ...".
+                    // If no '=' is present, fall back to call/field statement parser
+                    // for forms like "io.input():close()".
+                    self.parseAssignment() catch |err| switch (err) {
+                        error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
+                        else => return err,
+                    };
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
                     _ = try self.parseExpr();
@@ -1510,10 +1518,15 @@ pub const Parser = struct {
                     },
                 }
             } else {
-                // Global variable: load from _ENV
                 table_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(name);
-                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                if (std.mem.eql(u8, name, "_ENV")) {
+                    // _ENV is the environment upvalue itself.
+                    try self.proto.emitGETUPVAL(table_reg, 0);
+                } else {
+                    // Global variable: load from _ENV
+                    const name_const = try self.proto.addConstString(name);
+                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                }
             }
 
             // Parse field chain: .a.b.c or [key] until we hit '='
@@ -1582,7 +1595,7 @@ pub const Parser = struct {
                 } else if (last_key_reg) |kr| {
                     try self.proto.emitSETTABLE(table_reg, kr, value_reg);
                 }
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
                 // Function call: t[key]() or t.field[key]() etc.
                 // First, get the function from the table
                 const func_reg = self.proto.allocTemp();
@@ -1596,7 +1609,18 @@ pub const Parser = struct {
 
                 // Parse arguments and emit call
                 const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                const has_suffix = (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, ".") or
+                        std.mem.eql(u8, self.current.lexeme, "[") or
+                        std.mem.eql(u8, self.current.lexeme, ":") or
+                        std.mem.eql(u8, self.current.lexeme, "("))) or
+                    self.isNoParensArg();
+                if (has_suffix) {
+                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                    _ = try self.parseSuffixChain(func_reg);
+                } else {
+                    try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                }
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
                 // Method call on indexed value: t[key]:method()
                 // First, get the receiver from the table
@@ -1628,7 +1652,18 @@ pub const Parser = struct {
                 // Parse extra arguments
                 const extra_args = try self.parseMethodArgs(func_reg);
 
-                try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                const has_suffix = (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, ".") or
+                        std.mem.eql(u8, self.current.lexeme, "[") or
+                        std.mem.eql(u8, self.current.lexeme, ":") or
+                        std.mem.eql(u8, self.current.lexeme, "("))) or
+                    self.isNoParensArg();
+                if (has_suffix) {
+                    try self.proto.emitCall(func_reg, extra_args + 1, 1);
+                    _ = try self.parseSuffixChain(func_reg);
+                } else {
+                    try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                }
             } else {
                 return error.ExpectedEquals;
             }
@@ -1647,6 +1682,12 @@ pub const Parser = struct {
             }
 
             const value_reg = try self.parseExpr();
+
+            if (std.mem.eql(u8, name, "_ENV")) {
+                // _ENV is the environment upvalue itself.
+                try self.proto.emitSETUPVAL(value_reg, 0);
+                return;
+            }
 
             if (try self.proto.resolveVariable(name)) |loc| {
                 switch (loc) {
@@ -1803,6 +1844,10 @@ pub const Parser = struct {
 
             switch (target) {
                 .variable => |var_name| {
+                    if (std.mem.eql(u8, var_name, "_ENV")) {
+                        try self.proto.emitSETUPVAL(value_reg, 0);
+                        continue;
+                    }
                     if (try self.proto.resolveVariable(var_name)) |loc| {
                         switch (loc) {
                             .local => |local_reg| {
@@ -1849,8 +1894,12 @@ pub const Parser = struct {
                 }
             } else {
                 table_reg = self.proto.allocTemp();
-                const name_const = try self.proto.addConstString(base_name);
-                try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                if (std.mem.eql(u8, base_name, "_ENV")) {
+                    try self.proto.emitGETUPVAL(table_reg, 0);
+                } else {
+                    const name_const = try self.proto.addConstString(base_name);
+                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                }
             }
 
             // Parse field chain until we hit ',' or '='
@@ -2000,6 +2049,10 @@ pub const Parser = struct {
 
             switch (target) {
                 .variable => |var_name| {
+                    if (std.mem.eql(u8, var_name, "_ENV")) {
+                        try self.proto.emitSETUPVAL(value_reg, 0);
+                        continue;
+                    }
                     if (try self.proto.resolveVariable(var_name)) |loc| {
                         switch (loc) {
                             .local => |local_reg| {
@@ -3129,6 +3182,8 @@ pub const Parser = struct {
 
         // Register loop variable (user_var is at base_reg + 3)
         try self.proto.addVariable(loop_var_name, base_reg + 3);
+        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
+        defer _ = self.loop_close_regs.pop();
 
         // Mark for loop body - each iteration resets to this point
         const loop_body_mark = self.proto.markTemps();
@@ -3288,6 +3343,8 @@ pub const Parser = struct {
 
         // Mark to-be-closed state.
         try self.proto.emit(.TBC, base_reg + 3, 0, 0);
+        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
+        defer _ = self.loop_close_regs.pop();
 
         // Mark for loop body
         const loop_body_mark = self.proto.markTemps();
@@ -3365,6 +3422,9 @@ pub const Parser = struct {
 
         // Mark for loop body
         const body_mark = self.proto.markTemps();
+        const break_close_reg = self.proto.locals_top;
+        try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
+        defer _ = self.loop_close_regs.pop();
         try self.proto.enterScope();
 
         // Parse loop body
@@ -3409,6 +3469,9 @@ pub const Parser = struct {
 
         // Mark for loop body
         const body_mark = self.proto.markTemps();
+        const break_close_reg = self.proto.locals_top;
+        try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
+        defer _ = self.loop_close_regs.pop();
         try self.proto.enterScope();
 
         // Parse loop body (stops at 'until')
@@ -3452,8 +3515,10 @@ pub const Parser = struct {
             return error.BreakOutsideLoop;
         }
 
-        // Ensure to-be-closed variables and upvalues are finalized on break.
-        try self.proto.emit(.CLOSE, 0, 0, 0);
+        // Close only variables that belong to the current loop scope.
+        // Using CLOSE 0 would also close unrelated outer upvalues.
+        const close_reg = self.loop_close_regs.items[self.loop_close_regs.items.len - 1];
+        try self.proto.emit(.CLOSE, close_reg, 0, 0);
 
         // Emit JMP to be patched later at end of loop
         const jmp_addr = try self.proto.emitPatchableJMP();
@@ -3604,8 +3669,13 @@ pub const Parser = struct {
                     // Multiple assignment: a, b, c = expr, expr, ...
                     try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Check for chained method call: t.a:method() or field assignment
-                    try self.parseFieldAccessOrMethodCall();
+                    // Prefer assignment parser for targets like "t.x = ..." / "t.x, t.y = ...".
+                    // If no '=' is present, fall back to call/field statement parser
+                    // for forms like "io.input():close()".
+                    self.parseAssignment() catch |err| switch (err) {
+                        error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
+                        else => return err,
+                    };
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
                     _ = try self.parseExpr();
@@ -4309,10 +4379,14 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
             }
         } else {
-            // Fall back to global lookup via GETTABUP
             base_reg = self.proto.allocTemp();
-            const name_const = try self.proto.addConstString(base_name);
-            try self.proto.emitGETTABUP(base_reg, 0, name_const);
+            if (std.mem.eql(u8, base_name, "_ENV")) {
+                try self.proto.emitGETUPVAL(base_reg, 0);
+            } else {
+                // Fall back to global lookup via GETTABUP
+                const name_const = try self.proto.addConstString(base_name);
+                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+            }
         }
         self.advance(); // consume base name
 

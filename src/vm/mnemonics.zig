@@ -489,19 +489,32 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
         vm.stack[call_base + i] = arg;
     }
 
-    // Fill remaining params with nil
-    var i: u32 = @intCast(args.len);
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    const argc: u32 = @intCast(args.len);
+    if (proto.is_vararg and argc > proto.numparams) {
+        vararg_count = argc - proto.numparams;
+        const min_vararg_base = call_base + proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
+        var i: u32 = vararg_count;
+        while (i > 0) {
+            i -= 1;
+            vm.stack[vararg_base + i] = vm.stack[call_base + proto.numparams + i];
+        }
+    }
+
+    // Fill remaining fixed params with nil
+    var i: u32 = argc;
     while (i < proto.numparams) : (i += 1) {
         vm.stack[call_base + i] = .nil;
     }
-
-    vm.top = call_base + proto.maxstacksize;
 
     // Save current call depth
     const saved_depth = vm.callstack_size;
 
     // Push call info for metamethod
-    _ = try pushCallInfo(vm, proto, closure, call_base, result_slot, 1);
+    _ = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
     // Execute until we return to saved depth
     while (vm.callstack_size > saved_depth) {
@@ -665,6 +678,9 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
                 err == error.InvalidTableOperation or
+                err == error.InvalidForLoopInit or
+                err == error.InvalidForLoopLimit or
+                err == error.InvalidForLoopStep or
                 err == error.FormatError)
             {
                 var msg_buf: [128]u8 = undefined;
@@ -697,6 +713,9 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",
                     error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.InvalidForLoopInit => "'for' initial value must be a number",
+                    error.InvalidForLoopLimit => "'for' limit must be a number",
+                    error.InvalidForLoopStep => "'for' step is zero",
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
@@ -853,8 +872,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer +% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .add)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb + nc };
             }
             return .Continue;
@@ -871,8 +896,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer -% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .sub)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb - nc };
             }
             return .Continue;
@@ -889,8 +920,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (vb.isInteger() and vc.isInteger()) {
                 vm.stack[vm.base + a] = .{ .integer = vb.integer *% vc.integer };
             } else {
-                const nb = vb.toNumber() orelse return error.ArithmeticError;
-                const nc = vc.toNumber() orelse return error.ArithmeticError;
+                const nb_opt = vb.toNumber();
+                const nc_opt = vc.toNumber();
+                if (nb_opt == null or nc_opt == null) {
+                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mul)) |result| return result;
+                    return error.ArithmeticError;
+                }
+                const nb = nb_opt.?;
+                const nc = nc_opt.?;
                 vm.stack[vm.base + a] = .{ .number = nb * nc };
             }
             return .Continue;
@@ -903,8 +940,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .div)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             // Division by zero returns inf/-inf/nan per IEEE 754
             vm.stack[vm.base + a] = .{ .number = nb / nc };
             return .Continue;
@@ -922,8 +965,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .integer = res };
                 return .Continue;
             }
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .idiv)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb, nc) };
             return .Continue;
         },
@@ -940,8 +989,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .integer = res };
                 return .Continue;
             }
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mod)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = luaMod(nb, nc) };
             return .Continue;
         },
@@ -953,8 +1008,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const vb = &vm.stack[vm.base + b];
             const vc = &ci.func.k[c];
 
-            const nb = vb.toNumber() orelse return error.ArithmeticError;
-            const nc = vc.toNumber() orelse return error.ArithmeticError;
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .pow)) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
             vm.stack[vm.base + a] = .{ .number = std.math.pow(f64, nb, nc) };
             return .Continue;
         },
@@ -1267,6 +1328,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 vm.stack[vm.base + a] = .{ .integer = len };
             } else {
+                if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
+                    return try callUnaryMetamethod(vm, mm, vb.*, a);
+                }
                 return error.LengthError;
             }
             return .Continue;
@@ -1336,17 +1400,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return .Continue;
             }
 
-            // Slow path: try __concat metamethod (binary operation)
-            // For now, only handle the case of exactly 2 operands
-            if (c == b + 1) {
-                const left = vm.stack[vm.base + b];
-                const right = vm.stack[vm.base + c];
-                if (try dispatchConcatMM(vm, left, right, a)) |result| {
-                    return result;
-                }
+            // Slow path: fold concatenation pairwise with metamethod fallback.
+            var acc = vm.stack[vm.base + c];
+            var i: i32 = @as(i32, c) - 1;
+            while (i >= @as(i32, b)) : (i -= 1) {
+                acc = try concatTwoSync(vm, vm.stack[vm.base + @as(u32, @intCast(i))], acc);
             }
-
-            return error.ArithmeticError;
+            vm.stack[vm.base + a] = acc;
+            return .Continue;
         },
         // [MM_EQ] Fast path: primitive equality. Slow path: __eq metamethod.
         .EQ => {
@@ -1451,18 +1512,71 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const v_limit = vm.stack[vm.base + a + 1];
             const v_step = vm.stack[vm.base + a + 2];
 
-            if (v_init.isInteger() and v_limit.isInteger() and v_step.isInteger()) {
+            if (v_init.isInteger() and v_step.isInteger()) {
                 const ii = v_init.integer;
                 const is = v_step.integer;
                 if (is == 0) return error.InvalidForLoopStep;
+
+                var il: i64 = undefined;
+                if (v_limit.isInteger()) {
+                    il = v_limit.integer;
+                } else {
+                    const lnum = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
+                    if (std.math.isNan(lnum)) return error.InvalidForLoopLimit;
+
+                    if (std.math.isPositiveInf(lnum)) {
+                        if (is < 0) {
+                            // finite integer start cannot reach +inf with negative step
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        il = std.math.maxInt(i64);
+                    } else if (std.math.isNegativeInf(lnum)) {
+                        if (is > 0) {
+                            // finite integer start cannot reach -inf with positive step
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        il = std.math.minInt(i64);
+                    } else {
+                        const adj = if (is > 0) @floor(lnum) else @ceil(lnum);
+                        if (is > 0 and adj < @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                            // Finite limit is below i64 range: positive-step integer loop
+                            // can never reach it from any finite i64 start.
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        if (is < 0 and adj > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                            // Finite limit is above i64 range: negative-step integer loop
+                            // can never reach it from any finite i64 start.
+                            try ci.jumpRel(sbx);
+                            return .Continue;
+                        }
+                        if (adj >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                            il = std.math.maxInt(i64);
+                        } else if (adj <= @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                            il = std.math.minInt(i64);
+                        } else {
+                            il = @as(i64, @intFromFloat(adj));
+                        }
+                    }
+                }
+                vm.stack[vm.base + a + 1] = .{ .integer = il };
 
                 const sub_result = @subWithOverflow(ii, is);
                 if (sub_result[1] == 0) {
                     vm.stack[vm.base + a] = .{ .integer = sub_result[0] };
                 } else {
-                    const i = @as(f64, @floatFromInt(ii));
-                    const s = @as(f64, @floatFromInt(is));
-                    vm.stack[vm.base + a] = .{ .number = i - s };
+                    // Integer overflow on (init - step): keep integer semantics
+                    // without falling back to imprecise float math near 2^63.
+                    const should_run = if (is > 0) (ii <= il) else (ii >= il);
+                    if (!should_run) {
+                        try ci.jumpRel(sbx);
+                        return .Continue;
+                    }
+                    vm.stack[vm.base + a] = .{ .integer = ii };
+                    vm.stack[vm.base + a + 3] = .{ .integer = ii };
+                    return .Continue;
                 }
             } else {
                 const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
@@ -1750,6 +1864,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const func_val = vm.stack[vm.base + a];
             const current_ci = vm.ci.?;
+            var nargs: u32 = if (b > 0) b - 1 else blk: {
+                const arg_start = vm.base + a + 1;
+                break :blk vm.top - arg_start;
+            };
+            var tail_func = func_val;
 
             // Close TBC variables if k flag is set
             if (k) {
@@ -1759,14 +1878,32 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Close upvalues before tail call
             vm.closeUpvalues(current_ci.base);
 
-            // Handle Lua closure tail call
-            if (func_val.asClosure()) |closure| {
-                const func_proto = closure.proto;
+            // Slow path: callable table with __call metamethod.
+            if (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
+                const table = tail_func.asTable() orelse return error.NotAFunction;
+                const mt = table.metatable orelse return error.NotAFunction;
+                const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return error.NotAFunction;
+                if (!(call_mm.asClosure() != null or (call_mm.isObject() and call_mm.object.type == .native_closure))) {
+                    return error.NotAFunction;
+                }
 
-                const nargs: u32 = if (b > 0) b - 1 else blk: {
-                    const arg_start = vm.base + a + 1;
-                    break :blk vm.top - arg_start;
-                };
+                // Rewrite stack as mm(self, args...) for tailcall execution.
+                // [a] currently holds self; [a+1..a+nargs] holds original args.
+                var i: u32 = nargs;
+                while (i > 0) {
+                    i -= 1;
+                    vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 1 + i];
+                }
+                vm.stack[vm.base + a + 1] = tail_func;
+                vm.stack[vm.base + a] = call_mm;
+                tail_func = call_mm;
+                nargs += 1;
+                if (b == 0) vm.top += 1;
+            }
+
+            // Handle Lua closure tail call
+            if (tail_func.asClosure()) |closure| {
+                const func_proto = closure.proto;
 
                 // For tail call, we reuse the current frame's ret_base and nresults
                 const ret_base = current_ci.ret_base;
@@ -1831,14 +1968,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Handle native closure tail call (fall back to regular call + return)
-            if (func_val.isObject()) {
-                const obj = func_val.object;
+            if (tail_func.isObject()) {
+                const obj = tail_func.object;
                 if (obj.type == .native_closure) {
                     const nc = object.getObject(NativeClosureObject, obj);
-                    const nargs: u32 = if (b > 0) b - 1 else blk: {
-                        const arg_start = vm.base + a + 1;
-                        break :blk vm.top - arg_start;
-                    };
 
                     // For native tail calls, we call normally but adjust return handling
                     const ret_base = current_ci.ret_base;
@@ -2102,10 +2235,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                const value = env_table.get(TValue.fromString(key)) orelse .nil;
-                vm.stack[vm.base + a] = value;
                 vm.last_field_reg = a;
                 vm.last_field_key = key;
+                if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableKey;
             }
@@ -2128,7 +2262,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[b];
             const value = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                try tableSetWithBarrier(vm, env_table, TValue.fromString(key), value);
+                if (try dispatchNewindexMM(vm, env_table, key, TValue.fromTable(env_table), value)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableKey;
             }
@@ -2176,34 +2312,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 } else {
                     // Integer, number, boolean, etc. - use TValue key directly
-                    if (table.get(key_val)) |value| {
-                        vm.stack[vm.base + a] = value;
-                    } else {
-                        // Check __index metamethod
-                        if (table.metatable) |mt| {
-                            if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
-                                if (index_mm.asTable()) |index_table| {
-                                    vm.stack[vm.base + a] = index_table.get(key_val) orelse .nil;
-                                } else {
-                                    vm.stack[vm.base + a] = .nil;
-                                }
-                            } else {
-                                vm.stack[vm.base + a] = .nil;
-                            }
-                        } else {
-                            vm.stack[vm.base + a] = .nil;
-                        }
+                    if (try dispatchIndexMMValue(vm, table, key_val, table_val, a)) |result| {
+                        return result;
                     }
                 }
             } else {
                 // Non-table value: check for shared metatable with __index
-                if (key_val.asString()) |key| {
-                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    // Non-table with non-string key - cannot index this value
-                    return error.NotATable;
+                if (try dispatchSharedIndexMMValue(vm, table_val, key_val, a)) |result| {
+                    return result;
                 }
             }
             return .Continue;
@@ -2223,11 +2339,16 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         return result;
                     }
                 } else {
-                    // Integer, number, boolean, etc. - use TValue key directly
-                    try tableSetWithBarrier(vm, table, key_val, value);
+                    // Integer, number, boolean, etc.
+                    if (try dispatchNewindexMMValue(vm, table, key_val, table_val, value)) |result| {
+                        return result;
+                    }
                 }
             } else {
-                return error.InvalidTableOperation;
+                const key = TValue{ .integer = @intCast(c) };
+                if (try dispatchSharedIndexMMValue(vm, table_val, key, a)) |result| {
+                    return result;
+                }
             }
             return .Continue;
         },
@@ -2244,20 +2365,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (table.get(key)) |value| {
                     vm.stack[vm.base + a] = value;
                 } else {
-                    // Slow path: check __index metamethod
-                    // Note: For integer keys, we still call metamethod with integer key
-                    if (table.metatable) |mt| {
-                        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)))) |index_mm| {
-                            if (index_mm.asTable()) |index_table| {
-                                vm.stack[vm.base + a] = index_table.get(key) orelse .nil;
-                            } else {
-                                vm.stack[vm.base + a] = .nil;
-                            }
-                        } else {
-                            vm.stack[vm.base + a] = .nil;
-                        }
-                    } else {
-                        vm.stack[vm.base + a] = .nil;
+                    if (try dispatchIndexMMValue(vm, table, key, table_val, a)) |result| {
+                        return result;
                     }
                 }
             } else {
@@ -2275,8 +2384,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 const key = TValue{ .integer = @intCast(b) };
-                // Direct set (SETI typically doesn't trigger __newindex for existing keys)
-                try tableSetWithBarrier(vm, table, key, value);
+                if (try dispatchNewindexMMValue(vm, table, key, table_val, value)) |result| {
+                    return result;
+                }
             } else {
                 return error.InvalidTableOperation;
             }
@@ -2600,35 +2710,35 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         // Metamethod dispatch opcodes
         // These are emitted after arithmetic operations for metamethod fallback
         .MMBIN => {
-            // MMBIN A B C: metamethod for binary operation R[B] op R[C]
-            // A encodes the metamethod event (add, sub, mul, etc.)
+            // MMBIN A B C: metamethod for binary operation R[A] op R[B]
+            // C encodes the metamethod event (add, sub, mul, etc.)
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
 
+            const va = vm.stack[vm.base + a];
             const vb = vm.stack[vm.base + b];
-            const vc = vm.stack[vm.base + c];
 
-            // Decode metamethod event from A
-            const event = mmEventFromOpcode(a) orelse return error.UnknownOpcode;
+            // Decode metamethod event from C
+            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
 
             // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+            const mm = metamethod.getBinMetamethod(va, vb, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                 // No metamethod found - arithmetic error
                 return error.ArithmeticError;
             };
 
-            // Call the metamethod: mm(vb, vc) -> result at b
+            // Call the metamethod: mm(va, vb) -> result at a
             // Set up call: function at temp, args at temp+1, temp+2
             const temp = vm.top;
             vm.stack[temp] = mm;
-            vm.stack[temp + 1] = vb;
-            vm.stack[temp + 2] = vc;
+            vm.stack[temp + 1] = va;
+            vm.stack[temp + 2] = vb;
             vm.top = temp + 3;
 
             // If metamethod is a closure, push call frame
             if (mm.asClosure()) |closure| {
-                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + b), 1);
+                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
                 return .LoopContinue;
             }
 
@@ -2636,8 +2746,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (mm.isObject() and mm.object.type == .native_closure) {
                 const nc = object.getObject(NativeClosureObject, mm.object);
                 try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-                // Result is at temp, move to b
-                vm.stack[vm.base + b] = vm.stack[temp];
+                // Result is at temp, move to a
+                vm.stack[vm.base + a] = vm.stack[temp];
                 vm.top = temp;
                 return .Continue;
             }
@@ -3053,6 +3163,13 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     return try callBinMetamethod(vm, mm, vb, vc, a);
 }
 
+fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime event: MetaEvent) !?ExecuteResult {
+    const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+        return null;
+    };
+    return try callBinMetamethod(vm, mm, vb, vc, result_reg);
+}
+
 /// Check if both values can be used for arithmetic (fast path)
 /// Lua 5.4: numbers and strings (coercible to numbers) are allowed
 fn canDoArith(a: TValue, b: TValue) bool {
@@ -3069,22 +3186,44 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
 
     // If metamethod is a closure, push call frame
     if (mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = temp;
+        const total_args: u32 = 2;
 
         // Set up parameters at new_base (like CALL does)
         vm.stack[new_base] = arg1; // First parameter at R[0]
         vm.stack[new_base + 1] = arg2; // Second parameter at R[1]
 
-        // Fill remaining parameters with nil if needed
-        var i: u32 = 2;
-        while (i < proto.numparams) : (i += 1) {
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        // Fill remaining fixed parameters with nil if needed
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
-        vm.top = new_base + proto.maxstacksize;
-
-        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            @intCast(vm.base + result_reg),
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
@@ -3113,21 +3252,44 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
 
     // If metamethod is a closure, push call frame
     if (mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = temp;
+        const total_args: u32 = 2;
 
-        // Set up parameter at new_base
+        // Lua passes unary metamethod operand twice for compatibility.
         vm.stack[new_base] = arg;
+        vm.stack[new_base + 1] = arg;
 
-        // Fill remaining parameters with nil if needed
-        var i: u32 = 1;
-        while (i < proto.numparams) : (i += 1) {
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        // Fill remaining fixed parameters with nil if needed
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
-        vm.top = new_base + proto.maxstacksize;
-
-        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            @intCast(vm.base + result_reg),
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
@@ -3136,9 +3298,10 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
         const nc = object.getObject(NativeClosureObject, mm.object);
         vm.stack[temp] = mm;
         vm.stack[temp + 1] = arg;
-        vm.top = temp + 2;
+        vm.stack[temp + 2] = arg;
+        vm.top = temp + 3;
 
-        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 1, 1);
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
         vm.stack[vm.base + result_reg] = vm.stack[temp];
         vm.top = temp;
         return .Continue;
@@ -3152,8 +3315,17 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
 /// If __index is a table, recursively looks up the key
 /// If __index is a function, calls it with (table, key)
 fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObject, table_val: TValue, result_reg: u8) !?ExecuteResult {
+    return try dispatchIndexMMValue(vm, table, TValue.fromString(key), table_val, result_reg);
+}
+
+fn dispatchIndexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, result_reg: u8) !?ExecuteResult {
+    return try dispatchIndexMMValueDepth(vm, table, key_val, table_val, result_reg, 0);
+}
+
+fn dispatchIndexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, result_reg: u8, depth: u16) !?ExecuteResult {
+    if (depth >= 2000) return error.InvalidTableOperation;
     // Fast path: key exists in table
-    if (table.get(TValue.fromString(key))) |value| {
+    if (table.get(key_val)) |value| {
         vm.stack[vm.base + result_reg] = value;
         return null; // Continue
     }
@@ -3171,11 +3343,11 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 
     // __index is a table: recursively look up
     if (index_mm.asTable()) |index_table| {
-        if (index_table.get(TValue.fromString(key))) |value| {
+        if (index_table.get(key_val)) |value| {
             vm.stack[vm.base + result_reg] = value;
         } else {
             // Recursive __index lookup on the index table
-            return try dispatchIndexMM(vm, index_table, key, index_mm, result_reg);
+            return try dispatchIndexMMValueDepth(vm, index_table, key_val, index_mm, result_reg, depth + 1);
         }
         return null; // Continue
     }
@@ -3187,7 +3359,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 
         // Set up parameters: table, key
         vm.stack[new_base] = table_val;
-        vm.stack[new_base + 1] = TValue.fromString(key);
+        vm.stack[new_base + 1] = key_val;
 
         // Fill remaining parameters with nil if needed
         var i: u32 = 2;
@@ -3208,7 +3380,7 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 
         vm.stack[temp] = index_mm;
         vm.stack[temp + 1] = table_val;
-        vm.stack[temp + 2] = TValue.fromString(key);
+        vm.stack[temp + 2] = key_val;
         vm.top = temp + 3;
 
         try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
@@ -3225,6 +3397,10 @@ fn dispatchIndexMM(vm: *VM, table: *object.TableObject, key: *object.StringObjec
 /// Dispatch __index metamethod for non-table values (strings, numbers, userdata, files, etc.)
 /// Uses shared metatables from gc.shared_mt, or individual metatables for userdata/files
 fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, result_reg: u8) !?ExecuteResult {
+    return try dispatchSharedIndexMMValue(vm, value, TValue.fromString(key), result_reg);
+}
+
+fn dispatchSharedIndexMMValue(vm: *VM, value: TValue, key_val: TValue, result_reg: u8) !?ExecuteResult {
     // Check for individual metatable first (FileObject, Userdata)
     const mt = blk: {
         if (value.asFile()) |file_obj| {
@@ -3248,11 +3424,11 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 
     // __index is a table: look up the key
     if (index_mm.asTable()) |index_table| {
-        if (index_table.get(TValue.fromString(key))) |found| {
+        if (index_table.get(key_val)) |found| {
             vm.stack[vm.base + result_reg] = found;
         } else {
             // Recursive lookup in index table's metatable
-            return try dispatchIndexMM(vm, index_table, key, index_mm, result_reg);
+            return try dispatchIndexMMValue(vm, index_table, key_val, index_mm, result_reg);
         }
         return null;
     }
@@ -3264,7 +3440,7 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 
         // Set up parameters: value, key
         vm.stack[new_base] = value;
-        vm.stack[new_base + 1] = TValue.fromString(key);
+        vm.stack[new_base + 1] = key_val;
 
         // Fill remaining parameters with nil if needed
         var i: u32 = 2;
@@ -3285,7 +3461,7 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 
         vm.stack[temp] = index_mm;
         vm.stack[temp + 1] = value;
-        vm.stack[temp + 2] = TValue.fromString(key);
+        vm.stack[temp + 2] = key_val;
         vm.top = temp + 3;
 
         try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
@@ -3304,7 +3480,15 @@ fn dispatchSharedIndexMM(vm: *VM, value: TValue, key: *object.StringObject, resu
 /// If __newindex is a table, set the key in that table
 /// If __newindex is a function, call it with (table, key, value)
 fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringObject, table_val: TValue, value: TValue) !?ExecuteResult {
-    const key_val = TValue.fromString(key);
+    return try dispatchNewindexMMValue(vm, table, TValue.fromString(key), table_val, value);
+}
+
+fn dispatchNewindexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, value: TValue) !?ExecuteResult {
+    return try dispatchNewindexMMValueDepth(vm, table, key_val, table_val, value, 0);
+}
+
+fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, value: TValue, depth: u16) !?ExecuteResult {
+    if (depth >= 2000) return error.InvalidTableOperation;
     // Fast path: key already exists in table - just update it
     if (table.get(key_val) != null) {
         try tableSetWithBarrier(vm, table, key_val, value);
@@ -3313,21 +3497,18 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
 
     // Check for __newindex metamethod
     const mt = table.metatable orelse {
-        // No metatable, just set the value
         try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
     const newindex_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex))) orelse {
-        // No __newindex, just set the value
         try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
 
     // __newindex is a table: set in that table instead
     if (newindex_mm.asTable()) |newindex_table| {
-        // Recursive __newindex dispatch
-        return try dispatchNewindexMM(vm, newindex_table, key, newindex_mm, value);
+        return try dispatchNewindexMMValueDepth(vm, newindex_table, key_val, newindex_mm, value, depth + 1);
     }
 
     // __newindex is a function: call it with (table, key, value)
@@ -3335,20 +3516,16 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
         const proto = closure.proto;
         const new_base = vm.top;
 
-        // Set up parameters: table, key, value
         vm.stack[new_base] = table_val;
-        vm.stack[new_base + 1] = TValue.fromString(key);
+        vm.stack[new_base + 1] = key_val;
         vm.stack[new_base + 2] = value;
 
-        // Fill remaining parameters with nil if needed
         var i: u32 = 3;
         while (i < proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
         vm.top = new_base + proto.maxstacksize;
-
-        // __newindex doesn't return a value, but we still need to call it
         _ = try pushCallInfo(vm, proto, closure, new_base, new_base, 0);
         return .LoopContinue;
     }
@@ -3360,7 +3537,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
 
         vm.stack[temp] = newindex_mm;
         vm.stack[temp + 1] = table_val;
-        vm.stack[temp + 2] = TValue.fromString(key);
+        vm.stack[temp + 2] = key_val;
         vm.stack[temp + 3] = value;
         vm.top = temp + 4;
 
@@ -3370,7 +3547,7 @@ fn dispatchNewindexMM(vm: *VM, table: *object.TableObject, key: *object.StringOb
     }
 
     // __newindex is not a valid type, just set normally
-    try tableSetWithBarrier(vm, table, TValue.fromString(key), value);
+    try tableSetWithBarrier(vm, table, key_val, value);
     return null;
 }
 
@@ -3387,26 +3564,42 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
 
     // __call must be a function
     if (call_mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = vm.base + func_slot;
-
-        // Stack is already laid out correctly for __call:
-        // [new_base] = obj (becomes self)
-        // [new_base+1..] = original args
-        // No shifting needed - obj is already at func_slot
-
-        // Total args for __call is nargs + 1 (the object)
         const total_args = nargs + 1;
 
-        // Fill remaining parameters with nil if needed
+        // Match regular CALL semantics for vararg closures.
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        // Fill missing fixed parameters.
         var i: u32 = total_args;
-        while (i < proto.numparams) : (i += 1) {
+        while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
-        vm.top = new_base + proto.maxstacksize;
-
-        _ = try pushCallInfo(vm, proto, closure, new_base, new_base, nresults);
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            new_base,
+            nresults,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
@@ -3446,38 +3639,60 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
 
     // __len is a Lua function
     if (len_mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = vm.top;
+        const total_args: u32 = 2;
 
-        // Set up call: __len(table)
+        // Lua passes unary metamethod operand twice for compatibility.
         vm.stack[new_base] = table_val;
+        vm.stack[new_base + 1] = table_val;
 
-        // Fill remaining params with nil
-        var i: u32 = 1;
-        while (i < proto.numparams) : (i += 1) {
-            vm.stack[new_base + i] = .nil;
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
         }
 
-        vm.top = new_base + proto.maxstacksize;
-
-        // Push call info, result goes to result_reg
-        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
+            vm.stack[new_base + i] = .nil;
+        }
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            vm.base + result_reg,
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
     // __len is a native function
     if (len_mm.isObject() and len_mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, len_mm.object);
-        const call_base = vm.top - vm.base;
+        const call_base = vm.top;
 
-        // Set up call: __len(table)
-        vm.stack[vm.top] = table_val;
-        vm.top += 1;
+        vm.stack[call_base] = len_mm;
+        vm.stack[call_base + 1] = table_val;
+        vm.stack[call_base + 2] = table_val;
+        vm.top = call_base + 3;
 
-        try vm.callNative(nc.func.id, @intCast(call_base), 1, 1);
+        try vm.callNative(nc.func.id, @intCast(call_base), 2, 1);
 
         // Copy result to destination register
-        vm.stack[vm.base + result_reg] = vm.stack[vm.base + call_base];
+        vm.stack[vm.base + result_reg] = vm.stack[call_base];
+        vm.top = call_base;
         return .Continue;
     }
 
@@ -3487,6 +3702,57 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
 /// Check if value can be concatenated without metamethod (string or number)
 fn canConcatPrimitive(val: TValue) bool {
     return val.asString() != null or val.isInteger() or val.isNumber();
+}
+
+fn appendConcatValue(out: *std.ArrayList(u8), allocator: std.mem.Allocator, val: TValue) !void {
+    if (val.asString()) |s| {
+        try out.appendSlice(allocator, s.asSlice());
+        return;
+    }
+    if (val.isInteger()) {
+        var buf: [32]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return error.ArithmeticError;
+        try out.appendSlice(allocator, str);
+        return;
+    }
+    if (val.isNumber()) {
+        var buf: [32]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "{d}", .{val.number}) catch return error.ArithmeticError;
+        try out.appendSlice(allocator, str);
+        return;
+    }
+    return error.ArithmeticError;
+}
+
+fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
+    if (canConcatPrimitive(left) and canConcatPrimitive(right)) {
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(vm.gc().allocator);
+        try appendConcatValue(&out, vm.gc().allocator, left);
+        try appendConcatValue(&out, vm.gc().allocator, right);
+        const joined = try out.toOwnedSlice(vm.gc().allocator);
+        defer vm.gc().allocator.free(joined);
+        const s = try vm.gc().allocString(joined);
+        return TValue.fromString(s);
+    }
+
+    const concat_mm = getConcatMM(vm, left) orelse getConcatMM(vm, right) orelse return error.ArithmeticError;
+    if (concat_mm.asClosure()) |closure| {
+        return try executeSyncMM(vm, closure, &[_]TValue{ left, right });
+    }
+    if (concat_mm.isObject() and concat_mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, concat_mm.object);
+        const call_base = vm.top;
+        vm.stack[call_base] = concat_mm;
+        vm.stack[call_base + 1] = left;
+        vm.stack[call_base + 2] = right;
+        vm.top = call_base + 3;
+        try vm.callNative(nc.func.id, @intCast(call_base), 2, 1);
+        const result = vm.stack[call_base];
+        vm.top = call_base;
+        return result;
+    }
+    return error.ArithmeticError;
 }
 
 /// Try to get __concat metamethod from a value
@@ -3565,35 +3831,25 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
     const left_table = left.asTable() orelse return null;
     const right_table = right.asTable() orelse return null;
 
-    // In Lua 5.4, __eq requires both operands have the same metamethod
-    const left_mm = getEqMM(vm, left) orelse return null;
-    const right_mm = getEqMM(vm, right);
-
-    // Check if they have the same __eq (by identity)
-    if (right_mm) |rmm| {
-        // For simplicity, just check if left has __eq and use it
-        _ = rmm;
-    }
+    // Try left operand first, then right (matches test expectations).
+    const eq_mm = getEqMM(vm, left) orelse getEqMM(vm, right) orelse return null;
 
     // __eq is a native function - call synchronously
-    if (left_mm.isObject() and left_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, left_mm.object);
-        const call_base = vm.top - vm.base;
-
-        // Set up call: __eq(left, right)
-        vm.stack[vm.top] = TValue.fromTable(left_table);
-        vm.stack[vm.top + 1] = TValue.fromTable(right_table);
-        vm.top += 2;
-
+    if (eq_mm.isObject() and eq_mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, eq_mm.object);
+        const call_base = vm.top;
+        vm.stack[call_base] = eq_mm;
+        vm.stack[call_base + 1] = TValue.fromTable(left_table);
+        vm.stack[call_base + 2] = TValue.fromTable(right_table);
+        vm.top = call_base + 3;
         try vm.callNative(nc.func.id, @intCast(call_base), 2, 1);
-
-        // Get result and convert to boolean
-        const result = vm.stack[vm.base + call_base];
+        const result = vm.stack[call_base];
+        vm.top = call_base;
         return result.toBoolean();
     }
 
     // __eq is a Lua function - call synchronously using VM's executeSync
-    if (left_mm.asClosure()) |closure| {
+    if (eq_mm.asClosure()) |closure| {
         const result = try executeSyncMM(vm, closure, &[_]TValue{
             TValue.fromTable(left_table),
             TValue.fromTable(right_table),
@@ -3755,33 +4011,56 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
 
     // Metamethod is a Lua function
     if (mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = vm.top;
+        const total_args: u32 = 2;
 
         vm.stack[new_base] = left;
         vm.stack[new_base + 1] = right;
 
-        var i: u32 = 2;
-        while (i < proto.numparams) : (i += 1) {
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
-        vm.top = new_base + proto.maxstacksize;
-        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            vm.base + result_reg,
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
     // Metamethod is a native function
     if (mm.isObject() and mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, mm.object);
-        const call_base = vm.top - vm.base;
-
-        vm.stack[vm.top] = left;
-        vm.stack[vm.top + 1] = right;
-        vm.top += 2;
-
+        const call_base = vm.top;
+        vm.stack[call_base] = mm;
+        vm.stack[call_base + 1] = left;
+        vm.stack[call_base + 2] = right;
+        vm.top = call_base + 3;
         try vm.callNative(nc.func.id, @intCast(call_base), 2, 1);
-        vm.stack[vm.base + result_reg] = vm.stack[vm.base + call_base];
+        vm.stack[vm.base + result_reg] = vm.stack[call_base];
+        vm.top = call_base;
         return .Continue;
     }
 
@@ -3794,31 +4073,56 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
 
     // Metamethod is a Lua function
     if (mm.asClosure()) |closure| {
-        const proto = closure.proto;
+        const func_proto = closure.proto;
         const new_base = vm.top;
+        const total_args: u32 = 2;
 
         vm.stack[new_base] = operand;
+        vm.stack[new_base + 1] = operand;
 
-        var i: u32 = 1;
-        while (i < proto.numparams) : (i += 1) {
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
 
-        vm.top = new_base + proto.maxstacksize;
-        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            vm.base + result_reg,
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
 
     // Metamethod is a native function
     if (mm.isObject() and mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, mm.object);
-        const call_base = vm.top - vm.base;
-
-        vm.stack[vm.top] = operand;
-        vm.top += 1;
-
-        try vm.callNative(nc.func.id, @intCast(call_base), 1, 1);
-        vm.stack[vm.base + result_reg] = vm.stack[vm.base + call_base];
+        const call_base = vm.top;
+        vm.stack[call_base] = mm;
+        vm.stack[call_base + 1] = operand;
+        vm.stack[call_base + 2] = operand;
+        vm.top = call_base + 3;
+        try vm.callNative(nc.func.id, @intCast(call_base), 2, 1);
+        vm.stack[vm.base + result_reg] = vm.stack[call_base];
+        vm.top = call_base;
         return .Continue;
     }
 

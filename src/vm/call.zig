@@ -64,6 +64,108 @@ pub fn callValue(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValu
     return CallError.NotCallable;
 }
 
+fn computeSafeCallBase(vm: *VM) u32 {
+    if (vm.ci) |ci| {
+        var safe = ci.base + ci.func.maxstacksize;
+        if (ci.vararg_count > 0) {
+            safe = @max(safe, ci.vararg_base + ci.vararg_count);
+        }
+        return @max(vm.top, safe);
+    }
+    return vm.top;
+}
+
+/// Reentrant-safe call entry for native code executing inside the VM loop.
+/// Ensures temporary call frames are placed above the active frame footprint.
+pub fn callValueSafe(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValue {
+    const saved_top = vm.top;
+
+    const safe_base = computeSafeCallBase(vm);
+    if (vm.top < safe_base) vm.top = safe_base;
+
+    const result = callValue(vm, func_val, args) catch |err| {
+        if (err != error.Yield) vm.top = saved_top;
+        return err;
+    };
+    vm.top = saved_top;
+    return result;
+}
+
+/// Reentrant-safe fixed-results call entry.
+/// Fills `out` with fixed results (nil-padded as needed).
+pub fn callValueInto(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue) anyerror!void {
+    const saved_top = vm.top;
+
+    const safe_base = computeSafeCallBase(vm);
+    if (vm.top < safe_base) vm.top = safe_base;
+
+    callValueIntoUnsafe(vm, func_val, args, out) catch |err| {
+        if (err != error.Yield) vm.top = saved_top;
+        return err;
+    };
+    vm.top = saved_top;
+}
+
+/// Reentrant-safe fixed-results call entry that routes Lua return placement to `ret_base`.
+/// Useful for native callers that may yield and need results to land in stable VM slots.
+pub fn callValueIntoAt(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue, ret_base: u32) anyerror!void {
+    const saved_top = vm.top;
+
+    const safe_base = computeSafeCallBase(vm);
+    if (vm.top < safe_base) vm.top = safe_base;
+
+    callValueIntoUnsafeAt(vm, func_val, args, out, ret_base) catch |err| {
+        if (err != error.Yield) vm.top = saved_top;
+        return err;
+    };
+    vm.top = saved_top;
+}
+
+fn callValueIntoUnsafe(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue) anyerror!void {
+    if (func_val.asNativeClosure()) |nc| {
+        return callNativeClosureInto(vm, nc, args, out);
+    }
+    if (func_val.asClosure()) |closure| {
+        return callClosureInto(vm, closure, args, out);
+    }
+    if (func_val.asTable()) |table| {
+        if (table.metatable) |mt| {
+            const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
+            if (mt.get(call_key)) |call_mm| {
+                const first = try callWithSelf(vm, call_mm, func_val, args);
+                if (out.len > 0) out[0] = first;
+                var i: usize = 1;
+                while (i < out.len) : (i += 1) out[i] = .nil;
+                return;
+            }
+        }
+    }
+    return CallError.NotCallable;
+}
+
+fn callValueIntoUnsafeAt(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue, ret_base: u32) anyerror!void {
+    if (func_val.asNativeClosure()) |nc| {
+        // Native closures do not need custom ret_base placement.
+        return callNativeClosureInto(vm, nc, args, out);
+    }
+    if (func_val.asClosure()) |closure| {
+        return callClosureIntoWithResultBase(vm, closure, args, out, ret_base);
+    }
+    if (func_val.asTable()) |table| {
+        if (table.metatable) |mt| {
+            const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
+            if (mt.get(call_key)) |call_mm| {
+                const first = try callWithSelf(vm, call_mm, func_val, args);
+                if (out.len > 0) out[0] = first;
+                var i: usize = 1;
+                while (i < out.len) : (i += 1) out[i] = .nil;
+                return;
+            }
+        }
+    }
+    return CallError.NotCallable;
+}
+
 /// Call a function with self prepended to arguments.
 /// Used for __call metamethod: __call(self, args...)
 fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) anyerror!TValue {
@@ -176,6 +278,33 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
     return result;
 }
 
+fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue, out: []TValue) anyerror!void {
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
+    const call_base = vm.top;
+    const result_slot = call_base;
+
+    vm.stack[call_base] = TValue.fromNativeClosure(nc);
+    for (args, 0..) |arg, i| {
+        vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
+    }
+
+    vm.base = call_base;
+    vm.top = call_base + 1 + @as(u32, @intCast(args.len));
+    defer {
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
+
+    try vm.callNative(nc.func.id, 0, @intCast(args.len), @intCast(out.len));
+
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        out[i] = vm.stack[result_slot + @as(u32, @intCast(i))];
+    }
+}
+
 /// Call a Lua closure with arguments.
 /// Executes synchronously until the function returns.
 fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
@@ -219,6 +348,48 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
 
     // Execute until return, then restore caller's frame state
     return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
+}
+
+fn callClosureInto(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue) anyerror!void {
+    return callClosureIntoWithResultBase(vm, closure, args, out, vm.top);
+}
+
+fn callClosureIntoWithResultBase(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue, result_slot_override: u32) anyerror!void {
+    const proto = closure.proto;
+
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
+    const call_base = vm.top;
+    const result_slot = result_slot_override;
+
+    const arg_count: u32 = @intCast(args.len);
+    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
+
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        vm.stack[call_base + i] = args[i];
+    }
+
+    i = params_to_copy;
+    while (i < proto.numparams) : (i += 1) {
+        vm.stack[call_base + i] = .nil;
+    }
+
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (proto.is_vararg and arg_count > proto.numparams) {
+        vararg_count = arg_count - proto.numparams;
+        vararg_base = call_base + proto.maxstacksize;
+        var vi: u32 = 0;
+        while (vi < vararg_count) : (vi += 1) {
+            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
+        }
+    }
+
+    vm.top = call_base + proto.maxstacksize + vararg_count;
+
+    return runUntilReturnInto(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count, out);
 }
 
 /// Execute a Lua function until it returns to saved call depth.
@@ -287,6 +458,9 @@ fn runUntilReturn(
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
                 err == error.InvalidTableOperation or
+                err == error.InvalidForLoopInit or
+                err == error.InvalidForLoopLimit or
+                err == error.InvalidForLoopStep or
                 err == error.FormatError)
             {
                 // Set error message and try to handle as LuaException
@@ -306,6 +480,9 @@ fn runUntilReturn(
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",
                     error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.InvalidForLoopInit => "'for' initial value must be a number",
+                    error.InvalidForLoopLimit => "'for' limit must be a number",
+                    error.InvalidForLoopStep => "'for' step is zero",
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
@@ -344,4 +521,87 @@ fn runUntilReturn(
     vm.top = saved_top;
 
     return result;
+}
+
+fn runUntilReturnInto(
+    vm: *VM,
+    proto: *const ProtoObject,
+    closure: *ClosureObject,
+    call_base: u32,
+    result_slot: u32,
+    saved_base: u32,
+    saved_top: u32,
+    vararg_base: u32,
+    vararg_count: u32,
+    out: []TValue,
+) anyerror!void {
+    const cleanupOnError = struct {
+        fn run(vm2: *VM, saved_depth2: u32, saved_base2: u32, saved_top2: u32) void {
+            while (vm2.callstack_size > saved_depth2) {
+                mnemonics.popCallInfo(vm2);
+            }
+            vm2.base = saved_base2;
+            vm2.top = saved_top2;
+        }
+    }.run;
+
+    const saved_depth = vm.callstack_size;
+    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, @intCast(out.len), vararg_base, vararg_count);
+
+    var direct_results: ?[]const TValue = null;
+    var direct_single: ?TValue = null;
+    var direct_none = false;
+
+    while (vm.callstack_size > saved_depth) {
+        const ci = &vm.callstack[vm.callstack_size - 1];
+        const inst = ci.fetch() catch {
+            mnemonics.popCallInfo(vm);
+            if (vm.callstack_size == saved_depth) break;
+            const prev_ci = &vm.callstack[vm.callstack_size - 1];
+            vm.base = prev_ci.ret_base;
+            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
+            continue;
+        };
+        const result = mnemonics.do(vm, inst) catch |err| {
+            if (err == error.Yield) return error.Yield;
+            if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            cleanupOnError(vm, saved_depth, saved_base, saved_top);
+            return err;
+        };
+        switch (result) {
+            .Continue => {},
+            .LoopContinue => {},
+            .ReturnVM => |ret| {
+                switch (ret) {
+                    .none => direct_none = true,
+                    .single => |v| direct_single = v,
+                    .multiple => |vs| direct_results = vs,
+                }
+                mnemonics.popCallInfo(vm);
+                break;
+            },
+        }
+    }
+
+    if (direct_none) {
+        var i: usize = 0;
+        while (i < out.len) : (i += 1) out[i] = .nil;
+    } else if (direct_single) |v| {
+        if (out.len > 0) out[0] = v;
+        var i: usize = 1;
+        while (i < out.len) : (i += 1) out[i] = .nil;
+    } else if (direct_results) |vs| {
+        var i: usize = 0;
+        while (i < out.len) : (i += 1) {
+            out[i] = if (i < vs.len) vs[i] else .nil;
+        }
+    } else {
+        var i: usize = 0;
+        while (i < out.len) : (i += 1) {
+            out[i] = vm.stack[result_slot + @as(u32, @intCast(i))];
+        }
+    }
+
+    vm.base = saved_base;
+    vm.top = saved_top;
 }

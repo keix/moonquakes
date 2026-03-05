@@ -507,10 +507,8 @@ pub fn nativeOsGetenv(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
 /// os.remove(filename) - Deletes the file (or empty directory) with the given name
 pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
             const err_msg = try vm.gc().allocString("bad argument #1 to 'remove' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
@@ -520,7 +518,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     const filename_arg = vm.stack[vm.base + func_reg + 1];
     const filename_obj = filename_arg.asString() orelse {
-        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
             const err_msg = try vm.gc().allocString("bad argument #1 to 'remove' (string expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_msg);
@@ -535,7 +533,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // If file deletion fails due to IsDir, try as directory
         if (file_err == error.IsDir) {
             cwd.deleteDir(filename) catch |dir_err| {
-                vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                 if (nresults >= 2) {
                     const err_msg = switch (dir_err) {
                         error.FileNotFound => try vm.gc().allocString("No such file or directory"),
@@ -547,11 +545,11 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 }
                 return;
             };
-            vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
             return;
         }
         // File deletion failed for other reason
-        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
         if (nresults >= 2) {
             const err_msg = switch (file_err) {
                 error.FileNotFound => try vm.gc().allocString("No such file or directory"),
@@ -563,7 +561,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
 }
 
 /// os.rename(oldname, newname) - Renames file or directory from oldname to newname
@@ -688,8 +686,6 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// os.time([table]) - Returns the current time when called without arguments
 pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     if (nargs >= 1 and vm.stack[vm.base + func_reg + 1] != .nil) {
         const table = vm.stack[vm.base + func_reg + 1].asTable() orelse return vm.raiseString("table expected");
 
@@ -743,13 +739,17 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         try writeDateField(table, vm, "yday", .{ .integer = normalized.yday });
         try writeDateField(table, vm, "isdst", .{ .boolean = false });
 
-        vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+        }
         return;
     }
 
     // Return current Unix timestamp (seconds since epoch)
     const timestamp = std.time.timestamp();
-    vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+    }
 }
 
 /// os.tmpname() - Returns a string with a file name that can be used for a temporary file
