@@ -89,12 +89,8 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
 
 /// type(v) - Returns the type of its only argument, coded as a string
 pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     if (nargs == 0) {
-        const type_name = try vm.gc().allocString("nil");
-        vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
-        return;
+        return vm.raiseString("bad argument #1 to 'type' (value expected)");
     }
 
     const arg = vm.stack[vm.base + func_reg + 1];
@@ -104,7 +100,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         const closed_key = try vm.gc().allocString("_closed");
         if (table.get(TValue.fromString(closed_key)) != null) {
             const type_name = try vm.gc().allocString("userdata");
-            vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
             return;
         }
 
@@ -112,7 +108,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         if (table.metatable) |mt| {
             if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
                 if (name_val.asString()) |name_str| {
-                    vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(name_str);
                     return;
                 }
             }
@@ -137,7 +133,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     };
 
     const type_name = try vm.gc().allocString(type_name_str);
-    vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
+    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
@@ -627,18 +623,17 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
 /// rawlen(v) - Returns the length of object v without metamethods
 pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
-
     if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .{ .integer = 0 };
-        return;
+        return vm.raiseString("bad argument #1 to 'rawlen' (table or string expected)");
     }
 
     const arg = vm.stack[vm.base + func_reg + 1];
 
     // String length
     if (arg.asString()) |s| {
-        vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+        }
         return;
     }
 
@@ -651,11 +646,12 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
             if (val == .nil) break;
             len += 1;
         }
-        vm.stack[vm.base + func_reg] = .{ .integer = len };
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .{ .integer = len };
+        }
         return;
     }
-
-    vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+    return vm.raiseString("bad argument #1 to 'rawlen' (table or string expected)");
 }
 
 /// select(index, ...) - Returns all arguments after argument number index

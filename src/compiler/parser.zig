@@ -1283,10 +1283,13 @@ pub const Parser = struct {
                     // Multiple assignment: a, b, c = expr, expr, ...
                     try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Field/index chains are handled by parseAssignment, which also
-                    // supports call statements (t.x(), t:x()) and multi-assign starts
-                    // like "t.x, t.y = ...".
-                    try self.parseAssignment();
+                    // Prefer assignment parser for targets like "t.x = ..." / "t.x, t.y = ...".
+                    // If no '=' is present, fall back to call/field statement parser
+                    // for forms like "io.input():close()".
+                    self.parseAssignment() catch |err| switch (err) {
+                        error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
+                        else => return err,
+                    };
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
                     _ = try self.parseExpr();
@@ -1592,7 +1595,7 @@ pub const Parser = struct {
                 } else if (last_key_reg) |kr| {
                     try self.proto.emitSETTABLE(table_reg, kr, value_reg);
                 }
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
+            } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
                 // Function call: t[key]() or t.field[key]() etc.
                 // First, get the function from the table
                 const func_reg = self.proto.allocTemp();
@@ -1606,7 +1609,18 @@ pub const Parser = struct {
 
                 // Parse arguments and emit call
                 const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                const has_suffix = (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, ".") or
+                        std.mem.eql(u8, self.current.lexeme, "[") or
+                        std.mem.eql(u8, self.current.lexeme, ":") or
+                        std.mem.eql(u8, self.current.lexeme, "("))) or
+                    self.isNoParensArg();
+                if (has_suffix) {
+                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
+                    _ = try self.parseSuffixChain(func_reg);
+                } else {
+                    try self.proto.emitCallVararg(func_reg, arg_count, 0);
+                }
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
                 // Method call on indexed value: t[key]:method()
                 // First, get the receiver from the table
@@ -1638,7 +1652,18 @@ pub const Parser = struct {
                 // Parse extra arguments
                 const extra_args = try self.parseMethodArgs(func_reg);
 
-                try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                const has_suffix = (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, ".") or
+                        std.mem.eql(u8, self.current.lexeme, "[") or
+                        std.mem.eql(u8, self.current.lexeme, ":") or
+                        std.mem.eql(u8, self.current.lexeme, "("))) or
+                    self.isNoParensArg();
+                if (has_suffix) {
+                    try self.proto.emitCall(func_reg, extra_args + 1, 1);
+                    _ = try self.parseSuffixChain(func_reg);
+                } else {
+                    try self.proto.emitCall(func_reg, extra_args + 1, 0);
+                }
             } else {
                 return error.ExpectedEquals;
             }
@@ -3644,8 +3669,13 @@ pub const Parser = struct {
                     // Multiple assignment: a, b, c = expr, expr, ...
                     try self.parseMultipleAssignment();
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ".")) {
-                    // Check for chained method call: t.a:method() or field assignment
-                    try self.parseFieldAccessOrMethodCall();
+                    // Prefer assignment parser for targets like "t.x = ..." / "t.x, t.y = ...".
+                    // If no '=' is present, fall back to call/field statement parser
+                    // for forms like "io.input():close()".
+                    self.parseAssignment() catch |err| switch (err) {
+                        error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
+                        else => return err,
+                    };
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":")) {
                     // Method call: t:method()
                     _ = try self.parseExpr();
