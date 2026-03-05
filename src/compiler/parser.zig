@@ -1287,6 +1287,7 @@ pub const Parser = struct {
                     // If no '=' is present, fall back to call/field statement parser
                     // for forms like "io.input():close()".
                     self.parseAssignment() catch |err| switch (err) {
+                        // Fallback is intentional for assignment/call ambiguity on dotted prefixes.
                         error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
                         else => return err,
                     };
@@ -3673,6 +3674,7 @@ pub const Parser = struct {
                     // If no '=' is present, fall back to call/field statement parser
                     // for forms like "io.input():close()".
                     self.parseAssignment() catch |err| switch (err) {
+                        // Fallback is intentional for assignment/call ambiguity on dotted prefixes.
                         error.ExpectedEquals, error.UnsupportedStatement => _ = try self.parseExpr(),
                         else => return err,
                     };
