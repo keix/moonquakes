@@ -109,6 +109,7 @@ const VariableEntry = struct {
     name: []const u8,
     reg: u8,
     is_const: bool = false,
+    decl_seq: u32 = 0,
 };
 
 /// Number of registers used by numeric for loop (idx, limit, step, user_var)
@@ -124,6 +125,16 @@ const ScopeMark = struct {
 const PendingGoto = struct {
     name: []const u8, // label name
     code_pos: usize, // position of the JMP instruction to patch
+    scope_depth: usize = 0,
+    scope_id: u32 = 0,
+    next_decl_seq: u32 = 0,
+};
+
+const LabelEntry = struct {
+    code_pos: usize,
+    scope_depth: usize,
+    scope_id: u32,
+    next_decl_seq: u32,
 };
 
 pub const ProtoBuilder = struct {
@@ -150,10 +161,11 @@ pub const ProtoBuilder = struct {
     scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
+    local_decl_seq: u32 = 0,
     // Constant deduplication maps (string content -> const_refs index)
     string_constants: std.StringHashMap(u32),
     // Label tracking for goto support
-    labels: std.StringHashMap(usize), // label name -> code position
+    labels: std.StringHashMap(LabelEntry), // label name -> code/scope info
     pending_gotos: std.ArrayList(PendingGoto), // gotos that need patching
 
     pub fn init(allocator: std.mem.Allocator, parent: ?*ProtoBuilder) std.mem.Allocator.Error!ProtoBuilder {
@@ -177,8 +189,9 @@ pub const ProtoBuilder = struct {
             .scope_starts = .{},
             .upvalues = .{},
             .parent = parent,
+            .local_decl_seq = 0,
             .string_constants = std.StringHashMap(u32).init(allocator),
-            .labels = std.StringHashMap(usize).init(allocator),
+            .labels = std.StringHashMap(LabelEntry).init(allocator),
             .pending_gotos = .{},
         };
 
@@ -1017,11 +1030,24 @@ pub const ProtoBuilder = struct {
 
     // Variable management methods
     pub fn addVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
-        try self.variables.append(self.allocator, .{ .name = name, .reg = reg });
+        const decl_seq = self.local_decl_seq;
+        self.local_decl_seq += 1;
+        try self.variables.append(self.allocator, .{
+            .name = name,
+            .reg = reg,
+            .decl_seq = decl_seq,
+        });
     }
 
     pub fn addConstVariable(self: *ProtoBuilder, name: []const u8, reg: u8) !void {
-        try self.variables.append(self.allocator, .{ .name = name, .reg = reg, .is_const = true });
+        const decl_seq = self.local_decl_seq;
+        self.local_decl_seq += 1;
+        try self.variables.append(self.allocator, .{
+            .name = name,
+            .reg = reg,
+            .is_const = true,
+            .decl_seq = decl_seq,
+        });
     }
 
     pub fn findVariable(self: *ProtoBuilder, name: []const u8) ?u8 {
@@ -1154,6 +1180,11 @@ pub const Parser = struct {
     break_jumps: std.ArrayList(u32),
     loop_close_regs: std.ArrayList(u8),
     loop_depth: usize,
+    active_label_names: std.ArrayList([]const u8),
+    scope_label_marks: std.ArrayList(usize),
+    scope_ids: std.ArrayList(u32),
+    scope_parents: std.ArrayList(u32),
+    next_scope_id: u32,
     /// Error message buffer for detailed parse error reporting
     error_msg: [256]u8 = undefined,
     error_len: usize = 0,
@@ -1166,7 +1197,15 @@ pub const Parser = struct {
             .break_jumps = .{},
             .loop_close_regs = .{},
             .loop_depth = 0,
+            .active_label_names = .{},
+            .scope_label_marks = .{},
+            .scope_ids = .{},
+            .scope_parents = .{},
+            .next_scope_id = 0,
         };
+        p.scope_label_marks.append(proto.allocator, 0) catch unreachable;
+        p.scope_ids.append(proto.allocator, 0) catch unreachable;
+        p.scope_parents.append(proto.allocator, 0) catch unreachable;
         p.advance();
         return p;
     }
@@ -1189,6 +1228,10 @@ pub const Parser = struct {
     pub fn deinit(self: *Parser) void {
         self.break_jumps.deinit(self.proto.allocator);
         self.loop_close_regs.deinit(self.proto.allocator);
+        self.active_label_names.deinit(self.proto.allocator);
+        self.scope_label_marks.deinit(self.proto.allocator);
+        self.scope_ids.deinit(self.proto.allocator);
+        self.scope_parents.deinit(self.proto.allocator);
     }
 
     fn advance(self: *Parser) void {
@@ -1217,6 +1260,108 @@ pub const Parser = struct {
         const reg = self.proto.allocTemp();
         try self.proto.emitLOADNIL(reg, 1);
         try self.proto.emitReturn(reg, 1);
+    }
+
+    fn enterScope(self: *Parser) !void {
+        try self.proto.enterScope();
+        try self.scope_label_marks.append(self.proto.allocator, self.active_label_names.items.len);
+        self.next_scope_id += 1;
+        const new_id = self.next_scope_id;
+        const parent_id = self.scope_ids.items[self.scope_ids.items.len - 1];
+        try self.scope_parents.append(self.proto.allocator, parent_id);
+        try self.scope_ids.append(self.proto.allocator, new_id);
+    }
+
+    fn leaveScope(self: *Parser) void {
+        const mark = self.scope_label_marks.pop().?;
+        var i = self.active_label_names.items.len;
+        while (i > mark) {
+            i -= 1;
+            _ = self.proto.labels.remove(self.active_label_names.items[i]);
+        }
+        self.active_label_names.shrinkRetainingCapacity(mark);
+        _ = self.scope_ids.pop();
+        self.proto.leaveScope();
+    }
+
+    fn currentScopeDepth(self: *Parser) usize {
+        return self.proto.scope_starts.items.len;
+    }
+
+    fn currentScopeId(self: *Parser) u32 {
+        return self.scope_ids.items[self.scope_ids.items.len - 1];
+    }
+
+    fn isScopeAncestor(self: *Parser, ancestor_id: u32, scope_id: u32) bool {
+        var cur = scope_id;
+        while (true) {
+            if (cur == ancestor_id) return true;
+            if (cur == 0) return false;
+            cur = self.scope_parents.items[cur];
+        }
+    }
+
+    fn isLabelOnlyTailToBlockBoundary(self: *Parser) bool {
+        const saved_pos = self.lexer.pos;
+        const saved_line = self.lexer.line;
+        defer {
+            self.lexer.pos = saved_pos;
+            self.lexer.line = saved_line;
+        }
+
+        var tok = self.current;
+        while (true) {
+            if (tok.kind == .Symbol and std.mem.eql(u8, tok.lexeme, ";")) {
+                tok = self.lexer.nextToken();
+                continue;
+            }
+
+            // Skip following labels: ::name::
+            if (tok.kind == .Symbol and std.mem.eql(u8, tok.lexeme, ":")) {
+                const t2 = self.lexer.nextToken();
+                if (!(t2.kind == .Symbol and std.mem.eql(u8, t2.lexeme, ":"))) return false;
+                const t3 = self.lexer.nextToken();
+                if (t3.kind != .Identifier) return false;
+                const t4 = self.lexer.nextToken();
+                if (!(t4.kind == .Symbol and std.mem.eql(u8, t4.lexeme, ":"))) return false;
+                const t5 = self.lexer.nextToken();
+                if (!(t5.kind == .Symbol and std.mem.eql(u8, t5.lexeme, ":"))) return false;
+                tok = self.lexer.nextToken();
+                continue;
+            }
+            break;
+        }
+
+        return tok.kind == .Keyword and
+            (std.mem.eql(u8, tok.lexeme, "end") or
+                std.mem.eql(u8, tok.lexeme, "else") or
+                std.mem.eql(u8, tok.lexeme, "elseif"));
+    }
+
+    fn firstCrossedLocal(self: *Parser, next_decl_seq: u32) ?[]const u8 {
+        var found_name: ?[]const u8 = null;
+        var found_seq: u32 = std.math.maxInt(u32);
+        for (self.proto.variables.items) |entry| {
+            if (entry.decl_seq >= next_decl_seq and entry.decl_seq < found_seq) {
+                found_seq = entry.decl_seq;
+                found_name = entry.name;
+            }
+        }
+        return found_name;
+    }
+
+    fn crossedLocalCloseReg(self: *Parser, next_decl_seq: u32) ?u8 {
+        var found = false;
+        var min_reg: u8 = 0;
+        for (self.proto.variables.items) |entry| {
+            if (entry.decl_seq >= next_decl_seq) {
+                if (!found or entry.reg < min_reg) {
+                    min_reg = entry.reg;
+                    found = true;
+                }
+            }
+        }
+        return if (found) min_reg else null;
     }
 
     // Parse functions grouped together
@@ -1320,6 +1465,8 @@ pub const Parser = struct {
 
         // Check for unresolved gotos
         if (self.proto.pending_gotos.items.len > 0) {
+            const first = self.proto.pending_gotos.items[0];
+            self.setError("no visible label '{s}' for <goto>", .{first.name});
             return error.UndefinedLabel;
         }
 
@@ -1481,7 +1628,7 @@ pub const Parser = struct {
     fn parseDoEnd(self: *Parser) ParseError!void {
         self.advance(); // consume 'do'
 
-        try self.proto.enterScope();
+        try self.enterScope();
         const scope_base = self.proto.locals_top; // First local of this scope
         try self.parseStatements();
 
@@ -1489,7 +1636,7 @@ pub const Parser = struct {
         if (self.proto.locals_top > scope_base) {
             try self.proto.emit(.CLOSE, scope_base, 0, 0);
         }
-        self.proto.leaveScope();
+        self.leaveScope();
 
         // Expect 'end'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
@@ -2990,13 +3137,13 @@ pub const Parser = struct {
 
         // Mark for then branch
         const then_mark = self.proto.markTemps();
-        try self.proto.enterScope();
+        try self.enterScope();
 
         // Parse then branch
         try self.parseStatements();
 
         // Release then branch scope and temporaries
-        self.proto.leaveScope();
+        self.leaveScope();
         self.proto.resetTemps(then_mark);
 
         // Always emit jump to skip else branch after then branch
@@ -3036,13 +3183,13 @@ pub const Parser = struct {
 
             // Mark for elseif body
             const elseif_body_mark = self.proto.markTemps();
-            try self.proto.enterScope();
+            try self.enterScope();
 
             // Parse elseif body
             try self.parseStatements();
 
             // Release elseif body scope and temporaries
-            self.proto.leaveScope();
+            self.leaveScope();
             self.proto.resetTemps(elseif_body_mark);
 
             // Jump over remaining elseif/else when this condition was true
@@ -3062,13 +3209,13 @@ pub const Parser = struct {
 
             // Mark for else body
             const else_body_mark = self.proto.markTemps();
-            try self.proto.enterScope();
+            try self.enterScope();
 
             // Parse else branch
             try self.parseStatements();
 
             // Release else body scope and temporaries
-            self.proto.leaveScope();
+            self.leaveScope();
             self.proto.resetTemps(else_body_mark);
         }
 
@@ -3426,13 +3573,13 @@ pub const Parser = struct {
         const break_close_reg = self.proto.locals_top;
         try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
         defer _ = self.loop_close_regs.pop();
-        try self.proto.enterScope();
+        try self.enterScope();
 
         // Parse loop body
         try self.parseStatements();
 
         // Release loop body scope and temporaries
-        self.proto.leaveScope();
+        self.leaveScope();
         self.proto.resetTemps(body_mark);
 
         // Expect 'end'
@@ -3473,7 +3620,7 @@ pub const Parser = struct {
         const break_close_reg = self.proto.locals_top;
         try self.loop_close_regs.append(self.proto.allocator, break_close_reg);
         defer _ = self.loop_close_regs.pop();
-        try self.proto.enterScope();
+        try self.enterScope();
 
         // Parse loop body (stops at 'until')
         try self.parseStatements();
@@ -3505,7 +3652,7 @@ pub const Parser = struct {
 
         // Release condition temporaries and scope
         self.proto.resetTemps(cond_mark);
-        self.proto.leaveScope();
+        self.leaveScope();
         self.proto.resetTemps(body_mark);
     }
 
@@ -3538,10 +3685,21 @@ pub const Parser = struct {
         self.advance(); // consume label name
 
         // Check if label is already defined
-        if (self.proto.labels.get(label_name)) |target_pos| {
+        if (self.proto.labels.get(label_name)) |target| {
+            // Cannot jump into a deeper block.
+            if (!self.isScopeAncestor(target.scope_id, self.currentScopeId())) {
+                self.setError("no visible label '{s}' for <goto>", .{label_name});
+                return error.UndefinedLabel;
+            }
+            if (target.code_pos <= self.proto.code.items.len) {
+                // Backward jump may leave scope of locals: close them before jumping.
+                if (self.crossedLocalCloseReg(target.next_decl_seq)) |close_reg| {
+                    try self.proto.emit(.CLOSE, close_reg, 0, 0);
+                }
+            }
             // Backward jump - emit JMP directly
             const current_pos = self.proto.code.items.len;
-            const offset = @as(i32, @intCast(target_pos)) - @as(i32, @intCast(current_pos)) - 1;
+            const offset = @as(i32, @intCast(target.code_pos)) - @as(i32, @intCast(current_pos)) - 1;
             try self.proto.emitJMP(@intCast(offset));
         } else {
             // Forward jump - emit placeholder JMP and record for patching
@@ -3549,6 +3707,9 @@ pub const Parser = struct {
             try self.proto.pending_gotos.append(self.proto.allocator, .{
                 .name = label_name,
                 .code_pos = jmp_addr,
+                .scope_depth = self.currentScopeDepth(),
+                .scope_id = self.currentScopeId(),
+                .next_decl_seq = self.proto.local_decl_seq,
             });
         }
     }
@@ -3575,15 +3736,38 @@ pub const Parser = struct {
         }
         self.advance(); // consume ':'
 
+        // Repeated labels are not allowed.
+        if (self.proto.labels.get(label_name) != null) {
+            self.setError("label '{s}' already defined", .{label_name});
+            return error.ExpectedLabel;
+        }
+
         // Record label position
         const label_pos = self.proto.code.items.len;
-        try self.proto.labels.put(label_name, label_pos);
+        const label = LabelEntry{
+            .code_pos = label_pos,
+            .scope_depth = self.currentScopeDepth(),
+            .scope_id = self.currentScopeId(),
+            .next_decl_seq = self.proto.local_decl_seq,
+        };
+        try self.proto.labels.put(label_name, label);
+        try self.active_label_names.append(self.proto.allocator, label_name);
 
         // Patch any pending gotos to this label
         var i: usize = 0;
         while (i < self.proto.pending_gotos.items.len) {
             const pending = self.proto.pending_gotos.items[i];
             if (std.mem.eql(u8, pending.name, label_name)) {
+                if (!self.isScopeAncestor(label.scope_id, pending.scope_id)) {
+                    i += 1;
+                    continue;
+                }
+                if (self.firstCrossedLocal(pending.next_decl_seq)) |local_name| {
+                    if (!self.isLabelOnlyTailToBlockBoundary()) {
+                        self.setError("<goto {s}> jumps into the scope of local '{s}'", .{ label_name, local_name });
+                        return error.UndefinedLabel;
+                    }
+                }
                 // Patch the JMP instruction
                 self.proto.patchJMP(@intCast(pending.code_pos), @intCast(label_pos));
                 // Remove from pending list (swap remove)
