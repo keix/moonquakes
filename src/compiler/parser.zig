@@ -777,8 +777,7 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn emitTEST(self: *ProtoBuilder, reg: u8, condition: bool) !void {
-        const k: u8 = if (condition) 1 else 0;
-        const instr = Instruction.initABC(.TEST, reg, 0, k);
+        const instr = Instruction.initABCk(.TEST, reg, 0, 0, condition);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
     }
@@ -1568,18 +1567,33 @@ pub const Parser = struct {
         var count: u8 = 1;
 
         // Check for tail call optimization: return f(...)
-        // If the return is a single function call, convert CALL to TAILCALL
+        // If the return is a single function call, convert CALL to TAILCALL.
+        // Also handle a trailing MOVE after CALL.
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) {
             // Single return value - check if it was a function call
             if (self.proto.code.items.len > 0) {
                 const last_idx = self.proto.code.items.len - 1;
                 const last_inst = self.proto.code.items[last_idx];
+                var call_idx_opt: ?usize = null;
                 if (last_inst.getOpCode() == .CALL) {
+                    call_idx_opt = last_idx;
+                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                    const prev_idx = last_idx - 1;
+                    if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                        call_idx_opt = prev_idx;
+                    }
+                }
+                if (call_idx_opt) |call_idx| {
+                    // Drop trailing MOVE after CALL; tailcall must be the final instruction.
+                    if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
+                        self.proto.code.items.len -= 1;
+                    }
                     // Convert CALL to TAILCALL
                     // CALL A B C -> TAILCALL A B 0
-                    const a = last_inst.getA();
-                    const b = last_inst.getB();
-                    self.proto.code.items[last_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
+                    const call_inst = self.proto.code.items[call_idx];
+                    const a = call_inst.getA();
+                    const b = call_inst.getB();
+                    self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
                     return; // TAILCALL handles the return
                 }
             }
@@ -1619,13 +1633,53 @@ pub const Parser = struct {
                 if (self.proto.code.items.len > 0) {
                     const last_idx = self.proto.code.items.len - 1;
                     const last_inst = self.proto.code.items[last_idx];
+                    var call_idx_opt: ?usize = null;
                     if (last_inst.getOpCode() == .CALL) {
+                        call_idx_opt = last_idx;
+                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                        const prev_idx = last_idx - 1;
+                        if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                            call_idx_opt = prev_idx;
+                        }
+                    }
+                    if (call_idx_opt) |call_idx| {
+                        // Drop trailing MOVE after CALL to avoid duplicating first result
+                        // when RETURN B=0 collects from first_reg to top.
+                        if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
+                            self.proto.code.items.len -= 1;
+                        }
                         // Patch CALL to return variable results (C=0)
-                        const a = last_inst.getA();
-                        const b = last_inst.getB();
-                        self.proto.code.items[last_idx] = Instruction.initABC(.CALL, a, b, 0);
-                        // RETURN with B=0 returns from first_reg to top
-                        try self.proto.emit(.RETURN, first_reg, 0, 0);
+                        const call_inst = self.proto.code.items[call_idx];
+                        const a = call_inst.getA();
+                        const b = call_inst.getB();
+                        self.proto.code.items[call_idx] = Instruction.initABC(.CALL, a, b, 0);
+
+                        // Ensure fixed return values are contiguous immediately before
+                        // the CALL result block: [fixed..., call_results...].
+                        // This handles cases like: return x, f(...)
+                        const fixed_count: u8 = count - 1;
+                        var return_base: u8 = first_reg;
+                        if (fixed_count > 0 and a >= fixed_count) {
+                            const desired_base: u8 = a - fixed_count;
+                            if (desired_base != first_reg) {
+                                if (desired_base > first_reg) {
+                                    var i: u8 = fixed_count;
+                                    while (i > 0) {
+                                        i -= 1;
+                                        try self.proto.emitMOVE(desired_base + i, first_reg + i);
+                                    }
+                                } else {
+                                    var i: u8 = 0;
+                                    while (i < fixed_count) : (i += 1) {
+                                        try self.proto.emitMOVE(desired_base + i, first_reg + i);
+                                    }
+                                }
+                                return_base = desired_base;
+                            }
+                        }
+
+                        // RETURN with B=0 returns from return_base to top
+                        try self.proto.emit(.RETURN, return_base, 0, 0);
                         return;
                     }
                 }
@@ -1940,9 +1994,13 @@ pub const Parser = struct {
             expr_count += 1;
         }
 
-        // Handle multiple return values from single function call
+        // Handle multiple return values from the last expression.
+        // In Lua, only the last expression in assignment can expand.
         var handled_multi_return = false;
-        if (expr_count == 1 and target_count > 1) {
+        if (expr_count >= 1 and target_count >= expr_count) {
+            const fixed_values: u8 = expr_count - 1;
+            const needed_from_last: u8 = target_count - fixed_values;
+            if (needed_from_last > 1) {
             if (self.proto.code.items.len > 0) {
                 var call_idx: ?usize = null;
                 var call_func_reg: u8 = 0;
@@ -1971,20 +2029,22 @@ pub const Parser = struct {
                 }
 
                 if (call_idx) |idx| {
-                    // Adjust CALL/PCALL to return target_count results
-                    self.proto.code.items[idx].c = target_count + 1;
+                    // Adjust CALL/PCALL to return needed_from_last results
+                    self.proto.code.items[idx].c = needed_from_last + 1;
 
-                    // Move results from call_func_reg to first_temp...
+                    // Move expanded results into remaining target temp slots.
+                    const dst_start = first_temp + fixed_values;
                     var vi: u8 = 0;
-                    while (vi < target_count) : (vi += 1) {
+                    while (vi < needed_from_last) : (vi += 1) {
                         const src = call_func_reg + vi;
-                        const dst = first_temp + vi;
+                        const dst = dst_start + vi;
                         if (src != dst) {
                             try self.proto.emitMOVE(dst, src);
                         }
                     }
                     handled_multi_return = true;
                 }
+            }
             }
         }
 
@@ -2917,7 +2977,20 @@ pub const Parser = struct {
     }
 
     fn parseAdd(self: *Parser) ParseError!u8 {
-        var left = try self.parseMul();
+        const first = try self.parseMul();
+        if (!(self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, "+") or
+                std.mem.eql(u8, self.current.lexeme, "-"))))
+        {
+            return first;
+        }
+
+        // Fold long additive chains into a single accumulator register to avoid
+        // unbounded temporary growth (e.g. a1 + a2 + ... + a200).
+        const acc = self.proto.allocTemp();
+        if (acc != first) {
+            try self.proto.emitMOVE(acc, first);
+        }
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "+") or
@@ -2927,18 +3000,19 @@ pub const Parser = struct {
             self.advance(); // consume operator
             const right = try self.parseMul();
 
-            const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "+")) {
-                try self.proto.emitAdd(dst, left, right);
+                try self.proto.emitAdd(acc, acc, right);
             } else if (std.mem.eql(u8, op, "-")) {
-                try self.proto.emitSub(dst, left, right);
+                try self.proto.emitSub(acc, acc, right);
             } else {
                 return error.UnsupportedOperator;
             }
-            left = dst;
+
+            // Release temporaries created for the RHS; keep only accumulator.
+            self.proto.next_reg = @max(self.proto.locals_top, acc + 1);
         }
 
-        return left;
+        return acc;
     }
 
     /// Parse bitwise OR: a | b
@@ -4027,6 +4101,7 @@ pub const Parser = struct {
 
             // Parse initializer expressions (comma-separated)
             var expr_count: u8 = 0;
+            var expr_mark = self.proto.markTemps();
             var expr_reg = try self.parseExpr();
 
             // Move first expression to first variable register
@@ -4034,10 +4109,14 @@ pub const Parser = struct {
                 try self.proto.emitMOVE(first_reg, expr_reg);
             }
             expr_count += 1;
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.proto.resetTemps(expr_mark);
+            }
 
             // Parse remaining expressions
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
+                expr_mark = self.proto.markTemps();
                 expr_reg = try self.parseExpr();
 
                 if (expr_count < var_count) {
@@ -4048,12 +4127,19 @@ pub const Parser = struct {
                 }
                 // If more values than variables, discard extras
                 expr_count += 1;
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                    self.proto.resetTemps(expr_mark);
+                }
             }
 
-            // Handle multiple return values: if single expression assigns to multiple vars,
-            // adjust the last CALL/PCALL/VARARG instruction's nresults to match var_count
+            // Handle multiple return values from the last expression:
+            // In Lua, only the last expression in an assignment can expand.
+            // Adjust the trailing CALL/PCALL/VARARG nresults to fill remaining variables.
             var handled_multi_return = false;
-            if (expr_count == 1 and var_count > 1) {
+            if (expr_count >= 1 and var_count >= expr_count) {
+                const fixed_values: u8 = expr_count - 1;
+                const needed_from_last: u8 = var_count - fixed_values;
+                if (needed_from_last > 1) {
                 // Find the CALL, PCALL, or VARARG instruction (may be last or before a MOVE)
                 if (self.proto.code.items.len > 0) {
                     var target_idx: ?usize = null;
@@ -4090,20 +4176,23 @@ pub const Parser = struct {
                     }
 
                     if (target_idx) |idx| {
-                        // Adjust CALL/PCALL/VARARG to return var_count results
-                        self.proto.code.items[idx].c = var_count + 1;
+                        // Adjust CALL/PCALL/VARARG to return needed_from_last results
+                        self.proto.code.items[idx].c = needed_from_last + 1;
 
-                        // Emit MOVEs to copy results from target_reg to first_reg...
+                        // Copy expanded results from the last expression into remaining vars.
+                        // Destination starts at first_reg + fixed_values (the first slot of last expr).
+                        const dst_start = first_reg + fixed_values;
                         var vi: u8 = 0;
-                        while (vi < var_count) : (vi += 1) {
+                        while (vi < needed_from_last) : (vi += 1) {
                             const src = target_reg + vi;
-                            const dst = first_reg + vi;
+                            const dst = dst_start + vi;
                             if (src != dst) {
                                 try self.proto.emitMOVE(dst, src);
                             }
                         }
                         handled_multi_return = true;
                     }
+                }
                 }
             }
 
@@ -4434,11 +4523,9 @@ pub const Parser = struct {
             } else {
                 // Parse first argument
                 const target_reg = func_reg + 1;
-                // Set next_reg to target so allocTemp() returns correct register for this arg
+                // Force next_reg to the argument target so call results remain contiguous.
                 const saved_next_reg = self.proto.next_reg;
-                if (self.proto.next_reg < target_reg) {
-                    self.proto.next_reg = target_reg;
-                }
+                self.proto.next_reg = target_reg;
                 const code_len_before = self.proto.code.items.len;
                 const arg_reg = try self.parseExpr();
                 // Restore next_reg to max of saved and current
@@ -4468,11 +4555,9 @@ pub const Parser = struct {
 
                 arg_count += 1;
                 const target_reg = func_reg + arg_count;
-                // Set next_reg to target so allocTemp() returns correct register for this arg
+                // Force next_reg to the argument target so call results remain contiguous.
                 const saved_next_reg = self.proto.next_reg;
-                if (self.proto.next_reg < target_reg) {
-                    self.proto.next_reg = target_reg;
-                }
+                self.proto.next_reg = target_reg;
                 const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
                 const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
@@ -4501,12 +4586,21 @@ pub const Parser = struct {
         if (last_was_call and arg_count >= 1 and self.proto.code.items.len > 0) {
             const last_idx = self.proto.code.items.len - 1;
             const last_inst = self.proto.code.items[last_idx];
+            var call_idx_opt: ?usize = null;
 
-            // Only enable MULTRET if the last instruction is CALL (no MOVE after it).
-            // With register reuse in parseSuffixChain, MOVE after CALL should not occur
-            // for chained field accesses like table.unpack().
             if (last_inst.getOpCode() == .CALL) {
-                self.proto.code.items[last_idx].c = 0;
+                call_idx_opt = last_idx;
+            } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                const prev_idx = last_idx - 1;
+                if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                    call_idx_opt = prev_idx;
+                    // Drop trailing MOVE; MULTRET result width is dynamic.
+                    self.proto.code.items.len -= 1;
+                }
+            }
+
+            if (call_idx_opt) |call_idx| {
+                self.proto.code.items[call_idx].c = 0;
                 return ProtoBuilder.VARARG_SENTINEL;
             }
         }
@@ -4938,12 +5032,8 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // Add implicit RETURN if no explicit return was added
-        if (func_builder.code.items.len == 0 or
-            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
-        {
-            try func_builder.emit(.RETURN, 0, 1, 0);
-        }
+        // Always add a fallthrough return for paths that do not explicitly return.
+        try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert function builder to RawProto with dynamic allocation
         const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
@@ -5113,12 +5203,8 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // Add implicit RETURN if needed
-        if (func_builder.code.items.len == 0 or
-            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
-        {
-            try func_builder.emit(.RETURN, 0, 1, 0);
-        }
+        // Always add a fallthrough return for paths that do not explicitly return.
+        try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert to RawProto
         const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
@@ -5221,12 +5307,8 @@ pub const Parser = struct {
         }
         self.advance(); // consume 'end'
 
-        // Add implicit RETURN if needed
-        if (func_builder.code.items.len == 0 or
-            func_builder.code.items[func_builder.code.items.len - 1].getOpCode() != .RETURN)
-        {
-            try func_builder.emit(.RETURN, 0, 1, 0);
-        }
+        // Always add a fallthrough return for paths that do not explicitly return.
+        try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert to RawProto
         const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);

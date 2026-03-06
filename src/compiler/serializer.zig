@@ -5,9 +5,13 @@ const ProtoObject = object.ProtoObject;
 const Upvaldesc = @import("proto.zig").Upvaldesc;
 const Instruction = @import("opcodes.zig").Instruction;
 
-/// Moonquakes bytecode signature
-pub const SIGNATURE = "\x1bMOO";
-pub const VERSION: u8 = 1;
+/// Lua 5.4 bytecode header constants (for compatibility checks in tests)
+pub const SIGNATURE = "\x1bLua";
+pub const VERSION: u8 = 0x54;
+pub const FORMAT: u8 = 0;
+pub const LUAC_DATA = "\x19\x93\r\n\x1a\n";
+pub const LUAC_INT: i64 = 0x5678;
+pub const LUAC_NUM: f64 = 370.5;
 
 /// Constant type tags
 const ConstTag = enum(u8) {
@@ -27,9 +31,13 @@ pub fn dumpProto(proto: *const ProtoObject, allocator: std.mem.Allocator, strip:
     // Write header
     try result.appendSlice(allocator, SIGNATURE);
     try result.append(allocator, VERSION);
-    try result.append(allocator, 4); // instruction size
-    try result.append(allocator, 8); // integer size
-    try result.append(allocator, 8); // number size
+    try result.append(allocator, FORMAT);
+    try result.appendSlice(allocator, LUAC_DATA);
+    try result.append(allocator, @sizeOf(Instruction)); // instruction size
+    try result.append(allocator, @sizeOf(i64)); // integer size
+    try result.append(allocator, @sizeOf(f64)); // number size
+    try writeI64(&result, allocator, LUAC_INT);
+    try writeF64(&result, allocator, LUAC_NUM);
 
     // Write proto recursively
     try writeProto(&result, allocator, proto, strip);
@@ -145,9 +153,22 @@ pub fn loadProto(data: []const u8, gc: anytype, allocator: std.mem.Allocator) !*
     const version = reader.readU8() orelse return error.InvalidBytecode;
     if (version != VERSION) return error.UnsupportedVersion;
 
-    _ = reader.readU8() orelse return error.InvalidBytecode; // instruction size
-    _ = reader.readU8() orelse return error.InvalidBytecode; // integer size
-    _ = reader.readU8() orelse return error.InvalidBytecode; // number size
+    const format = reader.readU8() orelse return error.InvalidBytecode;
+    if (format != FORMAT) return error.InvalidBytecode;
+
+    const luac_data = reader.readBytes(LUAC_DATA.len) orelse return error.InvalidBytecode;
+    if (!std.mem.eql(u8, luac_data, LUAC_DATA)) return error.InvalidBytecode;
+
+    const insn_size = reader.readU8() orelse return error.InvalidBytecode;
+    const int_size = reader.readU8() orelse return error.InvalidBytecode;
+    const num_size = reader.readU8() orelse return error.InvalidBytecode;
+    if (insn_size != @sizeOf(Instruction) or int_size != @sizeOf(i64) or num_size != @sizeOf(f64)) {
+        return error.InvalidBytecode;
+    }
+
+    const luac_int = reader.readI64() orelse return error.InvalidBytecode;
+    const luac_num = reader.readF64() orelse return error.InvalidBytecode;
+    if (luac_int != LUAC_INT or luac_num != LUAC_NUM) return error.InvalidBytecode;
 
     // Read proto
     return readProto(&reader, gc, allocator);

@@ -450,7 +450,8 @@ fn runUntilReturn(
             // Handle LuaException by unwinding to protected frames (pcall)
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
-            if (err == error.ArithmeticError or
+            if (err == error.CallStackOverflow or
+                err == error.ArithmeticError or
                 err == error.DivideByZero or
                 err == error.ModuloByZero or
                 err == error.IntegerRepresentation or
@@ -466,6 +467,7 @@ fn runUntilReturn(
                 // Set error message and try to handle as LuaException
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
+                    error.CallStackOverflow => "stack overflow",
                     error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",

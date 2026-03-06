@@ -57,7 +57,8 @@ pub const VM = struct {
     base: u32,
     ci: ?*CallInfo,
     base_ci: CallInfo,
-    callstack: [35]CallInfo,
+    // Keep this below 256 as callstack_size is u8.
+    callstack: [200]CallInfo,
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
     lua_error_value: TValue = .nil,

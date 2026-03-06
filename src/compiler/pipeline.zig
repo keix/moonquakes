@@ -70,6 +70,8 @@ pub fn compile(
             allocator.dupe(u8, parser_msg) catch ""
         else if (err == error.ExpectedExpression and p.current.kind == lexer.TokenKind.Eof)
             allocator.dupe(u8, "near <eof>") catch ""
+        else if (err == error.UnsupportedStatement)
+            allocator.dupe(u8, "unexpected symbol") catch ""
         else
             allocator.dupe(u8, @errorName(err)) catch "";
 
