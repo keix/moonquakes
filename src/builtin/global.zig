@@ -1094,7 +1094,10 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         break :blk owned_source.?;
     };
 
-    const bytecode_probe = sourceForBytecodeProbe(source);
+    // load() on a string/reader should not apply shebang stripping.
+    // Only strip UTF-8 BOM for bytecode probe and text compilation.
+    const load_source = stripUtf8Bom(source);
+    const bytecode_probe = load_source;
     const looks_binary = bytecode_probe.len > 0 and bytecode_probe[0] == 0x1B;
 
     if (looks_binary and !modeAllowsBinary(mode)) {
@@ -1142,7 +1145,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, load_source, .{});
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);

@@ -68,9 +68,19 @@ pub fn newObjectHeader(self: anytype, obj_type: GCObjectType) GCObject {
 
 /// Allocate a new string object
 pub fn allocString(self: anytype, str: []const u8) !*StringObject {
+    return allocStringWithPolicy(self, str, false);
+}
+
+/// Allocate a constant string object (always interned by content).
+/// Used by compiler materialization so equal constants share one object.
+pub fn allocConstString(self: anytype, str: []const u8) !*StringObject {
+    return allocStringWithPolicy(self, str, true);
+}
+
+fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*StringObject {
     // Lua-compatible policy: intern only short strings.
     const short_string_max_len: usize = 40;
-    const should_intern = str.len <= short_string_max_len;
+    const should_intern = force_intern or str.len <= short_string_max_len;
     if (should_intern) {
         // Check intern table for existing short string
         if (self.strings.get(str)) |existing| {

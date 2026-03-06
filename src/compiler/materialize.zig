@@ -75,8 +75,8 @@ fn materializeConstants(raw: *const RawProto, gc: *GC) MaterializeError![]const 
             .boolean => .{ .boolean = raw.booleans[ref.index] },
             .integer => .{ .integer = raw.integers[ref.index] },
             .number => .{ .number = raw.numbers[ref.index] },
-            // GC.allocString handles string interning - duplicates in RawProto will share ObjString
-            .string => TValue.fromString(gc.allocString(raw.strings[ref.index]) catch return error.OutOfMemory),
+            // Constant strings are interned across protos so equal literals share one object.
+            .string => TValue.fromString(gc.allocConstString(raw.strings[ref.index]) catch return error.OutOfMemory),
             .native_fn => TValue.fromNativeClosure(
                 gc.allocNativeClosure(NativeFn.init(raw.native_ids[ref.index])) catch return error.OutOfMemory,
             ),
