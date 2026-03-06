@@ -36,8 +36,15 @@ fn isUpvalueReferenced(closure: *ClosureObject, idx: usize) bool {
 }
 
 fn isHiddenSyntheticUpvalue(closure: *ClosureObject, idx: usize) bool {
-    if (idx >= closure.proto.upvalues.len) return false;
-    if (closure.proto.upvalues[idx].name != null) return false;
+    // Closure slots beyond proto descriptors are internal artifacts.
+    if (idx >= closure.proto.upvalues.len) return true;
+
+    if (closure.proto.upvalues[idx].name) |name| {
+        // Hide implicit _ENV when bytecode does not reference it.
+        if (std.mem.eql(u8, name, "_ENV") and !isUpvalueReferenced(closure, idx)) return true;
+        return false;
+    }
+
     return !isUpvalueReferenced(closure, idx);
 }
 
@@ -57,6 +64,19 @@ fn keyFor(closure: *ClosureObject, idx: usize, env_idx: ?usize) UpvalueKey {
 
 fn sameKey(a: UpvalueKey, b: UpvalueKey) bool {
     return a.instack == b.instack and a.idx == b.idx and a.is_env == b.is_env;
+}
+
+fn upvalueFirstRefPos(closure: *ClosureObject, idx: usize) usize {
+    for (closure.proto.code, 0..) |inst, pc| {
+        const op = inst.getOpCode();
+        switch (op) {
+            .GETUPVAL, .SETUPVAL => if (inst.getB() == idx) return pc,
+            .GETTABUP => if (inst.getB() == idx) return pc,
+            .SETTABUP => if (inst.getA() == idx) return pc,
+            else => {},
+        }
+    }
+    return std.math.maxInt(usize);
 }
 
 fn collectVisibleUpvalueReps(closure: *ClosureObject, reps: *[256]usize) usize {
@@ -84,24 +104,51 @@ fn collectVisibleUpvalueReps(closure: *ClosureObject, reps: *[256]usize) usize {
             continue;
         }
 
-        // Insert non-env upvalues ordered by descriptor idx (Lua-like a,b,c order).
-        var insert_at = count;
-        var p: usize = 0;
-        while (p < count) : (p += 1) {
-            const kp = keyFor(closure, reps[p], env_idx);
-            if (k.idx < kp.idx) {
-                insert_at = p;
-                break;
+        const has_name = i < closure.proto.upvalues.len and closure.proto.upvalues[i].name != null;
+        if (has_name) {
+            // For named upvalues, follow first reference order in bytecode.
+            const pos_i = upvalueFirstRefPos(closure, i);
+            var insert_at = count;
+            var p: usize = 0;
+            while (p < count) : (p += 1) {
+                const rp = reps[p];
+                if (rp < closure.proto.upvalues.len and closure.proto.upvalues[rp].name != null) {
+                    const pos_p = upvalueFirstRefPos(closure, rp);
+                    if (pos_i < pos_p or (pos_i == pos_p and i < rp)) {
+                        insert_at = p;
+                        break;
+                    }
+                }
             }
-        }
-        if (insert_at < count) {
-            var s = count;
-            while (s > insert_at) : (s -= 1) {
-                reps[s] = reps[s - 1];
+            if (insert_at < count) {
+                var s = count;
+                while (s > insert_at) : (s -= 1) {
+                    reps[s] = reps[s - 1];
+                }
             }
+            reps[insert_at] = i;
+            count += 1;
+        } else {
+            // For unnamed/synthetic descriptors (common after dump/undump),
+            // keep a stable lexical-like order by descriptor idx.
+            var insert_at = count;
+            var p: usize = 0;
+            while (p < count) : (p += 1) {
+                const kp = keyFor(closure, reps[p], env_idx);
+                if (k.idx < kp.idx) {
+                    insert_at = p;
+                    break;
+                }
+            }
+            if (insert_at < count) {
+                var s = count;
+                while (s > insert_at) : (s -= 1) {
+                    reps[s] = reps[s - 1];
+                }
+            }
+            reps[insert_at] = i;
+            count += 1;
         }
-        reps[insert_at] = i;
-        count += 1;
     }
 
     if (env_rep) |e| {
@@ -123,6 +170,45 @@ fn debugMapUpvalueIndex(closure: *ClosureObject, lua_index: i64) ?usize {
     const visible_idx: usize = @intCast(lua_index - 1);
     if (visible_idx >= visible_len) return null;
     return visible[visible_idx];
+}
+
+fn collectReferencedUpvaluesInCodeOrder(closure: *ClosureObject, refs: *[256]usize) usize {
+    var count: usize = 0;
+    for (closure.proto.code) |inst| {
+        const op = inst.getOpCode();
+        const idx_opt: ?usize = switch (op) {
+            .GETUPVAL, .SETUPVAL => inst.getB(),
+            .GETTABUP => inst.getB(),
+            .SETTABUP => inst.getA(),
+            else => null,
+        };
+        if (idx_opt) |idx| {
+            if (idx >= closure.upvalues.len) continue;
+            if (isHiddenSyntheticUpvalue(closure, idx)) continue;
+            var exists = false;
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                if (refs[i] == idx) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists and count < refs.len) {
+                refs[count] = idx;
+                count += 1;
+            }
+        }
+    }
+    return count;
+}
+
+fn debugMapUpvalueIndexByRefOrder(closure: *ClosureObject, lua_index: i64) ?usize {
+    if (lua_index < 1) return null;
+    var refs: [256]usize = undefined;
+    const n = collectReferencedUpvaluesInCodeOrder(closure, &refs);
+    const i: usize = @intCast(lua_index - 1);
+    if (i >= n) return null;
+    return refs[i];
 }
 
 fn syntheticUpvalueName(idx: usize, buf: *[32]u8) []const u8 {
@@ -1150,12 +1236,6 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     const func_arg = vm.stack[vm.base + func_reg + 1];
     const n_arg = vm.stack[vm.base + func_reg + 2];
 
-    // Get function closure
-    const closure = func_arg.asClosure() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
-    };
-
     // Get upvalue index (1-based in Lua)
     const n_int = n_arg.toInteger() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
@@ -1166,25 +1246,42 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const up_idx = debugMapUpvalueIndex(closure, n_int) orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
-    };
+    if (func_arg.asClosure()) |closure| {
+        const up_idx = debugMapUpvalueIndexByRefOrder(closure, n_int) orelse {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+            return;
+        };
 
-    if (up_idx >= closure.upvalues.len) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        if (up_idx >= closure.upvalues.len) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+            return;
+        }
+
+        // Return the pointer address of the UpvalueObject as the unique id
+        // This works because two upvalues that share the same variable
+        // will point to the same UpvalueObject
+        const upval_ptr = closure.upvalues[up_idx];
+        const id: i64 = @intCast(@intFromPtr(upval_ptr));
+
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = .{ .integer = id };
+        }
         return;
     }
 
-    // Return the pointer address of the UpvalueObject as the unique id
-    // This works because two upvalues that share the same variable
-    // will point to the same UpvalueObject
-    const upval_ptr = closure.upvalues[up_idx];
-    const id: i64 = @intCast(@intFromPtr(upval_ptr));
-
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .integer = id };
+    // Native closure: expose a stable non-nil id for the first upvalue slot.
+    if (func_arg.asNativeClosure()) |nc| {
+        if (nresults > 0) {
+            if (n_int == 1) {
+                vm.stack[vm.base + func_reg] = .{ .integer = @intCast(@intFromPtr(nc)) };
+            } else {
+                vm.stack[vm.base + func_reg] = TValue.nil;
+            }
+        }
+        return;
     }
+
+    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
 }
 
 /// debug.upvaluejoin(f1, n1, f2, n2) - Makes upvalue n1 of function f1 refer to upvalue n2 of function f2
@@ -1192,7 +1289,7 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 pub fn nativeDebugUpvaluejoin(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    if (nargs < 4) return;
+    if (nargs < 4) return vm.raiseString("bad argument to 'upvaluejoin'");
 
     const f1_arg = vm.stack[vm.base + func_reg + 1];
     const n1_arg = vm.stack[vm.base + func_reg + 2];
@@ -1200,19 +1297,21 @@ pub fn nativeDebugUpvaluejoin(vm: anytype, func_reg: u32, nargs: u32, nresults: 
     const n2_arg = vm.stack[vm.base + func_reg + 4];
 
     // Get both closures
-    const closure1 = f1_arg.asClosure() orelse return;
-    const closure2 = f2_arg.asClosure() orelse return;
+    const closure1 = f1_arg.asClosure() orelse return vm.raiseString("bad argument to 'upvaluejoin'");
+    const closure2 = f2_arg.asClosure() orelse return vm.raiseString("bad argument to 'upvaluejoin'");
 
     // Get upvalue indices (1-based in Lua)
-    const n1_int = n1_arg.toInteger() orelse return;
-    const n2_int = n2_arg.toInteger() orelse return;
+    const n1_int = n1_arg.toInteger() orelse return vm.raiseString("bad argument to 'upvaluejoin'");
+    const n2_int = n2_arg.toInteger() orelse return vm.raiseString("bad argument to 'upvaluejoin'");
 
-    if (n1_int < 1 or n2_int < 1) return;
+    if (n1_int < 1 or n2_int < 1) return vm.raiseString("bad argument to 'upvaluejoin'");
 
-    const idx1 = debugMapUpvalueIndex(closure1, n1_int) orelse return;
-    const idx2 = debugMapUpvalueIndex(closure2, n2_int) orelse return;
+    const idx1 = debugMapUpvalueIndexByRefOrder(closure1, n1_int) orelse return vm.raiseString("invalid upvalue index");
+    const idx2 = debugMapUpvalueIndexByRefOrder(closure2, n2_int) orelse return vm.raiseString("invalid upvalue index");
 
-    if (idx1 >= closure1.upvalues.len or idx2 >= closure2.upvalues.len) return;
+    if (idx1 >= closure1.upvalues.len or idx2 >= closure2.upvalues.len) {
+        return vm.raiseString("invalid upvalue index");
+    }
 
     // Make f1's upvalue n1 point to the same UpvalueObject as f2's upvalue n2
     // This requires mutable access to the closure's upvalues array
