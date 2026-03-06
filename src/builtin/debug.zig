@@ -6,15 +6,131 @@ const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 
-fn debugUpvalueBase(closure: *ClosureObject) usize {
-    // Moonquakes keeps an internal _ENV upvalue at slot 0 for nested functions.
-    // Debug API indices should match Lua-visible upvalues used in source.
-    if (closure.proto.upvalues.len > 0) {
-        if (closure.proto.upvalues[0].name) |name| {
-            if (std.mem.eql(u8, name, "_ENV")) return 1;
+fn inferEnvUpvalueIndex(closure: *ClosureObject) ?usize {
+    for (closure.proto.upvalues, 0..) |upv, i| {
+        if (upv.name) |name| {
+            if (std.mem.eql(u8, name, "_ENV")) return i;
         }
     }
-    return 0;
+    for (closure.proto.code) |inst| {
+        const op = inst.getOpCode();
+        if (op == .GETTABUP or op == .SETTABUP) {
+            const idx = inst.getB();
+            if (idx < closure.proto.upvalues.len) return idx;
+        }
+    }
+    return null;
+}
+
+fn isUpvalueReferenced(closure: *ClosureObject, idx: usize) bool {
+    for (closure.proto.code) |inst| {
+        const op = inst.getOpCode();
+        switch (op) {
+            .GETUPVAL, .SETUPVAL => if (inst.getB() == idx) return true,
+            .GETTABUP => if (inst.getB() == idx) return true,
+            .SETTABUP => if (inst.getA() == idx) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn isHiddenSyntheticUpvalue(closure: *ClosureObject, idx: usize) bool {
+    if (idx >= closure.proto.upvalues.len) return false;
+    if (closure.proto.upvalues[idx].name != null) return false;
+    return !isUpvalueReferenced(closure, idx);
+}
+
+const UpvalueKey = struct {
+    instack: bool,
+    idx: u8,
+    is_env: bool,
+};
+
+fn keyFor(closure: *ClosureObject, idx: usize, env_idx: ?usize) UpvalueKey {
+    if (env_idx != null and env_idx.? == idx) {
+        return .{ .instack = false, .idx = 0, .is_env = true };
+    }
+    const d = if (idx < closure.proto.upvalues.len) closure.proto.upvalues[idx] else closure.proto.upvalues[0];
+    return .{ .instack = d.instack, .idx = d.idx, .is_env = false };
+}
+
+fn sameKey(a: UpvalueKey, b: UpvalueKey) bool {
+    return a.instack == b.instack and a.idx == b.idx and a.is_env == b.is_env;
+}
+
+fn collectVisibleUpvalueReps(closure: *ClosureObject, reps: *[256]usize) usize {
+    const env_idx = inferEnvUpvalueIndex(closure);
+
+    var count: usize = 0;
+    var env_rep: ?usize = null;
+    var i: usize = 0;
+    while (i < closure.upvalues.len and count < reps.len) : (i += 1) {
+        if (isHiddenSyntheticUpvalue(closure, i)) continue;
+
+        const k = keyFor(closure, i, env_idx);
+        var exists = false;
+        var j: usize = 0;
+        while (j < count) : (j += 1) {
+            if (sameKey(k, keyFor(closure, reps[j], env_idx))) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) continue;
+
+        if (k.is_env) {
+            env_rep = i;
+            continue;
+        }
+
+        // Insert non-env upvalues ordered by descriptor idx (Lua-like a,b,c order).
+        var insert_at = count;
+        var p: usize = 0;
+        while (p < count) : (p += 1) {
+            const kp = keyFor(closure, reps[p], env_idx);
+            if (k.idx < kp.idx) {
+                insert_at = p;
+                break;
+            }
+        }
+        if (insert_at < count) {
+            var s = count;
+            while (s > insert_at) : (s -= 1) {
+                reps[s] = reps[s - 1];
+            }
+        }
+        reps[insert_at] = i;
+        count += 1;
+    }
+
+    if (env_rep) |e| {
+        if (count < reps.len) {
+            reps[count] = e;
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
+fn debugMapUpvalueIndex(closure: *ClosureObject, lua_index: i64) ?usize {
+    if (lua_index < 1) return null;
+    var visible: [256]usize = undefined;
+    const visible_len = collectVisibleUpvalueReps(closure, &visible);
+    if (visible_len == 0) return null;
+
+    const visible_idx: usize = @intCast(lua_index - 1);
+    if (visible_idx >= visible_len) return null;
+    return visible[visible_idx];
+}
+
+fn syntheticUpvalueName(idx: usize, buf: *[32]u8) []const u8 {
+    if (idx < 26) {
+        buf[0] = @as(u8, 'a') + @as(u8, @intCast(idx));
+        return buf[0..1];
+    }
+    return std.fmt.bufPrint(buf, "up{d}", .{idx + 1}) catch "(no name)";
 }
 
 /// Lua 5.4 Debug Library
@@ -334,10 +450,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         if (want_source) {
             const what_key = try vm.gc().allocString("what");
             try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("Lua")));
+            const src = if (proto.source.len > 0) proto.source else "?";
             const source_key = try vm.gc().allocString("source");
-            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString("?")));
+            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));
             const short_src_key = try vm.gc().allocString("short_src");
-            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString("?")));
+            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString(src)));
             const linedefined_key = try vm.gc().allocString("linedefined");
             try result_table.set(TValue.fromString(linedefined_key), .{ .integer = 0 });
             const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
@@ -563,8 +680,10 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const base = debugUpvalueBase(closure);
-    const up_idx: usize = @intCast((up_int - 1) + @as(i64, @intCast(base)));
+    const up_idx = debugMapUpvalueIndex(closure, up_int) orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        return;
+    };
 
     // Check bounds
     if (up_idx >= closure.upvalues.len) {
@@ -573,10 +692,13 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     }
 
     // Get upvalue name from proto
-    const name = if (up_idx < closure.proto.upvalues.len)
-        closure.proto.upvalues[up_idx].name orelse "(no name)"
-    else
-        "(no name)";
+    const env_idx = inferEnvUpvalueIndex(closure);
+    var name_buf: [32]u8 = undefined;
+    const name = if (up_idx < closure.proto.upvalues.len) blk: {
+        if (closure.proto.upvalues[up_idx].name) |n| break :blk n;
+        if (env_idx != null and env_idx.? == up_idx) break :blk "_ENV";
+        break :blk syntheticUpvalueName(@intCast(up_int - 1), &name_buf);
+    } else "(no name)";
 
     // Get upvalue value
     const upval = closure.upvalues[up_idx];
@@ -792,8 +914,10 @@ pub fn nativeDebugSetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const base = debugUpvalueBase(closure);
-    const up_idx: usize = @intCast((up_int - 1) + @as(i64, @intCast(base)));
+    const up_idx = debugMapUpvalueIndex(closure, up_int) orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        return;
+    };
 
     // Check bounds
     if (up_idx >= closure.upvalues.len) {
@@ -802,14 +926,23 @@ pub fn nativeDebugSetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     }
 
     // Get upvalue name from proto
-    const name = if (up_idx < closure.proto.upvalues.len)
-        closure.proto.upvalues[up_idx].name orelse "(no name)"
-    else
-        "(no name)";
+    const env_idx = inferEnvUpvalueIndex(closure);
+    var name_buf: [32]u8 = undefined;
+    const name = if (up_idx < closure.proto.upvalues.len) blk: {
+        if (closure.proto.upvalues[up_idx].name) |n| break :blk n;
+        if (env_idx != null and env_idx.? == up_idx) break :blk "_ENV";
+        break :blk syntheticUpvalueName(@intCast(up_int - 1), &name_buf);
+    } else "(no name)";
 
     // Set upvalue value
-    const upval = closure.upvalues[up_idx];
-    upval.set(value);
+    const target_key = keyFor(closure, up_idx, env_idx);
+    var i: usize = 0;
+    while (i < closure.upvalues.len) : (i += 1) {
+        if (isHiddenSyntheticUpvalue(closure, i)) continue;
+        if (sameKey(target_key, keyFor(closure, i, env_idx))) {
+            closure.upvalues[i].set(value);
+        }
+    }
 
     // Return name
     if (nresults > 0) {
@@ -1033,8 +1166,10 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const base = debugUpvalueBase(closure);
-    const up_idx: usize = @intCast((n_int - 1) + @as(i64, @intCast(base)));
+    const up_idx = debugMapUpvalueIndex(closure, n_int) orelse {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        return;
+    };
 
     if (up_idx >= closure.upvalues.len) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
@@ -1074,10 +1209,8 @@ pub fn nativeDebugUpvaluejoin(vm: anytype, func_reg: u32, nargs: u32, nresults: 
 
     if (n1_int < 1 or n2_int < 1) return;
 
-    const base1 = debugUpvalueBase(closure1);
-    const base2 = debugUpvalueBase(closure2);
-    const idx1: usize = @intCast((n1_int - 1) + @as(i64, @intCast(base1)));
-    const idx2: usize = @intCast((n2_int - 1) + @as(i64, @intCast(base2)));
+    const idx1 = debugMapUpvalueIndex(closure1, n1_int) orelse return;
+    const idx2 = debugMapUpvalueIndex(closure2, n2_int) orelse return;
 
     if (idx1 >= closure1.upvalues.len or idx2 >= closure2.upvalues.len) return;
 

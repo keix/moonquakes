@@ -140,6 +140,9 @@ pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
     // Allocate upvalues array if needed
     if (proto.nups > 0) {
         const upvals = try self.allocator.alloc(*UpvalueObject, proto.nups);
+        for (upvals) |*slot| {
+            slot.* = try self.allocClosedUpvalue(.nil);
+        }
         obj.upvalues = upvals;
         self.bytes_allocated += proto.nups * @sizeOf(*UpvalueObject);
     } else {

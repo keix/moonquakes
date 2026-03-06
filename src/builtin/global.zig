@@ -1,6 +1,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
+const Upvaldesc = @import("../compiler/proto.zig").Upvaldesc;
 const string = @import("string.zig");
 const call = @import("../vm/call.zig");
 const pipeline = @import("../compiler/pipeline.zig");
@@ -39,6 +40,47 @@ fn modeAllowsBinary(mode: []const u8) bool {
 
 fn modeAllowsText(mode: []const u8) bool {
     return std.mem.indexOfScalar(u8, mode, 't') != null;
+}
+
+fn findEnvUpvalueIndex(upvalues: []const Upvaldesc) ?usize {
+    for (upvalues, 0..) |upv, i| {
+        if (upv.name) |name| {
+            if (std.mem.eql(u8, name, "_ENV")) return i;
+        }
+    }
+    for (upvalues, 0..) |upv, i| {
+        if (!upv.instack and upv.idx == 0) return i;
+    }
+    return null;
+}
+
+fn inferEnvUpvalueIndex(proto: anytype) ?usize {
+    if (findEnvUpvalueIndex(proto.upvalues)) |idx| return idx;
+    for (proto.code) |inst| {
+        const op = inst.getOpCode();
+        if (op == .GETTABUP or op == .SETTABUP) {
+            const idx = inst.getB();
+            if (idx < proto.upvalues.len) return idx;
+        }
+    }
+    return null;
+}
+
+fn coalesceEquivalentUpvalues(closure: anytype) void {
+    var i: usize = 0;
+    while (i < closure.upvalues.len) : (i += 1) {
+        if (i >= closure.proto.upvalues.len) break;
+        const cur = closure.proto.upvalues[i];
+        var j: usize = 0;
+        while (j < i) : (j += 1) {
+            if (j >= closure.proto.upvalues.len) break;
+            const prev = closure.proto.upvalues[j];
+            if (cur.instack == prev.instack and cur.idx == prev.idx) {
+                closure.upvalues[i] = closure.upvalues[j];
+                break;
+            }
+        }
+    }
 }
 
 /// Lua 5.4 Global Functions (Basic Functions)
@@ -226,10 +268,12 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             var handler_args = [1]TValue{error_value};
             const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| switch (handler_err) {
                 error.LuaException => {
-                    // Handler itself raised - return handler's error
+                    // Lua-compatible behavior: if message handler fails,
+                    // xpcall returns "error in error handling".
                     vm.stack[vm.base + func_reg] = .{ .boolean = false };
                     if (nresults > 1) {
-                        vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                        const err_str = try vm.gc().allocString("error in error handling");
+                        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                     }
                     vm.lua_error_value = .nil;
                     return;
@@ -1051,6 +1095,14 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
     }
 
+    // Get chunkname parameter (2nd argument, default "[string]")
+    var source_name: []const u8 = "[string]";
+    if (nargs >= 2) {
+        if (vm.stack[vm.base + func_reg + 2].asString()) |name_str| {
+            source_name = name_str.asSlice();
+        }
+    }
+
     // Get source string or read source through a reader function.
     var owned_source: ?[]u8 = null;
     defer if (owned_source) |buf| vm.gc().allocator.free(buf);
@@ -1087,7 +1139,10 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                 }
                 return;
             };
-            try buf.appendSlice(vm.gc().allocator, piece_str.asSlice());
+            const piece = piece_str.asSlice();
+            // Lua load reader protocol: empty chunk signals EOF.
+            if (piece.len == 0) break;
+            try buf.appendSlice(vm.gc().allocator, piece);
         }
 
         owned_source = try buf.toOwnedSlice(vm.gc().allocator);
@@ -1126,7 +1181,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
-                const err_str = try vm.gc().allocString("invalid bytecode");
+                const err_str = try vm.gc().allocString("truncated bytecode");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
             return;
@@ -1134,10 +1189,13 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         const closure = try vm.gc().allocClosure(proto);
 
-        // Initialize _ENV upvalue (first upvalue) to the environment table
-        if (closure.upvalues.len > 0) {
+        // Keep duplicated captured variables (same descriptor) aliased after undump.
+        coalesceEquivalentUpvalues(closure);
+
+        // Initialize _ENV upvalue to the environment table.
+        if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
             const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-            closure.upvalues[0] = env_upval;
+            closure.upvalues[env_idx] = env_upval;
         }
 
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1145,7 +1203,9 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, load_source, .{});
+    const compile_result = pipeline.compile(vm.gc().allocator, load_source, .{
+        .source_name = source_name,
+    });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -1183,10 +1243,10 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc().allocClosure(proto);
 
-    // Initialize _ENV upvalue (first upvalue) to the environment table
-    if (closure.upvalues.len > 0) {
+    // Initialize _ENV upvalue to the environment table.
+    if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
         const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-        closure.upvalues[0] = env_upval;
+        closure.upvalues[env_idx] = env_upval;
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1282,16 +1342,17 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
-                const err_str = try vm.gc().allocString("invalid bytecode");
+                const err_str = try vm.gc().allocString("truncated bytecode");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
             return;
         };
 
         const closure = try vm.gc().allocClosure(proto);
-        if (closure.upvalues.len > 0) {
+        coalesceEquivalentUpvalues(closure);
+        if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
             const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-            closure.upvalues[0] = env_upval;
+            closure.upvalues[env_idx] = env_upval;
         }
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
         return;
@@ -1336,10 +1397,10 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc().allocClosure(proto);
 
-    // Initialize _ENV upvalue (first upvalue) to the environment table
-    if (closure.upvalues.len > 0) {
+    // Initialize _ENV upvalue to the environment table.
+    if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
         const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-        closure.upvalues[0] = env_upval;
+        closure.upvalues[env_idx] = env_upval;
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1399,10 +1460,10 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Create closure - proto is now safe since GC is inhibited
     const closure = try vm.gc().allocClosure(proto);
 
-    // Initialize _ENV upvalue (first upvalue) to the globals table
-    if (closure.upvalues.len > 0) {
+    // Initialize _ENV upvalue to the globals table.
+    if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
         const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
-        closure.upvalues[0] = env_upval;
+        closure.upvalues[env_idx] = env_upval;
     }
 
     const func_val = TValue.fromClosure(closure);

@@ -454,15 +454,16 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     vm.beginGCGuard();
     defer vm.endGCGuard();
 
-    // When __call is invoked, the table (wrapper) is at func_reg
-    // and original args are at func_reg+1, func_reg+2, ...
-    // But nargs includes the wrapper itself as first arg
+    // __call is invoked as a native function.
+    // Preferred layout: function at func_reg, wrapper at func_reg+1, user args after that.
+    // For compatibility with older call paths, also accept wrapper at func_reg.
+    var wrapper_slot = vm.base + func_reg + 1;
+    if (nargs == 0 or !vm.stack[wrapper_slot].isObject() or vm.stack[wrapper_slot].object.type != .table) {
+        wrapper_slot = vm.base + func_reg;
+    }
 
-    // Get the wrapper table
-    const wrapper_val = vm.stack[vm.base + func_reg];
-    const wrapper = wrapper_val.asTable() orelse {
-        return vm.raiseString("invalid wrapped coroutine");
-    };
+    const wrapper_val = vm.stack[wrapper_slot];
+    const wrapper = wrapper_val.asTable() orelse return vm.raiseString("invalid wrapped coroutine");
 
     // Get thread from wrapper[1]
     const thread_val = wrapper.get(.{ .integer = 1 }) orelse {
@@ -482,8 +483,8 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     }
 
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
-    const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-    const arg_base = vm.base + func_reg + 1; // __call: args after wrapper
+    const num_args: u32 = if (nargs > 0) nargs - 1 else 0;
+    const arg_base = wrapper_slot + 1;
     const is_first_resume = thread.status == .created;
     const body = threadEntryBody(thread, co_vm);
 

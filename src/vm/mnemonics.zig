@@ -40,6 +40,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .next => 2, // next returns key, value
+        .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
         .coroutine_resume => 0, // C=0 sentinel: callee decides actual result count.
         else => 1,
     };
@@ -676,7 +677,8 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
         const result = do(vm, inst) catch |err| {
             if (err == error.LuaException and handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
-            if (err == error.ArithmeticError or
+            if (err == error.CallStackOverflow or
+                err == error.ArithmeticError or
                 err == error.DivideByZero or
                 err == error.ModuloByZero or
                 err == error.IntegerRepresentation or
@@ -691,6 +693,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
+                    error.CallStackOverflow => "stack overflow",
                     error.ArithmeticError => blk: {
                         const op_name: ?[]const u8 = switch (inst.getOpCode()) {
                             .BAND, .BANDK => "'band'",
@@ -1885,27 +1888,41 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Close upvalues before tail call
             vm.closeUpvalues(current_ci.base);
 
-            // Slow path: callable table with __call metamethod.
-            if (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
+            // Slow path: resolve __call chain (table -> __call -> table -> ... -> function)
+            // by repeatedly rewriting stack as callable(self, args...).
+            var call_chain_depth: u16 = 0;
+            while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
+                if (call_chain_depth >= 2000) return error.NotAFunction;
+                call_chain_depth += 1;
+
                 const table = tail_func.asTable() orelse return error.NotAFunction;
                 const mt = table.metatable orelse return error.NotAFunction;
                 const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return error.NotAFunction;
-                if (!(call_mm.asClosure() != null or (call_mm.isObject() and call_mm.object.type == .native_closure))) {
+
+                if (call_mm.asTable() != null or
+                    call_mm.asClosure() != null or
+                    (call_mm.isObject() and call_mm.object.type == .native_closure))
+                {
+                    // Need one extra argument slot to prepend current callable as self.
+                    try ensureStackTop(vm, vm.base + a + nargs + 2);
+
+                    // Shift existing args right by 1: [a+1..a+nargs] -> [a+2..a+nargs+1]
+                    var i: u32 = nargs;
+                    while (i > 0) {
+                        i -= 1;
+                        vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 1 + i];
+                    }
+
+                    vm.stack[vm.base + a + 1] = tail_func;
+                    vm.stack[vm.base + a] = call_mm;
+                    tail_func = call_mm;
+                    nargs += 1;
+                    if (b == 0) {
+                        vm.top = @max(vm.top, vm.base + a + 1 + nargs);
+                    }
+                } else {
                     return error.NotAFunction;
                 }
-
-                // Rewrite stack as mm(self, args...) for tailcall execution.
-                // [a] currently holds self; [a+1..a+nargs] holds original args.
-                var i: u32 = nargs;
-                while (i > 0) {
-                    i -= 1;
-                    vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 1 + i];
-                }
-                vm.stack[vm.base + a + 1] = tail_func;
-                vm.stack[vm.base + a] = call_mm;
-                tail_func = call_mm;
-                nargs += 1;
-                if (b == 0) vm.top += 1;
             }
 
             // Handle Lua closure tail call
@@ -3569,79 +3586,104 @@ fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TV
 /// If obj has __call metamethod, call it with (obj, args...)
 /// Returns null if no __call found (caller should return error)
 fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults: i16) !?ExecuteResult {
-    // Only tables can have metatables (for now)
-    const table = obj_val.asTable() orelse return null;
+    var callable = obj_val;
+    var effective_nargs = nargs;
+    var callable_at_func_slot = false;
+    var depth: u16 = 0;
 
-    const mt = table.metatable orelse return null;
+    while (true) {
+        // Resolve callable function.
+        if (callable.asClosure()) |closure| {
+            const func_proto = closure.proto;
+            const new_base = vm.base + func_slot;
+            const total_args = effective_nargs + 1;
 
-    const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return null;
+            // Match regular CALL semantics for vararg closures.
+            var vararg_base: u32 = 0;
+            var vararg_count: u32 = 0;
+            if (func_proto.is_vararg and total_args > func_proto.numparams) {
+                vararg_count = total_args - func_proto.numparams;
+                const min_vararg_base = new_base + func_proto.maxstacksize;
+                vararg_base = @max(min_vararg_base, vm.top) + 32;
+                try ensureStackTop(vm, vararg_base + vararg_count);
 
-    // __call must be a function
-    if (call_mm.asClosure()) |closure| {
-        const func_proto = closure.proto;
-        const new_base = vm.base + func_slot;
-        const total_args = nargs + 1;
+                var i: u32 = vararg_count;
+                while (i > 0) {
+                    i -= 1;
+                    vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+                }
+            }
 
-        // Match regular CALL semantics for vararg closures.
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-        if (func_proto.is_vararg and total_args > func_proto.numparams) {
-            vararg_count = total_args - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
+            // Fill missing fixed parameters.
+            var i: u32 = total_args;
+            while (i < func_proto.numparams) : (i += 1) {
+                vm.stack[new_base + i] = .nil;
+            }
 
-            var i: u32 = vararg_count;
+            _ = try pushCallInfoVararg(
+                vm,
+                func_proto,
+                closure,
+                new_base,
+                new_base,
+                nresults,
+                vararg_base,
+                vararg_count,
+            );
+            vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+            return .LoopContinue;
+        }
+
+        if (callable.isObject() and callable.object.type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, callable.object);
+            const base_slot = func_slot;
+            const native_nargs: u32 = if (callable_at_func_slot) effective_nargs else effective_nargs + 1;
+
+            // Stack is already correct: callable at base_slot, args at base_slot+1...
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + base_slot));
+            const actual_nresults = nativeDesiredResultsForMM(nc.func.id, nresults, stack_room);
+            try vm.callNative(nc.func.id, base_slot, native_nargs, actual_nresults);
+
+            // Update vm.top after native call completes
+            const is_multret_native = nresults < 0 and switch (nc.func.id) {
+                .io_lines_iterator, .coroutine_resume, .coroutine_wrap_call => true,
+                else => false,
+            };
+            if (!is_multret_native) {
+                vm.top = vm.base + base_slot + actual_nresults;
+            }
+            return .LoopContinue;
+        }
+
+        // Follow __call chain (table -> __call -> table -> ...).
+        const table = callable.asTable() orelse return null;
+        const mt = table.metatable orelse return null;
+        const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return null;
+
+        if (depth >= 2000) return error.NotAFunction;
+        depth += 1;
+
+        if (call_mm.asTable() != null or (call_mm.isObject() and call_mm.object.type == .native_closure)) {
+            // Rewrite in place: call_mm(self, args...), increasing args by one.
+            try ensureStackTop(vm, vm.base + func_slot + effective_nargs + 2);
+            var i: u32 = effective_nargs;
             while (i > 0) {
                 i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+                vm.stack[vm.base + func_slot + 2 + i] = vm.stack[vm.base + func_slot + 1 + i];
             }
+            vm.stack[vm.base + func_slot + 1] = callable;
+            vm.stack[vm.base + func_slot] = call_mm;
+            callable = call_mm;
+            effective_nargs += 1;
+            callable_at_func_slot = true;
+            vm.top = @max(vm.top, vm.base + func_slot + 1 + effective_nargs);
+        } else {
+            // If __call already resolved to a function, keep current argument layout:
+            // stack[func_slot] is current self, stack[func_slot+1..] are existing args.
+            callable = call_mm;
+            callable_at_func_slot = false;
         }
-
-        // Fill missing fixed parameters.
-        var i: u32 = total_args;
-        while (i < func_proto.numparams) : (i += 1) {
-            vm.stack[new_base + i] = .nil;
-        }
-
-        _ = try pushCallInfoVararg(
-            vm,
-            func_proto,
-            closure,
-            new_base,
-            new_base,
-            nresults,
-            vararg_base,
-            vararg_count,
-        );
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        return .LoopContinue;
     }
-
-    // __call is a native closure
-    if (call_mm.isObject() and call_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, call_mm.object);
-        const base_slot = func_slot;
-
-        // Stack is already correct: obj at base_slot, args at base_slot+1...
-        // Call native with nargs+1 (obj counts as first arg).
-        const stack_room: u32 = @intCast(vm.stack.len - (vm.base + base_slot));
-        const actual_nresults = nativeDesiredResultsForMM(nc.func.id, nresults, stack_room);
-        try vm.callNative(nc.func.id, base_slot, nargs + 1, actual_nresults);
-
-        // Update vm.top after native call completes
-        // MULTRET-capable natives set vm.top themselves; others need fixed update
-        const is_multret_native = nresults < 0 and switch (nc.func.id) {
-            .io_lines_iterator, .coroutine_resume, .coroutine_wrap_call => true,
-            else => false,
-        };
-        if (!is_multret_native) {
-            vm.top = vm.base + base_slot + actual_nresults;
-        }
-        return .LoopContinue;
-    }
-
-    return null;
 }
 
 /// Len with __len metamethod fallback
