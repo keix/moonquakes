@@ -911,13 +911,16 @@ pub const ProtoBuilder = struct {
 
         // Parse integer part (hex digits)
         var int_part: f64 = 0;
+        var int_digits: usize = 0;
         while (i < lexeme.len and isHexDigit(lexeme[i])) {
             int_part = int_part * 16 + @as(f64, @floatFromInt(hexDigitValue(lexeme[i])));
             i += 1;
+            int_digits += 1;
         }
 
         // Parse fractional part if present
         var frac_part: f64 = 0;
+        var frac_digits: usize = 0;
         if (i < lexeme.len and lexeme[i] == '.') {
             i += 1;
             var frac_mult: f64 = 1.0 / 16.0;
@@ -925,8 +928,11 @@ pub const ProtoBuilder = struct {
                 frac_part += @as(f64, @floatFromInt(hexDigitValue(lexeme[i]))) * frac_mult;
                 frac_mult /= 16.0;
                 i += 1;
+                frac_digits += 1;
             }
         }
+
+        if (int_digits == 0 and frac_digits == 0) return error.InvalidNumber;
 
         var mantissa = int_part + frac_part;
 
@@ -945,16 +951,21 @@ pub const ProtoBuilder = struct {
 
             // Parse exponent value (decimal digits)
             var exp: i32 = 0;
+            var exp_digits: usize = 0;
             while (i < lexeme.len and lexeme[i] >= '0' and lexeme[i] <= '9') {
                 exp = exp * 10 + @as(i32, @intCast(lexeme[i] - '0'));
                 i += 1;
+                exp_digits += 1;
             }
+            if (exp_digits == 0) return error.InvalidNumber;
 
             if (exp_neg) exp = -exp;
 
             // Apply binary exponent: mantissa * 2^exp
             mantissa = mantissa * std.math.pow(f64, 2.0, @as(f64, @floatFromInt(exp)));
         }
+
+        if (i != lexeme.len) return error.InvalidNumber;
 
         return mantissa;
     }
@@ -2280,7 +2291,13 @@ pub const Parser = struct {
 
         if (self.current.kind == .Number) {
             const reg = self.proto.allocTemp();
-            const k = try self.proto.addConstNumber(self.current.lexeme);
+            const k = self.proto.addConstNumber(self.current.lexeme) catch |err| switch (err) {
+                error.InvalidNumber => {
+                    self.setError("malformed number", .{});
+                    return error.ExpectedExpression;
+                },
+                else => return err,
+            };
             try self.proto.emitLoadK(reg, k);
             self.advance();
             return reg;
@@ -2297,6 +2314,10 @@ pub const Parser = struct {
                     level += 1;
                     i += 1;
                 }
+                if (!hasLongBracketClose(lexeme, level)) {
+                    self.setError("near <eof>", .{});
+                    return error.ExpectedExpression;
+                }
                 // Extract content between [[ and ]] (or [=[ and ]=] etc.)
                 const start = 2 + level; // skip [[ or [=[ etc.
                 const end = lexeme.len - 2 - level; // skip ]] or ]=] etc.
@@ -2304,20 +2325,40 @@ pub const Parser = struct {
                 if (content_start < end) {
                     if (lexeme[content_start] == '\n') {
                         content_start += 1;
+                        if (content_start < end and lexeme[content_start] == '\r') content_start += 1;
                     } else if (lexeme[content_start] == '\r') {
                         content_start += 1;
                         if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
                     }
                 }
-                const str_content = lexeme[content_start..end];
+                const str_content_raw = lexeme[content_start..end];
+                const str_content = try normalizeLineEndings(self.proto.allocator, str_content_raw);
+                defer self.proto.allocator.free(str_content);
                 // Long bracket strings don't process escapes
                 const k = try self.proto.addConstString(str_content);
                 try self.proto.emitLoadK(reg, k);
             } else {
                 // Regular quoted string: remove quotes and process escape sequences
-                const str_raw = lexeme[1 .. lexeme.len - 1];
-                const str_content = try processEscapes(self.proto.allocator, str_raw);
+                const quote = lexeme[0];
+                const closed = lexeme.len >= 2 and lexeme[lexeme.len - 1] == quote;
+                const str_raw = if (closed) lexeme[1 .. lexeme.len - 1] else lexeme[1..];
+                var bad_escape: ?[]const u8 = null;
+                const str_content = processEscapes(self.proto.allocator, str_raw, &bad_escape) catch |err| switch (err) {
+                    error.InvalidEscape => {
+                        if (bad_escape) |frag| {
+                            self.setError("near '{s}' in '{s}'", .{ frag, lexeme });
+                        } else {
+                            self.setError("near '{s}'", .{lexeme});
+                        }
+                        return error.ExpectedExpression;
+                    },
+                    else => return error.OutOfMemory,
+                };
                 defer self.proto.allocator.free(str_content);
+                if (!closed) {
+                    self.setError("near <eof>", .{});
+                    return error.ExpectedExpression;
+                }
                 const k = try self.proto.addConstString(str_content);
                 try self.proto.emitLoadK(reg, k);
             }
@@ -2794,24 +2835,48 @@ pub const Parser = struct {
                 level += 1;
                 i += 1;
             }
+            if (!hasLongBracketClose(lexeme, level)) {
+                self.setError("near <eof>", .{});
+                return error.ExpectedExpression;
+            }
             const start = 2 + level;
             const end = lexeme.len - 2 - level;
             var content_start = start;
             if (content_start < end) {
                 if (lexeme[content_start] == '\n') {
                     content_start += 1;
+                    if (content_start < end and lexeme[content_start] == '\r') content_start += 1;
                 } else if (lexeme[content_start] == '\r') {
                     content_start += 1;
                     if (content_start < end and lexeme[content_start] == '\n') content_start += 1;
                 }
             }
-            const str_content = lexeme[content_start..end];
+            const str_content_raw = lexeme[content_start..end];
+            const str_content = try normalizeLineEndings(self.proto.allocator, str_content_raw);
+            defer self.proto.allocator.free(str_content);
             const k = try self.proto.addConstString(str_content);
             try self.proto.emitLoadK(reg, k);
         } else {
-            const str_raw = lexeme[1 .. lexeme.len - 1];
-            const str_content = try processEscapes(self.proto.allocator, str_raw);
+            const quote = lexeme[0];
+            const closed = lexeme.len >= 2 and lexeme[lexeme.len - 1] == quote;
+            const str_raw = if (closed) lexeme[1 .. lexeme.len - 1] else lexeme[1..];
+            var bad_escape: ?[]const u8 = null;
+            const str_content = processEscapes(self.proto.allocator, str_raw, &bad_escape) catch |err| switch (err) {
+                error.InvalidEscape => {
+                    if (bad_escape) |frag| {
+                        self.setError("near '{s}' in '{s}'", .{ frag, lexeme });
+                    } else {
+                        self.setError("near '{s}'", .{lexeme});
+                    }
+                    return error.ExpectedExpression;
+                },
+                else => return error.OutOfMemory,
+            };
             defer self.proto.allocator.free(str_content);
+            if (!closed) {
+                self.setError("near <eof>", .{});
+                return error.ExpectedExpression;
+            }
             const k = try self.proto.addConstString(str_content);
             try self.proto.emitLoadK(reg, k);
         }
@@ -5177,7 +5242,40 @@ pub const Parser = struct {
 
 /// Process escape sequences in a string literal (after quotes are removed).
 /// Supports: \n, \t, \r, \\, \", \'
-fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+fn appendUtf8Extended(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u32) !void {
+    if (cp <= 0x7F) {
+        try out.append(allocator, @intCast(cp));
+    } else if (cp <= 0x7FF) {
+        try out.append(allocator, @intCast(0xC0 | ((cp >> 6) & 0x1F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        try out.append(allocator, @intCast(0xE0 | ((cp >> 12) & 0x0F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x1FFFFF) {
+        try out.append(allocator, @intCast(0xF0 | ((cp >> 18) & 0x07)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x3FFFFFF) {
+        try out.append(allocator, @intCast(0xF8 | ((cp >> 24) & 0x03)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 18) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x7FFFFFFF) {
+        try out.append(allocator, @intCast(0xFC | ((cp >> 30) & 0x01)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 24) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 18) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 12) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | ((cp >> 6) & 0x3F)));
+        try out.append(allocator, @intCast(0x80 | (cp & 0x3F)));
+    } else {
+        return error.InvalidEscape;
+    }
+}
+
+fn processEscapes(allocator: std.mem.Allocator, input: []const u8, bad_escape: *?[]const u8) ![]u8 {
     var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
     defer result.deinit(allocator);
 
@@ -5190,24 +5288,55 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                     try result.append(allocator, '\n');
                     i += 2;
                 },
+                'a' => {
+                    try result.append(allocator, '\x07');
+                    i += 2;
+                },
+                'b' => {
+                    try result.append(allocator, '\x08');
+                    i += 2;
+                },
+                'f' => {
+                    try result.append(allocator, '\x0c');
+                    i += 2;
+                },
                 't' => {
                     try result.append(allocator, '\t');
+                    i += 2;
+                },
+                'v' => {
+                    try result.append(allocator, '\x0b');
                     i += 2;
                 },
                 'r' => {
                     try result.append(allocator, '\r');
                     i += 2;
                 },
+                'z' => {
+                    // Skip all following whitespace (including line breaks).
+                    i += 2;
+                    while (i < input.len) {
+                        const ch = input[i];
+                        if (ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '\x0b' or ch == '\x0c') {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                },
                 '\n' => {
                     // Backslash-newline line continuation inside short strings.
                     try result.append(allocator, '\n');
                     i += 2;
+                    if (i < input.len and input[i] == '\r') {
+                        i += 1;
+                    }
                 },
                 '\r' => {
                     // Handle CR and CRLF as a single newline continuation.
                     try result.append(allocator, '\n');
                     i += 2;
-                    if (i < input.len and input[i] == '\n') {
+                    if (i < input.len and (input[i] == '\n' or input[i] == '\r')) {
                         i += 1;
                     }
                 },
@@ -5224,38 +5353,34 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                     i += 2;
                 },
                 'x' => {
-                    if (i + 3 < input.len) {
-                        const h1 = input[i + 2];
-                        const h2 = input[i + 3];
-                        const v1_opt: ?u8 = if (h1 >= '0' and h1 <= '9')
-                            h1 - '0'
-                        else if (h1 >= 'a' and h1 <= 'f')
-                            10 + (h1 - 'a')
-                        else if (h1 >= 'A' and h1 <= 'F')
-                            10 + (h1 - 'A')
-                        else
-                            null;
-                        const v2_opt: ?u8 = if (h2 >= '0' and h2 <= '9')
-                            h2 - '0'
-                        else if (h2 >= 'a' and h2 <= 'f')
-                            10 + (h2 - 'a')
-                        else if (h2 >= 'A' and h2 <= 'F')
-                            10 + (h2 - 'A')
-                        else
-                            null;
-                        if (v1_opt != null and v2_opt != null) {
-                            try result.append(allocator, (v1_opt.? << 4) | v2_opt.?);
-                            i += 4;
-                        } else {
-                            // Invalid \x escape; preserve backslash.
-                            try result.append(allocator, input[i]);
-                            i += 1;
-                        }
-                    } else {
-                        // Truncated \x escape; preserve backslash.
-                        try result.append(allocator, input[i]);
-                        i += 1;
+                    if (i + 3 >= input.len) {
+                        bad_escape.* = input[i..];
+                        return error.InvalidEscape;
                     }
+                    const h1 = input[i + 2];
+                    const h2 = input[i + 3];
+                    const v1_opt: ?u8 = if (h1 >= '0' and h1 <= '9')
+                        h1 - '0'
+                    else if (h1 >= 'a' and h1 <= 'f')
+                        10 + (h1 - 'a')
+                    else if (h1 >= 'A' and h1 <= 'F')
+                        10 + (h1 - 'A')
+                    else
+                        null;
+                    const v2_opt: ?u8 = if (h2 >= '0' and h2 <= '9')
+                        h2 - '0'
+                    else if (h2 >= 'a' and h2 <= 'f')
+                        10 + (h2 - 'a')
+                    else if (h2 >= 'A' and h2 <= 'F')
+                        10 + (h2 - 'A')
+                    else
+                        null;
+                    if (v1_opt == null or v2_opt == null) {
+                        bad_escape.* = input[i..@min(input.len, i + 4)];
+                        return error.InvalidEscape;
+                    }
+                    try result.append(allocator, (v1_opt.? << 4) | v2_opt.?);
+                    i += 4;
                 },
                 '0'...'9' => {
                     // Decimal byte escape: \ddd (1-3 digits)
@@ -5266,13 +5391,52 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
                         val = val * 10 + @as(u16, input[j] - '0');
                         digits += 1;
                     }
+                    if (val > 255) {
+                        bad_escape.* = input[i..@min(input.len, j)];
+                        return error.InvalidEscape;
+                    }
                     try result.append(allocator, @intCast(val & 0xFF));
                     i = j;
                 },
+                'u' => {
+                    if (i + 2 >= input.len or input[i + 2] != '{') {
+                        bad_escape.* = input[0..@min(input.len, i + 3)];
+                        return error.InvalidEscape;
+                    }
+                    var j = i + 3;
+                    var cp: u64 = 0;
+                    var ndigits: usize = 0;
+                    while (j < input.len and input[j] != '}') : (j += 1) {
+                        const ch = input[j];
+                        const v_opt: ?u8 = if (ch >= '0' and ch <= '9')
+                            ch - '0'
+                        else if (ch >= 'a' and ch <= 'f')
+                            10 + (ch - 'a')
+                        else if (ch >= 'A' and ch <= 'F')
+                            10 + (ch - 'A')
+                        else
+                            null;
+                        if (v_opt == null) {
+                            bad_escape.* = input[0..@min(input.len, j + 1)];
+                            return error.InvalidEscape;
+                        }
+                        cp = cp * 16 + v_opt.?;
+                        ndigits += 1;
+                        if (cp > 0x7FFFFFFF) {
+                            bad_escape.* = input[0..@min(input.len, j + 1)];
+                            return error.InvalidEscape;
+                        }
+                    }
+                    if (j >= input.len or ndigits == 0 or input[j] != '}') {
+                        bad_escape.* = input[0..input.len];
+                        return error.InvalidEscape;
+                    }
+                    try appendUtf8Extended(&result, allocator, @intCast(cp));
+                    i = j + 1;
+                },
                 else => {
-                    // Unknown escape - keep as-is
-                    try result.append(allocator, input[i]);
-                    i += 1;
+                    bad_escape.* = input[i..@min(input.len, i + 2)];
+                    return error.InvalidEscape;
                 },
             }
         } else {
@@ -5282,4 +5446,42 @@ fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     }
 
     return try allocator.dupe(u8, result.items);
+}
+
+fn normalizeLineEndings(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '\r' or input[i] == '\n') {
+            const first = input[i];
+            try out.append(allocator, '\n');
+            i += 1;
+            if (i < input.len) {
+                const second = input[i];
+                if ((first == '\r' and second == '\n') or (first == '\n' and second == '\r')) {
+                    i += 1;
+                }
+            }
+        } else {
+            try out.append(allocator, input[i]);
+            i += 1;
+        }
+    }
+
+    return try allocator.dupe(u8, out.items);
+}
+
+fn hasLongBracketClose(lexeme: []const u8, level: usize) bool {
+    const close_len = 2 + level;
+    if (lexeme.len < close_len) return false;
+    var start = lexeme.len - close_len;
+    if (lexeme[start] != ']') return false;
+    start += 1;
+    for (0..level) |_| {
+        if (lexeme[start] != '=') return false;
+        start += 1;
+    }
+    return lexeme[start] == ']';
 }

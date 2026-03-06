@@ -464,6 +464,7 @@ pub const GC = struct {
     pub const allocObject = alloc_mod.allocObject;
     pub const newObjectHeader = alloc_mod.newObjectHeader;
     pub const allocString = alloc_mod.allocString;
+    pub const allocConstString = alloc_mod.allocConstString;
     pub const allocTable = alloc_mod.allocTable;
     pub const allocClosure = alloc_mod.allocClosure;
     pub const allocProto = alloc_mod.allocProto;

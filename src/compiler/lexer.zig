@@ -63,8 +63,9 @@ pub const Lexer = struct {
     }
 
     fn advance(self: *Lexer) u8 {
-        const c = self.peek();
-        if (c != 0) self.pos += 1;
+        if (self.pos >= self.src.len) return 0;
+        const c = self.src[self.pos];
+        self.pos += 1;
         return c;
     }
 
@@ -73,14 +74,31 @@ pub const Lexer = struct {
             const c = self.peek();
 
             switch (c) {
-                ' ', '\t', '\r' => _ = self.advance(),
-                '\n' => {
+                ' ', '\t', '\x0b', '\x0c' => _ = self.advance(),
+                '\n', '\r' => {
                     self.line += 1;
-                    _ = self.advance();
+                    const first = self.advance();
+                    if (self.pos < self.src.len) {
+                        const second = self.src[self.pos];
+                        if ((first == '\n' and second == '\r') or (first == '\r' and second == '\n')) {
+                            self.pos += 1;
+                        }
+                    }
                 },
                 '-' => {
                     if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '-') {
-                        self.skipLineComment();
+                        // Skip "--"
+                        self.pos += 2;
+                        // Long comments: --[[...]] / --[=[...]=] / ...
+                        if (self.pos < self.src.len and self.src[self.pos] == '[') {
+                            if (self.checkLongBracketStart()) |level| {
+                                self.skipLongBracket(level);
+                            } else {
+                                self.skipLineComment();
+                            }
+                        } else {
+                            self.skipLineComment();
+                        }
                     } else {
                         break;
                     }
@@ -91,8 +109,48 @@ pub const Lexer = struct {
     }
 
     fn skipLineComment(self: *Lexer) void {
-        while (self.pos < self.src.len and self.src[self.pos] != '\n') {
+        while (self.pos < self.src.len and self.src[self.pos] != '\n' and self.src[self.pos] != '\r') {
             _ = self.advance();
+        }
+    }
+
+    /// Skip a long bracket body: [[...]] or [=[...]=] etc.
+    /// Assumes self.pos points to the opening '['.
+    fn skipLongBracket(self: *Lexer, level: usize) void {
+        // Skip opening: [ + level * '=' + [
+        self.pos += 2 + level;
+
+        // Find matching close: ] + level * '=' + ]
+        while (self.pos < self.src.len) {
+            if (self.src[self.pos] == '\n' or self.src[self.pos] == '\r') {
+                self.line += 1;
+                const first = self.src[self.pos];
+                self.pos += 1;
+                if (self.pos < self.src.len) {
+                    const second = self.src[self.pos];
+                    if ((first == '\n' and second == '\r') or (first == '\r' and second == '\n')) {
+                        self.pos += 1;
+                    }
+                }
+                continue;
+            }
+            if (self.src[self.pos] != ']') {
+                self.pos += 1;
+                continue;
+            }
+
+            var i = self.pos + 1;
+            var eq_count: usize = 0;
+            while (i < self.src.len and self.src[i] == '=') {
+                eq_count += 1;
+                i += 1;
+            }
+
+            if (eq_count == level and i < self.src.len and self.src[i] == ']') {
+                self.pos = i + 1;
+                return;
+            }
+            self.pos += 1;
         }
     }
 
@@ -178,6 +236,12 @@ pub const Lexer = struct {
             }
         }
 
+        // Malformed-number capture: consume trailing identifier chars contiguous to number
+        // (e.g. "1print", "0xep-p") so parser can report "malformed number".
+        while (self.pos < self.src.len and (isAlphaNum(self.peek()) or self.peek() == '_')) {
+            _ = self.advance();
+        }
+
         return .{
             .kind = .Number,
             .lexeme = self.src[start..self.pos],
@@ -220,15 +284,57 @@ pub const Lexer = struct {
         const start = self.pos;
         const start_line = self.line;
         const quote = self.advance(); // Get and skip opening quote (" or ')
+        var skip_z_whitespace = false;
 
         while (self.pos < self.src.len and self.peek() != quote) {
+            if (skip_z_whitespace) {
+                const ch = self.peek();
+                if (ch == ' ' or ch == '\t' or ch == '\x0b' or ch == '\x0c') {
+                    _ = self.advance();
+                    continue;
+                }
+                if (ch == '\n' or ch == '\r') {
+                    self.line += 1;
+                    const first = self.advance();
+                    if (self.pos < self.src.len) {
+                        const second = self.src[self.pos];
+                        if ((first == '\n' and second == '\r') or (first == '\r' and second == '\n')) {
+                            self.pos += 1;
+                        }
+                    }
+                    continue;
+                }
+                skip_z_whitespace = false;
+            }
+
             if (self.peek() == '\\' and self.pos + 1 < self.src.len) {
-                // Skip escape sequence (backslash + next char)
-                _ = self.advance();
-                _ = self.advance();
+                // Skip escape sequence (backslash + next char), counting escaped line breaks.
+                const next = self.src[self.pos + 1];
+                _ = self.advance(); // '\'
+                if (next == '\n' or next == '\r') {
+                    self.line += 1;
+                    _ = self.advance(); // first newline byte
+                    if (self.pos < self.src.len) {
+                        const second = self.src[self.pos];
+                        if ((next == '\n' and second == '\r') or (next == '\r' and second == '\n')) {
+                            self.pos += 1;
+                        }
+                    }
+                } else {
+                    _ = self.advance();
+                    if (next == 'z') {
+                        skip_z_whitespace = true;
+                    }
+                }
             } else {
-                if (self.peek() == '\n') self.line += 1;
-                _ = self.advance();
+                const ch = self.peek();
+                if (ch == '\n' or ch == '\r') {
+                    // Raw newlines are not allowed inside short strings.
+                    // Leave newline unread so parser reports unterminated string.
+                    break;
+                } else {
+                    _ = self.advance();
+                }
             }
         }
 
@@ -275,9 +381,16 @@ pub const Lexer = struct {
 
         // Find matching close bracket: ] + level * '=' + ]
         while (self.pos < self.src.len) {
-            if (self.src[self.pos] == '\n') {
+            if (self.src[self.pos] == '\n' or self.src[self.pos] == '\r') {
                 self.line += 1;
+                const first = self.src[self.pos];
                 self.pos += 1;
+                if (self.pos < self.src.len) {
+                    const second = self.src[self.pos];
+                    if ((first == '\n' and second == '\r') or (first == '\r' and second == '\n')) {
+                        self.pos += 1;
+                    }
+                }
             } else if (self.src[self.pos] == ']') {
                 // Check for matching close bracket
                 var i = self.pos + 1;
