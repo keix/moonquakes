@@ -2096,10 +2096,41 @@ fn parseFormatNumber(fmt: []const u8, pos: *usize) ?usize {
 
     var num: usize = 0;
     while (pos.* < fmt.len and fmt[pos.*] >= '0' and fmt[pos.*] <= '9') {
-        num = num * 10 + (fmt[pos.*] - '0');
+        const digit: usize = fmt[pos.*] - '0';
+        num = std.math.mul(usize, num, 10) catch return std.math.maxInt(usize);
+        num = std.math.add(usize, num, digit) catch return std.math.maxInt(usize);
         pos.* += 1;
     }
     return num;
+}
+
+fn raiseIntegerSizeOutOfLimits(vm: anytype, n: usize) !void {
+    var buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "integral size ({d}) out of limits [1,16]", .{n}) catch "out of limits";
+    return vm.raiseString(msg);
+}
+
+fn raiseInvalidFormatOption(vm: anytype, c: u8) !void {
+    var buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "invalid format option '{c}'", .{c}) catch "invalid format option";
+    return vm.raiseString(msg);
+}
+
+fn raiseIntegerDoesNotFit(vm: anytype, size: usize) !void {
+    var buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{d}-byte integer does not fit", .{size}) catch "integer does not fit";
+    return vm.raiseString(msg);
+}
+
+fn isValidXNextOption(c: u8) bool {
+    return switch (c) {
+        'b', 'B', 'h', 'H', 'l', 'L', 'j', 'J', 'T', 'i', 'I', 'f', 'd', 'n' => true,
+        else => false,
+    };
+}
+
+fn checkPacksizeTooLarge(vm: anytype, size: usize) !void {
+    if (size > 0x7fffffff) return vm.raiseString("too large");
 }
 
 /// string.packsize(fmt) - Returns size of a string resulting from string.pack with given format
@@ -2134,6 +2165,7 @@ pub fn nativeStringPacksize(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
             '!' => {
                 const n = parseFormatNumber(fmt, &pos) orelse 1;
+                if (n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
                 state.max_align = if (n == 0) 8 else n; // !0 means native max alignment
             },
             'b', 'B', 'h', 'H', 'l', 'L', 'j', 'J', 'T', 'f', 'd', 'n' => {
@@ -2141,37 +2173,50 @@ pub fn nativeStringPacksize(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 // Add alignment padding
                 const aligned = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
                 total_size = aligned + opt.size;
+                try checkPacksizeTooLarge(vm, total_size);
             },
             'i', 'I' => {
                 const n = parseFormatNumber(fmt, &pos) orelse 4;
+                if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                if (state.max_align > 1 and n > 1 and (n & (n - 1)) != 0) return vm.raiseString("not power of 2");
                 const opt = state.getOptionSize(c, n);
                 const aligned = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
                 total_size = aligned + opt.size;
+                try checkPacksizeTooLarge(vm, total_size);
             },
             'x' => {
                 total_size += 1;
+                try checkPacksizeTooLarge(vm, total_size);
             },
             'X' => {
                 // Alignment option - peek at next char
-                if (pos < fmt.len) {
-                    const next = fmt[pos];
-                    pos += 1;
-                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &pos));
-                    if (opt.align_to > 1) {
-                        total_size = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
+                if (pos >= fmt.len) return vm.raiseString("invalid next option");
+                const next = fmt[pos];
+                if (!isValidXNextOption(next)) return vm.raiseString("invalid next option");
+                pos += 1;
+                const size_override = parseFormatNumber(fmt, &pos);
+                if (next == 'i' or next == 'I') {
+                    if (size_override) |n| {
+                        if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
                     }
+                }
+                const opt = state.getOptionSize(next, size_override);
+                if (opt.align_to > 1) {
+                    total_size = (total_size + opt.align_to - 1) / opt.align_to * opt.align_to;
+                    try checkPacksizeTooLarge(vm, total_size);
                 }
             },
             'c' => {
-                const n = parseFormatNumber(fmt, &pos) orelse 1;
+                const n = parseFormatNumber(fmt, &pos) orelse return vm.raiseString("missing size");
+                if (n == std.math.maxInt(usize)) return vm.raiseString("invalid format");
                 total_size += n;
+                try checkPacksizeTooLarge(vm, total_size);
             },
             's', 'z' => {
                 // Variable-size formats - error
-                vm.stack[vm.base + func_reg] = .nil;
-                return;
+                return vm.raiseString("variable-length format");
             },
-            else => {},
+            else => return raiseInvalidFormatOption(vm, c),
         }
     }
 
@@ -2213,6 +2258,7 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
             '!' => {
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                if (n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
                 state.max_align = if (n == 0) 8 else n;
             },
             'b' => {
@@ -2268,12 +2314,31 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             'i', 'I' => {
                 // Signed/unsigned int with optional size
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 4;
-                const size = @min(n, 8);
+                if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                if (state.max_align > 1 and n > 1 and (n & (n - 1)) != 0) return vm.raiseString("not power of 2");
+                const size = n;
                 try addAlignment(allocator, &result, size, state.max_align);
                 const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
                 arg_idx += 1;
                 const val = arg.toInteger() orelse 0;
-                try packInteger(allocator, &result, @as(u64, @bitCast(val)), size, state.little_endian);
+                if (c == 'I') {
+                    if (val < 0) return vm.raiseString("overflow");
+                    if (size < 8) {
+                        const bits = size * 8;
+                        const max_u: u64 = (@as(u64, 1) << @intCast(bits)) - 1;
+                        if (@as(u64, @intCast(val)) > max_u) return vm.raiseString("overflow");
+                    }
+                } else if (size < 8) {
+                    const bits = size * 8;
+                    const min_i: i64 = -(@as(i64, 1) << @intCast(bits - 1));
+                    const max_i: i64 = (@as(i64, 1) << @intCast(bits - 1)) - 1;
+                    if (val < min_i or val > max_i) return vm.raiseString("overflow");
+                }
+                if (c == 'i') {
+                    try packExtendedSigned(allocator, &result, val, size, state.little_endian);
+                } else {
+                    try packExtendedUnsigned(allocator, &result, @as(u64, @bitCast(val)), size, state.little_endian);
+                }
             },
             'f' => {
                 // Float (4 bytes)
@@ -2296,11 +2361,12 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             },
             'c' => {
                 // Fixed-size string
-                const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                const n = parseFormatNumber(fmt, &fmt_pos) orelse return vm.raiseString("missing size");
                 const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
                 arg_idx += 1;
                 if (arg.asString()) |str_obj| {
                     const str = str_obj.asSlice();
+                    if (str.len > n) return vm.raiseString("longer than");
                     const copy_len = @min(str.len, n);
                     try result.appendSlice(allocator, str[0..copy_len]);
                     // Pad with zeros if string is shorter
@@ -2320,6 +2386,7 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                 arg_idx += 1;
                 if (arg.asString()) |str_obj| {
                     const str = str_obj.asSlice();
+                    if (std.mem.indexOfScalar(u8, str, 0) != null) return vm.raiseString("contains zeros");
                     try result.appendSlice(allocator, str);
                 }
                 try result.append(allocator, 0); // Null terminator
@@ -2327,16 +2394,22 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             's' => {
                 // String with length prefix
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 8; // Default to size_t (8)
-                const size = @min(n, 8);
+                if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                const size = n;
                 try addAlignment(allocator, &result, size, state.max_align);
                 const arg = if (arg_idx <= nargs) vm.stack[vm.base + func_reg + arg_idx] else TValue.nil;
                 arg_idx += 1;
                 if (arg.asString()) |str_obj| {
                     const str = str_obj.asSlice();
-                    try packInteger(allocator, &result, str.len, size, state.little_endian);
+                    if (size < 8) {
+                        const bits = size * 8;
+                        const max_len: usize = (@as(usize, 1) << @intCast(bits)) - 1;
+                        if (str.len > max_len) return vm.raiseString("does not fit");
+                    }
+                    try packExtendedUnsigned(allocator, &result, @intCast(str.len), size, state.little_endian);
                     try result.appendSlice(allocator, str);
                 } else {
-                    try packInteger(allocator, &result, 0, size, state.little_endian);
+                    try packExtendedUnsigned(allocator, &result, 0, size, state.little_endian);
                 }
             },
             'x' => {
@@ -2345,14 +2418,20 @@ pub fn nativeStringPack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             },
             'X' => {
                 // Alignment padding
-                if (fmt_pos < fmt.len) {
-                    const next = fmt[fmt_pos];
-                    fmt_pos += 1;
-                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &fmt_pos));
-                    try addAlignment(allocator, &result, opt.size, state.max_align);
+                if (fmt_pos >= fmt.len) return vm.raiseString("invalid next option");
+                const next = fmt[fmt_pos];
+                if (!isValidXNextOption(next)) return vm.raiseString("invalid next option");
+                fmt_pos += 1;
+                const size_override = parseFormatNumber(fmt, &fmt_pos);
+                if (next == 'i' or next == 'I') {
+                    if (size_override) |n| {
+                        if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                    }
                 }
+                const opt = state.getOptionSize(next, size_override);
+                try addAlignment(allocator, &result, opt.size, state.max_align);
             },
-            else => {},
+            else => return raiseInvalidFormatOption(vm, c),
         }
     }
 
@@ -2387,6 +2466,41 @@ fn packInteger(allocator: std.mem.Allocator, result: *std.ArrayList(u8), val: u6
     }
 }
 
+/// Helper: Pack signed integer with extension for sizes > 8
+fn packExtendedSigned(allocator: std.mem.Allocator, result: *std.ArrayList(u8), val: i64, size: usize, little_endian: bool) !void {
+    const bits: u64 = @bitCast(val);
+    if (little_endian) {
+        for (0..size) |i| {
+            const byte: u8 = if (i < 8) @truncate(bits >> @intCast(i * 8)) else if (val < 0) 0xFF else 0x00;
+            try result.append(allocator, byte);
+        }
+    } else {
+        var i: usize = size;
+        while (i > 0) {
+            i -= 1;
+            const byte: u8 = if (i < 8) @truncate(bits >> @intCast(i * 8)) else if (val < 0) 0xFF else 0x00;
+            try result.append(allocator, byte);
+        }
+    }
+}
+
+/// Helper: Pack unsigned integer with zero-extension for sizes > 8
+fn packExtendedUnsigned(allocator: std.mem.Allocator, result: *std.ArrayList(u8), val: u64, size: usize, little_endian: bool) !void {
+    if (little_endian) {
+        for (0..size) |i| {
+            const byte: u8 = if (i < 8) @truncate(val >> @intCast(i * 8)) else 0;
+            try result.append(allocator, byte);
+        }
+    } else {
+        var i: usize = size;
+        while (i > 0) {
+            i -= 1;
+            const byte: u8 = if (i < 8) @truncate(val >> @intCast(i * 8)) else 0;
+            try result.append(allocator, byte);
+        }
+    }
+}
+
 /// string.unpack(fmt, s [, pos]) - Returns values packed in string s according to format fmt
 pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
@@ -2415,7 +2529,11 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (nargs >= 3) {
         const pos_arg = vm.stack[vm.base + func_reg + 3];
         if (pos_arg.toInteger()) |p| {
-            if (p > 0) data_pos = @intCast(p - 1);
+            const len_i64: i64 = @intCast(data.len);
+            var idx = p;
+            if (idx < 0) idx = len_i64 + idx + 1;
+            if (idx <= 0 or idx > len_i64 + 1) return vm.raiseString("out of string");
+            data_pos = @intCast(idx - 1);
         }
     }
 
@@ -2423,7 +2541,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     var fmt_pos: usize = 0;
     var result_idx: u32 = 0;
 
-    while (fmt_pos < fmt.len and result_idx < nresults - 1) { // -1 to leave room for final position
+    while (fmt_pos < fmt.len and result_idx < nresults) {
         const c = fmt[fmt_pos];
         fmt_pos += 1;
 
@@ -2434,6 +2552,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             '=' => state.little_endian = (@import("builtin").cpu.arch.endian() == .little),
             '!' => {
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
+                if (n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
                 state.max_align = if (n == 0) 8 else n;
             },
             'b' => {
@@ -2455,7 +2574,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'h' => {
                 // Signed short (2 bytes)
                 data_pos = alignPosition(data_pos, 2, state.max_align);
-                if (data_pos + 2 > data.len) break;
+                if (data_pos > data.len) break;
+                if (2 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
                 data_pos += 2;
                 const signed: i16 = @bitCast(@as(u16, @truncate(val)));
@@ -2465,7 +2585,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'H' => {
                 // Unsigned short (2 bytes)
                 data_pos = alignPosition(data_pos, 2, state.max_align);
-                if (data_pos + 2 > data.len) break;
+                if (data_pos > data.len) break;
+                if (2 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
                 data_pos += 2;
                 vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @intCast(val) };
@@ -2474,7 +2595,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'l', 'j' => {
                 // Signed long / lua_Integer (8 bytes)
                 data_pos = alignPosition(data_pos, 8, state.max_align);
-                if (data_pos + 8 > data.len) break;
+                if (data_pos > data.len) break;
+                if (8 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
                 vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
@@ -2483,7 +2605,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'L', 'J', 'T' => {
                 // Unsigned long / lua_Unsigned / size_t (8 bytes)
                 data_pos = alignPosition(data_pos, 8, state.max_align);
-                if (data_pos + 8 > data.len) break;
+                if (data_pos > data.len) break;
+                if (8 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
                 // Note: Large unsigned values may overflow i64
@@ -2493,10 +2616,32 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'i', 'I' => {
                 // Signed/unsigned int with optional size
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 4;
-                const size = @min(n, 8);
+                if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                if (state.max_align > 1 and n > 1 and (n & (n - 1)) != 0) return vm.raiseString("not power of 2");
+                const size = n;
                 data_pos = alignPosition(data_pos, size, state.max_align);
-                if (data_pos + size > data.len) break;
-                const val = unpackInteger(data[data_pos..][0..size], size, state.little_endian);
+                if (data_pos > data.len) break;
+                if (size > data.len - data_pos) break;
+                const val = if (size <= 8)
+                    unpackInteger(data[data_pos..][0..size], size, state.little_endian)
+                else blk: {
+                    const wide = data[data_pos..][0..size];
+                    const low_off: usize = if (state.little_endian) 0 else size - 8;
+                    const low = unpackInteger(wide[low_off..][0..8], 8, state.little_endian);
+                    const high = if (state.little_endian) wide[8..] else wide[0 .. size - 8];
+
+                    if (c == 'i') {
+                        const sign_fill: u8 = if (((low >> 63) & 1) == 1) 0xFF else 0x00;
+                        for (high) |b| {
+                            if (b != sign_fill) return raiseIntegerDoesNotFit(vm, size);
+                        }
+                    } else {
+                        for (high) |b| {
+                            if (b != 0) return raiseIntegerDoesNotFit(vm, size);
+                        }
+                    }
+                    break :blk low;
+                };
                 data_pos += size;
                 if (c == 'i') {
                     // Sign extend for signed
@@ -2510,7 +2655,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'f' => {
                 // Float (4 bytes)
                 data_pos = alignPosition(data_pos, 4, state.max_align);
-                if (data_pos + 4 > data.len) break;
+                if (data_pos > data.len) break;
+                if (4 > data.len - data_pos) break;
                 const bits: u32 = @truncate(unpackInteger(data[data_pos..][0..4], 4, state.little_endian));
                 data_pos += 4;
                 const float: f32 = @bitCast(bits);
@@ -2520,7 +2666,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'd', 'n' => {
                 // Double / lua_Number (8 bytes)
                 data_pos = alignPosition(data_pos, 8, state.max_align);
-                if (data_pos + 8 > data.len) break;
+                if (data_pos > data.len) break;
+                if (8 > data.len - data_pos) break;
                 const bits = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
                 const double: f64 = @bitCast(bits);
@@ -2530,7 +2677,8 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             'c' => {
                 // Fixed-size string
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 1;
-                if (data_pos + n > data.len) break;
+                if (data_pos > data.len) return vm.raiseString("too short");
+                if (n > data.len - data_pos) return vm.raiseString("too short");
                 const str = try vm.gc().allocString(data[data_pos..][0..n]);
                 data_pos += n;
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
@@ -2542,6 +2690,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 while (end_pos < data.len and data[end_pos] != 0) {
                     end_pos += 1;
                 }
+                if (end_pos >= data.len) return vm.raiseString("unfinished string");
                 const str = try vm.gc().allocString(data[data_pos..end_pos]);
                 data_pos = if (end_pos < data.len) end_pos + 1 else end_pos; // Skip null terminator
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
@@ -2550,14 +2699,29 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             's' => {
                 // String with length prefix
                 const n = parseFormatNumber(fmt, &fmt_pos) orelse 8;
-                const size = @min(n, 8);
+                if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                const size = n;
                 data_pos = alignPosition(data_pos, size, state.max_align);
-                if (data_pos + size > data.len) break;
-                const len = unpackInteger(data[data_pos..][0..size], size, state.little_endian);
+                if (data_pos > data.len) return vm.raiseString("too short");
+                if (size > data.len - data_pos) return vm.raiseString("too short");
+                const len = if (size <= 8)
+                    unpackInteger(data[data_pos..][0..size], size, state.little_endian)
+                else blk: {
+                    const wide = data[data_pos..][0..size];
+                    const low_off: usize = if (state.little_endian) 0 else size - 8;
+                    const low = unpackInteger(wide[low_off..][0..8], 8, state.little_endian);
+                    const high = if (state.little_endian) wide[8..] else wide[0 .. size - 8];
+                    for (high) |b| {
+                        if (b != 0) return vm.raiseString("does not fit");
+                    }
+                    break :blk low;
+                };
                 data_pos += size;
-                if (data_pos + len > data.len) break;
-                const str = try vm.gc().allocString(data[data_pos..][0..len]);
-                data_pos += len;
+                const len_usize = std.math.cast(usize, len) orelse return vm.raiseString("too short");
+                const end_pos = std.math.add(usize, data_pos, len_usize) catch return vm.raiseString("too short");
+                if (end_pos > data.len) return vm.raiseString("too short");
+                const str = try vm.gc().allocString(data[data_pos..end_pos]);
+                data_pos = end_pos;
                 vm.stack[vm.base + func_reg + result_idx] = TValue.fromString(str);
                 result_idx += 1;
             },
@@ -2567,14 +2731,20 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             },
             'X' => {
                 // Alignment padding
-                if (fmt_pos < fmt.len) {
-                    const next = fmt[fmt_pos];
-                    fmt_pos += 1;
-                    const opt = state.getOptionSize(next, parseFormatNumber(fmt, &fmt_pos));
-                    data_pos = alignPosition(data_pos, opt.size, state.max_align);
+                if (fmt_pos >= fmt.len) return vm.raiseString("invalid next option");
+                const next = fmt[fmt_pos];
+                if (!isValidXNextOption(next)) return vm.raiseString("invalid next option");
+                fmt_pos += 1;
+                const size_override = parseFormatNumber(fmt, &fmt_pos);
+                if (next == 'i' or next == 'I') {
+                    if (size_override) |n| {
+                        if (n == 0 or n > 16) return raiseIntegerSizeOutOfLimits(vm, n);
+                    }
                 }
+                const opt = state.getOptionSize(next, size_override);
+                data_pos = alignPosition(data_pos, opt.size, state.max_align);
             },
-            else => {},
+            else => return raiseInvalidFormatOption(vm, c),
         }
     }
 
@@ -2609,6 +2779,8 @@ fn unpackInteger(data: []const u8, size: usize, little_endian: bool) u64 {
 /// Helper: Sign extend value
 fn signExtend(val: u64, size: usize) i64 {
     const bits = size * 8;
+    if (bits == 0) return 0;
+    if (bits >= 64) return @bitCast(val);
     const sign_bit: u64 = @as(u64, 1) << @intCast(bits - 1);
     if ((val & sign_bit) != 0) {
         // Negative - extend sign

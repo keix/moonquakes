@@ -23,12 +23,14 @@ test "FORPREP minimal test" {
 
     const constants = [_]TValue{
         .{ .integer = 5 }, // init
+        .{ .integer = 5 }, // limit
         .{ .integer = 1 }, // step
     };
 
     const code = [_]Instruction{
         Instruction.initABx(.LOADK, 0, 0), // R0 = 5 (init)
-        Instruction.initABx(.LOADK, 2, 1), // R2 = 1 (step)
+        Instruction.initABx(.LOADK, 1, 1), // R1 = 5 (limit)
+        Instruction.initABx(.LOADK, 2, 2), // R2 = 1 (step)
         Instruction.initAsBx(.FORPREP, 0, 0), // FORPREP A=0, sBx=0 (jump to next = RETURN)
         Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be 5-1=4)
     };
@@ -240,9 +242,8 @@ test "for loop: step of zero should error" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
     const result = Mnemonics.execute(ctx.vm, proto);
 
-    // Step of zero should cause an error
-    // FIXED: VM now checks for zero step in FORPREP
-    try testing.expectError(error.InvalidForLoopStep, result);
+    // Runtime numeric-for errors are raised as LuaException by execute().
+    try testing.expectError(error.LuaException, result);
 }
 
 test "for loop: overflow behavior" {

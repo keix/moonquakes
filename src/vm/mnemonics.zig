@@ -473,6 +473,11 @@ pub fn popCallInfo(vm: *VM) void {
     }
 }
 
+fn ensureStackTop(vm: *VM, needed_top: u32) !void {
+    const stack_limit: u32 = @intCast(vm.stack.len);
+    if (needed_top > stack_limit) return error.CallStackOverflow;
+}
+
 /// Execute a metamethod synchronously and return its first result.
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
 pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
@@ -496,6 +501,7 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
         vararg_count = argc - proto.numparams;
         const min_vararg_base = call_base + proto.maxstacksize;
         vararg_base = @max(min_vararg_base, vm.top) + 32;
+        try ensureStackTop(vm, vararg_base + vararg_count);
         var i: u32 = vararg_count;
         while (i > 0) {
             i -= 1;
@@ -1806,6 +1812,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Add extra buffer for nested call frames
                     const min_vararg_base = new_base + func_proto.maxstacksize;
                     vararg_base = @max(min_vararg_base, vm.top) + 32; // 32-slot buffer for nested calls
+                    try ensureStackTop(vm, vararg_base + vararg_count);
 
                     // Copy varargs to their storage location (after maxstacksize)
                     // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
@@ -1921,6 +1928,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Store varargs beyond the frame with buffer for nested calls
                     const min_vararg_base = new_base + func_proto.maxstacksize;
                     vararg_base = @max(min_vararg_base, vm.top) + 32;
+                    try ensureStackTop(vm, vararg_base + vararg_count);
 
                     // Copy varargs to storage location
                     // Always copy backwards since dest > src
@@ -2969,6 +2977,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Store varargs beyond the frame with buffer for nested calls
                     const min_vararg_base = call_base + func_proto.maxstacksize;
                     vararg_base = @max(min_vararg_base, vm.top) + 32;
+                    try ensureStackTop(vm, vararg_base + vararg_count);
                     var i: u32 = vararg_count;
                     while (i > 0) {
                         i -= 1;
@@ -3077,6 +3086,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             // Store varargs beyond the frame with buffer for nested calls
                             const min_vararg_base = call_base + func_proto.maxstacksize;
                             vararg_base = @max(min_vararg_base, vm.top) + 32;
+                            try ensureStackTop(vm, vararg_base + vararg_count);
                             var i: u32 = vararg_count;
                             while (i > 0) {
                                 i -= 1;
@@ -3200,6 +3210,7 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;
@@ -3266,6 +3277,7 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;
@@ -3323,6 +3335,7 @@ fn dispatchIndexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue, ta
 }
 
 fn dispatchIndexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, result_reg: u8, depth: u16) !?ExecuteResult {
+    // Logical recursion guard for __index chains, independent of call stack depth.
     if (depth >= 2000) return error.InvalidTableOperation;
     // Fast path: key exists in table
     if (table.get(key_val)) |value| {
@@ -3488,6 +3501,7 @@ fn dispatchNewindexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue,
 }
 
 fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, value: TValue, depth: u16) !?ExecuteResult {
+    // Logical recursion guard for __newindex chains, independent of call stack depth.
     if (depth >= 2000) return error.InvalidTableOperation;
     // Fast path: key already exists in table - just update it
     if (table.get(key_val) != null) {
@@ -3575,6 +3589,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
 
             var i: u32 = vararg_count;
             while (i > 0) {
@@ -3653,6 +3668,7 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;
@@ -3831,7 +3847,8 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
     const left_table = left.asTable() orelse return null;
     const right_table = right.asTable() orelse return null;
 
-    // Try left operand first, then right (matches test expectations).
+    // Moonquakes deviation: use first available __eq from either side.
+    // Lua 5.4 requires both operands to share the same __eq metamethod.
     const eq_mm = getEqMM(vm, left) orelse getEqMM(vm, right) orelse return null;
 
     // __eq is a native function - call synchronously
@@ -4024,6 +4041,7 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;
@@ -4086,6 +4104,7 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
             vararg_count = total_args - func_proto.numparams;
             const min_vararg_base = new_base + func_proto.maxstacksize;
             vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;

@@ -6,6 +6,17 @@ const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 
+fn debugUpvalueBase(closure: *ClosureObject) usize {
+    // Moonquakes keeps an internal _ENV upvalue at slot 0 for nested functions.
+    // Debug API indices should match Lua-visible upvalues used in source.
+    if (closure.proto.upvalues.len > 0) {
+        if (closure.proto.upvalues[0].name) |name| {
+            if (std.mem.eql(u8, name, "_ENV")) return 1;
+        }
+    }
+    return 0;
+}
+
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.10
@@ -552,7 +563,8 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const up_idx: usize = @intCast(up_int - 1);
+    const base = debugUpvalueBase(closure);
+    const up_idx: usize = @intCast((up_int - 1) + @as(i64, @intCast(base)));
 
     // Check bounds
     if (up_idx >= closure.upvalues.len) {
@@ -780,7 +792,8 @@ pub fn nativeDebugSetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const up_idx: usize = @intCast(up_int - 1);
+    const base = debugUpvalueBase(closure);
+    const up_idx: usize = @intCast((up_int - 1) + @as(i64, @intCast(base)));
 
     // Check bounds
     if (up_idx >= closure.upvalues.len) {
@@ -1020,7 +1033,8 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
-    const up_idx: usize = @intCast(n_int - 1);
+    const base = debugUpvalueBase(closure);
+    const up_idx: usize = @intCast((n_int - 1) + @as(i64, @intCast(base)));
 
     if (up_idx >= closure.upvalues.len) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
@@ -1060,8 +1074,10 @@ pub fn nativeDebugUpvaluejoin(vm: anytype, func_reg: u32, nargs: u32, nresults: 
 
     if (n1_int < 1 or n2_int < 1) return;
 
-    const idx1: usize = @intCast(n1_int - 1);
-    const idx2: usize = @intCast(n2_int - 1);
+    const base1 = debugUpvalueBase(closure1);
+    const base2 = debugUpvalueBase(closure2);
+    const idx1: usize = @intCast((n1_int - 1) + @as(i64, @intCast(base1)));
+    const idx2: usize = @intCast((n2_int - 1) + @as(i64, @intCast(base2)));
 
     if (idx1 >= closure1.upvalues.len or idx2 >= closure2.upvalues.len) return;
 
