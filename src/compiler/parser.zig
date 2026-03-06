@@ -1562,6 +1562,8 @@ pub const Parser = struct {
             return;
         }
 
+        const ret_code_before = self.proto.code.items.len;
+
         // Parse first return value
         const first_reg = try self.parseExpr();
         var count: u8 = 1;
@@ -1584,6 +1586,9 @@ pub const Parser = struct {
                     }
                 }
                 if (call_idx_opt) |call_idx| {
+                    if (call_idx < ret_code_before) {
+                        // Last CALL belongs to previous statement; ignore.
+                    } else {
                     // Drop trailing MOVE after CALL; tailcall must be the final instruction.
                     if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
                         self.proto.code.items.len -= 1;
@@ -1595,6 +1600,7 @@ pub const Parser = struct {
                     const b = call_inst.getB();
                     self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
                     return; // TAILCALL handles the return
+                    }
                 }
             }
         }
@@ -1617,6 +1623,7 @@ pub const Parser = struct {
                 return;
             }
 
+            const expr_code_before = self.proto.code.items.len;
             const expr_reg = try self.parseExpr();
 
             // Values must be in consecutive registers
@@ -1643,6 +1650,9 @@ pub const Parser = struct {
                         }
                     }
                     if (call_idx_opt) |call_idx| {
+                        if (call_idx < expr_code_before) {
+                            // Last CALL belongs to previous expression; ignore.
+                        } else {
                         // Drop trailing MOVE after CALL to avoid duplicating first result
                         // when RETURN B=0 collects from first_reg to top.
                         if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
@@ -1681,6 +1691,7 @@ pub const Parser = struct {
                         // RETURN with B=0 returns from return_base to top
                         try self.proto.emit(.RETURN, return_base, 0, 0);
                         return;
+                        }
                     }
                 }
             }
@@ -2519,19 +2530,13 @@ pub const Parser = struct {
                 const has_call_suffix = (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
                     self.isNoParensArg();
 
+                // Overwrite the current temporary register so chained call results stay
+                // contiguous when this expression is used as a trailing call argument.
+                try self.proto.emitGETFIELD(reg, reg, key_const);
+
                 if (has_call_suffix) {
-                    // Overwrite table register when immediately calling a field.
-                    // This keeps CALL results in-place and avoids trailing MOVE
-                    // in parent call-arg contexts.
-                    try self.proto.emitGETFIELD(reg, reg, key_const);
                     const arg_count = try self.parseCallArgs(reg);
                     try self.proto.emitCallVararg(reg, arg_count, 1);
-                } else {
-                    // Reuse the table register for the field value since we don't
-                    // need the table after accessing the field. This reduces register
-                    // pressure and helps with MULTRET when used as call arguments.
-                    try self.proto.emitGETFIELD(reg, reg, key_const);
-                    // reg stays the same
                 }
             } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2543,9 +2548,9 @@ pub const Parser = struct {
                 }
                 self.advance(); // consume ']'
 
-                // Reuse the table register for the indexed value
+                // Overwrite the current temporary register so chained call results stay
+                // contiguous when this expression is used as a trailing call argument.
                 try self.proto.emitGETTABLE(reg, reg, key_reg);
-                // reg stays the same
 
                 // Check for function call: t["key"]() or t[k]()
                 if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
@@ -2566,11 +2571,14 @@ pub const Parser = struct {
                 const method_name = self.current.lexeme;
                 self.advance(); // consume method name
 
-                // Use SELF: R[func_reg] := R[reg][K[method_const]]
-                //           R[func_reg+1] := R[reg]
+                // Keep method-call base in the same register so trailing MULTRET
+                // argument expansion does not include stale prefix values.
                 const method_const = try self.proto.addConstString(method_name);
-                const func_reg = self.proto.allocTemp();
-                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+                const func_reg = reg;
+                if (self.proto.next_reg <= func_reg + 1) {
+                    self.proto.next_reg = func_reg + 2;
+                    self.proto.updateMaxStack(func_reg + 2);
+                }
                 try self.proto.emitSELF(func_reg, reg, method_const);
 
                 // Parse extra arguments starting at func_reg + 2
@@ -3271,6 +3279,12 @@ pub const Parser = struct {
         try self.proto.emitTEST(condition_reg, false);
         const false_jmp = try self.proto.emitPatchableJMP();
 
+        // Drop temporary condition value before branch bodies so GC does not
+        // keep weakly-referenced objects alive through dead temp registers.
+        if (condition_reg >= self.proto.locals_top) {
+            try self.proto.emitLOADNIL(condition_reg, 1);
+        }
+
         // Release condition temporaries
         self.proto.resetTemps(cond_mark);
 
@@ -3704,6 +3718,11 @@ pub const Parser = struct {
         try self.proto.emitTEST(condition_reg, false);
         const exit_jmp = try self.proto.emitPatchableJMP();
 
+        // Condition temporaries are dead after TEST/JMP dispatch.
+        if (condition_reg >= self.proto.locals_top) {
+            try self.proto.emitLOADNIL(condition_reg, 1);
+        }
+
         // Release condition temporaries
         self.proto.resetTemps(cond_mark);
 
@@ -3726,6 +3745,10 @@ pub const Parser = struct {
             return error.ExpectedEnd;
         }
         self.advance(); // consume 'end'
+
+        // Close loop-scope locals/upvalues at end of each iteration before
+        // jumping back to reevaluate the condition.
+        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
 
         // Jump back to loop start
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
@@ -3774,14 +3797,27 @@ pub const Parser = struct {
         const cond_mark = self.proto.markTemps();
         const condition_reg = try self.parseExpr();
 
-        // TEST: if condition is truthy, skip JMP (exit loop)
-        //       if condition is falsy, execute JMP (loop back)
+        // Branch on condition:
+        // cond true  -> skip first JMP, close locals, jump to end.
+        // cond false -> take first JMP to continue path, close locals, jump back.
         try self.proto.emitTEST(condition_reg, false);
+        const continue_jmp = try self.proto.emitPatchableJMP();
+
+        // Exit path (condition true): close loop-scope locals and leave loop.
+        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
+        const end_jmp = try self.proto.emitPatchableJMP();
+
+        // Continue path (condition false): close and jump back to loop start.
+        const continue_addr = @as(u32, @intCast(self.proto.code.items.len));
+        self.proto.patchJMP(continue_jmp, continue_addr);
+        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
         try self.proto.emitJMP(@intCast(back_offset));
 
-        // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        self.proto.patchJMP(end_jmp, end_addr);
+
+        // Patch all break jumps to after the loop
         for (self.break_jumps.items[break_count..]) |jmp| {
             self.proto.patchJMP(jmp, end_addr);
         }
