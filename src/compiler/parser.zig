@@ -156,6 +156,7 @@ pub const ProtoBuilder = struct {
     next_reg: u8, // Next available register (for temps)
     locals_top: u8, // Register watermark: locals occupy [0, locals_top)
     allocator: std.mem.Allocator,
+    output_allocator: std.mem.Allocator,
     functions: std.ArrayList(FunctionEntry),
     variables: std.ArrayList(VariableEntry),
     scope_starts: std.ArrayList(ScopeMark), // Stack of scope boundaries
@@ -184,6 +185,7 @@ pub const ProtoBuilder = struct {
             .next_reg = 0,
             .locals_top = 0,
             .allocator = allocator,
+            .output_allocator = if (parent) |p| p.output_allocator else allocator,
             .functions = .{},
             .variables = .{},
             .scope_starts = .{},
@@ -212,7 +214,7 @@ pub const ProtoBuilder = struct {
         // Free function protos and their allocated arrays
         // All slices are allocator-owned (even when len=0), so always free
         for (self.functions.items) |entry| {
-            freeRawProto(self.allocator, entry.proto);
+            freeRawProto(self.output_allocator, entry.proto);
         }
 
         // Free duplicated strings
@@ -1579,27 +1581,22 @@ pub const Parser = struct {
                 var call_idx_opt: ?usize = null;
                 if (last_inst.getOpCode() == .CALL) {
                     call_idx_opt = last_idx;
-                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                    const prev_idx = last_idx - 1;
-                    if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
-                        call_idx_opt = prev_idx;
-                    }
                 }
                 if (call_idx_opt) |call_idx| {
                     if (call_idx < ret_code_before) {
                         // Last CALL belongs to previous statement; ignore.
                     } else {
-                    // Drop trailing MOVE after CALL; tailcall must be the final instruction.
-                    if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
-                        self.proto.code.items.len -= 1;
-                    }
-                    // Convert CALL to TAILCALL
-                    // CALL A B C -> TAILCALL A B 0
-                    const call_inst = self.proto.code.items[call_idx];
-                    const a = call_inst.getA();
-                    const b = call_inst.getB();
-                    self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
-                    return; // TAILCALL handles the return
+                        // Drop trailing MOVE after CALL; tailcall must be the final instruction.
+                        if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
+                            self.proto.code.items.len -= 1;
+                        }
+                        // Convert CALL to TAILCALL
+                        // CALL A B C -> TAILCALL A B 0
+                        const call_inst = self.proto.code.items[call_idx];
+                        const a = call_inst.getA();
+                        const b = call_inst.getB();
+                        self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
+                        return; // TAILCALL handles the return
                     }
                 }
             }
@@ -1653,44 +1650,44 @@ pub const Parser = struct {
                         if (call_idx < expr_code_before) {
                             // Last CALL belongs to previous expression; ignore.
                         } else {
-                        // Drop trailing MOVE after CALL to avoid duplicating first result
-                        // when RETURN B=0 collects from first_reg to top.
-                        if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
-                            self.proto.code.items.len -= 1;
-                        }
-                        // Patch CALL to return variable results (C=0)
-                        const call_inst = self.proto.code.items[call_idx];
-                        const a = call_inst.getA();
-                        const b = call_inst.getB();
-                        self.proto.code.items[call_idx] = Instruction.initABC(.CALL, a, b, 0);
-
-                        // Ensure fixed return values are contiguous immediately before
-                        // the CALL result block: [fixed..., call_results...].
-                        // This handles cases like: return x, f(...)
-                        const fixed_count: u8 = count - 1;
-                        var return_base: u8 = first_reg;
-                        if (fixed_count > 0 and a >= fixed_count) {
-                            const desired_base: u8 = a - fixed_count;
-                            if (desired_base != first_reg) {
-                                if (desired_base > first_reg) {
-                                    var i: u8 = fixed_count;
-                                    while (i > 0) {
-                                        i -= 1;
-                                        try self.proto.emitMOVE(desired_base + i, first_reg + i);
-                                    }
-                                } else {
-                                    var i: u8 = 0;
-                                    while (i < fixed_count) : (i += 1) {
-                                        try self.proto.emitMOVE(desired_base + i, first_reg + i);
-                                    }
-                                }
-                                return_base = desired_base;
+                            // Drop trailing MOVE after CALL to avoid duplicating first result
+                            // when RETURN B=0 collects from first_reg to top.
+                            if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
+                                self.proto.code.items.len -= 1;
                             }
-                        }
+                            // Patch CALL to return variable results (C=0)
+                            const call_inst = self.proto.code.items[call_idx];
+                            const a = call_inst.getA();
+                            const b = call_inst.getB();
+                            self.proto.code.items[call_idx] = Instruction.initABC(.CALL, a, b, 0);
 
-                        // RETURN with B=0 returns from return_base to top
-                        try self.proto.emit(.RETURN, return_base, 0, 0);
-                        return;
+                            // Ensure fixed return values are contiguous immediately before
+                            // the CALL result block: [fixed..., call_results...].
+                            // This handles cases like: return x, f(...)
+                            const fixed_count: u8 = count - 1;
+                            var return_base: u8 = first_reg;
+                            if (fixed_count > 0 and a >= fixed_count) {
+                                const desired_base: u8 = a - fixed_count;
+                                if (desired_base != first_reg) {
+                                    if (desired_base > first_reg) {
+                                        var i: u8 = fixed_count;
+                                        while (i > 0) {
+                                            i -= 1;
+                                            try self.proto.emitMOVE(desired_base + i, first_reg + i);
+                                        }
+                                    } else {
+                                        var i: u8 = 0;
+                                        while (i < fixed_count) : (i += 1) {
+                                            try self.proto.emitMOVE(desired_base + i, first_reg + i);
+                                        }
+                                    }
+                                    return_base = desired_base;
+                                }
+                            }
+
+                            // RETURN with B=0 returns from return_base to top
+                            try self.proto.emit(.RETURN, return_base, 0, 0);
+                            return;
                         }
                     }
                 }
@@ -2012,50 +2009,45 @@ pub const Parser = struct {
             const fixed_values: u8 = expr_count - 1;
             const needed_from_last: u8 = target_count - fixed_values;
             if (needed_from_last > 1) {
-            if (self.proto.code.items.len > 0) {
-                var call_idx: ?usize = null;
-                var call_func_reg: u8 = 0;
-                const last_idx = self.proto.code.items.len - 1;
-                const last_inst = self.proto.code.items[last_idx];
+                if (self.proto.code.items.len > 0) {
+                    var call_idx: ?usize = null;
+                    var call_func_reg: u8 = 0;
+                    const last_idx = self.proto.code.items.len - 1;
+                    const last_inst = self.proto.code.items[last_idx];
 
-                if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
-                    call_idx = last_idx;
-                    call_func_reg = last_inst.a;
-                } else {
-                    var scan = last_idx;
-                    var removed_trailing_move = false;
-                    while (true) {
-                        const inst = self.proto.code.items[scan];
-                        if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
-                            call_idx = scan;
-                            call_func_reg = inst.a;
-                            if (removed_trailing_move) _ = self.proto.code.pop();
-                            break;
-                        }
-                        if (inst.getOpCode() != .MOVE) break;
-                        if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
-                        if (scan == 0) break;
-                        scan -= 1;
-                    }
-                }
-
-                if (call_idx) |idx| {
-                    // Adjust CALL/PCALL to return needed_from_last results
-                    self.proto.code.items[idx].c = needed_from_last + 1;
-
-                    // Move expanded results into remaining target temp slots.
-                    const dst_start = first_temp + fixed_values;
-                    var vi: u8 = 0;
-                    while (vi < needed_from_last) : (vi += 1) {
-                        const src = call_func_reg + vi;
-                        const dst = dst_start + vi;
-                        if (src != dst) {
-                            try self.proto.emitMOVE(dst, src);
+                    if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
+                        call_idx = last_idx;
+                        call_func_reg = last_inst.a;
+                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                        // Look through at most one trailing MOVE. This preserves Lua's
+                        // `(f())` single-result semantics, which intentionally inserts
+                        // a two-MOVE barrier.
+                        const prev_idx = last_idx - 1;
+                        const prev_inst = self.proto.code.items[prev_idx];
+                        if (prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL) {
+                            call_idx = prev_idx;
+                            call_func_reg = prev_inst.a;
+                            _ = self.proto.code.pop();
                         }
                     }
-                    handled_multi_return = true;
+
+                    if (call_idx) |idx| {
+                        // Adjust CALL/PCALL to return needed_from_last results
+                        self.proto.code.items[idx].c = needed_from_last + 1;
+
+                        // Move expanded results into remaining target temp slots.
+                        const dst_start = first_temp + fixed_values;
+                        var vi: u8 = 0;
+                        while (vi < needed_from_last) : (vi += 1) {
+                            const src = call_func_reg + vi;
+                            const dst = dst_start + vi;
+                            if (src != dst) {
+                                try self.proto.emitMOVE(dst, src);
+                            }
+                        }
+                        handled_multi_return = true;
+                    }
                 }
-            }
             }
         }
 
@@ -4176,59 +4168,54 @@ pub const Parser = struct {
                 const fixed_values: u8 = expr_count - 1;
                 const needed_from_last: u8 = var_count - fixed_values;
                 if (needed_from_last > 1) {
-                // Find the CALL, PCALL, or VARARG instruction (may be last or before a MOVE)
-                if (self.proto.code.items.len > 0) {
-                    var target_idx: ?usize = null;
-                    var target_reg: u8 = 0;
-                    var is_vararg = false;
-                    const last_idx = self.proto.code.items.len - 1;
-                    const last_inst = self.proto.code.items[last_idx];
+                    // Find the CALL, PCALL, or VARARG instruction (may be last or before a MOVE)
+                    if (self.proto.code.items.len > 0) {
+                        var target_idx: ?usize = null;
+                        var target_reg: u8 = 0;
+                        var is_vararg = false;
+                        const last_idx = self.proto.code.items.len - 1;
+                        const last_inst = self.proto.code.items[last_idx];
 
-                    const is_call = last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL;
-                    const is_va = last_inst.getOpCode() == .VARARG;
-                    if (is_call or is_va) {
-                        target_idx = last_idx;
-                        target_reg = last_inst.a;
-                        is_vararg = is_va;
-                    } else {
-                        var scan = last_idx;
-                        var removed_trailing_move = false;
-                        while (true) {
-                            const inst = self.proto.code.items[scan];
-                            const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
-                            const scan_is_va = inst.getOpCode() == .VARARG;
-                            if (scan_is_call or scan_is_va) {
-                                target_idx = scan;
-                                target_reg = inst.a;
-                                is_vararg = scan_is_va;
-                                if (removed_trailing_move) _ = self.proto.code.pop();
-                                break;
-                            }
-                            if (inst.getOpCode() != .MOVE) break;
-                            if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
-                            if (scan == 0) break;
-                            scan -= 1;
-                        }
-                    }
-
-                    if (target_idx) |idx| {
-                        // Adjust CALL/PCALL/VARARG to return needed_from_last results
-                        self.proto.code.items[idx].c = needed_from_last + 1;
-
-                        // Copy expanded results from the last expression into remaining vars.
-                        // Destination starts at first_reg + fixed_values (the first slot of last expr).
-                        const dst_start = first_reg + fixed_values;
-                        var vi: u8 = 0;
-                        while (vi < needed_from_last) : (vi += 1) {
-                            const src = target_reg + vi;
-                            const dst = dst_start + vi;
-                            if (src != dst) {
-                                try self.proto.emitMOVE(dst, src);
+                        const is_call = last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL;
+                        const is_va = last_inst.getOpCode() == .VARARG;
+                        if (is_call or is_va) {
+                            target_idx = last_idx;
+                            target_reg = last_inst.a;
+                            is_vararg = is_va;
+                        } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                            // Look through at most one trailing MOVE. This preserves Lua's
+                            // `(f())` single-result semantics, which intentionally inserts
+                            // a two-MOVE barrier.
+                            const prev_idx = last_idx - 1;
+                            const prev_inst = self.proto.code.items[prev_idx];
+                            const prev_is_call = prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL;
+                            const prev_is_va = prev_inst.getOpCode() == .VARARG;
+                            if (prev_is_call or prev_is_va) {
+                                target_idx = prev_idx;
+                                target_reg = prev_inst.a;
+                                is_vararg = prev_is_va;
+                                _ = self.proto.code.pop();
                             }
                         }
-                        handled_multi_return = true;
+
+                        if (target_idx) |idx| {
+                            // Adjust CALL/PCALL/VARARG to return needed_from_last results
+                            self.proto.code.items[idx].c = needed_from_last + 1;
+
+                            // Copy expanded results from the last expression into remaining vars.
+                            // Destination starts at first_reg + fixed_values (the first slot of last expr).
+                            const dst_start = first_reg + fixed_values;
+                            var vi: u8 = 0;
+                            while (vi < needed_from_last) : (vi += 1) {
+                                const src = target_reg + vi;
+                                const dst = dst_start + vi;
+                                if (src != dst) {
+                                    try self.proto.emitMOVE(dst, src);
+                                }
+                            }
+                            handled_multi_return = true;
+                        }
                     }
-                }
                 }
             }
 
@@ -4993,7 +4980,7 @@ pub const Parser = struct {
         defer func_builder.deinit(); // Clean up at end of function
 
         // Create RawProto container early (address is fixed, content will be filled later)
-        const proto_ptr = try self.proto.allocator.create(RawProto);
+        const proto_ptr = try self.proto.output_allocator.create(RawProto);
 
         // Temporarily add function for recursive calls with unfilled RawProto
         // Use the full qualified name for lookup (base.field1.field2 or base)
@@ -5072,7 +5059,7 @@ pub const Parser = struct {
         try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert function builder to RawProto with dynamic allocation
-        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
 
         // Fill the Proto container with actual content (late binding)
         proto_ptr.* = func_proto_data;
@@ -5162,7 +5149,7 @@ pub const Parser = struct {
 
         // Create RawProto container with safe default values
         // This ensures cleanup won't crash if parsing fails before proto is filled
-        const proto_ptr = try self.proto.allocator.create(RawProto);
+        const proto_ptr = try self.proto.output_allocator.create(RawProto);
         proto_ptr.* = .{
             .code = &.{},
             .booleans = &.{},
@@ -5243,7 +5230,7 @@ pub const Parser = struct {
         try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE to local register (no SETTABUP - it's local, not global)
@@ -5271,8 +5258,8 @@ pub const Parser = struct {
 
         // Create RawProto container with safe default values
         // This ensures cleanup won't crash if parsing fails before proto is filled
-        const proto_ptr = try self.proto.allocator.create(RawProto);
-        errdefer self.proto.allocator.destroy(proto_ptr);
+        const proto_ptr = try self.proto.output_allocator.create(RawProto);
+        errdefer self.proto.output_allocator.destroy(proto_ptr);
         proto_ptr.* = .{
             .code = &.{},
             .booleans = &.{},
@@ -5347,7 +5334,7 @@ pub const Parser = struct {
         try func_builder.emit(.RETURN, 0, 1, 0);
 
         // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProto(self.proto.allocator, param_count);
+        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
         proto_ptr.* = func_proto_data;
 
         // Emit CLOSURE instruction

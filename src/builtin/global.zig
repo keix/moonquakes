@@ -1203,7 +1203,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, load_source, .{
+    const compile_result = vm.rt.compile_ctx.compile(load_source, .{
         .source_name = source_name,
     });
     switch (compile_result) {
@@ -1359,7 +1359,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     }
 
     // Compile the source with filename as source name
-    const compile_result = pipeline.compile(vm.gc().allocator, preprocessChunkSource(source), .{ .source_name = filename });
+    const compile_result = vm.rt.compile_ctx.compile(preprocessChunkSource(source), .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -1433,7 +1433,7 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     defer vm.gc().allocator.free(source);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{ .source_name = filename });
+    const compile_result = vm.rt.compile_ctx.compile(source, .{ .source_name = filename });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);

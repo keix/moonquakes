@@ -41,19 +41,38 @@ pub const CompileOptions = struct {
     source_name: []const u8 = "[string]",
 };
 
-/// Compile source to RawProto or CompileError
-///
-/// Pure function - no side effects, no GC dependencies.
-/// Caller must handle the result and call deinit when done.
-pub fn compile(
-    allocator: std.mem.Allocator,
+pub const CompileContext = struct {
+    output_allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+
+    pub fn init(output_allocator: std.mem.Allocator) CompileContext {
+        return .{
+            .output_allocator = output_allocator,
+            .arena = std.heap.ArenaAllocator.init(output_allocator),
+        };
+    }
+
+    pub fn deinit(self: *CompileContext) void {
+        self.arena.deinit();
+    }
+
+    pub fn compile(self: *CompileContext, source: []const u8, options: CompileOptions) CompileResult {
+        _ = self.arena.reset(.retain_capacity);
+        return compileWithAllocators(self.arena.allocator(), self.output_allocator, source, options);
+    }
+};
+
+fn compileWithAllocators(
+    work_allocator: std.mem.Allocator,
+    output_allocator: std.mem.Allocator,
     source: []const u8,
     options: CompileOptions,
 ) CompileResult {
     var lx = lexer.Lexer.init(source);
-    var builder = parser.ProtoBuilder.init(allocator, null) catch {
-        return .{ .err = .{ .line = 0, .message = allocator.dupe(u8, "OutOfMemory") catch "" } };
+    var builder = parser.ProtoBuilder.init(work_allocator, null) catch {
+        return .{ .err = .{ .line = 0, .message = output_allocator.dupe(u8, "OutOfMemory") catch "" } };
     };
+    builder.output_allocator = output_allocator;
     builder.source = options.source_name;
     // Note: _ENV upvalue is now added in ProtoBuilder.init for all functions
 
@@ -66,24 +85,41 @@ pub fn compile(
         const line: u32 = @intCast(p.current.line);
         const parser_msg = p.getErrorMsg();
 
+        const err_name = @errorName(err);
         const message = if (parser_msg.len > 0)
-            allocator.dupe(u8, parser_msg) catch ""
+            output_allocator.dupe(u8, parser_msg) catch ""
         else if (err == error.ExpectedExpression and p.current.kind == lexer.TokenKind.Eof)
-            allocator.dupe(u8, "near <eof>") catch ""
+            output_allocator.dupe(u8, "near <eof>") catch ""
         else if (err == error.UnsupportedStatement)
-            allocator.dupe(u8, "unexpected symbol") catch ""
+            output_allocator.dupe(u8, "unexpected symbol") catch ""
+        else if (std.mem.startsWith(u8, err_name, "Expected"))
+            output_allocator.dupe(u8, "expected") catch ""
         else
-            allocator.dupe(u8, @errorName(err)) catch "";
+            output_allocator.dupe(u8, err_name) catch "";
 
         return .{ .err = .{ .line = line, .message = message } };
     };
 
-    const raw = builder.toRawProto(allocator, 0) catch |err| {
-        const message = allocator.dupe(u8, @errorName(err)) catch "";
+    const raw = builder.toRawProto(output_allocator, 0) catch |err| {
+        const message = output_allocator.dupe(u8, @errorName(err)) catch "";
         return .{ .err = .{ .line = 0, .message = message } };
     };
 
     return .{ .ok = raw };
+}
+
+/// Compile source to RawProto or CompileError
+///
+/// Pure function - no side effects, no GC dependencies.
+/// Caller must handle the result and call deinit when done.
+pub fn compile(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    options: CompileOptions,
+) CompileResult {
+    var ctx = CompileContext.init(allocator);
+    defer ctx.deinit();
+    return ctx.compile(source, options);
 }
 
 /// Free RawProto and all nested protos

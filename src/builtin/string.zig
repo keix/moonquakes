@@ -1398,9 +1398,15 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         return;
     };
     const fmt = fmt_str.asSlice();
+    const allocator = vm.gc().allocator;
+
+    // Fast path for hot loop workloads (e.g. constructs.lua):
+    // accept only plain "%s" substitutions plus literal "%%".
+    if (try tryFormatSimpleSubst(vm, func_reg, nargs, nresults, fmt, allocator)) {
+        return;
+    }
 
     // Build result string
-    const allocator = vm.gc().allocator;
     var result = try std.ArrayList(u8).initCapacity(allocator, fmt.len * 2);
     defer result.deinit(allocator);
 
@@ -1770,6 +1776,73 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
     }
+}
+
+fn tryFormatSimpleSubst(vm: anytype, func_reg: u32, nargs: u32, nresults: u32, fmt: []const u8, allocator: std.mem.Allocator) !bool {
+    // Validate format uses only "%s" and "%%".
+    var placeholders: u32 = 0;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        if (fmt[i] != '%') {
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= fmt.len) return false;
+        const spec = fmt[i + 1];
+        if (spec == '%') {
+            i += 2;
+            continue;
+        }
+        if (spec == 's') {
+            placeholders += 1;
+            i += 2;
+            continue;
+        }
+        return false;
+    }
+
+    if (placeholders == 0) return false;
+    if (nargs < 1 + placeholders) return false;
+
+    // Build directly without full format parser.
+    var result = try std.ArrayList(u8).initCapacity(allocator, fmt.len);
+    defer result.deinit(allocator);
+
+    var arg_idx: u32 = 2; // after format string
+    i = 0;
+    while (i < fmt.len) {
+        if (fmt[i] != '%') {
+            try result.append(allocator, fmt[i]);
+            i += 1;
+            continue;
+        }
+
+        const spec = fmt[i + 1];
+        if (spec == '%') {
+            try result.append(allocator, '%');
+            i += 2;
+            continue;
+        }
+
+        // spec == 's' only (validated above)
+        const arg = vm.stack[vm.base + func_reg + arg_idx];
+        arg_idx += 1;
+        const str_obj = try toStringValue(vm, arg);
+        const str_val = TValue.fromString(str_obj);
+        if (!vm.pushTempRoot(str_val)) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        try result.appendSlice(allocator, str_obj.asSlice());
+        i += 2;
+    }
+
+    const result_slice = try result.toOwnedSlice(allocator);
+    const result_str = try vm.gc().allocString(result_slice);
+    allocator.free(result_slice);
+
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+    }
+    return true;
 }
 
 /// Helper: Format integer to buffer with optional sign

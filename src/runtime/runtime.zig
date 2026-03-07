@@ -26,12 +26,14 @@ const object = @import("gc/object.zig");
 const TableObject = object.TableObject;
 const ThreadObject = object.ThreadObject;
 const builtin_dispatch = @import("../builtin/dispatch.zig");
+const pipeline = @import("../compiler/pipeline.zig");
 
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
     gc: *GC,
     globals: *TableObject,
     registry: *TableObject,
+    compile_ctx: pipeline.CompileContext,
 
     /// The main thread (first VM created).
     /// Stored only as a GC-level thread object.
@@ -67,6 +69,7 @@ pub const Runtime = struct {
             .gc = gc,
             .globals = globals,
             .registry = registry,
+            .compile_ctx = pipeline.CompileContext.init(allocator),
         };
 
         // Register as root provider (must be after self.* is set)
@@ -82,6 +85,8 @@ pub const Runtime = struct {
     pub fn deinit(self: *Runtime) void {
         // Unregister from GC before destruction
         self.gc.removeRootProvider(self.rootProvider());
+
+        self.compile_ctx.deinit();
 
         // Clean up GC
         self.gc.deinit();
