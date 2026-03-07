@@ -1174,10 +1174,28 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
                 return;
             }
             const state_arg = vm.stack[vm.base + func_reg + 1];
-            state_table = state_arg.asTable() orelse {
+            const state_tbl = state_arg.asTable() orelse {
                 vm.stack[vm.base + func_reg] = .nil;
                 return;
             };
+            const wrapped_state_key = try vm.gc().allocString("_lines_state");
+            if (state_tbl.get(TValue.fromString(wrapped_state_key))) |wrapped_state| {
+                if (wrapped_state.asTable()) |st| {
+                    const done_key = try vm.gc().allocString("_lines_done");
+                    if (state_tbl.get(TValue.fromString(done_key))) |done_val| {
+                        if (done_val.toBoolean()) {
+                            return vm.raiseString("file is already closed");
+                        }
+                    }
+                    wrapper_opt = state_tbl;
+                    state_table = st;
+                } else {
+                    vm.stack[vm.base + func_reg] = .nil;
+                    return;
+                }
+            } else {
+                state_table = state_tbl;
+            }
         }
     } else {
         if (nargs < 1) {
@@ -1185,10 +1203,28 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
             return;
         }
         const state_arg = vm.stack[vm.base + func_reg + 1];
-        state_table = state_arg.asTable() orelse {
+        const state_tbl = state_arg.asTable() orelse {
             vm.stack[vm.base + func_reg] = .nil;
             return;
         };
+        const state_key = try vm.gc().allocString("_lines_state");
+        if (state_tbl.get(TValue.fromString(state_key))) |wrapped_state| {
+            if (wrapped_state.asTable()) |st| {
+                const done_key = try vm.gc().allocString("_lines_done");
+                if (state_tbl.get(TValue.fromString(done_key))) |done_val| {
+                    if (done_val.toBoolean()) {
+                        return vm.raiseString("file is already closed");
+                    }
+                }
+                wrapper_opt = state_tbl;
+                state_table = st;
+            } else {
+                vm.stack[vm.base + func_reg] = .nil;
+                return;
+            }
+        } else {
+            state_table = state_tbl;
+        }
     }
 
     // Get content from state table
