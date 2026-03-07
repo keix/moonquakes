@@ -10,15 +10,7 @@ const metamethod = @import("../vm/metamethod.zig");
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.6
 /// Helper: Get the length of a table (count sequential integer keys from 1)
 fn getTableLength(table: *TableObject) i64 {
-    var len: i64 = 0;
-    while (true) {
-        const key = TValue{ .integer = len + 1 };
-        const val = table.get(key) orelse break;
-        // Also check if value is nil (key exists but value is nil)
-        if (val == .nil) break;
-        len += 1;
-    }
-    return len;
+    return table.rawLen();
 }
 
 fn rawSetWithBarrier(vm: anytype, table: *TableObject, key: TValue, value: TValue) !void {
