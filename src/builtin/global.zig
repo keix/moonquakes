@@ -312,6 +312,15 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // If index is nil, start from beginning
     if (index_arg.isNil()) {
+        // Fast path for array-like tables used by many loops.
+        const first_key = TValue{ .integer = 1 };
+        if (table.get(first_key)) |first_val| {
+            vm.stack[vm.base + func_reg] = first_key;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = first_val;
+            }
+            return;
+        }
         var iter = table.hash_part.iterator();
         if (iter.next()) |entry| {
             vm.stack[vm.base + func_reg] = entry.key_ptr.*;
@@ -352,6 +361,18 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             vm.stack[vm.base + func_reg + 1] = .nil;
         }
         return;
+    }
+
+    // Fast path for integer-key iteration: try direct successor first.
+    if (index_arg == .integer and index_arg.integer >= 1) {
+        const next_key = TValue{ .integer = index_arg.integer + 1 };
+        if (table.get(next_key)) |next_val| {
+            vm.stack[vm.base + func_reg] = next_key;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = next_val;
+            }
+            return;
+        }
     }
 
     // Find the key and return the next one
@@ -683,15 +704,8 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Table length: count sequential integer keys from 1
     if (arg.asTable()) |table| {
-        var len: i64 = 0;
-        while (true) {
-            const key = TValue{ .integer = len + 1 };
-            const val = table.get(key) orelse break;
-            if (val == .nil) break;
-            len += 1;
-        }
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = len };
+            vm.stack[vm.base + func_reg] = .{ .integer = table.rawLen() };
         }
         return;
     }

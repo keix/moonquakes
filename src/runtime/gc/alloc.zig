@@ -79,7 +79,7 @@ pub fn allocConstString(self: anytype, str: []const u8) !*StringObject {
 
 fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*StringObject {
     // Lua-compatible policy: intern only short strings.
-    const short_string_max_len: usize = 40;
+    const short_string_max_len: usize = 16;
     const should_intern = force_intern or str.len <= short_string_max_len;
     if (should_intern) {
         // Check intern table for existing short string

@@ -210,6 +210,7 @@ pub const TableObject = struct {
     hash_part: HashMap,
     deleted_keys: DeletedKeySet,
     allocator: std.mem.Allocator,
+    seq_len: i64 = 0,
     /// Metatable for metamethod dispatch (null if no metatable)
     metatable: ?*TableObject,
     /// Weak mode, cached from metatable.__mode during GC cycle
@@ -230,6 +231,10 @@ pub const TableObject = struct {
         return self.hash_part.get(key);
     }
 
+    pub fn rawLen(self: *const TableObject) i64 {
+        return self.seq_len;
+    }
+
     /// Set a value by TValue key
     /// Note: nil and NaN keys are not allowed (Lua 5.4 semantics)
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
@@ -237,15 +242,45 @@ pub const TableObject = struct {
         // route table mutations through a write barrier helper here.
         if (key.isNil()) return error.InvalidTableKey;
         if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
+        const seq_key: ?i64 = switch (key) {
+            .integer => |i| if (i > 0) i else null,
+            .number => |n| blk: {
+                if (n > 0 and n == @floor(n) and n >= -9007199254740992 and n <= 9007199254740992) {
+                    break :blk @intFromFloat(n);
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+
         // Setting to nil removes the entry
         if (value.isNil()) {
             if (self.hash_part.contains(key)) {
                 _ = self.hash_part.remove(key);
                 try self.deleted_keys.put(key, {});
+                if (seq_key) |k| {
+                    if (k == self.seq_len) {
+                        while (self.seq_len > 0) {
+                            const prev_key = TValue{ .integer = self.seq_len };
+                            if (self.hash_part.get(prev_key) != null) break;
+                            self.seq_len -= 1;
+                        }
+                    }
+                }
             }
         } else {
             try self.hash_part.put(key, value);
             _ = self.deleted_keys.remove(key);
+            if (seq_key) |k| {
+                if (k == self.seq_len + 1) {
+                    var cursor = self.seq_len + 1;
+                    while (true) : (cursor += 1) {
+                        const next_key = TValue{ .integer = cursor };
+                        if (self.hash_part.get(next_key) == null) break;
+                    }
+                    self.seq_len = cursor - 1;
+                }
+            }
         }
     }
 

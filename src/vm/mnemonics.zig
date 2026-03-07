@@ -1326,16 +1326,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (try dispatchLenMM(vm, table, vb.*, a)) |result| {
                     return result;
                 }
-                // Default: count sequential integer keys from 1
-                // Stop at first nil or missing key (Lua sequence semantics)
-                var len: i64 = 0;
-                while (true) {
-                    const key = TValue{ .integer = len + 1 };
-                    const val = table.get(key) orelse break;
-                    if (val == .nil) break;
-                    len += 1;
-                }
-                vm.stack[vm.base + a] = .{ .integer = len };
+                vm.stack[vm.base + a] = .{ .integer = table.rawLen() };
             } else {
                 if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
                     return try callUnaryMetamethod(vm, mm, vb.*, a);
