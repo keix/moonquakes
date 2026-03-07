@@ -166,7 +166,7 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype, loaded_table:
     defer vm.gc().allocator.free(source);
 
     // Compile the source
-    const compile_result = pipeline.compile(vm.gc().allocator, source, .{});
+    const compile_result = vm.rt.compile_ctx.compile(source, .{});
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);

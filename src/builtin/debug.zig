@@ -299,7 +299,7 @@ pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         if (trimmed.len == 0) continue;
 
         // Compile the input
-        const compile_result = pipeline.compile(vm.gc().allocator, trimmed, .{});
+        const compile_result = vm.rt.compile_ctx.compile(trimmed, .{});
         switch (compile_result) {
             .err => |e| {
                 defer e.deinit(vm.gc().allocator);
