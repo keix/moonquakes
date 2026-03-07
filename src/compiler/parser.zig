@@ -1579,11 +1579,6 @@ pub const Parser = struct {
                 var call_idx_opt: ?usize = null;
                 if (last_inst.getOpCode() == .CALL) {
                     call_idx_opt = last_idx;
-                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
-                    const prev_idx = last_idx - 1;
-                    if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
-                        call_idx_opt = prev_idx;
-                    }
                 }
                 if (call_idx_opt) |call_idx| {
                     if (call_idx < ret_code_before) {
@@ -2021,21 +2016,16 @@ pub const Parser = struct {
                 if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                     call_idx = last_idx;
                     call_func_reg = last_inst.a;
-                } else {
-                    var scan = last_idx;
-                    var removed_trailing_move = false;
-                    while (true) {
-                        const inst = self.proto.code.items[scan];
-                        if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
-                            call_idx = scan;
-                            call_func_reg = inst.a;
-                            if (removed_trailing_move) _ = self.proto.code.pop();
-                            break;
-                        }
-                        if (inst.getOpCode() != .MOVE) break;
-                        if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
-                        if (scan == 0) break;
-                        scan -= 1;
+                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                    // Look through at most one trailing MOVE. This preserves Lua's
+                    // `(f())` single-result semantics, which intentionally inserts
+                    // a two-MOVE barrier.
+                    const prev_idx = last_idx - 1;
+                    const prev_inst = self.proto.code.items[prev_idx];
+                    if (prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL) {
+                        call_idx = prev_idx;
+                        call_func_reg = prev_inst.a;
+                        _ = self.proto.code.pop();
                     }
                 }
 
@@ -4190,24 +4180,19 @@ pub const Parser = struct {
                         target_idx = last_idx;
                         target_reg = last_inst.a;
                         is_vararg = is_va;
-                    } else {
-                        var scan = last_idx;
-                        var removed_trailing_move = false;
-                        while (true) {
-                            const inst = self.proto.code.items[scan];
-                            const scan_is_call = inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL;
-                            const scan_is_va = inst.getOpCode() == .VARARG;
-                            if (scan_is_call or scan_is_va) {
-                                target_idx = scan;
-                                target_reg = inst.a;
-                                is_vararg = scan_is_va;
-                                if (removed_trailing_move) _ = self.proto.code.pop();
-                                break;
-                            }
-                            if (inst.getOpCode() != .MOVE) break;
-                            if (!removed_trailing_move and scan == last_idx) removed_trailing_move = true;
-                            if (scan == 0) break;
-                            scan -= 1;
+                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                        // Look through at most one trailing MOVE. This preserves Lua's
+                        // `(f())` single-result semantics, which intentionally inserts
+                        // a two-MOVE barrier.
+                        const prev_idx = last_idx - 1;
+                        const prev_inst = self.proto.code.items[prev_idx];
+                        const prev_is_call = prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL;
+                        const prev_is_va = prev_inst.getOpCode() == .VARARG;
+                        if (prev_is_call or prev_is_va) {
+                            target_idx = prev_idx;
+                            target_reg = prev_inst.a;
+                            is_vararg = prev_is_va;
+                            _ = self.proto.code.pop();
                         }
                     }
 

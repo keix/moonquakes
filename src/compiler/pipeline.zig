@@ -66,14 +66,17 @@ pub fn compile(
         const line: u32 = @intCast(p.current.line);
         const parser_msg = p.getErrorMsg();
 
+        const err_name = @errorName(err);
         const message = if (parser_msg.len > 0)
             allocator.dupe(u8, parser_msg) catch ""
         else if (err == error.ExpectedExpression and p.current.kind == lexer.TokenKind.Eof)
             allocator.dupe(u8, "near <eof>") catch ""
         else if (err == error.UnsupportedStatement)
             allocator.dupe(u8, "unexpected symbol") catch ""
+        else if (std.mem.startsWith(u8, err_name, "Expected"))
+            allocator.dupe(u8, "expected") catch ""
         else
-            allocator.dupe(u8, @errorName(err)) catch "";
+            allocator.dupe(u8, err_name) catch "";
 
         return .{ .err = .{ .line = line, .message = message } };
     };

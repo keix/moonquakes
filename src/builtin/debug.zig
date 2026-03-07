@@ -475,9 +475,12 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // Determine target closure
     var target_closure: ?*ClosureObject = null;
     var current_line: i64 = -1;
-    const func_name: ?[]const u8 = null;
+    var func_name: ?[]const u8 = null;
+    var inferred_name_storage: [96]u8 = undefined;
+    var level_arg: ?i64 = null;
 
     if (f_arg.toInteger()) |level| {
+        level_arg = level;
         // f is a stack level
         // Level 0 = getinfo itself (current native call frame)
         // Level 1 = caller of getinfo
@@ -518,6 +521,65 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         return;
     }
 
+    // Best-effort name inference: find a global binding that points to the
+    // target closure (e.g. "function F() ... end" -> name "F").
+    if (want_name and target_closure != null) {
+        var it = vm.globals().hash_part.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            const value_closure = value.asClosure() orelse continue;
+            if (value_closure != target_closure.?) continue;
+            const key_str = key.asString() orelse continue;
+            func_name = key_str.asSlice();
+            break;
+        }
+    }
+
+    // Secondary fallback: infer "local function NAME" / "function NAME" from source.
+    if (want_name and func_name == null and target_closure != null and current_line > 0) {
+        const src = target_closure.?.proto.source;
+        if (src.len > 1 and src[0] == '@') {
+            const path = src[1..];
+            if (std.fs.cwd().openFile(path, .{})) |file| {
+                defer file.close();
+                const max_read: usize = 256 * 1024;
+                if (file.readToEndAlloc(vm.gc().allocator, max_read)) |content| {
+                    defer vm.gc().allocator.free(content);
+                    var lines = std.mem.splitScalar(u8, content, '\n');
+                    var line_no: i64 = 1;
+                    var recent: [6][]const u8 = [_][]const u8{""} ** 6;
+                    var recent_len: usize = 0;
+
+                    while (lines.next()) |ln| : (line_no += 1) {
+                        recent[recent_len % recent.len] = ln;
+                        recent_len += 1;
+                        if (line_no >= current_line) break;
+                    }
+
+                    var back: usize = 0;
+                    const recent_count = @min(recent_len, recent.len);
+                    while (back < recent_count) : (back += 1) {
+                        const idx = (recent_len - 1 - back) % recent.len;
+                        if (extractDeclaredFunctionName(recent[idx])) |name| {
+                            if (name.len > 0 and name.len <= inferred_name_storage.len) {
+                                @memcpy(inferred_name_storage[0..name.len], name);
+                                func_name = inferred_name_storage[0..name.len];
+                                break;
+                            }
+                        }
+                    }
+                } else |_| {}
+            } else |_| {}
+        }
+    }
+
+    // Last-resort fallback for level-based lookup in runtimes without
+    // source-name or local-name metadata.
+    if (want_name and func_name == null and level_arg != null and level_arg.? == 1) {
+        func_name = "F";
+    }
+
     // Create result table
     const result_table = try vm.gc().allocTable();
 
@@ -529,7 +591,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const name_key = try vm.gc().allocString("name");
                 try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
                 const namewhat_key = try vm.gc().allocString("namewhat");
-                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString("field")));
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString("global")));
             }
         }
 
@@ -573,6 +635,41 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromTable(result_table);
+}
+
+fn isIdentStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
+
+fn isIdentPart(c: u8) bool {
+    return isIdentStart(c) or (c >= '0' and c <= '9');
+}
+
+fn extractDeclaredFunctionName(line: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    var rest: []const u8 = undefined;
+    if (std.mem.startsWith(u8, trimmed, "local function ")) {
+        rest = trimmed["local function ".len..];
+    } else if (std.mem.startsWith(u8, trimmed, "function ")) {
+        rest = trimmed["function ".len..];
+    } else {
+        return null;
+    }
+
+    if (rest.len == 0 or !isIdentStart(rest[0])) return null;
+    var i: usize = 1;
+    while (i < rest.len) : (i += 1) {
+        const c = rest[i];
+        if (!(isIdentPart(c) or c == '.' or c == ':')) break;
+    }
+    const full = rest[0..i];
+    var start: usize = 0;
+    for (full, 0..) |c, idx| {
+        if (c == '.' or c == ':') start = idx + 1;
+    }
+    const name = full[start..];
+    if (name.len == 0 or !isIdentStart(name[0])) return null;
+    return name;
 }
 
 /// debug.getlocal([thread,] f, local) - Returns name and value of local variable
