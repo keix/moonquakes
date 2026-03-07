@@ -494,18 +494,31 @@ fn isAlphaNum(c: u8) bool {
 }
 
 fn isKeyword(str: []const u8) bool {
-    const keywords = [_][]const u8{
-        "and",      "break",  "do",   "else", "elseif", "end",   "false", "for",
-        "function", "goto",   "if",   "in",   "local",  "nil",   "not",   "or",
-        "repeat",   "return", "then", "true", "until",  "while",
+    return switch (str.len) {
+        2 => (str[0] == 'd' and str[1] == 'o') or
+            (str[0] == 'i' and str[1] == 'f') or
+            (str[0] == 'i' and str[1] == 'n') or
+            (str[0] == 'o' and str[1] == 'r'),
+        3 => (str[0] == 'a' and str[1] == 'n' and str[2] == 'd') or
+            (str[0] == 'e' and str[1] == 'n' and str[2] == 'd') or
+            (str[0] == 'f' and str[1] == 'o' and str[2] == 'r') or
+            (str[0] == 'n' and str[1] == 'i' and str[2] == 'l') or
+            (str[0] == 'n' and str[1] == 'o' and str[2] == 't'),
+        4 => (str[0] == 'e' and str[1] == 'l' and str[2] == 's' and str[3] == 'e') or
+            (str[0] == 'g' and str[1] == 'o' and str[2] == 't' and str[3] == 'o') or
+            (str[0] == 't' and str[1] == 'h' and str[2] == 'e' and str[3] == 'n') or
+            (str[0] == 't' and str[1] == 'r' and str[2] == 'u' and str[3] == 'e'),
+        5 => (str[0] == 'b' and str[1] == 'r' and str[2] == 'e' and str[3] == 'a' and str[4] == 'k') or
+            (str[0] == 'f' and str[1] == 'a' and str[2] == 'l' and str[3] == 's' and str[4] == 'e') or
+            (str[0] == 'l' and str[1] == 'o' and str[2] == 'c' and str[3] == 'a' and str[4] == 'l') or
+            (str[0] == 'u' and str[1] == 'n' and str[2] == 't' and str[3] == 'i' and str[4] == 'l') or
+            (str[0] == 'w' and str[1] == 'h' and str[2] == 'i' and str[3] == 'l' and str[4] == 'e'),
+        6 => (str[0] == 'e' and str[1] == 'l' and str[2] == 's' and str[3] == 'e' and str[4] == 'i' and str[5] == 'f') or
+            (str[0] == 'r' and str[1] == 'e' and str[2] == 'p' and str[3] == 'e' and str[4] == 'a' and str[5] == 't') or
+            (str[0] == 'r' and str[1] == 'e' and str[2] == 't' and str[3] == 'u' and str[4] == 'r' and str[5] == 'n'),
+        8 => str[0] == 'f' and str[1] == 'u' and str[2] == 'n' and str[3] == 'c' and str[4] == 't' and str[5] == 'i' and str[6] == 'o' and str[7] == 'n',
+        else => false,
     };
-
-    for (keywords) |keyword| {
-        if (std.mem.eql(u8, str, keyword)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 pub fn dumpAllTokens(src: []const u8) void {
