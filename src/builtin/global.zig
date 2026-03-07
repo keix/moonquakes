@@ -295,6 +295,8 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 /// If index is nil, returns first key-value pair (or nil if empty)
 /// If index is a valid key, returns next key-value pair (or nil if last)
 /// If index is not in table, raises "invalid key" error
+// TODO(perf): next() currently uses O(n) key scanning with a stable-order fallback.
+// Replace with slot/stateful traversal to match Lua-style table iteration performance.
 pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
@@ -309,26 +311,87 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Get optional index (nil means start from beginning)
     const index_arg = if (nargs >= 2) vm.stack[vm.base + func_reg + 2] else TValue.nil;
+    const seq_len = table.rawLen();
+    const pure_array = seq_len > 0 and @as(usize, @intCast(seq_len)) == table.hash_part.count();
+
+    if (pure_array) {
+        if (index_arg.isNil()) {
+            const first_key = TValue{ .integer = 1 };
+            const first_val = table.get(first_key).?;
+            vm.stack[vm.base + func_reg] = first_key;
+            if (nresults > 1) vm.stack[vm.base + func_reg + 1] = first_val;
+            return;
+        }
+
+        if (index_arg == .integer and index_arg.integer >= 1 and index_arg.integer <= seq_len) {
+            if (index_arg.integer == seq_len) {
+                vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
+                return;
+            }
+
+            const next_key = TValue{ .integer = index_arg.integer + 1 };
+            const next_val = table.get(next_key).?;
+            vm.stack[vm.base + func_reg] = next_key;
+            if (nresults > 1) vm.stack[vm.base + func_reg + 1] = next_val;
+            return;
+        }
+    }
+
+    const keyLessThan = struct {
+        fn lt(_: void, a: TValue, b: TValue) bool {
+            const ta = std.meta.activeTag(a);
+            const tb = std.meta.activeTag(b);
+            if (ta != tb) return @intFromEnum(ta) < @intFromEnum(tb);
+
+            return switch (a) {
+                .nil => false,
+                .boolean => |ab| (!ab) and b.boolean,
+                .integer => |ai| ai < b.integer,
+                .number => |an| an < b.number,
+                .object => |ao| blk: {
+                    const bo = b.object;
+                    if (ao.type != bo.type) break :blk @intFromEnum(ao.type) < @intFromEnum(bo.type);
+                    break :blk @intFromPtr(ao) < @intFromPtr(bo);
+                },
+            };
+        }
+    }.lt;
+    const selectNext = struct {
+        const Pair = struct { key: TValue, value: TValue };
+        fn pick(tbl: anytype, after: ?TValue, less: *const fn (void, TValue, TValue) bool) ?Pair {
+            var iter = tbl.hash_part.iterator();
+            var best_key: ?TValue = null;
+            var best_val: TValue = .nil;
+
+            while (iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (after) |pivot| {
+                    if (!less({}, pivot, key)) continue;
+                }
+                if (best_key == null or less({}, key, best_key.?)) {
+                    best_key = key;
+                    best_val = entry.value_ptr.*;
+                }
+            }
+
+            if (best_key) |k| {
+                return .{ .key = k, .value = best_val };
+            }
+            return null;
+        }
+    }.pick;
 
     // If index is nil, start from beginning
     if (index_arg.isNil()) {
-        // Fast path for array-like tables used by many loops.
-        const first_key = TValue{ .integer = 1 };
-        if (table.get(first_key)) |first_val| {
-            vm.stack[vm.base + func_reg] = first_key;
+        if (selectNext(table, null, keyLessThan)) |pair| {
+            vm.stack[vm.base + func_reg] = pair.key;
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = first_val;
+                vm.stack[vm.base + func_reg + 1] = pair.value;
             }
             return;
         }
-        var iter = table.hash_part.iterator();
-        if (iter.next()) |entry| {
-            vm.stack[vm.base + func_reg] = entry.key_ptr.*;
-            if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = entry.value_ptr.*;
-            }
-            return;
-        }
+
         // Empty table
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) {
@@ -342,16 +405,16 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     // If key was explicitly deleted from this table, restart from current
     // first entry (Lua-compatible behavior for deletion during traversal).
     // Otherwise, reject as invalid key.
-    if (table.get(index_arg) == null) {
+    const index_present = table.get(index_arg) != null;
+    if (!index_present) {
         if (!table.deleted_keys.contains(index_arg)) {
             return vm.raiseString("invalid key to 'next'");
         }
 
-        var deleted_iter = table.hash_part.iterator();
-        if (deleted_iter.next()) |entry| {
-            vm.stack[vm.base + func_reg] = entry.key_ptr.*;
+        if (selectNext(table, null, keyLessThan)) |pair| {
+            vm.stack[vm.base + func_reg] = pair.key;
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = entry.value_ptr.*;
+                vm.stack[vm.base + func_reg + 1] = pair.value;
             }
             return;
         }
@@ -363,39 +426,12 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         return;
     }
 
-    // Fast path for integer-key iteration: try direct successor first.
-    if (index_arg == .integer and index_arg.integer >= 1) {
-        const next_key = TValue{ .integer = index_arg.integer + 1 };
-        if (table.get(next_key)) |next_val| {
-            vm.stack[vm.base + func_reg] = next_key;
-            if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = next_val;
-            }
-            return;
+    if (selectNext(table, index_arg, keyLessThan)) |pair| {
+        vm.stack[vm.base + func_reg] = pair.key;
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = pair.value;
         }
-    }
-
-    // Find the key and return the next one
-    var iter = table.hash_part.iterator();
-    var found_current = false;
-
-    while (iter.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const value = entry.value_ptr.*;
-
-        if (found_current) {
-            // Return this key-value pair
-            vm.stack[vm.base + func_reg] = key;
-            if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = value;
-            }
-            return;
-        }
-
-        // Check if this is the current key
-        if (key.eql(index_arg)) {
-            found_current = true;
-        }
+        return;
     }
 
     // No more entries after the current key
