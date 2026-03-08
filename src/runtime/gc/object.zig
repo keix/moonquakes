@@ -197,6 +197,11 @@ pub const TableObject = struct {
         TValueKeyContext,
         std.hash_map.default_max_load_percentage,
     );
+    pub const KeyValuePair = struct {
+        key: TValue,
+        value: TValue,
+    };
+    pub const NextSlotError = error{InvalidKey};
 
     /// Weak table mode for __mode metamethod
     pub const WeakMode = enum(u2) {
@@ -235,6 +240,110 @@ pub const TableObject = struct {
         return self.seq_len;
     }
 
+    fn isPureArray(self: *const TableObject) bool {
+        return self.seq_len > 0 and @as(usize, @intCast(self.seq_len)) == self.hash_part.count();
+    }
+
+    fn keyLessThan(a: TValue, b: TValue) bool {
+        const ta = std.meta.activeTag(a);
+        const tb = std.meta.activeTag(b);
+        if (ta != tb) return @intFromEnum(ta) < @intFromEnum(tb);
+
+        return switch (a) {
+            .nil => false,
+            .boolean => |ab| (!ab) and b.boolean,
+            .integer => |ai| ai < b.integer,
+            .number => |an| an < b.number,
+            .object => |ao| blk: {
+                const bo = b.object;
+                if (ao.type != bo.type) break :blk @intFromEnum(ao.type) < @intFromEnum(bo.type);
+                break :blk @intFromPtr(ao) < @intFromPtr(bo);
+            },
+        };
+    }
+
+    fn selectNext(self: *const TableObject, after: ?TValue) ?KeyValuePair {
+        var iter = self.hash_part.iterator();
+        var best_key: ?TValue = null;
+        var best_val: TValue = .nil;
+
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (after) |pivot| {
+                if (!keyLessThan(pivot, key)) continue;
+            }
+            if (best_key == null or keyLessThan(key, best_key.?)) {
+                best_key = key;
+                best_val = entry.value_ptr.*;
+            }
+        }
+
+        if (best_key) |key| return .{ .key = key, .value = best_val };
+        return null;
+    }
+
+    fn keyExactEq(a: TValue, b: TValue) bool {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
+            .nil => true,
+            .boolean => |v| v == b.boolean,
+            .integer => |v| v == b.integer,
+            .number => |v| v == b.number,
+            .object => |v| v == b.object,
+        };
+    }
+
+    fn hasExactKey(self: *const TableObject, target: TValue) bool {
+        var iter = self.hash_part.iterator();
+        while (iter.next()) |entry| {
+            if (keyExactEq(entry.key_ptr.*, target)) return true;
+        }
+        return false;
+    }
+
+    fn hasExactDeletedKey(self: *const TableObject, target: TValue) bool {
+        var iter = self.deleted_keys.iterator();
+        while (iter.next()) |entry| {
+            if (keyExactEq(entry.key_ptr.*, target)) return true;
+        }
+        return false;
+    }
+
+    fn pruneDeletedKeys(self: *TableObject) void {
+        const deleted_count = self.deleted_keys.count();
+        const live_count = self.hash_part.count();
+        if (deleted_count > (live_count * 2 + 64)) {
+            self.deleted_keys.clearRetainingCapacity();
+        }
+    }
+
+    pub fn nextSlot(self: *TableObject, prev: ?TValue) NextSlotError!?KeyValuePair {
+        if (self.isPureArray()) {
+            if (prev == null) {
+                const first_key = TValue{ .integer = 1 };
+                return .{ .key = first_key, .value = self.get(first_key).? };
+            }
+            const prev_key = prev.?;
+            if (prev_key == .integer and prev_key.integer >= 1 and prev_key.integer <= self.seq_len) {
+                if (prev_key.integer == self.seq_len) return null;
+                const next_key = TValue{ .integer = prev_key.integer + 1 };
+                return .{ .key = next_key, .value = self.get(next_key).? };
+            }
+        }
+
+        if (prev == null) return self.selectNext(null);
+        const prev_key = prev.?;
+
+        if (self.hasExactKey(prev_key)) return self.selectNext(prev_key);
+
+        if (self.hasExactDeletedKey(prev_key)) {
+            _ = self.deleted_keys.remove(prev_key);
+            return self.selectNext(null);
+        }
+
+        return error.InvalidKey;
+    }
+
     /// Set a value by TValue key
     /// Note: nil and NaN keys are not allowed (Lua 5.4 semantics)
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
@@ -242,22 +351,33 @@ pub const TableObject = struct {
         // route table mutations through a write barrier helper here.
         if (key.isNil()) return error.InvalidTableKey;
         if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
-        const seq_key: ?i64 = switch (key) {
-            .integer => |i| if (i > 0) i else null,
+        const canonical_key: TValue = switch (key) {
             .number => |n| blk: {
-                if (n > 0 and n == @floor(n) and n >= -9007199254740992 and n <= 9007199254740992) {
-                    break :blk @intFromFloat(n);
+                if (std.math.isFinite(n) and n == @floor(n)) {
+                    const max_i = std.math.maxInt(i64);
+                    const min_i = std.math.minInt(i64);
+                    const max_f: f64 = @floatFromInt(max_i);
+                    const min_f: f64 = @floatFromInt(min_i);
+                    if (n >= min_f and n <= max_f) {
+                        const i: i64 = @intFromFloat(n);
+                        if (@as(f64, @floatFromInt(i)) == n) break :blk TValue{ .integer = i };
+                    }
                 }
-                break :blk null;
+                break :blk key;
             },
+            else => key,
+        };
+        const seq_key: ?i64 = switch (canonical_key) {
+            .integer => |i| if (i > 0) i else null,
             else => null,
         };
 
         // Setting to nil removes the entry
         if (value.isNil()) {
-            if (self.hash_part.contains(key)) {
-                _ = self.hash_part.remove(key);
-                try self.deleted_keys.put(key, {});
+            if (self.hash_part.contains(canonical_key)) {
+                _ = self.hash_part.remove(canonical_key);
+                try self.deleted_keys.put(canonical_key, {});
+                self.pruneDeletedKeys();
                 if (seq_key) |k| {
                     if (k == self.seq_len) {
                         while (self.seq_len > 0) {
@@ -269,8 +389,8 @@ pub const TableObject = struct {
                 }
             }
         } else {
-            try self.hash_part.put(key, value);
-            _ = self.deleted_keys.remove(key);
+            try self.hash_part.put(canonical_key, value);
+            _ = self.deleted_keys.remove(canonical_key);
             if (seq_key) |k| {
                 if (k == self.seq_len + 1) {
                     var cursor = self.seq_len + 1;

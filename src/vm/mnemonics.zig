@@ -1792,6 +1792,21 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const new_base = vm.base + a;
                 const ret_base = vm.base + a;
 
+                // Hot fast path: fixed-arity, non-vararg call with exact argument count.
+                // Common in recursive numeric code (e.g. fib): skip vararg bookkeeping and
+                // nil-filling logic, only shift arguments over callee slot.
+                if (!func_proto.is_vararg and nargs == func_proto.numparams) {
+                    if (nargs > 0) {
+                        var i: u32 = 0;
+                        while (i < nargs) : (i += 1) {
+                            vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
+                        }
+                    }
+                    _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
+                    vm.top = new_base + func_proto.maxstacksize;
+                    return .LoopContinue;
+                }
+
                 // Calculate vararg info before shifting arguments
                 var vararg_base: u32 = 0;
                 var vararg_count: u32 = 0;
@@ -2046,8 +2061,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 // Close TBC variables before returning (Lua 5.4)
-                try closeTBCVariables(vm, vm.ci.?, 0);
-                vm.closeUpvalues(returning_ci.base);
+                if (returning_ci.tbc_bitmap != 0) {
+                    try closeTBCVariables(vm, returning_ci, 0);
+                }
+                if (vm.open_upvalues != null) {
+                    vm.closeUpvalues(returning_ci.base);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -2124,7 +2143,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Top-level return (no previous call frame)
             // Close TBC variables before returning
-            try closeTBCVariables(vm, vm.ci.?, 0);
+            const top_ci = vm.ci.?;
+            if (top_ci.tbc_bitmap != 0) {
+                try closeTBCVariables(vm, top_ci, 0);
+            }
             const ret_count: u32 = if (b == 0)
                 vm.top - (vm.base + a)
             else if (b == 1)
@@ -2149,8 +2171,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 // Close TBC variables before returning (Lua 5.4)
-                try closeTBCVariables(vm, vm.ci.?, 0);
-                vm.closeUpvalues(returning_ci.base);
+                if (returning_ci.tbc_bitmap != 0) {
+                    try closeTBCVariables(vm, returning_ci, 0);
+                }
+                if (vm.open_upvalues != null) {
+                    vm.closeUpvalues(returning_ci.base);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -2179,7 +2205,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Top-level return - close TBC variables
-            try closeTBCVariables(vm, vm.ci.?, 0);
+            const top_ci = vm.ci.?;
+            if (top_ci.tbc_bitmap != 0) {
+                try closeTBCVariables(vm, top_ci, 0);
+            }
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -2192,8 +2221,12 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 // Close TBC variables before returning (Lua 5.4)
-                try closeTBCVariables(vm, vm.ci.?, 0);
-                vm.closeUpvalues(returning_ci.base);
+                if (returning_ci.tbc_bitmap != 0) {
+                    try closeTBCVariables(vm, returning_ci, 0);
+                }
+                if (vm.open_upvalues != null) {
+                    vm.closeUpvalues(returning_ci.base);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -2951,12 +2984,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                         // Failure: set false and error value
                         vm.stack[vm.base + a] = .{ .boolean = false };
-                        if (vm.lua_error_value.isNil()) {
-                            const err_fallback = try vm.gc().allocString("error");
-                            vm.stack[vm.base + a + 1] = TValue.fromString(err_fallback);
-                        } else {
-                            vm.stack[vm.base + a + 1] = vm.lua_error_value;
-                        }
+                        vm.stack[vm.base + a + 1] = vm.lua_error_value;
                         vm.lua_error_value = .nil;
                         break :blk 2; // false + error value
                     };
