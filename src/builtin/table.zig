@@ -40,7 +40,7 @@ fn callValueManaged(vm: anytype, fn_val: TValue, args: []const TValue) !TValue {
 fn getLengthMM(vm: anytype, table_val: TValue, table: *TableObject) !i64 {
     if (metamethod.getMetamethod(table_val, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |len_mm| {
         const result = try callValueManaged(vm, len_mm, &[_]TValue{table_val});
-        return result.toInteger() orelse vm.raiseString("'__len' must return an integer");
+        return result.toInteger() orelse vm.raiseString("object length is not an integer");
     }
     return getTableLength(table);
 }
@@ -186,17 +186,17 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 }
 
 /// table.sort(list [, comp]) - Sorts table elements in-place
-/// Uses < operator by default. Implements insertion sort for simplicity.
+/// Uses < operator by default.
 /// If comp is provided, it must be a function that takes two arguments
 /// and returns true if the first argument should come before the second.
 pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    if (nargs < 1) return error.BadArgument;
+    if (nargs < 1) return vm.raiseString("bad argument #1 to 'sort' (table expected)");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
-    const table = tbl_arg.asTable() orelse return error.BadArgument;
+    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'sort' (table expected)");
 
     // Get optional comparator function
     const comp: ?TValue = if (nargs >= 2) blk: {
@@ -206,12 +206,15 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             break :blk comp_arg;
         }
         if (!comp_arg.isNil()) {
-            return error.BadArgument; // comp must be function or nil
+            return vm.raiseString("bad argument #2 to 'sort' (function expected)");
         }
         break :blk null;
     } else null;
 
     const len = try getLengthMM(vm, tbl_arg, table);
+    if (len >= std.math.maxInt(i32)) {
+        return vm.raiseString("array too big");
+    }
     if (len <= 1) return; // Already sorted
 
     // Collect all elements into a temporary array
@@ -226,28 +229,10 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         elements.appendAssumeCapacity(val);
     }
 
-    // Insertion sort
-    var j: usize = 1;
-    while (j < elements.items.len) : (j += 1) {
-        const current = elements.items[j];
-        var k: usize = j;
-
-        while (k > 0) {
-            const prev = elements.items[k - 1];
-
-            // Compare: is prev > current? (need to swap)
-            const should_swap = try compareForSort(vm, prev, current, comp);
-
-            if (should_swap) {
-                elements.items[k] = prev;
-                k -= 1;
-            } else {
-                break;
-            }
-        }
-
-        elements.items[k] = current;
-    }
+    quickSort(vm, elements.items, 0, @as(i64, @intCast(elements.items.len)) - 1, comp) catch |err| switch (err) {
+        error.InvalidOrderFunction => return vm.raiseString("invalid order function for sorting"),
+        else => return err,
+    };
 
     // Write sorted elements back to table
     i = 1;
@@ -261,49 +246,66 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 }
 
 /// Compare two values for sorting.
-/// Returns true if `a` should come AFTER `b` (i.e., need to swap).
-/// With custom comparator: returns true if NOT comp(a, b) AND comp(b, a)
-/// Default: returns true if a > b
-fn compareForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
+/// Returns true if `a` is less than `b` according to sort order.
+fn lessForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
     if (comp) |comp_fn| {
-        // Call comparator with (a, b) - returns true if a < b
-        var args: [2]TValue = .{ a, b };
-        const result = call.callValueSafe(vm, comp_fn, &args) catch |err| {
-            if (err == call.CallError.NotCallable) return false;
-            return err;
-        };
+        const result = try callValueManaged(vm, comp_fn, &[_]TValue{ a, b });
+        const ab = result.toBoolean();
+        // Lua rejects comparators that say x < x.
+        if (ab and a.eql(b)) return error.InvalidOrderFunction;
+        return ab;
+    }
 
-        // If comp(a, b) is true, a should come before b, so don't swap
-        if (result.isBoolean() and result.boolean) {
-            return false;
+    // Default comparison: numbers, strings, then __lt metamethod.
+    if (a.toNumber()) |a_num| {
+        if (b.toNumber()) |b_num| {
+            return a_num < b_num;
         }
+    }
+    if (a.asString()) |a_str| {
+        if (b.asString()) |b_str| {
+            const cmp = std.mem.order(u8, a_str.asSlice(), b_str.asSlice());
+            return cmp == .lt;
+        }
+    }
 
-        // comp(a, b) is false or nil
-        // For stable sort behavior, only swap if comp(b, a) is true
-        args = .{ b, a };
-        const reverse = call.callValueSafe(vm, comp_fn, &args) catch |err| {
-            if (err == call.CallError.NotCallable) return false;
-            return err;
-        };
+    if (metamethod.getBinMetamethod(a, b, .lt, &vm.gc().mm_keys, &vm.gc().shared_mt)) |lt_mm| {
+        const result = try callValueManaged(vm, lt_mm, &[_]TValue{ a, b });
+        return result.toBoolean();
+    }
 
-        return reverse.isBoolean() and reverse.boolean;
-    } else {
-        // Default comparison: a > b means swap
-        // Compare numbers
-        if (a.toNumber()) |a_num| {
-            if (b.toNumber()) |b_num| {
-                return a_num > b_num;
+    return vm.raiseString("attempt to compare values");
+}
+
+fn quickSort(vm: anytype, items: []TValue, lo: i64, hi: i64, comp: ?TValue) !void {
+    var left = lo;
+    var right = hi;
+    while (left < right) {
+        var i = left;
+        var j = right;
+        const pivot = items[@as(usize, @intCast(left + @divTrunc(right - left, 2)))];
+
+        while (i <= j) {
+            while (i <= right and try lessForSort(vm, items[@as(usize, @intCast(i))], pivot, comp)) : (i += 1) {}
+            while (j >= left and try lessForSort(vm, pivot, items[@as(usize, @intCast(j))], comp)) : (j -= 1) {}
+
+            if (i <= j) {
+                std.mem.swap(TValue, &items[@as(usize, @intCast(i))], &items[@as(usize, @intCast(j))]);
+                i += 1;
+                j -= 1;
             }
         }
-        // Compare strings
-        if (a.asString()) |a_str| {
-            if (b.asString()) |b_str| {
-                const cmp = std.mem.order(u8, a_str.asSlice(), b_str.asSlice());
-                return cmp == .gt;
-            }
+
+        const left_len: i64 = if (j >= left) (j - left + 1) else 0;
+        const right_len: i64 = if (i <= right) (right - i + 1) else 0;
+
+        if (left_len < right_len) {
+            if (left_len > 1) try quickSort(vm, items, left, j, comp);
+            left = i;
+        } else {
+            if (right_len > 1) try quickSort(vm, items, i, right, comp);
+            right = j;
         }
-        // Mixed types or incomparable - don't swap
-        return false;
     }
 }
 
@@ -418,27 +420,28 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 /// Moves elements from a1[f..e] to a2[t..]. Returns a2.
 /// If a2 is not given, uses a1.
 pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 4) return error.BadArgument;
+    if (nargs < 4) return vm.raiseString("wrong number of arguments to 'move'");
 
     // Source table (a1)
     const src_arg = vm.stack[vm.base + func_reg + 1];
-    const src_table = src_arg.asTable() orelse return error.BadArgument;
+    const src_table = src_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'move' (table expected)");
 
     // Source range: f to e
     const f_arg = vm.stack[vm.base + func_reg + 2];
-    const f = f_arg.toInteger() orelse return error.BadArgument;
+    const f = f_arg.toInteger() orelse return vm.raiseString("bad argument #2 to 'move' (number expected)");
 
     const e_arg = vm.stack[vm.base + func_reg + 3];
-    const e = e_arg.toInteger() orelse return error.BadArgument;
+    const e = e_arg.toInteger() orelse return vm.raiseString("bad argument #3 to 'move' (number expected)");
 
     // Target start position
     const t_arg = vm.stack[vm.base + func_reg + 4];
-    const t = t_arg.toInteger() orelse return error.BadArgument;
+    const t = t_arg.toInteger() orelse return vm.raiseString("bad argument #4 to 'move' (number expected)");
 
     // Destination table (a2, default is a1)
+    const dst_table_arg: TValue = if (nargs >= 5) vm.stack[vm.base + func_reg + 5] else src_arg;
     const dst_table = if (nargs >= 5) blk: {
-        const dst_arg = vm.stack[vm.base + func_reg + 5];
-        break :blk dst_arg.asTable() orelse return error.BadArgument;
+        const dst = vm.stack[vm.base + func_reg + 5];
+        break :blk dst.asTable() orelse return vm.raiseString("bad argument #5 to 'move' (table expected)");
     } else src_table;
 
     // Handle empty range
@@ -449,17 +452,29 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         return;
     }
 
-    const count = e - f + 1;
+    const max_i: i128 = std.math.maxInt(i64);
+    const min_i: i128 = std.math.minInt(i64);
+    const count_i128: i128 = @as(i128, e) - @as(i128, f) + 1;
+    if (count_i128 > max_i) {
+        return vm.raiseString("too many elements to move");
+    }
+
+    const last_dst: i128 = @as(i128, t) + count_i128 - 1;
+    if (last_dst > max_i or last_dst < min_i) {
+        return vm.raiseString("destination wrap around");
+    }
+
+    const count: i64 = @intCast(count_i128);
 
     // Determine copy direction to handle overlapping regions
-    if (t > f and src_table == dst_table) {
+    if (src_table == dst_table and t > f and t <= e) {
         // Copy backwards to avoid overwriting source before reading
         var i: i64 = count - 1;
         while (i >= 0) : (i -= 1) {
             const src_key = TValue{ .integer = f + i };
             const dst_key = TValue{ .integer = t + i };
-            const val = src_table.get(src_key) orelse .nil;
-            try dst_table.set(dst_key, val);
+            const val = try getAt(vm, src_arg, src_table, src_key);
+            try setAt(vm, dst_table_arg, dst_table, dst_key, val);
         }
     } else {
         // Copy forwards
@@ -467,8 +482,8 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         while (i < count) : (i += 1) {
             const src_key = TValue{ .integer = f + i };
             const dst_key = TValue{ .integer = t + i };
-            const val = src_table.get(src_key) orelse .nil;
-            try dst_table.set(dst_key, val);
+            const val = try getAt(vm, src_arg, src_table, src_key);
+            try setAt(vm, dst_table_arg, dst_table, dst_key, val);
         }
     }
 
@@ -525,8 +540,17 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         break :blk end_arg.toInteger() orelse len;
     } else len;
 
+    // Lua raises "too many results" before producing values when range is huge.
+    // Keep this limit compatible with C 'int' based result handling.
+    if (end >= start) {
+        const span: i128 = @as(i128, end) - @as(i128, start) + 1;
+        if (span >= @as(i128, std.math.maxInt(i32))) {
+            return vm.raiseString("too many results to unpack");
+        }
+    }
+
     // Calculate how many values to return
-    const count: u32 = if (end >= start) @intCast(end - start + 1) else 0;
+    const count: u32 = if (end >= start) @intCast(@as(i128, end) - @as(i128, start) + 1) else 0;
 
     // Limit by nresults if fixed
     const actual_count: u32 = if (nresults > 0) @min(count, nresults) else count;

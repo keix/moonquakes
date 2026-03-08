@@ -201,7 +201,7 @@ pub const TableObject = struct {
         key: TValue,
         value: TValue,
     };
-    pub const NextSlotError = error{ InvalidKey };
+    pub const NextSlotError = error{InvalidKey};
 
     /// Weak table mode for __mode metamethod
     pub const WeakMode = enum(u2) {

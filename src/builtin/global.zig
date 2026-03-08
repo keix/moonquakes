@@ -213,12 +213,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
-                if (vm.lua_error_value.isNil()) {
-                    const err_fallback = try vm.gc().allocString("error");
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
-                } else {
-                    vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
-                }
+                vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
             }
             // Always clear error value after handling
             vm.lua_error_value = .nil;
