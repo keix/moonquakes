@@ -2745,7 +2745,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (ci.closure) |enclosing| {
                         upvals_buf[i] = enclosing.upvalues[upvaldesc.idx];
                     } else {
-                        upvals_buf[i] = try vm.gc().allocUpvalue(&vm.stack[0]);
+                        upvals_buf[i] = try vm.gc().allocUpvalue(&vm.stack[0], vm.thread);
                     }
                 }
             }

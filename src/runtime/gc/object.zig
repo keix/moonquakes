@@ -452,6 +452,8 @@ pub const UpvalueObject = struct {
     header: GCObject,
     /// Pointer to the value (stack slot when open, &closed when closed)
     location: *TValue,
+    /// Owning thread while open; null after close.
+    owner_thread: ?*ThreadObject,
     /// Storage for the value when the upvalue is closed
     closed: TValue,
     /// Linked list of open upvalues (for efficient closing when stack frame pops)
@@ -466,6 +468,7 @@ pub const UpvalueObject = struct {
     pub fn close(self: *UpvalueObject) void {
         self.closed = self.location.*;
         self.location = &self.closed;
+        self.owner_thread = null;
     }
 
     /// Get the current value
