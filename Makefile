@@ -45,7 +45,10 @@ $(TARGET): examples/minimal.c zig-libs | $(BINDIR)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all clean zig-libs run
+.PHONY: all clean zig-libs run test
 
 run: $(TARGET)
 	LD_LIBRARY_PATH=$(ZIG_LIBDIR) ./$(TARGET)
+
+test: zig-libs
+	cd passing && for f in *.lua; do ../zig-out/bin/moonquakes "$$f"; done

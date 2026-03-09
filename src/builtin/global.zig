@@ -1505,10 +1505,10 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             const step_arg: usize = if (nargs >= 2) blk2: {
                 const arg = vm.stack[vm.base + func_reg + 2];
                 if (arg.toInteger()) |i| {
-                    break :blk2 if (i <= 0) 1 else @as(usize, @intCast(i));
+                    break :blk2 if (i <= 0) 0 else @as(usize, @intCast(i));
                 }
-                break :blk2 1;
-            } else 1;
+                break :blk2 0;
+            } else 0;
             break :blk TValue{ .boolean = gc.stepSized(step_arg) };
         },
         .isrunning => TValue{ .boolean = gc.is_running },

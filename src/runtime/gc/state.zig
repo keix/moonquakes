@@ -308,6 +308,11 @@ pub const GC = struct {
     pub fn stepSized(self: *GC, size_hint: usize) bool {
         if (self.gc_inhibit > 0) return false;
         if (self.root_providers.items.len == 0) return false;
+        if (size_hint == 0) {
+            self.step_accum = 0;
+            self.collect();
+            return true;
+        }
         self.step_accum += size_hint;
         if (self.step_accum >= 200) {
             self.step_accum = 0;
