@@ -1,5 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const object = @import("../runtime/gc/object.zig");
 
 const LuaRng = struct {
     state: [4]u64,
@@ -44,6 +45,39 @@ var global_rng: LuaRng = .{ .state = .{ 0, 0, 0, 0 } };
 var rng_seed1: u64 = 0;
 var rng_seed2: u64 = 0;
 var rng_initialized: bool = false;
+
+fn valueTypeName(v: TValue) []const u8 {
+    return switch (v) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .userdata => "userdata",
+            .thread => "thread",
+            .file => "userdata",
+            else => "userdata",
+        },
+    };
+}
+
+fn namedValueTypeName(vm: anytype, v: TValue) []const u8 {
+    if (!v.isObject()) return valueTypeName(v);
+    const mt_opt: ?*object.TableObject = switch (v.object.type) {
+        .table => object.getObject(object.TableObject, v.object).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
+        .file => object.getObject(object.FileObject, v.object).metatable,
+        else => null,
+    };
+    if (mt_opt) |mt| {
+        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
+            if (name_val.asString()) |name_str| return name_str.asSlice();
+        }
+    }
+    return valueTypeName(v);
+}
 
 fn setRngSeeds(seed1: u64, seed2: u64) void {
     rng_seed1 = seed1;
@@ -578,7 +612,12 @@ pub fn nativeMathRandomseed(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 pub fn nativeMathSin(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) return vm.raiseString("number expected");
     const arg = vm.stack[vm.base + func_reg + 1];
-    const n = arg.toNumber() orelse return vm.raiseString("number expected");
+    const n = arg.toNumber() orelse {
+        const ty = namedValueTypeName(vm, arg);
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #1 to 'sin' (number expected, got {s})", .{ty}) catch "number expected";
+        return vm.raiseString(msg);
+    };
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = .{ .number = @sin(n) };
     }

@@ -65,7 +65,10 @@ pub const VM = struct {
     last_field_reg: ?u8 = null,
     last_field_key: ?*object.StringObject = null,
     last_field_is_global: bool = false,
+    last_field_is_method: bool = false,
+    last_field_tick: u64 = 0,
     int_repr_field_key: ?*object.StringObject = null,
+    exec_tick: u64 = 0,
 
     // Yield state
     yield_base: u32 = 0,

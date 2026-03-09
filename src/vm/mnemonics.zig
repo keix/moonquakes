@@ -367,6 +367,76 @@ fn callableValueTypeName(v: TValue) []const u8 {
     };
 }
 
+fn namedValueTypeName(vm: *VM, v: TValue) []const u8 {
+    if (!v.isObject()) return valueTypeName(v);
+    const mt_opt: ?*object.TableObject = switch (v.object.type) {
+        .table => object.getObject(object.TableObject, v.object).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
+        .file => object.getObject(object.FileObject, v.object).metatable,
+        else => null,
+    };
+    if (mt_opt) |mt| {
+        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
+            if (name_val.asString()) |name_str| return name_str.asSlice();
+        }
+    }
+    return valueTypeName(v);
+}
+
+const ForLoopArg = enum { init, limit, step };
+
+fn forLoopArgValue(vm: *VM, inst: Instruction, arg: ForLoopArg) ?TValue {
+    const op = inst.getOpCode();
+    if (op != .FORPREP and op != .FORLOOP) return null;
+    const a = inst.getA();
+    const offset: u8 = switch (arg) {
+        .init => 0,
+        .limit => 1,
+        .step => 2,
+    };
+    const idx = vm.base + a + offset;
+    if (idx >= vm.stack.len) return null;
+    return vm.stack[idx];
+}
+
+fn firstArithmeticBadOperand(vm: *VM, inst: Instruction) ?TValue {
+    return switch (inst.getOpCode()) {
+        .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => blk: {
+            const vb = vm.stack[vm.base + inst.getB()];
+            const vc = vm.stack[vm.base + inst.getC()];
+            if (vb.toNumber() == null) break :blk vb;
+            if (vc.toNumber() == null) break :blk vc;
+            break :blk null;
+        },
+        .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => blk: {
+            const vb = vm.stack[vm.base + inst.getB()];
+            if (vb.toNumber() == null) break :blk vb;
+            break :blk null;
+        },
+        .MMBIN => blk: {
+            const va = vm.stack[vm.base + inst.getA()];
+            const vb = vm.stack[vm.base + inst.getB()];
+            if (va.toNumber() == null) break :blk va;
+            if (vb.toNumber() == null) break :blk vb;
+            break :blk null;
+        },
+        .MMBINI, .MMBINK => blk: {
+            const va = vm.stack[vm.base + inst.getA()];
+            if (va.toNumber() == null) break :blk va;
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn customNamedArithmeticType(vm: *VM, inst: Instruction) ?[]const u8 {
+    const bad = firstArithmeticBadOperand(vm, inst) orelse return null;
+    const plain = valueTypeName(bad);
+    const named = namedValueTypeName(vm, bad);
+    if (std.mem.eql(u8, plain, named)) return null;
+    return named;
+}
+
 const CallNameKind = enum {
     global_name,
     field_name,
@@ -391,8 +461,10 @@ fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
 
     var target_reg = call_reg;
     var i = cur_idx;
-    while (i > 0) {
+    var budget: u16 = 48;
+    while (i > 0 and budget > 0) {
         i -= 1;
+        budget -= 1;
         const inst = ci.func.code[i];
         if (inst.getA() != target_reg) continue;
 
@@ -401,21 +473,39 @@ fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
                 target_reg = inst.getB();
                 continue;
             },
+            .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => {
+                target_reg = inst.getB();
+                continue;
+            },
+            .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
+                target_reg = inst.getB();
+                continue;
+            },
+            .MMBIN, .MMBINI, .MMBINK => {
+                target_reg = inst.getA();
+                continue;
+            },
             .SELF => {
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .method_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .method_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETFIELD => {
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .field_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .field_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETTABUP => {
                 if (inst.getB() != 0) return null;
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .global_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .global_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETUPVAL => {
                 const uv_idx = inst.getB();
@@ -423,7 +513,7 @@ fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
                 const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
                 return .{ .kind = .upvalue_name, .name = uv_name };
             },
-            else => break,
+            else => continue,
         }
     }
     if (target_reg < ci.func.local_reg_names.len) {
@@ -442,14 +532,34 @@ fn currentInstructionIndex(ci: *const CallInfo) ?usize {
     return (pc_addr - code_start) / @sizeOf(Instruction) - 1;
 }
 
+fn runtimeErrorWithLocation(ci: *const CallInfo, msg: []const u8, out_buf: *[320]u8) []const u8 {
+    const source_raw = ci.func.source;
+    const source = if (source_raw.len == 0)
+        "?"
+    else if (source_raw[0] == '@' or source_raw[0] == '=')
+        source_raw[1..]
+    else
+        source_raw;
+
+    const line_i: i64 = blk: {
+        const idx = currentInstructionIndex(ci) orelse break :blk -1;
+        if (ci.func.lineinfo.len == 0 or idx >= ci.func.lineinfo.len) break :blk -1;
+        break :blk @intCast(ci.func.lineinfo[idx]);
+    };
+
+    return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line_i, msg }) catch msg;
+}
+
 fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
     const cur_idx = currentInstructionIndex(ci) orelse return null;
     if (cur_idx > ci.func.code.len) return null;
 
     var target_reg = reg;
     var i = cur_idx;
-    while (i > 0) {
+    var budget: u16 = 64;
+    while (i > 0 and budget > 0) {
         i -= 1;
+        budget -= 1;
         const inst = ci.func.code[i];
         if (inst.getA() != target_reg) continue;
 
@@ -460,19 +570,25 @@ fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
             },
             .SELF => {
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .method_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .method_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETFIELD => {
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .field_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .field_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETTABUP => {
                 if (inst.getB() != 0) return null;
                 const key_val = ci.func.k[inst.getC()];
-                const key = key_val.asString() orelse return null;
-                return .{ .kind = .global_name, .name = key.asSlice() };
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .global_name, .name = key.asSlice() };
+                }
+                continue;
             },
             .GETUPVAL => {
                 const uv_idx = inst.getB();
@@ -480,7 +596,7 @@ fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
                 const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
                 return .{ .kind = .upvalue_name, .name = uv_name };
             },
-            else => break,
+            else => continue,
         }
     }
 
@@ -492,17 +608,50 @@ fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
     return null;
 }
 
-fn buildCallNotFunctionMessage(ci: *const CallInfo, call_reg: u8, called: TValue, out_buf: []u8) []const u8 {
+fn findUniqueLocalNameByValue(ci: *const CallInfo, vm: *VM, value: TValue) ?[]const u8 {
+    const max_regs = @min(ci.func.local_reg_names.len, ci.func.maxstacksize);
+    var found: ?[]const u8 = null;
+    var r: usize = 0;
+    while (r < max_regs) : (r += 1) {
+        const name = ci.func.local_reg_names[r] orelse continue;
+        if (vm.base + r >= vm.stack.len) break;
+        if (vm.stack[vm.base + r].eql(value)) {
+            if (found != null) return null; // Ambiguous: more than one matching local.
+            found = name;
+        }
+    }
+    return found;
+}
+
+fn buildCallNotFunctionMessage(vm: *VM, ci: *const CallInfo, call_reg: u8, called: TValue, out_buf: []u8) []const u8 {
     const ty = callableValueTypeName(called);
     if (callNameContext(ci, call_reg)) |ctx| {
-        const kind = switch (ctx.kind) {
-            .global_name => "global",
-            .field_name => "field",
-            .method_name => "method",
-            .local_name => "local",
-            .upvalue_name => "upvalue",
-        };
-        return std.fmt.bufPrint(out_buf, "attempt to call a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to call a non-function value";
+        if (ctx.kind == .upvalue_name and std.mem.eql(u8, ctx.name, "_ENV")) {
+            // Prefer explicit field/method/global hints over synthetic _ENV names.
+        } else if ((ctx.kind == .global_name or ctx.kind == .field_name) and std.mem.eql(u8, ty, "table")) {
+            // For table-valued complex expressions like "(x or x)()", Lua reports
+            // a generic call error without attaching a variable/field name.
+        } else {
+            const kind = switch (ctx.kind) {
+                .global_name => "global",
+                .field_name => "field",
+                .method_name => "method",
+                .local_name => "local",
+                .upvalue_name => "upvalue",
+            };
+            return std.fmt.bufPrint(out_buf, "attempt to call a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to call a non-function value";
+        }
+    }
+    if (findUniqueLocalNameByValue(ci, vm, called)) |lname| {
+        return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (local '{s}')", .{ ty, lname }) catch "attempt to call a non-function value";
+    }
+    if (vm.last_field_key != null and vm.exec_tick - vm.last_field_tick <= 64) {
+        const key = vm.last_field_key.?;
+        const self_reg = vm.base + call_reg + 1;
+        const has_self_table = self_reg < vm.stack.len and vm.stack[self_reg].asTable() != null;
+        if (vm.last_field_is_method or has_self_table) {
+            return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (method '{s}')", .{ ty, key.asSlice() }) catch "attempt to call a non-function value";
+        }
     }
     return std.fmt.bufPrint(out_buf, "attempt to call a {s} value", .{ty}) catch "attempt to call a non-function value";
 }
@@ -548,9 +697,16 @@ fn raiseMetamethodNotCallable(vm: *VM, mm: TValue, metamethod_name: []const u8) 
     return vm.raiseString(msg);
 }
 
+fn raiseIndexValueError(vm: *VM, value: TValue) !void {
+    const ty = callableValueTypeName(value);
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value", .{ty}) catch "attempt to index a non-table value";
+    return vm.raiseString(msg);
+}
+
 fn raiseOrderComparison(vm: *VM, left: TValue, right: TValue) !bool {
-    const left_ty = valueTypeName(left);
-    const right_ty = valueTypeName(right);
+    const left_ty = namedValueTypeName(vm, left);
+    const right_ty = namedValueTypeName(vm, right);
     var msg_buf: [128]u8 = undefined;
     const msg = if (std.mem.eql(u8, left_ty, right_ty))
         std.fmt.bufPrint(&msg_buf, "attempt to compare two {s} values", .{left_ty}) catch "attempt to compare values"
@@ -563,19 +719,19 @@ pub fn ltOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
         return a.integer < b.integer;
     }
+    if (a.isNumber() and b.isNumber()) {
+        return a.number < b.number;
+    }
     if (a.isInteger() and b.isNumber()) {
         return compareIntFloat(a.integer, b.number, false);
     }
     if (a.isNumber() and b.isInteger()) {
         return compareFloatInt(a.number, b.integer, false);
     }
-    const na = a.toNumber();
-    const nb = b.toNumber();
-    if (na != null and nb != null) {
-        if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
-            return false;
+    if (a.asString()) |as| {
+        if (b.asString()) |bs| {
+            return std.mem.order(u8, as.asSlice(), bs.asSlice()) == .lt;
         }
-        return na.? < nb.?;
     }
     return error.OrderComparisonError;
 }
@@ -584,19 +740,20 @@ pub fn leOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
         return a.integer <= b.integer;
     }
+    if (a.isNumber() and b.isNumber()) {
+        return a.number <= b.number;
+    }
     if (a.isInteger() and b.isNumber()) {
         return compareIntFloat(a.integer, b.number, true);
     }
     if (a.isNumber() and b.isInteger()) {
         return compareFloatInt(a.number, b.integer, true);
     }
-    const na = a.toNumber();
-    const nb = b.toNumber();
-    if (na != null and nb != null) {
-        if (std.math.isNan(na.?) or std.math.isNan(nb.?)) {
-            return false;
+    if (a.asString()) |as| {
+        if (b.asString()) |bs| {
+            const ord = std.mem.order(u8, as.asSlice(), bs.asSlice());
+            return ord == .lt or ord == .eq;
         }
-        return na.? <= nb.?;
     }
     return error.OrderComparisonError;
 }
@@ -683,6 +840,12 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
+    vm.last_field_reg = null;
+    vm.last_field_key = null;
+    vm.last_field_is_global = false;
+    vm.last_field_is_method = false;
+    vm.last_field_tick = 0;
+    vm.int_repr_field_key = null;
 
     return new_ci;
 }
@@ -695,6 +858,12 @@ pub fn popCallInfo(vm: *VM) void {
             if (vm.callstack_size > 0) {
                 vm.callstack_size -= 1;
             }
+            vm.last_field_reg = null;
+            vm.last_field_key = null;
+            vm.last_field_is_global = false;
+            vm.last_field_is_method = false;
+            vm.last_field_tick = 0;
+            vm.int_repr_field_key = null;
         }
     }
 }
@@ -907,6 +1076,8 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                 err == error.DivideByZero or
                 err == error.ModuloByZero or
                 err == error.IntegerRepresentation or
+                err == error.OrderComparisonError or
+                err == error.LengthError or
                 err == error.NotATable or
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
@@ -930,35 +1101,40 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                             else => null,
                         };
                         if (op_name) |name| {
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform bitwise operation {s} on a non-numeric value", .{name}) catch "attempt to perform arithmetic on a non-numeric value";
+                            const bad_ty: []const u8 = blkty: {
+                                switch (inst.getOpCode()) {
+                                    .BNOT => break :blkty namedValueTypeName(vm, vm.stack[vm.base + inst.getB()]),
+                                    .BAND, .BOR, .BXOR, .SHL, .SHR => {
+                                        const rb = inst.getB();
+                                        const rc = inst.getC();
+                                        const vb = vm.stack[vm.base + rb];
+                                        const vc = vm.stack[vm.base + rc];
+                                        if (toIntForBitwise(&vb)) |_| {} else |_| break :blkty namedValueTypeName(vm, vb);
+                                        if (toIntForBitwise(&vc)) |_| {} else |_| break :blkty namedValueTypeName(vm, vc);
+                                        break :blkty "non-numeric";
+                                    },
+                                    .BANDK, .BORK, .BXORK, .SHLI, .SHRI => break :blkty namedValueTypeName(vm, vm.stack[vm.base + inst.getB()]),
+                                    else => break :blkty "non-numeric",
+                                }
+                            };
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform bitwise operation {s} on a {s} value", .{ name, bad_ty }) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
+                        if (customNamedArithmeticType(vm, inst)) |ty| {
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a {s} value", .{ty}) catch "attempt to perform arithmetic on a non-numeric value";
                         }
                         if (vm.ci) |cur_ci| {
                             const reg_opt: ?u8 = switch (inst.getOpCode()) {
                                 .UNM, .BNOT => inst.getB(),
                                 .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI => inst.getB(),
                                 .MMBINI, .MMBINK => inst.getA(),
-                                .MMBIN => mmbin: {
-                                    const ra = inst.getA();
-                                    const rb = inst.getB();
-                                    const va = vm.stack[vm.base + ra];
-                                    const vb = vm.stack[vm.base + rb];
-                                    if (va.toNumber() == null) break :mmbin ra;
-                                    if (vb.toNumber() == null) break :mmbin rb;
-                                    break :mmbin ra;
-                                },
-                                .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => badreg: {
-                                    const rb = inst.getB();
-                                    const rc = inst.getC();
-                                    const vb = vm.stack[vm.base + rb];
-                                    const vc = vm.stack[vm.base + rc];
-                                    if (vb.toNumber() == null) break :badreg rb;
-                                    if (vc.toNumber() == null) break :badreg rc;
-                                    break :badreg null;
-                                },
                                 else => null,
                             };
                             if (reg_opt) |bad_reg| {
                                 if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                                    if (ctx.kind == .upvalue_name and std.mem.eql(u8, ctx.name, "_ENV")) {
+                                        // Ignore synthetic _ENV provenance; fallback will
+                                        // try field/global/method names from value flow.
+                                    } else {
                                     const kind = switch (ctx.kind) {
                                         .global_name => "global",
                                         .field_name => "field",
@@ -967,36 +1143,62 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                                         .upvalue_name => "upvalue",
                                     };
                                     break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
+                                    }
                                 }
                             }
-                            if (inst.getOpCode() == .ADD or inst.getOpCode() == .SUB or inst.getOpCode() == .MUL or inst.getOpCode() == .DIV or inst.getOpCode() == .MOD or inst.getOpCode() == .POW or inst.getOpCode() == .IDIV or inst.getOpCode() == .BAND or inst.getOpCode() == .BOR or inst.getOpCode() == .BXOR or inst.getOpCode() == .SHL or inst.getOpCode() == .SHR or inst.getOpCode() == .MMBIN) {
-                                const r1: u8 = if (inst.getOpCode() == .MMBIN) inst.getA() else inst.getB();
-                                const r2: u8 = if (inst.getOpCode() == .MMBIN) inst.getB() else inst.getC();
+                            if (inst.getOpCode() == .ADD or inst.getOpCode() == .SUB or inst.getOpCode() == .MUL or inst.getOpCode() == .DIV or inst.getOpCode() == .MOD or inst.getOpCode() == .POW or inst.getOpCode() == .IDIV or inst.getOpCode() == .BAND or inst.getOpCode() == .BOR or inst.getOpCode() == .BXOR or inst.getOpCode() == .SHL or inst.getOpCode() == .SHR or inst.getOpCode() == .MMBIN or inst.getOpCode() == .MMBINI or inst.getOpCode() == .MMBINK) {
+                                const r1: u8 = switch (inst.getOpCode()) {
+                                    .MMBIN, .MMBINI, .MMBINK => inst.getA(),
+                                    else => inst.getB(),
+                                };
+                                const r2: u8 = switch (inst.getOpCode()) {
+                                    .MMBIN => inst.getB(),
+                                    .MMBINI, .MMBINK => r1,
+                                    else => inst.getC(),
+                                };
                                 var best_ctx: ?CallNameContext = null;
                                 var best_score: u8 = 0;
 
                                 const v1 = vm.stack[vm.base + r1];
+                                const c1 = if (v1.toNumber() == null) resolveRegisterNameContext(cur_ci, r1) else null;
                                 if (v1.toNumber() == null) {
-                                    if (resolveRegisterNameContext(cur_ci, r1)) |ctx| {
+                                    if (c1) |ctx| {
                                         const score: u8 = switch (ctx.kind) {
-                                            .local_name, .upvalue_name => 3,
+                                            .local_name => 3,
+                                            .upvalue_name => if (std.mem.eql(u8, ctx.name, "_ENV")) 0 else 3,
                                             .global_name, .field_name, .method_name => 2,
                                         };
-                                        best_ctx = ctx;
-                                        best_score = score;
+                                        if (score > 0) {
+                                            best_ctx = ctx;
+                                            best_score = score;
+                                        }
                                     }
                                 }
 
                                 const v2 = vm.stack[vm.base + r2];
+                                const c2 = if (v2.toNumber() == null) resolveRegisterNameContext(cur_ci, r2) else null;
                                 if (v2.toNumber() == null) {
-                                    if (resolveRegisterNameContext(cur_ci, r2)) |ctx| {
+                                    if (c2) |ctx| {
                                         const score: u8 = switch (ctx.kind) {
-                                            .local_name, .upvalue_name => 3,
+                                            .local_name => 3,
+                                            .upvalue_name => if (std.mem.eql(u8, ctx.name, "_ENV")) 0 else 3,
                                             .global_name, .field_name, .method_name => 2,
                                         };
-                                        if (best_ctx == null or score > best_score) {
+                                        if (score > 0 and (best_ctx == null or score > best_score)) {
                                             best_ctx = ctx;
                                             best_score = score;
+                                        }
+                                    }
+                                }
+
+                                // Complex expressions like "(g or g) + (g and g)" should not
+                                // force a named global/field in the final arithmetic message.
+                                if (c1) |ctx1| {
+                                    if (c2) |ctx2| {
+                                        if (ctx1.kind == ctx2.kind and std.mem.eql(u8, ctx1.name, ctx2.name) and
+                                            (ctx1.kind == .global_name or ctx1.kind == .field_name))
+                                        {
+                                            best_ctx = null;
                                         }
                                     }
                                 }
@@ -1011,23 +1213,100 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                                     };
                                     break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
                                 }
+                                // Last fallback for table/userdata cases: recover local name by value identity.
+                                if (v1.toNumber() == null) {
+                                    if (findUniqueLocalNameByValue(cur_ci, vm, v1)) |lname| {
+                                        break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (local '{s}')", .{lname}) catch "attempt to perform arithmetic on a non-numeric value";
+                                    }
+                                }
+                                if (v2.toNumber() == null) {
+                                    if (findUniqueLocalNameByValue(cur_ci, vm, v2)) |lname| {
+                                        break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (local '{s}')", .{lname}) catch "attempt to perform arithmetic on a non-numeric value";
+                                    }
+                                }
                             }
                         }
                         if (vm.last_field_key) |key| {
+                            if (vm.exec_tick - vm.last_field_tick <= 64) {
+                                var suppress_field_hint = false;
+                                switch (inst.getOpCode()) {
+                                    .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
+                                        const rb = inst.getB();
+                                        const rc = inst.getC();
+                                        const vb = vm.stack[vm.base + rb];
+                                        const vc = vm.stack[vm.base + rc];
+                                        suppress_field_hint = (vb.toNumber() == null and vc.toNumber() == null and vb.eql(vc));
+                                    },
+                                    .MMBIN => {
+                                        const ra = inst.getA();
+                                        const rb = inst.getB();
+                                        const va = vm.stack[vm.base + ra];
+                                        const vb = vm.stack[vm.base + rb];
+                                        suppress_field_hint = (va.toNumber() == null and vb.toNumber() == null and va.eql(vb));
+                                    },
+                                    else => {},
+                                }
+                                if (suppress_field_hint) {
+                                    vm.last_field_key = null;
+                                    break :blk "attempt to perform arithmetic on a non-numeric value";
+                                }
+                                const kind = if (vm.last_field_is_global) "global" else "field";
+                                vm.last_field_key = null;
+                                break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
+                            }
                             vm.last_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (field '{s}')", .{key.asSlice()}) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
+                        if (firstArithmeticBadOperand(vm, inst)) |bad| {
+                            const ty = namedValueTypeName(vm, bad);
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} value)", .{ty}) catch "attempt to perform arithmetic on a non-numeric value";
                         }
                         break :blk "attempt to perform arithmetic on a non-numeric value";
                     },
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
                     error.IntegerRepresentation => blk: {
+                        if (vm.ci) |cur_ci| {
+                            const reg_opt: ?u8 = switch (inst.getOpCode()) {
+                                .BNOT => inst.getB(),
+                                .SHLI, .SHRI, .BANDK, .BORK, .BXORK => inst.getB(),
+                                .BAND, .BOR, .BXOR, .SHL, .SHR => badreg: {
+                                    const rb = inst.getB();
+                                    const rc = inst.getC();
+                                    const vb = vm.stack[vm.base + rb];
+                                    const vc = vm.stack[vm.base + rc];
+                                    if (toIntForBitwise(&vb)) |_| {} else |_| break :badreg rb;
+                                    if (toIntForBitwise(&vc)) |_| {} else |_| break :badreg rc;
+                                    break :badreg null;
+                                },
+                                else => null,
+                            };
+                            if (reg_opt) |bad_reg| {
+                                if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                                    const kind = switch (ctx.kind) {
+                                        .global_name => "global",
+                                        .field_name => "field",
+                                        .method_name => "method",
+                                        .local_name => "local",
+                                        .upvalue_name => "upvalue",
+                                    };
+                                    if (ctx.kind == .local_name) {
+                                        break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (local {s})", .{ctx.name}) catch "number has no integer representation";
+                                    }
+                                    break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation ({s} '{s}')", .{ kind, ctx.name }) catch "number has no integer representation";
+                                }
+                                if (findUniqueLocalNameByValue(cur_ci, vm, vm.stack[vm.base + bad_reg])) |lname| {
+                                    break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (local {s})", .{lname}) catch "number has no integer representation";
+                                }
+                            }
+                        }
                         if (vm.int_repr_field_key) |key| {
                             vm.int_repr_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "number (field '{s}') has no integer representation", .{key.asSlice()}) catch "number has no integer representation";
+                            break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
                         }
                         break :blk "number has no integer representation";
                     },
+                    error.OrderComparisonError => "attempt to compare values",
+                    error.LengthError => "attempt to get length of a value",
                     error.NotATable => blk: {
                         if (vm.ci) |cur_ci| {
                             const reg_opt: ?u8 = switch (inst.getOpCode()) {
@@ -1090,13 +1369,36 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                         }
                         break :blk "attempt to index a non-table value";
                     },
-                    error.InvalidForLoopInit => "'for' initial value must be a number",
-                    error.InvalidForLoopLimit => "'for' limit must be a number",
-                    error.InvalidForLoopStep => "'for' step is zero",
+                    error.InvalidForLoopInit => blk: {
+                        if (forLoopArgValue(vm, inst, .init)) |v| {
+                            const ty = namedValueTypeName(vm, v);
+                            break :blk std.fmt.bufPrint(&msg_buf, "'for' initial value must be a number (got {s})", .{ty}) catch "'for' initial value must be a number";
+                        }
+                        break :blk "'for' initial value must be a number";
+                    },
+                    error.InvalidForLoopLimit => blk: {
+                        if (forLoopArgValue(vm, inst, .limit)) |v| {
+                            const ty = namedValueTypeName(vm, v);
+                            break :blk std.fmt.bufPrint(&msg_buf, "'for' limit must be a number (got {s})", .{ty}) catch "'for' limit must be a number";
+                        }
+                        break :blk "'for' limit must be a number";
+                    },
+                    error.InvalidForLoopStep => blk: {
+                        if (forLoopArgValue(vm, inst, .step)) |v| {
+                            if (v.toNumber()) |n| {
+                                if (n == 0) break :blk "'for' step is zero";
+                            }
+                            const ty = namedValueTypeName(vm, v);
+                            break :blk std.fmt.bufPrint(&msg_buf, "'for' step must be a number (got {s})", .{ty}) catch "'for' step must be a number";
+                        }
+                        break :blk "'for' step is zero";
+                    },
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                var full_msg_buf: [320]u8 = undefined;
+                const full_msg = runtimeErrorWithLocation(ci, msg, &full_msg_buf);
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
                 if (handleLuaException(vm)) continue;
@@ -1116,6 +1418,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
+    vm.exec_tick +%= 1;
     const ci = vm.ci.?;
 
     switch (inst.getOpCode()) {
@@ -2249,7 +2552,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             var msg_buf: [192]u8 = undefined;
-            return vm.raiseString(buildCallNotFunctionMessage(ci, a, func_val, &msg_buf));
+            return vm.raiseString(buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf));
         },
         // TAILCALL: Tail call optimization - reuse current frame
         // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
@@ -2281,21 +2584,21 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
                 if (call_chain_depth >= 2000) {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
                 }
                 call_chain_depth += 1;
 
                 const table = tail_func.asTable() orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
                 };
                 const mt = table.metatable orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
                 };
                 const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
                 };
 
                 if (call_mm.asTable() != null or
@@ -2321,7 +2624,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 } else {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
                 }
             }
 
@@ -2443,7 +2746,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             var msg_buf: [192]u8 = undefined;
-            return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+            return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
         },
         .RETURN => {
             const a = inst.getA();
@@ -2682,6 +2985,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.last_field_reg = a;
                 vm.last_field_key = key;
                 vm.last_field_is_global = true;
+                vm.last_field_is_method = false;
+                vm.last_field_tick = vm.exec_tick;
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -2746,6 +3051,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const c = inst.getC();
             const table_val = vm.stack[vm.base + b];
             const key_val = vm.stack[vm.base + c];
+            if (key_val.asString()) |key| {
+                vm.last_field_reg = a;
+                vm.last_field_key = key;
+                vm.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
+                vm.last_field_is_method = false;
+                vm.last_field_tick = vm.exec_tick;
+            }
 
             if (table_val.asTable()) |table| {
                 if (key_val.isNil()) {
@@ -2850,6 +3162,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     vm.last_field_reg = a;
                     vm.last_field_key = key;
                     vm.last_field_is_global = false;
+                    vm.last_field_is_method = false;
+                    vm.last_field_tick = vm.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -2863,6 +3177,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         vm.last_field_reg = a;
                         vm.last_field_key = key;
                         vm.last_field_is_global = false;
+                        vm.last_field_is_method = false;
+                        vm.last_field_tick = vm.exec_tick;
                     }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
@@ -2915,6 +3231,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[c];
             if (obj.asTable()) |table| {
                 if (key_val.asString()) |key| {
+                    vm.last_field_reg = a;
+                    vm.last_field_key = key;
+                    vm.last_field_is_global = false;
+                    vm.last_field_is_method = true;
+                    vm.last_field_tick = vm.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
                         return result;
                     }
@@ -2924,6 +3245,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
+                    vm.last_field_reg = a;
+                    vm.last_field_key = key;
+                    vm.last_field_is_global = false;
+                    vm.last_field_is_method = true;
+                    vm.last_field_tick = vm.exec_tick;
                     if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
                         return result;
                     }
@@ -3473,7 +3799,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         // No __call - fall through to error
                         vm.stack[vm.base + a] = .{ .boolean = false };
                         var msg_buf: [192]u8 = undefined;
-                        const msg = buildCallNotFunctionMessage(ci, @intCast(a + 1), func_val, &msg_buf);
+                        const msg = buildCallNotFunctionMessage(vm, ci, @intCast(a + 1), func_val, &msg_buf);
                         const err_str = try vm.gc().allocString(msg);
                         vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
                         return .Continue;
@@ -3572,7 +3898,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Not a function - return error
             vm.stack[vm.base + a] = .{ .boolean = false };
             var msg_buf: [192]u8 = undefined;
-            const msg = buildCallNotFunctionMessage(ci, @intCast(a + 1), func_val, &msg_buf);
+            const msg = buildCallNotFunctionMessage(vm, ci, @intCast(a + 1), func_val, &msg_buf);
             const err_str = try vm.gc().allocString(msg);
             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
             return .Continue;
@@ -3867,9 +4193,9 @@ fn dispatchIndexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValu
         return null; // Continue
     }
 
-    // __index is not a valid type
-    vm.stack[vm.base + result_reg] = .nil;
-    return null;
+    // __index must be a table or function; any other type is an indexing error.
+    try raiseIndexValueError(vm, index_mm);
+    return error.LuaException;
 }
 
 /// Dispatch __index metamethod for non-table values (strings, numbers, userdata, files, etc.)
@@ -3948,9 +4274,9 @@ fn dispatchSharedIndexMMValue(vm: *VM, value: TValue, key_val: TValue, result_re
         return null;
     }
 
-    // __index is not a valid type
-    vm.stack[vm.base + result_reg] = .nil;
-    return null;
+    // __index must be a table or function; any other type is an indexing error.
+    try raiseIndexValueError(vm, index_mm);
+    return error.LuaException;
 }
 
 /// Newindex with __newindex metamethod fallback

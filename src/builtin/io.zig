@@ -27,6 +27,50 @@ const FILE_IMPL_KEY = "_impl"; // FileObject reference for delegation
 const IO_DEFAULT_INPUT_KEY = "_defaultInput";
 const IO_DEFAULT_OUTPUT_KEY = "_defaultOutput";
 
+fn valueTypeName(v: TValue) []const u8 {
+    return switch (v) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .userdata => "userdata",
+            .thread => "thread",
+            .file => "userdata",
+            else => "userdata",
+        },
+    };
+}
+
+fn namedValueTypeName(vm: anytype, v: TValue) []const u8 {
+    if (!v.isObject()) return valueTypeName(v);
+    const mt_opt: ?*TableObject = switch (v.object.type) {
+        .table => object.getObject(TableObject, v.object).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
+        .file => object.getObject(FileObject, v.object).metatable,
+        else => null,
+    };
+    if (mt_opt) |mt| {
+        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
+            if (name_val.asString()) |name_str| return name_str.asSlice();
+        }
+    }
+    return valueTypeName(v);
+}
+
+fn isFileLikeTable(vm: anytype, t: *TableObject) bool {
+    if (t.metatable) |mt| {
+        if (mt.get(TValue.fromString(vm.gc().mm_keys.get(.name)))) |name_val| {
+            if (name_val.asString()) |name_str| {
+                return std.mem.eql(u8, name_str.asSlice(), "FILE*");
+            }
+        }
+    }
+    return false;
+}
+
 fn makeShellScript(allocator: std.mem.Allocator, cmd: []const u8) ![]u8 {
     if (std.mem.trim(u8, cmd, " \t\r\n").len == 0) {
         return allocator.dupe(u8, "exit 0");
@@ -72,6 +116,7 @@ fn createFileMetatableInit(gc: *GC) !*TableObject {
     const close_key = try gc.allocString("close");
     try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
     try mt.set(TValue.fromString(gc.mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
 
     const write_nc = try gc.allocNativeClosure(.{ .id = .file_write });
     const write_key = try gc.allocString("write");
@@ -517,6 +562,18 @@ fn createLinesIteratorWrapper(vm: anytype, temp_slot: u32, state_table: *TableOb
     return wrapper;
 }
 pub fn nativeIoWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    var i_check: u32 = 0;
+    while (i_check < nargs) : (i_check += 1) {
+        const arg = vm.stack[vm.base + func_reg + 1 + i_check];
+        if (arg.asString() == null and arg.toNumber() == null) {
+            const ty = namedValueTypeName(vm, arg);
+            var msg_buf: [160]u8 = undefined;
+            const idx = i_check + 1;
+            const msg = std.fmt.bufPrint(&msg_buf, "bad argument #{} to 'io.write' (string expected, got {s})", .{ idx, ty }) catch "bad argument to 'io.write'";
+            return vm.raiseString(msg);
+        }
+    }
+
     // If a default output file handle exists, delegate to file:write(self, ...)
     const io_key = try vm.gc().allocString("io");
     if (vm.globals().get(TValue.fromString(io_key))) |io_val| {
@@ -961,6 +1018,12 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Legacy: if it's a file handle (table), set as default input
     if (arg.asTable()) |file_table| {
+        if (!isFileLikeTable(vm, file_table)) {
+            const ty = namedValueTypeName(vm, arg);
+            var msg_buf: [160]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "bad argument #1 to 'input' (FILE* expected, got {s})", .{ty}) catch "bad argument #1 to 'input' (FILE* expected)";
+            return vm.raiseString(msg);
+        }
         try io_table.set(TValue.fromString(default_input_key), TValue.fromTable(file_table));
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
         return;
@@ -2012,6 +2075,7 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     const close_key = try vm.gc().allocString("close");
     try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
     try mt.set(TValue.fromString(vm.gc().mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
 
     // Reuse scratch slot for write method
     const write_nc = try vm.gc().allocNativeClosure(.{ .id = .file_write });

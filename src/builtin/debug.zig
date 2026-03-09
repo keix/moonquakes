@@ -1139,6 +1139,11 @@ pub fn nativeDebugSetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
     // Get userdata argument
     const arg0 = vm.stack[vm.base + func_reg + 1];
     const ud = arg0.asUserdata() orelse {
+        // Moonquakes currently represents debug.upvalueid() as an integer id.
+        // Keep Lua-compatible diagnostics by treating that case as light userdata.
+        if (arg0.isInteger()) {
+            return vm.raiseString("bad argument #1 to 'setuservalue' (userdata expected, got light userdata)");
+        }
         // Not userdata - return nil
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;

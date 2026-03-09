@@ -192,11 +192,11 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    if (nargs < 1) return vm.raiseString("bad argument #1 to 'sort' (table expected)");
+    if (nargs < 1) return vm.raiseString("bad argument #1 to 'table.sort' (table expected)");
 
     // First argument must be a table
     const tbl_arg = vm.stack[vm.base + func_reg + 1];
-    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'sort' (table expected)");
+    const table = tbl_arg.asTable() orelse return vm.raiseString("bad argument #1 to 'table.sort' (table expected)");
 
     // Get optional comparator function
     const comp: ?TValue = if (nargs >= 2) blk: {
@@ -206,7 +206,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             break :blk comp_arg;
         }
         if (!comp_arg.isNil()) {
-            return vm.raiseString("bad argument #2 to 'sort' (function expected)");
+            return vm.raiseString("bad argument #2 to 'table.sort' (function expected)");
         }
         break :blk null;
     } else null;

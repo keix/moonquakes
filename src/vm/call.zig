@@ -455,6 +455,8 @@ fn runUntilReturn(
                 err == error.DivideByZero or
                 err == error.ModuloByZero or
                 err == error.IntegerRepresentation or
+                err == error.OrderComparisonError or
+                err == error.LengthError or
                 err == error.NotATable or
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
@@ -486,6 +488,8 @@ fn runUntilReturn(
                     },
                     error.NotATable => "attempt to index a non-table value",
                     error.NotAFunction => "attempt to call a non-function value",
+                    error.OrderComparisonError => "attempt to compare values",
+                    error.LengthError => "attempt to get length of a value",
                     error.InvalidTableKey => "table index is nil or NaN",
                     error.InvalidTableOperation => "attempt to index a non-table value",
                     error.InvalidForLoopInit => "'for' initial value must be a number",

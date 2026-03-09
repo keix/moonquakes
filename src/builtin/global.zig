@@ -1532,7 +1532,8 @@ const gc_options = std.StaticStringMap(GcOption).initComptime(.{
 pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     const opt = if (nargs > 0) blk: {
         const opt_arg = vm.stack[vm.base + func_reg + 1];
-        break :blk if (opt_arg.asString()) |s| s.asSlice() else "collect";
+        if (opt_arg.asString()) |s| break :blk s.asSlice();
+        return vm.raiseString("bad argument #1 to 'collectgarbage' (string expected)");
     } else "collect";
 
     const gc = vm.gc();
@@ -1580,9 +1581,10 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             gc.mode = .generational;
             break :blk TValue.fromString(try vm.gc().allocString(prev));
         },
-    } else blk: {
-        // Invalid option returns nil (Lua compatible)
-        break :blk .nil;
+    } else {
+        var msg_buf: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #1 to 'collectgarbage' (invalid option '{s}')", .{opt}) catch "bad argument #1 to 'collectgarbage' (invalid option)";
+        return vm.raiseString(msg);
     };
 
     if (nresults > 0) {
