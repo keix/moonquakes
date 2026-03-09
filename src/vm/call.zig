@@ -468,7 +468,13 @@ fn runUntilReturn(
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
                     error.CallStackOverflow => "stack overflow",
-                    error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.ArithmeticError => blk: {
+                        if (vm.last_field_key) |key| {
+                            vm.last_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (field '{s}')", .{key.asSlice()}) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
+                        break :blk "attempt to perform arithmetic on a non-numeric value";
+                    },
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
                     error.IntegerRepresentation => blk: {

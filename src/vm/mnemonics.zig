@@ -351,6 +351,203 @@ fn valueTypeName(v: TValue) []const u8 {
     };
 }
 
+fn callableValueTypeName(v: TValue) []const u8 {
+    return switch (v) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .userdata, .file => "userdata",
+            .thread => "thread",
+            else => "userdata",
+        },
+    };
+}
+
+const CallNameKind = enum {
+    global_name,
+    field_name,
+    method_name,
+    local_name,
+    upvalue_name,
+};
+
+const CallNameContext = struct {
+    kind: CallNameKind,
+    name: []const u8,
+};
+
+fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
+    if (ci.func.code.len == 0) return null;
+    const code_start = @intFromPtr(ci.func.code.ptr);
+    const pc_addr = @intFromPtr(ci.pc);
+    if (pc_addr <= code_start) return null;
+
+    const cur_idx = (pc_addr - code_start) / @sizeOf(Instruction) - 1;
+    if (cur_idx == 0 or cur_idx > ci.func.code.len) return null;
+
+    var target_reg = call_reg;
+    var i = cur_idx;
+    while (i > 0) {
+        i -= 1;
+        const inst = ci.func.code[i];
+        if (inst.getA() != target_reg) continue;
+
+        switch (inst.getOpCode()) {
+            .MOVE => {
+                target_reg = inst.getB();
+                continue;
+            },
+            .SELF => {
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .method_name, .name = key.asSlice() };
+            },
+            .GETFIELD => {
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .field_name, .name = key.asSlice() };
+            },
+            .GETTABUP => {
+                if (inst.getB() != 0) return null;
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .global_name, .name = key.asSlice() };
+            },
+            .GETUPVAL => {
+                const uv_idx = inst.getB();
+                if (uv_idx >= ci.func.upvalues.len) return null;
+                const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
+                return .{ .kind = .upvalue_name, .name = uv_name };
+            },
+            else => break,
+        }
+    }
+    if (target_reg < ci.func.local_reg_names.len) {
+        if (ci.func.local_reg_names[target_reg]) |name| {
+            return .{ .kind = .local_name, .name = name };
+        }
+    }
+    return null;
+}
+
+fn currentInstructionIndex(ci: *const CallInfo) ?usize {
+    if (ci.func.code.len == 0) return null;
+    const code_start = @intFromPtr(ci.func.code.ptr);
+    const pc_addr = @intFromPtr(ci.pc);
+    if (pc_addr <= code_start) return null;
+    return (pc_addr - code_start) / @sizeOf(Instruction) - 1;
+}
+
+fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
+    const cur_idx = currentInstructionIndex(ci) orelse return null;
+    if (cur_idx > ci.func.code.len) return null;
+
+    var target_reg = reg;
+    var i = cur_idx;
+    while (i > 0) {
+        i -= 1;
+        const inst = ci.func.code[i];
+        if (inst.getA() != target_reg) continue;
+
+        switch (inst.getOpCode()) {
+            .MOVE => {
+                target_reg = inst.getB();
+                continue;
+            },
+            .SELF => {
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .method_name, .name = key.asSlice() };
+            },
+            .GETFIELD => {
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .field_name, .name = key.asSlice() };
+            },
+            .GETTABUP => {
+                if (inst.getB() != 0) return null;
+                const key_val = ci.func.k[inst.getC()];
+                const key = key_val.asString() orelse return null;
+                return .{ .kind = .global_name, .name = key.asSlice() };
+            },
+            .GETUPVAL => {
+                const uv_idx = inst.getB();
+                if (uv_idx >= ci.func.upvalues.len) return null;
+                const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
+                return .{ .kind = .upvalue_name, .name = uv_name };
+            },
+            else => break,
+        }
+    }
+
+    if (target_reg < ci.func.local_reg_names.len) {
+        if (ci.func.local_reg_names[target_reg]) |name| {
+            return .{ .kind = .local_name, .name = name };
+        }
+    }
+    return null;
+}
+
+fn buildCallNotFunctionMessage(ci: *const CallInfo, call_reg: u8, called: TValue, out_buf: []u8) []const u8 {
+    const ty = callableValueTypeName(called);
+    if (callNameContext(ci, call_reg)) |ctx| {
+        const kind = switch (ctx.kind) {
+            .global_name => "global",
+            .field_name => "field",
+            .method_name => "method",
+            .local_name => "local",
+            .upvalue_name => "upvalue",
+        };
+        return std.fmt.bufPrint(out_buf, "attempt to call a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to call a non-function value";
+    }
+    return std.fmt.bufPrint(out_buf, "attempt to call a {s} value", .{ty}) catch "attempt to call a non-function value";
+}
+
+fn metamethodEventName(comptime event: MetaEvent) []const u8 {
+    return switch (event) {
+        .add => "add",
+        .sub => "sub",
+        .mul => "mul",
+        .div => "div",
+        .mod => "mod",
+        .pow => "pow",
+        .idiv => "idiv",
+        .band => "band",
+        .bor => "bor",
+        .bxor => "bxor",
+        .shl => "shl",
+        .shr => "shr",
+        .unm => "unm",
+        .bnot => "bnot",
+        .eq => "eq",
+        .lt => "lt",
+        .le => "le",
+        .index => "index",
+        .newindex => "newindex",
+        .call => "call",
+        .concat => "concat",
+        .len => "len",
+        .close => "close",
+        .name => "name",
+        .pairs => "pairs",
+        .mode => "mode",
+        .gc => "gc",
+        .tostring => "tostring",
+        .metatable => "metatable",
+    };
+}
+
+fn raiseMetamethodNotCallable(vm: *VM, mm: TValue, metamethod_name: []const u8) !void {
+    const ty = callableValueTypeName(mm);
+    var msg_buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value (metamethod '{s}')", .{ ty, metamethod_name }) catch "attempt to call metamethod value";
+    return vm.raiseString(msg);
+}
+
 fn raiseOrderComparison(vm: *VM, left: TValue, right: TValue) !bool {
     const left_ty = valueTypeName(left);
     const right_ty = valueTypeName(right);
@@ -735,6 +932,91 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                         if (op_name) |name| {
                             break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform bitwise operation {s} on a non-numeric value", .{name}) catch "attempt to perform arithmetic on a non-numeric value";
                         }
+                        if (vm.ci) |cur_ci| {
+                            const reg_opt: ?u8 = switch (inst.getOpCode()) {
+                                .UNM, .BNOT => inst.getB(),
+                                .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI => inst.getB(),
+                                .MMBINI, .MMBINK => inst.getA(),
+                                .MMBIN => mmbin: {
+                                    const ra = inst.getA();
+                                    const rb = inst.getB();
+                                    const va = vm.stack[vm.base + ra];
+                                    const vb = vm.stack[vm.base + rb];
+                                    if (va.toNumber() == null) break :mmbin ra;
+                                    if (vb.toNumber() == null) break :mmbin rb;
+                                    break :mmbin ra;
+                                },
+                                .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => badreg: {
+                                    const rb = inst.getB();
+                                    const rc = inst.getC();
+                                    const vb = vm.stack[vm.base + rb];
+                                    const vc = vm.stack[vm.base + rc];
+                                    if (vb.toNumber() == null) break :badreg rb;
+                                    if (vc.toNumber() == null) break :badreg rc;
+                                    break :badreg null;
+                                },
+                                else => null,
+                            };
+                            if (reg_opt) |bad_reg| {
+                                if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                                    const kind = switch (ctx.kind) {
+                                        .global_name => "global",
+                                        .field_name => "field",
+                                        .method_name => "method",
+                                        .local_name => "local",
+                                        .upvalue_name => "upvalue",
+                                    };
+                                    break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
+                                }
+                            }
+                            if (inst.getOpCode() == .ADD or inst.getOpCode() == .SUB or inst.getOpCode() == .MUL or inst.getOpCode() == .DIV or inst.getOpCode() == .MOD or inst.getOpCode() == .POW or inst.getOpCode() == .IDIV or inst.getOpCode() == .BAND or inst.getOpCode() == .BOR or inst.getOpCode() == .BXOR or inst.getOpCode() == .SHL or inst.getOpCode() == .SHR or inst.getOpCode() == .MMBIN) {
+                                const r1: u8 = if (inst.getOpCode() == .MMBIN) inst.getA() else inst.getB();
+                                const r2: u8 = if (inst.getOpCode() == .MMBIN) inst.getB() else inst.getC();
+                                var best_ctx: ?CallNameContext = null;
+                                var best_score: u8 = 0;
+
+                                const v1 = vm.stack[vm.base + r1];
+                                if (v1.toNumber() == null) {
+                                    if (resolveRegisterNameContext(cur_ci, r1)) |ctx| {
+                                        const score: u8 = switch (ctx.kind) {
+                                            .local_name, .upvalue_name => 3,
+                                            .global_name, .field_name, .method_name => 2,
+                                        };
+                                        best_ctx = ctx;
+                                        best_score = score;
+                                    }
+                                }
+
+                                const v2 = vm.stack[vm.base + r2];
+                                if (v2.toNumber() == null) {
+                                    if (resolveRegisterNameContext(cur_ci, r2)) |ctx| {
+                                        const score: u8 = switch (ctx.kind) {
+                                            .local_name, .upvalue_name => 3,
+                                            .global_name, .field_name, .method_name => 2,
+                                        };
+                                        if (best_ctx == null or score > best_score) {
+                                            best_ctx = ctx;
+                                            best_score = score;
+                                        }
+                                    }
+                                }
+
+                                if (best_ctx) |ctx| {
+                                    const kind = switch (ctx.kind) {
+                                        .global_name => "global",
+                                        .field_name => "field",
+                                        .method_name => "method",
+                                        .local_name => "local",
+                                        .upvalue_name => "upvalue",
+                                    };
+                                    break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
+                                }
+                            }
+                        }
+                        if (vm.last_field_key) |key| {
+                            vm.last_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (field '{s}')", .{key.asSlice()}) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
                         break :blk "attempt to perform arithmetic on a non-numeric value";
                     },
                     error.DivideByZero => "divide by zero",
@@ -746,10 +1028,68 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                         }
                         break :blk "number has no integer representation";
                     },
-                    error.NotATable => "attempt to index a non-table value",
+                    error.NotATable => blk: {
+                        if (vm.ci) |cur_ci| {
+                            const reg_opt: ?u8 = switch (inst.getOpCode()) {
+                                .GETTABLE, .GETFIELD, .GETI, .SELF => inst.getB(),
+                                .SETTABLE, .SETFIELD, .SETI => inst.getA(),
+                                else => null,
+                            };
+                            if (reg_opt) |bad_reg| {
+                                if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                                    const kind = switch (ctx.kind) {
+                                        .global_name => "global",
+                                        .field_name => "field",
+                                        .method_name => "method",
+                                        .local_name => "local",
+                                        .upvalue_name => "upvalue",
+                                    };
+                                    const ty = callableValueTypeName(vm.stack[vm.base + bad_reg]);
+                                    break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to index a non-table value";
+                                }
+                            }
+                        }
+                        if (vm.last_field_key) |key| {
+                            const reg = vm.last_field_reg orelse 0;
+                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
+                            const kind = if (vm.last_field_is_global) "global" else "field";
+                            vm.last_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        }
+                        break :blk "attempt to index a non-table value";
+                    },
                     error.NotAFunction => "attempt to call a non-function value",
                     error.InvalidTableKey => "table index is nil or NaN",
-                    error.InvalidTableOperation => "attempt to index a non-table value",
+                    error.InvalidTableOperation => blk: {
+                        if (vm.ci) |cur_ci| {
+                            const reg_opt: ?u8 = switch (inst.getOpCode()) {
+                                .GETTABLE, .GETFIELD, .GETI, .SELF => inst.getB(),
+                                .SETTABLE, .SETFIELD, .SETI => inst.getA(),
+                                else => null,
+                            };
+                            if (reg_opt) |bad_reg| {
+                                if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                                    const kind = switch (ctx.kind) {
+                                        .global_name => "global",
+                                        .field_name => "field",
+                                        .method_name => "method",
+                                        .local_name => "local",
+                                        .upvalue_name => "upvalue",
+                                    };
+                                    const ty = callableValueTypeName(vm.stack[vm.base + bad_reg]);
+                                    break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to index a non-table value";
+                                }
+                            }
+                        }
+                        if (vm.last_field_key) |key| {
+                            const reg = vm.last_field_reg orelse 0;
+                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
+                            const kind = if (vm.last_field_is_global) "global" else "field";
+                            vm.last_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        }
+                        break :blk "attempt to index a non-table value";
+                    },
                     error.InvalidForLoopInit => "'for' initial value must be a number",
                     error.InvalidForLoopLimit => "'for' limit must be a number",
                     error.InvalidForLoopStep => "'for' step is zero",
@@ -1359,7 +1699,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
                     return try callUnaryMetamethod(vm, mm, vb.*, a);
                 }
-                return error.LengthError;
+                const ty = callableValueTypeName(vb.*);
+                var msg_buf: [96]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "attempt to get length of a {s} value", .{ty}) catch "attempt to get length of value";
+                return vm.raiseString(msg);
             }
             return .Continue;
         },
@@ -1905,7 +2248,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 return result;
             }
 
-            return error.NotAFunction;
+            var msg_buf: [192]u8 = undefined;
+            return vm.raiseString(buildCallNotFunctionMessage(ci, a, func_val, &msg_buf));
         },
         // TAILCALL: Tail call optimization - reuse current frame
         // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
@@ -1915,6 +2259,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const k = inst.getk();
 
             const func_val = vm.stack[vm.base + a];
+            const original_func_val = func_val;
             const current_ci = vm.ci.?;
             var nargs: u32 = if (b > 0) b - 1 else blk: {
                 const arg_start = vm.base + a + 1;
@@ -1934,12 +2279,24 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // by repeatedly rewriting stack as callable(self, args...).
             var call_chain_depth: u16 = 0;
             while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
-                if (call_chain_depth >= 2000) return error.NotAFunction;
+                if (call_chain_depth >= 2000) {
+                    var msg_buf: [192]u8 = undefined;
+                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                }
                 call_chain_depth += 1;
 
-                const table = tail_func.asTable() orelse return error.NotAFunction;
-                const mt = table.metatable orelse return error.NotAFunction;
-                const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse return error.NotAFunction;
+                const table = tail_func.asTable() orelse {
+                    var msg_buf: [192]u8 = undefined;
+                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                };
+                const mt = table.metatable orelse {
+                    var msg_buf: [192]u8 = undefined;
+                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                };
+                const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
+                    var msg_buf: [192]u8 = undefined;
+                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
+                };
 
                 if (call_mm.asTable() != null or
                     call_mm.asClosure() != null or
@@ -1963,7 +2320,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         vm.top = @max(vm.top, vm.base + a + 1 + nargs);
                     }
                 } else {
-                    return error.NotAFunction;
+                    var msg_buf: [192]u8 = undefined;
+                    return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
                 }
             }
 
@@ -2084,7 +2442,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
             }
 
-            return error.NotAFunction;
+            var msg_buf: [192]u8 = undefined;
+            return vm.raiseString(buildCallNotFunctionMessage(current_ci, a, original_func_val, &msg_buf));
         },
         .RETURN => {
             const a = inst.getA();
@@ -2322,6 +2681,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (key_val.asString()) |key| {
                 vm.last_field_reg = a;
                 vm.last_field_key = key;
+                vm.last_field_is_global = true;
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -2485,12 +2845,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = ci.func.k[c];
 
-            if (key_val.asString()) |key| {
-                vm.last_field_reg = a;
-                vm.last_field_key = key;
-            }
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
+                    vm.last_field_reg = a;
+                    vm.last_field_key = key;
+                    vm.last_field_is_global = false;
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -2500,6 +2859,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
+                    if (!table_val.isNil()) {
+                        vm.last_field_reg = a;
+                        vm.last_field_key = key;
+                        vm.last_field_is_global = false;
+                    }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
                     }
@@ -3108,7 +3472,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
                         // No __call - fall through to error
                         vm.stack[vm.base + a] = .{ .boolean = false };
-                        const err_str = try vm.gc().allocString("attempt to call a non-function value");
+                        var msg_buf: [192]u8 = undefined;
+                        const msg = buildCallNotFunctionMessage(ci, @intCast(a + 1), func_val, &msg_buf);
+                        const err_str = try vm.gc().allocString(msg);
                         vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
                         return .Continue;
                     };
@@ -3205,7 +3571,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Not a function - return error
             vm.stack[vm.base + a] = .{ .boolean = false };
-            const err_str = try vm.gc().allocString("attempt to call a non-function value");
+            var msg_buf: [192]u8 = undefined;
+            const msg = buildCallNotFunctionMessage(ci, @intCast(a + 1), func_val, &msg_buf);
+            const err_str = try vm.gc().allocString(msg);
             vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
             return .Continue;
         },
@@ -3250,8 +3618,21 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
 
     // Try metamethod
     const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+        if (event == .concat) {
+            const bad = if (vb.toNumber() == null and vb.asString() == null) vb else vc;
+            const ty = callableValueTypeName(bad);
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
+            _ = try vm.raiseString(msg);
+            unreachable;
+        }
         return error.ArithmeticError;
     };
+
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+        try raiseMetamethodNotCallable(vm, mm, metamethodEventName(event));
+        unreachable;
+    }
 
     // Call the metamethod
     return try callBinMetamethod(vm, mm, vb, vc, a);
@@ -3861,7 +4242,13 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
         return TValue.fromString(s);
     }
 
-    const concat_mm = getConcatMM(vm, left) orelse getConcatMM(vm, right) orelse return error.ArithmeticError;
+    const concat_mm = getConcatMM(vm, left) orelse getConcatMM(vm, right) orelse {
+        const bad = if (!canConcatPrimitive(left)) left else right;
+        const ty = callableValueTypeName(bad);
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
+        return vm.raiseString(msg);
+    };
     if (concat_mm.asClosure()) |closure| {
         return try executeSyncMM(vm, closure, &[_]TValue{ left, right });
     }
@@ -3877,7 +4264,7 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
         vm.top = call_base;
         return result;
     }
-    return error.ArithmeticError;
+    return vm.raiseString("attempt to concatenate a non-string value");
 }
 
 /// Try to get __concat metamethod from a value
@@ -4027,7 +4414,8 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
         return result.toBoolean();
     }
 
-    return null;
+    try raiseMetamethodNotCallable(vm, lt_mm, "lt");
+    unreachable;
 }
 
 /// Try to get __le metamethod from a table
@@ -4068,6 +4456,9 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
             const result = try executeSyncMM(vm, closure, &[_]TValue{ left, right });
             return result.toBoolean();
         }
+
+        try raiseMetamethodNotCallable(vm, le_mm, "le");
+        unreachable;
     }
 
     // No __le, try using __lt: a <= b iff not (b < a)
@@ -4093,6 +4484,9 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
             const result = try executeSyncMM(vm, closure, &[_]TValue{ right, left });
             return !result.toBoolean();
         }
+
+        try raiseMetamethodNotCallable(vm, lt_mm, "lt");
+        unreachable;
     }
 
     return null;

@@ -87,6 +87,14 @@ pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
     allocator.free(proto.strings);
     allocator.free(proto.native_ids);
     allocator.free(proto.const_refs);
+    for (proto.upvalues) |upv| {
+        if (upv.name) |name| allocator.free(name);
+    }
+    allocator.free(proto.upvalues);
+    for (proto.local_reg_names) |name_opt| {
+        if (name_opt) |name| allocator.free(name);
+    }
+    allocator.free(proto.local_reg_names);
     // Recursively free nested protos
     for (proto.protos) |nested| {
         freeRawProto(allocator, @constCast(nested));
@@ -1128,11 +1136,11 @@ pub const ProtoBuilder = struct {
         switch (parent_loc) {
             .local => |reg| {
                 // Parent has it as a local - capture from parent's stack
-                try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg });
+                try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg, .name = name });
             },
             .upvalue => |idx| {
                 // Parent has it as upvalue - capture from parent's upvalues
-                try self.upvalues.append(self.allocator, .{ .instack = false, .idx = idx });
+                try self.upvalues.append(self.allocator, .{ .instack = false, .idx = idx, .name = name });
             },
         }
 
@@ -1156,8 +1164,23 @@ pub const ProtoBuilder = struct {
             strings_slice[i] = try allocator.dupe(u8, s);
         }
 
-        // Duplicate upvalues
-        const upvalues_slice = try allocator.dupe(Upvaldesc, self.upvalues.items);
+        // Duplicate upvalues (including names)
+        const upvalues_slice = try allocator.alloc(Upvaldesc, self.upvalues.items.len);
+        for (self.upvalues.items, 0..) |upv, i| {
+            upvalues_slice[i] = upv;
+            if (upv.name) |name| {
+                upvalues_slice[i].name = try allocator.dupe(u8, name);
+            }
+        }
+
+        // Build best-effort local register names for diagnostics
+        const local_reg_names = try allocator.alloc(?[]const u8, self.maxstacksize);
+        for (local_reg_names) |*slot| slot.* = null;
+        for (self.variables.items) |entry| {
+            if (entry.reg < self.maxstacksize and local_reg_names[entry.reg] == null) {
+                local_reg_names[entry.reg] = try allocator.dupe(u8, entry.name);
+            }
+        }
 
         // Duplicate source name
         const source_slice = try allocator.dupe(u8, self.source);
@@ -1181,6 +1204,7 @@ pub const ProtoBuilder = struct {
             .maxstacksize = self.maxstacksize,
             .nups = @intCast(self.upvalues.items.len),
             .upvalues = upvalues_slice,
+            .local_reg_names = local_reg_names,
             .source = source_slice,
             .lineinfo = lineinfo_slice,
         };

@@ -25,6 +25,7 @@ pub const Proto = struct {
     maxstacksize: u8,
     nups: u8 = 0, // Number of upvalues
     upvalues: []const Upvaldesc = &.{}, // Upvalue descriptors
+    local_reg_names: []const ?[]const u8 = &.{}, // Best-effort local names by register
     // Debug/error info
     source: []const u8 = "", // Source name (e.g., "@file.lua" or "[string \"...\"]")
     lineinfo: []const u32 = &.{}, // Line number for each instruction
@@ -68,6 +69,7 @@ pub const RawProto = struct {
     maxstacksize: u8,
     nups: u8 = 0,
     upvalues: []const Upvaldesc = &.{},
+    local_reg_names: []const ?[]const u8 = &.{},
     // Debug/error info
     source: []const u8 = "",
     lineinfo: []const u32 = &.{},

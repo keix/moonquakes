@@ -66,6 +66,7 @@ pub fn createTestProto(
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{}, // no upvalues
+        &[_]?[]const u8{}, // no local reg names
         "", // source
         &[_]u32{}, // lineinfo
     );
@@ -97,6 +98,7 @@ pub fn createTestProtoWithUpvalues(
         maxstacksize,
         nups,
         upvalues_copy,
+        &[_]?[]const u8{}, // no local reg names
         "", // source
         &[_]u32{}, // lineinfo
     );
@@ -127,6 +129,7 @@ pub fn createTestProtoWithChildProtos(
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{},
+        &[_]?[]const u8{}, // no local reg names
         "", // source
         &[_]u32{}, // lineinfo
     );
@@ -160,6 +163,7 @@ pub fn createTestProtoFull(
         maxstacksize,
         nups,
         upvalues_copy,
+        &[_]?[]const u8{}, // no local reg names
         "", // source
         &[_]u32{}, // lineinfo
     );

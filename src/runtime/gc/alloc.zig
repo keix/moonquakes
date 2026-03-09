@@ -167,6 +167,7 @@ pub fn allocProto(
     maxstacksize: u8,
     nups: u8,
     upvalues: []const Upvaldesc,
+    local_reg_names: []const ?[]const u8,
     source: []const u8,
     lineinfo: []const u32,
 ) !*ProtoObject {
@@ -182,6 +183,7 @@ pub fn allocProto(
     obj.maxstacksize = maxstacksize;
     obj.nups = nups;
     obj.upvalues = upvalues;
+    obj.local_reg_names = local_reg_names;
     obj.allocator = self.allocator;
     obj.source = source;
     obj.lineinfo = lineinfo;
@@ -191,6 +193,10 @@ pub fn allocProto(
     self.bytes_allocated += code.len * @sizeOf(Instruction);
     self.bytes_allocated += protos.len * @sizeOf(*ProtoObject);
     self.bytes_allocated += upvalues.len * @sizeOf(Upvaldesc);
+    self.bytes_allocated += local_reg_names.len * @sizeOf(?[]const u8);
+    for (local_reg_names) |name_opt| {
+        if (name_opt) |name| self.bytes_allocated += name.len;
+    }
     self.bytes_allocated += source.len;
     self.bytes_allocated += lineinfo.len * @sizeOf(u32);
 

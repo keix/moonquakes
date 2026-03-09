@@ -64,6 +64,7 @@ pub const VM = struct {
     lua_error_value: TValue = .nil,
     last_field_reg: ?u8 = null,
     last_field_key: ?*object.StringObject = null,
+    last_field_is_global: bool = false,
     int_repr_field_key: ?*object.StringObject = null,
 
     // Yield state

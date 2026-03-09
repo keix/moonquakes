@@ -522,6 +522,8 @@ pub const ProtoObject = struct {
     nups: u8,
     /// Upvalue descriptors
     upvalues: []const Upvaldesc,
+    /// Best-effort local names by register index (for diagnostics)
+    local_reg_names: []const ?[]const u8 = &.{},
 
     /// Allocator used to allocate k, code, protos, upvalues arrays
     /// Needed for deallocation during GC sweep

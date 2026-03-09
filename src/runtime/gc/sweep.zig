@@ -127,8 +127,24 @@ pub fn freeObjectFinal(self: anytype, obj: *GCObject) void {
                 self.allocator.free(@constCast(proto_obj.protos));
             }
             if (proto_obj.upvalues.len > 0) {
+                for (proto_obj.upvalues) |upv| {
+                    if (upv.name) |name| {
+                        self.bytes_allocated -= name.len;
+                        self.allocator.free(name);
+                    }
+                }
                 self.bytes_allocated -= proto_obj.upvalues.len * @sizeOf(Upvaldesc);
                 self.allocator.free(@constCast(proto_obj.upvalues));
+            }
+            if (proto_obj.local_reg_names.len > 0) {
+                for (proto_obj.local_reg_names) |name_opt| {
+                    if (name_opt) |name| {
+                        self.bytes_allocated -= name.len;
+                        self.allocator.free(name);
+                    }
+                }
+                self.bytes_allocated -= proto_obj.local_reg_names.len * @sizeOf(?[]const u8);
+                self.allocator.free(@constCast(proto_obj.local_reg_names));
             }
             if (proto_obj.source.len > 0) {
                 self.bytes_allocated -= proto_obj.source.len;
