@@ -37,6 +37,15 @@ pub const GCState = enum(u8) {
     sweep,
 };
 
+pub const GcMode = enum(u8) {
+    // NOTE:
+    // This is currently an API-visible mode flag only.
+    // The collector implementation is still a single unified mark/sweep pipeline.
+    // A true mode split (incremental vs generational behavior) is TODO.
+    incremental,
+    generational,
+};
+
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
 // After collection, threshold adjusts based on survival rate (gc_multiplier)
 const GC_THRESHOLD = 256 * 1024; // 256KB initial threshold
@@ -195,6 +204,10 @@ pub const GC = struct {
     /// When false, automatic collection is disabled but manual collect() still works.
     is_running: bool = true,
 
+    /// API-visible mode for collectgarbage("incremental"/"generational").
+    /// IMPORTANT: this does not change the underlying collector algorithm yet.
+    mode: GcMode = .incremental,
+
     /// Current state in the GC cycle
     gc_state: GCState = .idle,
 
@@ -212,6 +225,9 @@ pub const GC = struct {
 
     /// Previous object in sweep (to update .next pointer)
     sweep_prev: ?*GCObject = null,
+
+    /// Accumulated work units for API-level collectgarbage("step", size).
+    step_accum: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) GC {
         return .{
@@ -284,10 +300,26 @@ pub const GC = struct {
     /// Perform a GC step. Currently runs a full collection.
     /// Returns true if a collection cycle completed.
     pub fn step(self: *GC) bool {
+        return self.stepSized(1);
+    }
+
+    /// Perform a GC step with user-provided size hint.
+    /// Larger sizes finish a cycle with fewer calls.
+    pub fn stepSized(self: *GC, size_hint: usize) bool {
         if (self.gc_inhibit > 0) return false;
         if (self.root_providers.items.len == 0) return false;
-        self.collect();
-        return true;
+        if (size_hint == 0) {
+            self.step_accum = 0;
+            self.collect();
+            return true;
+        }
+        self.step_accum += size_hint;
+        if (self.step_accum >= 200) {
+            self.step_accum = 0;
+            self.collect();
+            return true;
+        }
+        return false;
     }
 
     /// Get memory usage in KB (integer part).

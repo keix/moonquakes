@@ -44,7 +44,7 @@ pub fn propagateEphemerons(self: anytype) bool {
 
             // Check if key is marked (only objects can be unmarked)
             const key_marked = switch (key) {
-                .object => |o| self.isMarked(o),
+                .object => |o| if (o.type == .string) true else self.isMarked(o),
                 else => true, // Non-objects (nil, bool, int, number) are always "marked"
             };
 
@@ -83,7 +83,7 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
 
         // Check weak key (only objects can be collected)
         if (table.hasWeakKeys()) {
-            if (key == .object and self.isWhite(key.object)) {
+            if (key == .object and key.object.type != .string and self.isWhite(key.object)) {
                 remove = true;
             }
         }
@@ -91,8 +91,10 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
         // Check weak value (only for collectable values)
         if (table.hasWeakValues() and !remove) {
             const val = entry.value_ptr.*;
-            if (val == .object and self.isWhite(val.object)) {
-                remove = true;
+            if (val == .object and val.object.type != .string and self.isWhite(val.object)) {
+                if (!(key == .object and key.object == val.object)) {
+                    remove = true;
+                }
             }
         }
 

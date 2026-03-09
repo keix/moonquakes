@@ -143,8 +143,14 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
         },
         .upvalue => {
             const upval: *UpvalueObject = @fieldParentPtr("header", obj);
-            if (upval.isClosed()) {
-                markGrayValue(self, upval.closed);
+            // Open upvalues point into a live stack slot; closed upvalues use
+            // internal storage. In both cases the referenced value is part of
+            // the reachability graph and must be marked.
+            markGrayValue(self, upval.get());
+            if (!upval.isClosed()) {
+                if (upval.owner_thread) |owner| {
+                    markGray(self, &owner.header);
+                }
             }
         },
         .userdata => {

@@ -1482,6 +1482,14 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     } else "collect";
 
     const gc = vm.gc();
+    const modeName = struct {
+        fn get(mode: anytype) []const u8 {
+            return switch (mode) {
+                .incremental => "incremental",
+                .generational => "generational",
+            };
+        }
+    }.get;
     const result: TValue = if (gc_options.get(opt)) |option| switch (option) {
         .collect => blk: {
             vm.collectGarbage();
@@ -1493,10 +1501,31 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             break :blk .nil;
         },
         .count => TValue{ .number = @as(f64, @floatFromInt(gc.bytes_allocated)) / 1024.0 },
-        .step => TValue{ .boolean = gc.step() },
+        .step => blk: {
+            const step_arg: usize = if (nargs >= 2) blk2: {
+                const arg = vm.stack[vm.base + func_reg + 2];
+                if (arg.toInteger()) |i| {
+                    break :blk2 if (i <= 0) 0 else @as(usize, @intCast(i));
+                }
+                break :blk2 0;
+            } else 0;
+            break :blk TValue{ .boolean = gc.stepSized(step_arg) };
+        },
         .isrunning => TValue{ .boolean = gc.is_running },
-        .incremental => .nil, // Not implemented (Lua 5.4 advanced)
-        .generational => .nil, // Not implemented (Lua 5.4 advanced)
+        .incremental => blk: {
+            // API compatibility mode switch only.
+            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
+            const prev = modeName(gc.mode);
+            gc.mode = .incremental;
+            break :blk TValue.fromString(try vm.gc().allocString(prev));
+        },
+        .generational => blk: {
+            // API compatibility mode switch only.
+            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
+            const prev = modeName(gc.mode);
+            gc.mode = .generational;
+            break :blk TValue.fromString(try vm.gc().allocString(prev));
+        },
     } else blk: {
         // Invalid option returns nil (Lua compatible)
         break :blk .nil;

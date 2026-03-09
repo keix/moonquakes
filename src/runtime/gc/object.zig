@@ -269,12 +269,14 @@ pub const TableObject = struct {
 
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            if (value.isNil()) continue;
             if (after) |pivot| {
                 if (!keyLessThan(pivot, key)) continue;
             }
             if (best_key == null or keyLessThan(key, best_key.?)) {
                 best_key = key;
-                best_val = entry.value_ptr.*;
+                best_val = value;
             }
         }
 
@@ -320,14 +322,25 @@ pub const TableObject = struct {
     pub fn nextSlot(self: *TableObject, prev: ?TValue) NextSlotError!?KeyValuePair {
         if (self.isPureArray()) {
             if (prev == null) {
-                const first_key = TValue{ .integer = 1 };
-                return .{ .key = first_key, .value = self.get(first_key).? };
+                var i: i64 = 1;
+                while (i <= self.seq_len) : (i += 1) {
+                    const key = TValue{ .integer = i };
+                    if (self.get(key)) |v| {
+                        if (!v.isNil()) return .{ .key = key, .value = v };
+                    }
+                }
+                return null;
             }
             const prev_key = prev.?;
             if (prev_key == .integer and prev_key.integer >= 1 and prev_key.integer <= self.seq_len) {
-                if (prev_key.integer == self.seq_len) return null;
-                const next_key = TValue{ .integer = prev_key.integer + 1 };
-                return .{ .key = next_key, .value = self.get(next_key).? };
+                var i: i64 = prev_key.integer + 1;
+                while (i <= self.seq_len) : (i += 1) {
+                    const key = TValue{ .integer = i };
+                    if (self.get(key)) |v| {
+                        if (!v.isNil()) return .{ .key = key, .value = v };
+                    }
+                }
+                return null;
             }
         }
 
@@ -452,6 +465,8 @@ pub const UpvalueObject = struct {
     header: GCObject,
     /// Pointer to the value (stack slot when open, &closed when closed)
     location: *TValue,
+    /// Owning thread while open; null after close.
+    owner_thread: ?*ThreadObject,
     /// Storage for the value when the upvalue is closed
     closed: TValue,
     /// Linked list of open upvalues (for efficient closing when stack frame pops)
@@ -466,6 +481,7 @@ pub const UpvalueObject = struct {
     pub fn close(self: *UpvalueObject) void {
         self.closed = self.location.*;
         self.location = &self.closed;
+        self.owner_thread = null;
     }
 
     /// Get the current value

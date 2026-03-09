@@ -1493,21 +1493,39 @@ pub const Parser = struct {
     fn parseSuffixAssignmentFromExpr(self: *Parser, expr_reg: u8) ParseError!void {
         if (self.proto.code.items.len == 0) return error.UnsupportedStatement;
 
-        const last_idx = self.proto.code.items.len - 1;
-        const last_inst = self.proto.code.items[last_idx];
-        const target: AssignTarget = switch (last_inst.getOpCode()) {
+        // Some expression paths may end with one or more MOVE instructions.
+        // Follow MOVE chains to recover the original GETFIELD/GETTABLE target.
+        var probe_idx: usize = self.proto.code.items.len - 1;
+        var probe_reg: u8 = expr_reg;
+        var moves_to_pop: usize = 0;
+        while (true) {
+            const inst = self.proto.code.items[probe_idx];
+            if (inst.getOpCode() == .MOVE and inst.a == probe_reg and probe_idx > 0) {
+                probe_reg = inst.b;
+                probe_idx -= 1;
+                moves_to_pop += 1;
+                continue;
+            }
+            break;
+        }
+
+        const op_inst = self.proto.code.items[probe_idx];
+        const target: AssignTarget = switch (op_inst.getOpCode()) {
             .GETFIELD => blk: {
-                if (last_inst.a != expr_reg) return error.UnsupportedStatement;
-                break :blk .{ .field = .{ .table_reg = last_inst.b, .field_const = last_inst.c } };
+                if (op_inst.a != probe_reg) return error.UnsupportedStatement;
+                break :blk .{ .field = .{ .table_reg = op_inst.b, .field_const = op_inst.c } };
             },
             .GETTABLE => blk: {
-                if (last_inst.a != expr_reg) return error.UnsupportedStatement;
-                break :blk .{ .index = .{ .table_reg = last_inst.b, .key_reg = last_inst.c } };
+                if (op_inst.a != probe_reg) return error.UnsupportedStatement;
+                break :blk .{ .index = .{ .table_reg = op_inst.b, .key_reg = op_inst.c } };
             },
             else => return error.UnsupportedStatement,
         };
 
-        _ = self.proto.code.pop();
+        var pops: usize = moves_to_pop + 1; // move chain + source get op
+        while (pops > 0) : (pops -= 1) {
+            _ = self.proto.code.pop();
+        }
 
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             return self.parseMultipleAssignmentWithFirstTarget(target);

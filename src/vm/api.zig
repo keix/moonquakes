@@ -59,7 +59,7 @@ pub fn getOrCreateUpvalue(self: *VM, location: *TValue) !*UpvalueObject {
         current = uv.next_open;
     }
 
-    const new_uv = try gc(self).allocUpvalue(location);
+    const new_uv = try gc(self).allocUpvalue(location, self.thread);
     new_uv.next_open = current;
     if (prev) |p| {
         p.next_open = new_uv;

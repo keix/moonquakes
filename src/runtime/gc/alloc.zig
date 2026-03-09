@@ -201,12 +201,13 @@ pub fn allocProto(
 }
 
 /// Allocate a new upvalue object
-pub fn allocUpvalue(self: anytype, location: *TValue) !*UpvalueObject {
+pub fn allocUpvalue(self: anytype, location: *TValue, owner_thread: ?*ThreadObject) !*UpvalueObject {
     const obj = try allocObject(self, UpvalueObject, 0);
 
     // Initialize GC header (black = survives current cycle)
     obj.header = newObjectHeader(self, .upvalue);
     obj.location = location;
+    obj.owner_thread = owner_thread;
     obj.closed = TValue.nil;
     obj.next_open = null;
 
@@ -225,6 +226,7 @@ pub fn allocClosedUpvalue(self: anytype, value: TValue) !*UpvalueObject {
     obj.header = newObjectHeader(self, .upvalue);
     obj.closed = value;
     obj.location = &obj.closed; // Point to self (closed state)
+    obj.owner_thread = null;
     obj.next_open = null;
 
     // Add to GC object list
