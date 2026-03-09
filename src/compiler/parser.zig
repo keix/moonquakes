@@ -125,6 +125,7 @@ const ScopeMark = struct {
 const PendingGoto = struct {
     name: []const u8, // label name
     code_pos: usize, // position of the JMP instruction to patch
+    line: u32 = 0,
     scope_depth: usize = 0,
     scope_id: u32 = 0,
     next_decl_seq: u32 = 0,
@@ -132,6 +133,7 @@ const PendingGoto = struct {
 
 const LabelEntry = struct {
     code_pos: usize,
+    line: u32,
     scope_depth: usize,
     scope_id: u32,
     next_decl_seq: u32,
@@ -1391,6 +1393,17 @@ pub const Parser = struct {
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
+                    // Lua allows at most one optional semicolon after top-level return.
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        self.advance();
+                    }
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        return error.UnsupportedStatement;
+                    }
+                    // At top-level chunk, return must be the final statement.
+                    if (self.current.kind != .Eof) {
+                        return error.UnsupportedStatement;
+                    }
                     return; // return ends the chunk
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
                     try self.parseIf();
@@ -1478,7 +1491,7 @@ pub const Parser = struct {
         // Check for unresolved gotos
         if (self.proto.pending_gotos.items.len > 0) {
             const first = self.proto.pending_gotos.items[0];
-            self.setError("no visible label '{s}' for <goto>", .{first.name});
+            self.setError("no visible label '{s}' for <goto> at line {d}", .{ first.name, first.line });
             return error.UndefinedLabel;
         }
 
@@ -2716,6 +2729,7 @@ pub const Parser = struct {
     /// Parse table constructor: { [field,]* }
     /// field = Name '=' expr | '[' expr ']' '=' expr | expr
     fn parseTableConstructor(self: *Parser) ParseError!u8 {
+        const open_line = self.current.line;
         // Consume '{'
         self.advance();
 
@@ -2728,6 +2742,10 @@ pub const Parser = struct {
 
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            if (self.current.kind == .Eof) {
+                self.setError("'}}' expected (to close '{{' at line {d}) near <eof>", .{open_line});
+                return error.ExpectedCloseBrace;
+            }
             // Check for indexed field: '[' expr ']' '=' expr
             if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2893,6 +2911,9 @@ pub const Parser = struct {
 
         // Consume '}'
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            if (self.current.kind == .Eof) {
+                self.setError("'}}' expected (to close '{{' at line {d}) near <eof>", .{open_line});
+            }
             return error.ExpectedCloseBrace;
         }
         self.advance();
@@ -3861,6 +3882,7 @@ pub const Parser = struct {
     /// Parse 'goto label' statement
     fn parseGoto(self: *Parser) ParseError!void {
         self.advance(); // consume 'goto'
+        const goto_line = self.current.line;
 
         // Expect label name
         if (self.current.kind != .Identifier) {
@@ -3873,7 +3895,7 @@ pub const Parser = struct {
         if (self.proto.labels.get(label_name)) |target| {
             // Cannot jump into a deeper block.
             if (!self.isScopeAncestor(target.scope_id, self.currentScopeId())) {
-                self.setError("no visible label '{s}' for <goto>", .{label_name});
+                self.setError("no visible label '{s}' for <goto> at line {d}", .{ label_name, goto_line });
                 return error.UndefinedLabel;
             }
             if (target.code_pos <= self.proto.code.items.len) {
@@ -3892,6 +3914,7 @@ pub const Parser = struct {
             try self.proto.pending_gotos.append(self.proto.allocator, .{
                 .name = label_name,
                 .code_pos = jmp_addr,
+                .line = @intCast(goto_line),
                 .scope_depth = self.currentScopeDepth(),
                 .scope_id = self.currentScopeId(),
                 .next_decl_seq = self.proto.local_decl_seq,
@@ -3901,6 +3924,7 @@ pub const Parser = struct {
 
     /// Parse '::label::' label definition
     fn parseLabel(self: *Parser) ParseError!void {
+        const label_line = self.current.line;
         self.advance(); // consume first ':'
         self.advance(); // consume second ':'
 
@@ -3922,8 +3946,8 @@ pub const Parser = struct {
         self.advance(); // consume ':'
 
         // Repeated labels are not allowed.
-        if (self.proto.labels.get(label_name) != null) {
-            self.setError("label '{s}' already defined", .{label_name});
+        if (self.proto.labels.get(label_name)) |prev| {
+            self.setError("label '{s}' already defined on line {d}", .{ label_name, prev.line });
             return error.ExpectedLabel;
         }
 
@@ -3931,6 +3955,7 @@ pub const Parser = struct {
         const label_pos = self.proto.code.items.len;
         const label = LabelEntry{
             .code_pos = label_pos,
+            .line = @intCast(label_line),
             .scope_depth = self.currentScopeDepth(),
             .scope_id = self.currentScopeId(),
             .next_decl_seq = self.proto.local_decl_seq,
@@ -3990,9 +4015,12 @@ pub const Parser = struct {
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
-                    // Skip optional trailing semicolons after return
-                    while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                    // Lua allows at most one optional semicolon after return.
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
                         self.advance();
+                    }
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        return error.UnsupportedStatement;
                     }
                     return; // return ends the statement block
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {

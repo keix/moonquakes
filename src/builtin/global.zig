@@ -42,6 +42,57 @@ fn modeAllowsText(mode: []const u8) bool {
     return std.mem.indexOfScalar(u8, mode, 't') != null;
 }
 
+fn formatLoadChunkName(name: []const u8, out_buf: []u8) []const u8 {
+    if (name.len > 0 and (name[0] == '@' or name[0] == '=')) {
+        return name[1..];
+    }
+
+    const prefix = "[string \"";
+    const suffix = "\"]";
+    var pos: usize = 0;
+
+    if (prefix.len > out_buf.len) return "[string]";
+    @memcpy(out_buf[pos..][0..prefix.len], prefix);
+    pos += prefix.len;
+
+    const snippet_max: usize = 60;
+    var consumed: usize = 0;
+    var i: usize = 0;
+    var truncated = false;
+    while (i < name.len and consumed < snippet_max) : (i += 1) {
+        const c = name[i];
+        if (c == '\n' or c == '\r') {
+            truncated = true;
+            break;
+        }
+        if (c == '"' or c == '\\') {
+            if (pos + 2 > out_buf.len) return "[string]";
+            out_buf[pos] = '\\';
+            out_buf[pos + 1] = c;
+            pos += 2;
+        } else {
+            if (pos + 1 > out_buf.len) return "[string]";
+            out_buf[pos] = c;
+            pos += 1;
+        }
+        consumed += 1;
+    }
+    if (i < name.len) truncated = true;
+
+    if (truncated) {
+        if (pos + 3 > out_buf.len) return "[string]";
+        out_buf[pos] = '.';
+        out_buf[pos + 1] = '.';
+        out_buf[pos + 2] = '.';
+        pos += 3;
+    }
+
+    if (pos + suffix.len > out_buf.len) return "[string]";
+    @memcpy(out_buf[pos..][0..suffix.len], suffix);
+    pos += suffix.len;
+    return out_buf[0..pos];
+}
+
 fn findEnvUpvalueIndex(upvalues: []const Upvaldesc) ?usize {
     for (upvalues, 0..) |upv, i| {
         if (upv.name) |name| {
@@ -704,8 +755,7 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     }
 
     if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #1 to 'tonumber' (value expected)");
     }
 
     const arg = vm.stack[vm.base + func_reg + 1];
@@ -1022,11 +1072,11 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
     }
 
-    // Get chunkname parameter (2nd argument, default "[string]")
-    var source_name: []const u8 = "[string]";
+    // Get optional chunkname parameter (2nd argument).
+    var source_name_opt: ?[]const u8 = null;
     if (nargs >= 2) {
         if (vm.stack[vm.base + func_reg + 2].asString()) |name_str| {
-            source_name = name_str.asSlice();
+            source_name_opt = name_str.asSlice();
         }
     }
 
@@ -1129,6 +1179,8 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         return;
     }
 
+    const source_name = source_name_opt orelse if (chunk_arg.asString() != null) source else "=(load)";
+
     // Compile the source
     const compile_result = vm.rt.compile_ctx.compile(load_source, .{
         .source_name = source_name,
@@ -1138,9 +1190,11 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             defer e.deinit(vm.gc().allocator);
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
-                // Format: "[string]:line: message"
-                const msg = std.fmt.allocPrint(vm.gc().allocator, "[string]:{d}: {s}", .{
-                    e.line, e.message,
+                // Format follows Lua: chunkname:line: message.
+                var chunk_name_buf: [256]u8 = undefined;
+                const chunk_display = formatLoadChunkName(source_name, &chunk_name_buf);
+                const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
+                    chunk_display, e.line, e.message,
                 }) catch "syntax error";
                 defer vm.gc().allocator.free(msg);
                 const err_str = try vm.gc().allocString(msg);

@@ -48,9 +48,12 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     vm.beginGCGuard();
     defer vm.endGCGuard();
 
+    if (nargs == 0) {
+        return vm.raiseString("bad argument #1 to 'tostring' (value expected)");
+    }
     if (nresults == 0) return;
 
-    const arg = if (nargs > 0) vm.stack[vm.base + func_reg + 1] else TValue.nil;
+    const arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = try toStringValue(vm, arg);
     vm.stack[vm.base + func_reg] = TValue.fromString(str_obj);
     if (nresults > 1) {

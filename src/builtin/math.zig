@@ -576,14 +576,11 @@ pub fn nativeMathRandomseed(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
 /// math.sin(x) - Returns the sine of x (x is in radians)
 pub fn nativeMathSin(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nargs;
-    if (nresults == 0) return;
-
+    if (nargs < 1) return vm.raiseString("number expected");
     const arg = vm.stack[vm.base + func_reg + 1];
-    if (arg.toNumber()) |n| {
+    const n = arg.toNumber() orelse return vm.raiseString("number expected");
+    if (nresults > 0) {
         vm.stack[vm.base + func_reg] = .{ .number = @sin(n) };
-    } else {
-        vm.stack[vm.base + func_reg] = .nil;
     }
 }
 

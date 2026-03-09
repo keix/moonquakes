@@ -334,6 +334,34 @@ pub fn eqOp(a: TValue, b: TValue) bool {
     return a.eql(b);
 }
 
+fn valueTypeName(v: TValue) []const u8 {
+    return switch (v) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .userdata => "userdata",
+            .thread => "thread",
+            .file => "userdata",
+            else => "userdata",
+        },
+    };
+}
+
+fn raiseOrderComparison(vm: *VM, left: TValue, right: TValue) !bool {
+    const left_ty = valueTypeName(left);
+    const right_ty = valueTypeName(right);
+    var msg_buf: [128]u8 = undefined;
+    const msg = if (std.mem.eql(u8, left_ty, right_ty))
+        std.fmt.bufPrint(&msg_buf, "attempt to compare two {s} values", .{left_ty}) catch "attempt to compare values"
+    else
+        std.fmt.bufPrint(&msg_buf, "attempt to compare {s} with {s}", .{ left_ty, right_ty }) catch "attempt to compare values";
+    return vm.raiseString(msg);
+}
+
 pub fn ltOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
         return a.integer < b.integer;
@@ -1446,7 +1474,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 break :blk std.mem.order(u8, left_str, right_str) == .lt;
             }
                 // Slow path: try metamethod
-                else try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+                else blk: {
+                    if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                };
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -1472,7 +1504,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 break :blk order == .lt or order == .eq;
             }
                 // Slow path: try metamethod
-                else try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+                else blk: {
+                    if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                };
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
                 ci.skip();
@@ -2584,8 +2620,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
                 try ltOp(left, right)
-            else
-                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+            else blk: {
+                if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
+                _ = try raiseOrderComparison(vm, left, right);
+                unreachable;
+            };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -2604,8 +2643,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
                 try leOp(left, right)
-            else
-                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+            else blk: {
+                if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
+                _ = try raiseOrderComparison(vm, left, right);
+                unreachable;
+            };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -2624,8 +2666,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: right is a number (GTI is imm < R[B])
             const is_true = if (right.isInteger() or right.isNumber())
                 try ltOp(left, right)
-            else
-                try dispatchLtMM(vm, left, right) orelse return error.ArithmeticError;
+            else blk: {
+                if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
+                _ = try raiseOrderComparison(vm, left, right);
+                unreachable;
+            };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
@@ -2644,8 +2689,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: right is a number (GEI is imm <= R[B])
             const is_true = if (right.isInteger() or right.isNumber())
                 try leOp(left, right)
-            else
-                try dispatchLeMM(vm, left, right) orelse return error.ArithmeticError;
+            else blk: {
+                if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
+                _ = try raiseOrderComparison(vm, left, right);
+                unreachable;
+            };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
                 ci.skip();
