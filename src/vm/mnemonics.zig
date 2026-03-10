@@ -1378,14 +1378,14 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                                         // Ignore synthetic _ENV provenance; fallback will
                                         // try field/global/method names from value flow.
                                     } else {
-                                    const kind = switch (ctx.kind) {
-                                        .global_name => "global",
-                                        .field_name => "field",
-                                        .method_name => "method",
-                                        .local_name => "local",
-                                        .upvalue_name => "upvalue",
-                                    };
-                                    break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
+                                        const kind = switch (ctx.kind) {
+                                            .global_name => "global",
+                                            .field_name => "field",
+                                            .method_name => "method",
+                                            .local_name => "local",
+                                            .upvalue_name => "upvalue",
+                                        };
+                                        break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
                                     }
                                 }
                             }
