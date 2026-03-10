@@ -4100,7 +4100,13 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    _ = try self.parseExpr();
+                    const expr_reg = try self.parseExpr();
+                    if (self.current.kind == .Symbol and
+                        (std.mem.eql(u8, self.current.lexeme, "=") or
+                            std.mem.eql(u8, self.current.lexeme, ",")))
+                    {
+                        try self.parseSuffixAssignmentFromExpr(expr_reg);
+                    }
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -4128,7 +4134,13 @@ pub const Parser = struct {
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
                 // Lua allows function-call statements whose prefixexp starts with parentheses,
                 // e.g. (Message or print)("...")
-                _ = try self.parseExpr();
+                const expr_reg = try self.parseExpr();
+                if (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, "=") or
+                        std.mem.eql(u8, self.current.lexeme, ",")))
+                {
+                    try self.parseSuffixAssignmentFromExpr(expr_reg);
+                }
             } else {
                 return error.UnsupportedStatement;
             }
