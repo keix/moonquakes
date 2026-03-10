@@ -11,6 +11,27 @@ const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 pub const materialize = @import("materialize.zig").materialize;
 
+fn formatNearToken(allocator: std.mem.Allocator, tok: lexer.Token) ![]const u8 {
+    if (tok.kind == .Eof or tok.lexeme.len == 0) {
+        return allocator.dupe(u8, "<eof>");
+    }
+
+    if (tok.lexeme.len == 1) {
+        const b = tok.lexeme[0];
+        if (b < 32 or b == 127 or b >= 128) {
+            return std.fmt.allocPrint(allocator, "<\\{d}>", .{b});
+        }
+    }
+
+    for (tok.lexeme) |b| {
+        if (b < 32 or b == 127) {
+            return std.fmt.allocPrint(allocator, "<\\{d}>", .{b});
+        }
+    }
+
+    return allocator.dupe(u8, tok.lexeme);
+}
+
 /// Compilation error with structured information
 pub const CompileError = struct {
     line: u32,
@@ -84,18 +105,39 @@ fn compileWithAllocators(
     p.parseChunk() catch |err| {
         const line: u32 = @intCast(p.current.line);
         const parser_msg = p.getErrorMsg();
-
         const err_name = @errorName(err);
+
         const message = if (parser_msg.len > 0)
             output_allocator.dupe(u8, parser_msg) catch ""
-        else if (err == error.ExpectedExpression and p.current.kind == lexer.TokenKind.Eof)
-            output_allocator.dupe(u8, "near <eof>") catch ""
+        else if (err == error.TooManyUpvalues)
+            std.fmt.allocPrint(output_allocator, "too many upvalues (line {d})", .{line}) catch ""
         else if (err == error.UnsupportedStatement)
-            output_allocator.dupe(u8, "unexpected symbol") catch ""
+            blk: {
+                const near_tok = formatNearToken(output_allocator, p.current) catch "";
+                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "unexpected symbol") catch "";
+                if (std.mem.eql(u8, near_tok, "<eof>")) {
+                    break :blk output_allocator.dupe(u8, "unexpected symbol near <eof>") catch "";
+                }
+                break :blk std.fmt.allocPrint(output_allocator, "unexpected symbol near '{s}'", .{near_tok}) catch "";
+            }
         else if (std.mem.startsWith(u8, err_name, "Expected"))
-            output_allocator.dupe(u8, "expected") catch ""
+            blk: {
+                const near_tok = formatNearToken(output_allocator, p.current) catch "";
+                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "expected") catch "";
+                if (std.mem.eql(u8, near_tok, "<eof>")) {
+                    break :blk output_allocator.dupe(u8, "expected near <eof>") catch "";
+                }
+                break :blk std.fmt.allocPrint(output_allocator, "expected near '{s}'", .{near_tok}) catch "";
+            }
         else
-            output_allocator.dupe(u8, err_name) catch "";
+            blk: {
+                const near_tok = formatNearToken(output_allocator, p.current) catch "";
+                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "syntax error") catch "";
+                if (std.mem.eql(u8, near_tok, "<eof>")) {
+                    break :blk output_allocator.dupe(u8, "syntax error near <eof>") catch "";
+                }
+                break :blk std.fmt.allocPrint(output_allocator, "syntax error near '{s}'", .{near_tok}) catch "";
+            };
 
         return .{ .err = .{ .line = line, .message = message } };
     };

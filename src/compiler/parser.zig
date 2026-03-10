@@ -64,6 +64,7 @@ const ParseError = error{
     ExpectedColon,
     ExpectedIn,
     TooManyLoopVariables,
+    TooManyUpvalues,
     VarargOutsideVarargFunction,
     InvalidAttribute,
     ExpectedLabel,
@@ -1132,6 +1133,9 @@ pub const ProtoBuilder = struct {
         const parent_loc = try parent.resolveVariable(name) orelse return null;
 
         // 5. Create upvalue to capture from parent
+        if (self.upvalues.items.len >= 255) {
+            return error.TooManyUpvalues;
+        }
         const upval_idx: u8 = @intCast(self.upvalues.items.len);
         switch (parent_loc) {
             .local => |reg| {
@@ -1492,6 +1496,15 @@ pub const Parser = struct {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
+                    const near_lexeme = if (next.kind != .Eof and next.lexeme.len > 0) next.lexeme else self.current.lexeme;
+                    if (near_lexeme.len == 1) {
+                        const b = near_lexeme[0];
+                        if (b < 32 or b == 127 or b >= 128) {
+                            self.setError("syntax error near '<\\{d}>'", .{b});
+                            return error.UnsupportedStatement;
+                        }
+                    }
+                    self.setError("syntax error near '{s}'", .{near_lexeme});
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
@@ -3165,6 +3178,10 @@ pub const Parser = struct {
 
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "..")) {
             self.advance(); // consume '..'
+            if (count >= operands.len) {
+                self.setError("too many syntax levels", .{});
+                return error.UnsupportedStatement;
+            }
             operands[count] = try self.parseAdd();
             count += 1;
         }
@@ -4125,6 +4142,7 @@ pub const Parser = struct {
     /// Variable is only visible AFTER its initializer (so `local a = a` refers to outer a)
     fn parseLocalDecl(self: *Parser) ParseError!void {
         self.advance(); // consume 'local'
+        const local_var_limit: u8 = 200;
 
         // Check for 'local function' syntax
         if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "function")) {
@@ -4140,6 +4158,11 @@ pub const Parser = struct {
         // First identifier
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
+        }
+        if (var_count >= local_var_limit) {
+            const fn_line = if (self.current.line > 0) self.current.line - 1 else self.current.line;
+            self.setError("too many local variables (line {d})", .{fn_line});
+            return error.UnsupportedStatement;
         }
         var_names[var_count] = self.current.lexeme;
         var_is_close[var_count] = false;
@@ -4178,6 +4201,11 @@ pub const Parser = struct {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
                 return error.ExpectedIdentifier;
+            }
+            if (var_count >= local_var_limit) {
+                const fn_line = if (self.current.line > 0) self.current.line - 1 else self.current.line;
+                self.setError("too many local variables (line {d})", .{fn_line});
+                return error.UnsupportedStatement;
             }
             var_names[var_count] = self.current.lexeme;
             var_is_close[var_count] = false;
@@ -4566,6 +4594,7 @@ pub const Parser = struct {
         var arg_count: u8 = 0;
         var last_was_call = false;
         var last_was_vararg = false;
+        const max_register_index: u16 = 254;
 
         const detectTailCallInRange = struct {
             fn run(code: []Instruction, start: usize) bool {
@@ -4586,6 +4615,10 @@ pub const Parser = struct {
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
             // Single argument without parentheses
+            if (@as(u16, func_reg) + 1 > max_register_index) {
+                self.setError("too many registers", .{});
+                return error.UnsupportedStatement;
+            }
             const arg_reg = if (self.current.kind == .String)
                 try self.parseStringLiteral()
             else
@@ -4615,6 +4648,10 @@ pub const Parser = struct {
                 last_was_vararg = true;
             } else {
                 // Parse first argument
+                if (@as(u16, func_reg) + 1 > max_register_index) {
+                    self.setError("too many registers", .{});
+                    return error.UnsupportedStatement;
+                }
                 const target_reg = func_reg + 1;
                 // Force next_reg to the argument target so call results remain contiguous.
                 const saved_next_reg = self.proto.next_reg;
@@ -4640,12 +4677,20 @@ pub const Parser = struct {
                         return error.VarargOutsideVarargFunction;
                     }
                     self.advance(); // consume '...'
+                    if (@as(u16, func_reg) + @as(u16, arg_count) + 1 > max_register_index) {
+                        self.setError("too many registers", .{});
+                        return error.UnsupportedStatement;
+                    }
                     // Emit VARARG with C=0 to load all varargs starting at func_reg+arg_count+1
                     try self.proto.emit(.VARARG, func_reg + arg_count + 1, 0, 0);
                     last_was_vararg = true;
                     break; // ... must be last argument
                 }
 
+                if (@as(u16, func_reg) + @as(u16, arg_count) + 2 > max_register_index) {
+                    self.setError("too many registers", .{});
+                    return error.UnsupportedStatement;
+                }
                 arg_count += 1;
                 const target_reg = func_reg + arg_count;
                 // Force next_reg to the argument target so call results remain contiguous.

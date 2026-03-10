@@ -87,6 +87,9 @@ pub const VM = struct {
     hook_func: ?*ClosureObject = null,
     hook_mask: u8 = 0, // 1=call, 2=return, 4=line
     hook_count: u32 = 0,
+    error_handling_depth: u8 = 0,
+    traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
+    traceback_snapshot_count: u16 = 0,
 
     // Lifecycle
     pub const init = lifecycle.init;

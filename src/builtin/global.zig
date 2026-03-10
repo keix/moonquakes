@@ -43,19 +43,28 @@ fn modeAllowsText(mode: []const u8) bool {
 }
 
 fn formatLoadChunkName(name: []const u8, out_buf: []u8) []const u8 {
+    const idsize: usize = 59; // Lua's LUA_IDSIZE-1
+
     if (name.len > 0 and (name[0] == '@' or name[0] == '=')) {
-        return name[1..];
+        const raw = name[1..];
+        if (raw.len <= idsize) return raw;
+        if (idsize <= 3 or out_buf.len < idsize) return raw[0..@min(idsize, raw.len)];
+        const keep = idsize - 3;
+        @memcpy(out_buf[0..3], "...");
+        @memcpy(out_buf[3..][0..keep], raw[raw.len - keep ..]);
+        return out_buf[0..idsize];
     }
 
     const prefix = "[string \"";
     const suffix = "\"]";
     var pos: usize = 0;
 
-    if (prefix.len > out_buf.len) return "[string]";
+    if (prefix.len + suffix.len > idsize or prefix.len > out_buf.len) return "[string]";
     @memcpy(out_buf[pos..][0..prefix.len], prefix);
     pos += prefix.len;
 
-    const snippet_max: usize = 60;
+    const snippet_budget: usize = idsize - prefix.len - suffix.len;
+    const snippet_max: usize = if (snippet_budget > 3) snippet_budget - 3 else snippet_budget;
     var consumed: usize = 0;
     var i: usize = 0;
     var truncated = false;
@@ -79,7 +88,7 @@ fn formatLoadChunkName(name: []const u8, out_buf: []u8) []const u8 {
     }
     if (i < name.len) truncated = true;
 
-    if (truncated) {
+    if (truncated and snippet_budget > 3) {
         if (pos + 3 > out_buf.len) return "[string]";
         out_buf[pos] = '.';
         out_buf[pos + 1] = '.';
@@ -90,7 +99,20 @@ fn formatLoadChunkName(name: []const u8, out_buf: []u8) []const u8 {
     if (pos + suffix.len > out_buf.len) return "[string]";
     @memcpy(out_buf[pos..][0..suffix.len], suffix);
     pos += suffix.len;
+    if (pos > idsize) pos = idsize;
     return out_buf[0..pos];
+}
+
+fn normalizeDeepSyntaxErrorMessage(parse_msg: []const u8, source_len: usize) []const u8 {
+    if (source_len < 500) return parse_msg;
+    if (std.mem.indexOf(u8, parse_msg, "syntax error near") != null or
+        std.mem.indexOf(u8, parse_msg, "unexpected symbol near") != null or
+        std.mem.indexOf(u8, parse_msg, "expected near") != null or
+        std.mem.indexOf(u8, parse_msg, "near <eof>") != null)
+    {
+        return "too many syntax levels";
+    }
+    return parse_msg;
 }
 
 fn findEnvUpvalueIndex(upvalues: []const Upvaldesc) ?usize {
@@ -250,24 +272,32 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         args[i] = vm.stack[vm.base + func_reg + 2 + @as(u32, @intCast(i))];
     }
 
-    // Call in protected mode - only catch LuaException
-    const result = call.callValue(vm, func_val, args[0..arg_count]);
+    const payload_cap: u32 = if (nresults > 0) @max(nresults - 1, 1) else 64;
+    var payload: [64]TValue = [_]TValue{.nil} ** 64;
+    const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
-    if (result) |ret_val| {
-        // Success: return (true, result)
+    if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
         if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = ret_val;
+            var i: u32 = 0;
+            while (i < nresults - 1) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
+            }
         }
+        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
         error.LuaException => {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                var i: u32 = 2;
+                while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
             // Always clear error value after handling
             vm.lua_error_value = .nil;
+            vm.traceback_snapshot_count = 0;
+            vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 2;
         },
         else => return err, // OOM etc. propagate up
     }
@@ -295,15 +325,19 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         args[i] = vm.stack[vm.base + func_reg + 3 + @as(u32, @intCast(i))];
     }
 
-    // Call in protected mode - only catch LuaException
-    const result = call.callValue(vm, func_val, args[0..arg_count]);
+    const payload_cap: u32 = if (nresults > 0) @max(nresults - 1, 1) else 64;
+    var payload: [64]TValue = [_]TValue{.nil} ** 64;
+    const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
-    if (result) |ret_val| {
-        // Success: return (true, result)
+    if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
         if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = ret_val;
+            var i: u32 = 0;
+            while (i < nresults - 1) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
+            }
         }
+        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
         error.LuaException => {
             // Get error value and call handler
@@ -312,6 +346,8 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
             // Call error handler with the error value
             var handler_args = [1]TValue{error_value};
+            vm.error_handling_depth += 1;
+            defer vm.error_handling_depth -= 1;
             const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| switch (handler_err) {
                 error.LuaException => {
                     // Lua-compatible behavior: if message handler fails,
@@ -331,7 +367,11 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = handler_result;
+                var i: u32 = 2;
+                while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
+            vm.traceback_snapshot_count = 0;
+            vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 2;
         },
         else => return err, // OOM etc. propagate up
     }
@@ -1176,6 +1216,10 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
 
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+        if (nresults > 1) {
+            var i: u32 = 1;
+            while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+        }
         return;
     }
 
@@ -1193,8 +1237,9 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                 // Format follows Lua: chunkname:line: message.
                 var chunk_name_buf: [256]u8 = undefined;
                 const chunk_display = formatLoadChunkName(source_name, &chunk_name_buf);
+                const normalized = normalizeDeepSyntaxErrorMessage(e.message, load_source.len);
                 const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
-                    chunk_display, e.line, e.message,
+                    chunk_display, e.line, normalized,
                 }) catch "syntax error";
                 defer vm.gc().allocator.free(msg);
                 const err_str = try vm.gc().allocString(msg);
@@ -1231,6 +1276,10 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+    if (nresults > 1) {
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+    }
 }
 
 /// loadfile([filename [, mode [, env]]]) - Loads a chunk from a file
@@ -1336,6 +1385,10 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             closure.upvalues[env_idx] = env_upval;
         }
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+        if (nresults > 1) {
+            var i: u32 = 1;
+            while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+        }
         return;
     }
 
@@ -1347,8 +1400,9 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             vm.stack[vm.base + func_reg] = .nil;
             if (nresults > 1) {
                 // Format: "filename:line: message"
+                const normalized = normalizeDeepSyntaxErrorMessage(e.message, source.len);
                 const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
-                    filename, e.line, e.message,
+                    filename, e.line, normalized,
                 }) catch "syntax error";
                 defer vm.gc().allocator.free(msg);
                 const err_str = try vm.gc().allocString(msg);
@@ -1385,6 +1439,10 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
+    if (nresults > 1) {
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+    }
 }
 
 /// dofile([filename]) - Executes a Lua file
@@ -1418,8 +1476,9 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
+            const normalized = normalizeDeepSyntaxErrorMessage(e.message, source.len);
             const msg = std.fmt.allocPrint(vm.gc().allocator, "{s}:{d}: {s}", .{
-                filename, e.line, e.message,
+                filename, e.line, normalized,
             }) catch "syntax error";
             defer vm.gc().allocator.free(msg);
             return vm.raiseString(msg);

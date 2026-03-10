@@ -33,6 +33,7 @@ fn callValueManaged(vm: anytype, fn_val: TValue, args: []const TValue) !TValue {
 
     return call.callValueSafe(vm, fn_val, args) catch |err| switch (err) {
         call.CallError.NotCallable => vm.raiseString("attempt to call a non-function value"),
+        error.Yield => vm.raiseString("attempt to yield across a C-call boundary"),
         else => err,
     };
 }
@@ -551,6 +552,14 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
     // Calculate how many values to return
     const count: u32 = if (end >= start) @intCast(@as(i128, end) - @as(i128, start) + 1) else 0;
+
+    // MULTRET path writes all results starting at func_reg; guard stack bounds.
+    if (nresults == 0) {
+        const room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+        if (count > room) {
+            return vm.raiseString("too many results to unpack");
+        }
+    }
 
     // Limit by nresults if fixed
     const actual_count: u32 = if (nresults > 0) @min(count, nresults) else count;

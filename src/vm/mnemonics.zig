@@ -532,7 +532,189 @@ fn currentInstructionIndex(ci: *const CallInfo) ?usize {
     return (pc_addr - code_start) / @sizeOf(Instruction) - 1;
 }
 
-fn runtimeErrorWithLocation(ci: *const CallInfo, msg: []const u8, out_buf: *[320]u8) []const u8 {
+fn findNearestOpcodeBack(ci: *const CallInfo, from_idx: usize, op: OpCode) ?usize {
+    var i: usize = from_idx + 1;
+    while (i > 0) {
+        i -= 1;
+        if (ci.func.code[i].getOpCode() == op) return i;
+    }
+    return null;
+}
+
+fn findRegisterProducerBack(ci: *const CallInfo, from_idx: usize, reg: u8) ?usize {
+    var target_reg = reg;
+    var i = from_idx;
+    var budget: u16 = 96;
+    while (i > 0 and budget > 0) {
+        i -= 1;
+        budget -= 1;
+        const prev = ci.func.code[i];
+        if (prev.getA() != target_reg) continue;
+        if (prev.getOpCode() == .MOVE) {
+            target_reg = prev.getB();
+            continue;
+        }
+        return i;
+    }
+    return null;
+}
+
+fn isNameSourceOp(op: OpCode) bool {
+    return op == .GETTABUP or op == .GETUPVAL or op == .GETTABLE or op == .GETI or op == .GETFIELD or op == .SELF;
+}
+
+fn arithmeticNameOperandOperatorLine(ci: *const CallInfo, idx: usize, reg: u8) ?i64 {
+    if (idx >= ci.func.lineinfo.len) return null;
+    const cur_line = ci.func.lineinfo[idx];
+    const producer_idx = findRegisterProducerBack(ci, idx, reg) orelse return null;
+    if (producer_idx >= ci.func.lineinfo.len) return null;
+    const producer_line = ci.func.lineinfo[producer_idx];
+    const producer_op = ci.func.code[producer_idx].getOpCode();
+    if (!isNameSourceOp(producer_op)) return null;
+    if (cur_line > producer_line + 1) {
+        return @intCast(producer_line + 1);
+    }
+    return null;
+}
+
+fn trimAsciiSpace(slice: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = slice.len;
+    while (start < end and std.ascii.isWhitespace(slice[start])) : (start += 1) {}
+    while (end > start and std.ascii.isWhitespace(slice[end - 1])) : (end -= 1) {}
+    return slice[start..end];
+}
+
+fn sourceLineSlice(source: []const u8, target_line: u32) ?[]const u8 {
+    if (target_line == 0) return null;
+    var line_no: u32 = 1;
+    var line_start: usize = 0;
+    var i: usize = 0;
+    while (i <= source.len) : (i += 1) {
+        if (i == source.len or source[i] == '\n') {
+            if (line_no == target_line) return source[line_start..i];
+            line_no += 1;
+            line_start = i + 1;
+        }
+    }
+    return null;
+}
+
+fn findUnaryOperatorLineInSource(source: []const u8, operand_line: u32, op: OpCode) ?i64 {
+    if (operand_line <= 1) return null;
+    const op_text = switch (op) {
+        .UNM => "-",
+        .BNOT => "~",
+        else => return null,
+    };
+    var look_line = operand_line - 1;
+    var budget: u8 = 5;
+    while (look_line > 0 and budget > 0) : (look_line -= 1) {
+        budget -= 1;
+        const line = sourceLineSlice(source, look_line) orelse continue;
+        const trimmed = trimAsciiSpace(line);
+        if (std.mem.eql(u8, trimmed, op_text)) return @intCast(look_line);
+    }
+    return null;
+}
+
+fn findCallOpenParenLineInSource(source: []const u8, from_line: u32) ?i64 {
+    if (from_line == 0) return null;
+    var look_line = from_line;
+    var budget: u8 = 10;
+    while (look_line > 0 and budget > 0) : (look_line -= 1) {
+        budget -= 1;
+        const line = sourceLineSlice(source, look_line) orelse continue;
+        const trimmed = trimAsciiSpace(line);
+        if (std.mem.indexOfScalar(u8, trimmed, '(') != null) return @intCast(look_line);
+    }
+    return null;
+}
+
+fn runtimeErrorLine(ci: *const CallInfo, inst: Instruction, err: anyerror) i64 {
+    const idx = currentInstructionIndex(ci) orelse return -1;
+    var line_idx = idx;
+    var arithmetic_from_mmbin = false;
+    var arithmetic_line_override: ?i64 = null;
+    var call_line_override: ?i64 = null;
+
+    if (err == error.InvalidForLoopInit or err == error.InvalidForLoopLimit or err == error.InvalidForLoopStep) {
+        if (findNearestOpcodeBack(ci, idx, .FORPREP)) |prep_idx| {
+            line_idx = prep_idx;
+        }
+    } else if (err == error.NotAFunction and inst.getOpCode() == .TFORCALL) {
+        if (findNearestOpcodeBack(ci, idx, .TFORPREP)) |prep_idx| {
+            line_idx = prep_idx;
+        }
+    } else if (err == error.NotAFunction and (inst.getOpCode() == .CALL or inst.getOpCode() == .TAILCALL)) {
+        if (idx < ci.func.lineinfo.len) {
+            const source_raw = ci.func.source;
+            if (source_raw.len > 0 and source_raw[0] != '@' and source_raw[0] != '=') {
+                call_line_override = findCallOpenParenLineInSource(source_raw, ci.func.lineinfo[idx]);
+            }
+        }
+    } else if (err == error.ArithmeticError) {
+        const op = inst.getOpCode();
+        if ((op == .MMBIN or op == .MMBINI or op == .MMBINK) and idx > 0) {
+            const prev_op = ci.func.code[idx - 1].getOpCode();
+            if (prev_op == .ADD or prev_op == .SUB or prev_op == .MUL or prev_op == .DIV or prev_op == .MOD or prev_op == .POW or prev_op == .IDIV or
+                prev_op == .BAND or prev_op == .BOR or prev_op == .BXOR or prev_op == .SHL or prev_op == .SHR or
+                prev_op == .ADDI or prev_op == .ADDK or prev_op == .SUBK or prev_op == .MULK or prev_op == .DIVK or prev_op == .IDIVK or
+                prev_op == .BANDK or prev_op == .BORK or prev_op == .BXORK or prev_op == .SHLI or prev_op == .SHRI or
+                prev_op == .UNM or prev_op == .BNOT)
+            {
+                line_idx = idx - 1;
+                arithmetic_from_mmbin = true;
+            }
+        }
+        if (op == .ADD or op == .SUB or op == .MUL or op == .DIV or op == .MOD or op == .POW or op == .IDIV or
+            op == .BAND or op == .BOR or op == .BXOR or op == .SHL or op == .SHR)
+        {
+            const b_line = arithmeticNameOperandOperatorLine(ci, idx, inst.getB());
+            const c_line = arithmeticNameOperandOperatorLine(ci, idx, inst.getC());
+            arithmetic_line_override = if (b_line != null and c_line != null)
+                @min(b_line.?, c_line.?)
+            else
+                (b_line orelse c_line);
+        } else if (op == .ADDK or op == .ADDI or op == .SUBK or op == .MULK or op == .DIVK or op == .IDIVK or
+            op == .BANDK or op == .BORK or op == .BXORK or op == .SHLI or op == .SHRI)
+        {
+            arithmetic_line_override = arithmeticNameOperandOperatorLine(ci, idx, inst.getB());
+        } else if (op == .UNM or op == .BNOT) {
+            if (findRegisterProducerBack(ci, idx, inst.getB())) |producer_idx| {
+                if (producer_idx < ci.func.lineinfo.len) {
+                    const operand_line = ci.func.lineinfo[producer_idx];
+                    const source_raw = ci.func.source;
+                    if (source_raw.len > 0 and source_raw[0] != '@' and source_raw[0] != '=') {
+                        arithmetic_line_override = findUnaryOperatorLineInSource(source_raw, operand_line, op);
+                    }
+                }
+            }
+        }
+    }
+
+    if (ci.func.lineinfo.len == 0 or line_idx >= ci.func.lineinfo.len) return -1;
+    var line_i: i64 = @intCast(ci.func.lineinfo[line_idx]);
+    if (arithmetic_line_override) |line_override| return line_override;
+    if (call_line_override) |line_override| return line_override;
+
+    if (err == error.InvalidForLoopInit or err == error.InvalidForLoopLimit or err == error.InvalidForLoopStep) {
+        if (line_i > 1) line_i -= 1;
+    } else if (err == error.NotAFunction and inst.getOpCode() == .TFORCALL) {
+        if (line_i > 2) line_i -= 2;
+    } else if (err == error.NotATable or err == error.InvalidTableOperation) {
+        const src = ci.func.source;
+        const skip_sub = src.len > 0 and src[0] == '\n';
+        if (!skip_sub and line_i > 1) line_i -= 1;
+    } else if (err == error.DivideByZero or err == error.ModuloByZero) {
+        if (line_i > 1) line_i -= 1;
+    } else if (err == error.ArithmeticError and !arithmetic_from_mmbin) {
+        if (line_i > 1) line_i -= 1;
+    }
+    return line_i;
+}
+
+fn runtimeErrorWithLocation(ci: *const CallInfo, inst: Instruction, err: anyerror, msg: []const u8, out_buf: *[320]u8) []const u8 {
     const source_raw = ci.func.source;
     const source = if (source_raw.len == 0)
         "?"
@@ -541,13 +723,20 @@ fn runtimeErrorWithLocation(ci: *const CallInfo, msg: []const u8, out_buf: *[320
     else
         source_raw;
 
-    const line_i: i64 = blk: {
-        const idx = currentInstructionIndex(ci) orelse break :blk -1;
-        if (ci.func.lineinfo.len == 0 or idx >= ci.func.lineinfo.len) break :blk -1;
-        break :blk @intCast(ci.func.lineinfo[idx]);
-    };
+    const line_i: i64 = runtimeErrorLine(ci, inst, err);
 
-    return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line_i, msg }) catch msg;
+    if (std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line_i, msg })) |full| {
+        return full;
+    } else |_| {
+        const short_source = if (source_raw.len > 0 and source_raw[0] != '@' and source_raw[0] != '=') "[string]" else "?";
+        return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ short_source, line_i, msg }) catch msg;
+    }
+}
+
+fn raiseWithLocation(vm: *VM, ci: *const CallInfo, inst: Instruction, err: anyerror, msg: []const u8) !void {
+    var full_msg_buf: [320]u8 = undefined;
+    const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
+    return vm.raiseString(full_msg);
 }
 
 fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
@@ -994,11 +1183,13 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 /// Returns true if error was handled by a protected frame, false otherwise.
 /// The error value is taken from vm.lua_error_value (set by vm.raise()).
 pub fn handleLuaException(vm: *VM) bool {
+    vm.traceback_snapshot_count = 0;
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
             const ret_base = ci.ret_base;
             const target_ci = ci.previous;
+            captureTracebackSnapshot(vm, target_ci);
 
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
@@ -1028,6 +1219,58 @@ pub fn handleLuaException(vm: *VM) bool {
     }
 
     return false;
+}
+
+fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
+    const frameLine = struct {
+        fn get(ci: *const CallInfo) ?u32 {
+            const idx_opt = currentInstructionIndex(ci);
+            if (idx_opt == null) {
+                if (ci.func.lineinfo.len == 0) return null;
+                if (ci.func.lineinfo.len >= 2) return ci.func.lineinfo[ci.func.lineinfo.len - 2];
+                return ci.func.lineinfo[0];
+            }
+            const idx = idx_opt.?;
+            if (idx >= ci.func.lineinfo.len) return null;
+            var line = ci.func.lineinfo[idx];
+            if (idx > 0) {
+                const op = ci.func.code[idx].getOpCode();
+                if ((op == .CALL or op == .RETURN or op == .RETURN0 or op == .RETURN1) and line > ci.func.lineinfo[idx - 1]) {
+                    line = ci.func.lineinfo[idx - 1];
+                }
+            }
+            return line;
+        }
+    }.get;
+
+    var count: usize = 0;
+    if (vm.callstack_size > 0) {
+        var i: i32 = @as(i32, @intCast(vm.callstack_size)) - 1;
+        while (i >= 0) : (i -= 1) {
+            const ci = &vm.callstack[@intCast(i)];
+            if (ci == stop_before) break;
+            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (frameLine(ci)) |line| {
+                vm.traceback_snapshot_lines[count] = line;
+                count += 1;
+            }
+        }
+    } else {
+        var cur = vm.ci;
+        while (cur) |ci| : (cur = ci.previous) {
+            if (cur == stop_before) break;
+            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (frameLine(ci)) |line| {
+                vm.traceback_snapshot_lines[count] = line;
+                count += 1;
+            }
+        }
+    }
+    vm.traceback_snapshot_count = @intCast(count);
+}
+
+pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
+    captureTracebackSnapshot(vm, null);
 }
 
 /// Main VM execution loop.
@@ -1089,7 +1332,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => "stack overflow",
+                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => blk: {
                         const op_name: ?[]const u8 = switch (inst.getOpCode()) {
                             .BAND, .BANDK => "'band'",
@@ -1397,7 +1640,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                     else => "runtime error",
                 };
                 var full_msg_buf: [320]u8 = undefined;
-                const full_msg = runtimeErrorWithLocation(ci, msg, &full_msg_buf);
+                const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
                 vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
@@ -2552,7 +2795,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             var msg_buf: [192]u8 = undefined;
-            return vm.raiseString(buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf));
+            const msg = buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf);
+            try raiseWithLocation(vm, ci, inst, error.NotAFunction, msg);
+            return error.LuaException;
         },
         // TAILCALL: Tail call optimization - reuse current frame
         // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
@@ -2584,21 +2829,29 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
                 if (call_chain_depth >= 2000) {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+                    return error.LuaException;
                 }
                 call_chain_depth += 1;
 
                 const table = tail_func.asTable() orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+                    return error.LuaException;
                 };
                 const mt = table.metatable orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+                    return error.LuaException;
                 };
                 const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+                    return error.LuaException;
                 };
 
                 if (call_mm.asTable() != null or
@@ -2624,7 +2877,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                 } else {
                     var msg_buf: [192]u8 = undefined;
-                    return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+                    return error.LuaException;
                 }
             }
 
@@ -2746,7 +3001,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             var msg_buf: [192]u8 = undefined;
-            return vm.raiseString(buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf));
+            const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
+            try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
+            return error.LuaException;
         },
         .RETURN => {
             const a = inst.getA();

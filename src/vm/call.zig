@@ -449,6 +449,11 @@ fn runUntilReturn(
             if (err == error.Yield) return error.Yield;
             // Handle LuaException by unwinding to protected frames (pcall)
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            if (err == error.LuaException) {
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                return error.LuaException;
+            }
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.CallStackOverflow or
                 err == error.ArithmeticError or
@@ -469,7 +474,7 @@ fn runUntilReturn(
                 // Set error message and try to handle as LuaException
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => "stack overflow",
+                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => blk: {
                         if (vm.last_field_key) |key| {
                             vm.last_field_key = null;
@@ -503,6 +508,7 @@ fn runUntilReturn(
                     return err; // OOM: can't convert, propagate original error
                 });
                 if (mnemonics.handleLuaException(vm)) continue;
+                mnemonics.captureCurrentTracebackSnapshot(vm);
                 cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;
             }
@@ -577,6 +583,20 @@ fn runUntilReturnInto(
         const result = mnemonics.do(vm, inst) catch |err| {
             if (err == error.Yield) return error.Yield;
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            if (err == error.CallStackOverflow) {
+                const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                    cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                    return err;
+                });
+                if (mnemonics.handleLuaException(vm)) continue;
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                return error.LuaException;
+            }
+            if (err == error.LuaException) {
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+            }
             cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return err;
         };

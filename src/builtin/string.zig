@@ -493,24 +493,54 @@ pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 /// Returns start and end indices (1-based) or nil if not found
 /// Currently only supports plain text search (no pattern matching)
 pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'find' (value expected)");
+    }
     if (nargs < 2) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #2 to 'find' (value expected)");
     }
 
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        const got = switch (str_arg) {
+            .nil => "nil",
+            .boolean => "boolean",
+            .integer, .number => "number",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .thread => "thread",
+                .userdata, .file => "userdata",
+                else => "userdata",
+            },
+        };
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #1 to 'find' (string expected, got {s})", .{got}) catch "bad argument to 'find'";
+        return vm.raiseString(msg);
     };
     const str = str_obj.asSlice();
 
     // Get pattern
     const pattern_arg = vm.stack[vm.base + func_reg + 2];
     const pattern_obj = pattern_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        const got = switch (pattern_arg) {
+            .nil => "nil",
+            .boolean => "boolean",
+            .integer, .number => "number",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .thread => "thread",
+                .userdata, .file => "userdata",
+                else => "userdata",
+            },
+        };
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #2 to 'find' (string expected, got {s})", .{got}) catch "bad argument to 'find'";
+        return vm.raiseString(msg);
     };
     const pattern = pattern_obj.asSlice();
 
@@ -814,8 +844,10 @@ const PatternMatcher = struct {
                     // Then try one match and recurse
                     while (self.matchItem(item)) {
                         const sp = self.pat_pos;
+                        const ss = self.str_pos;
                         if (self.matchPattern()) return true;
                         self.pat_pos = sp;
+                        self.str_pos = ss;
                     }
                     return false;
                 },

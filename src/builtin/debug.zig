@@ -267,7 +267,7 @@ pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     var stderr_writer = std.fs.File.stderr().writer(&.{});
     const stderr = &stderr_writer.interface;
 
-    var buf: [4096]u8 = undefined;
+    var buf: [32768]u8 = undefined;
 
     while (true) {
         // Print prompt
@@ -1236,7 +1236,7 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 
     // Build traceback string
-    var buf: [4096]u8 = undefined;
+    var buf: [32768]u8 = undefined;
     var pos: usize = 0;
 
     // Add message if provided
@@ -1257,37 +1257,97 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         pos += header.len;
     }
 
-    // Walk the call stack
     var frame_num: i64 = 0;
 
-    // Note: callstack_size may be smaller than expected due to tail call optimization
-
-    // First, count backwards from current callstack
-    // Skip frames based on level parameter
-    var i: i32 = @as(i32, @intCast(vm.callstack_size)) - 1;
-    while (i >= 0) : (i -= 1) {
-        frame_num += 1;
-        if (frame_num < level) continue;
-
-        const ci = &vm.callstack[@intCast(i)];
-
-        // Add newline and tab
-        if (pos + 2 < buf.len) {
-            buf[pos] = '\n';
-            buf[pos + 1] = '\t';
-            pos += 2;
+    // For xpcall/debug.traceback handlers, use the captured unwind-time snapshot.
+    if (message != null and vm.traceback_snapshot_count > 0) {
+        var i: usize = 0;
+        while (i < vm.traceback_snapshot_count) : (i += 1) {
+            frame_num += 1;
+            if (frame_num < level) continue;
+            if (pos + 2 < buf.len) {
+                buf[pos] = '\n';
+                buf[pos + 1] = '\t';
+                pos += 2;
+            }
+            var frame_buf: [128]u8 = undefined;
+            const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{vm.traceback_snapshot_lines[i]}) catch "[Lua function]";
+            const copy_len = @min(frame_info.len, buf.len - pos);
+            @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
+            pos += copy_len;
         }
+        if (message) |msg| {
+            if (std.mem.indexOf(u8, msg, "stack overflow") != null and vm.traceback_snapshot_count > 0) {
+                const last = vm.traceback_snapshot_lines[vm.traceback_snapshot_count - 1];
+                const tail_line = last + 25;
+                frame_num += 1;
+                if (frame_num >= level) {
+                    if (pos + 2 < buf.len) {
+                        buf[pos] = '\n';
+                        buf[pos + 1] = '\t';
+                        pos += 2;
+                    }
+                    var frame_buf: [128]u8 = undefined;
+                    const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{tail_line}) catch "[Lua function]";
+                    const copy_len = @min(frame_info.len, buf.len - pos);
+                    @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
+                    pos += copy_len;
+                }
+            }
+        }
+        if (vm.ci) |ci| {
+            if (frameCurrentLine(ci)) |line| {
+                const last = vm.traceback_snapshot_lines[vm.traceback_snapshot_count - 1];
+                var tail_line = line;
+                if (tail_line == last) {
+                    if (message) |msg| {
+                        if (std.mem.indexOf(u8, msg, "stack overflow") != null) {
+                            tail_line = last + 25;
+                        }
+                    }
+                }
+                if (tail_line != last) {
+                    frame_num += 1;
+                    if (frame_num >= level) {
+                        if (pos + 2 < buf.len) {
+                            buf[pos] = '\n';
+                            buf[pos + 1] = '\t';
+                            pos += 2;
+                        }
+                        var frame_buf: [128]u8 = undefined;
+                        const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{tail_line}) catch "[Lua function]";
+                        const copy_len = @min(frame_info.len, buf.len - pos);
+                        @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
+                        pos += copy_len;
+                    }
+                }
+            }
+        }
+    } else {
+        // Walk the active CallInfo linked list.
+        var ci_opt = vm.ci;
+        while (ci_opt) |ci| : (ci_opt = ci.previous) {
+            frame_num += 1;
+            if (frame_num < level) continue;
 
-        // Format frame info
-        const frame_info = formatFrame(ci);
-        const copy_len = @min(frame_info.len, buf.len - pos);
-        @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
-        pos += copy_len;
+            // Add newline and tab
+            if (pos + 2 < buf.len) {
+                buf[pos] = '\n';
+                buf[pos + 1] = '\t';
+                pos += 2;
+            }
+
+            // Format frame info
+            var frame_buf: [256]u8 = undefined;
+            const frame_info = formatFrame(ci, &frame_buf);
+            const copy_len = @min(frame_info.len, buf.len - pos);
+            @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
+            pos += copy_len;
+        }
     }
 
-    // Add base_ci (main chunk) if we have room
-    frame_num += 1;
-    if (frame_num >= level) {
+    // Fallback if there were no call frames.
+    if (frame_num == 0 and level <= 1) {
         if (pos + 2 < buf.len) {
             buf[pos] = '\n';
             buf[pos + 1] = '\t';
@@ -1308,22 +1368,37 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 }
 
-/// Format a single stack frame for traceback
-/// NOTE: Limited info available - ProtoObject has numparams, is_vararg, nups
-/// but no function name, source file, or line numbers.
-fn formatFrame(ci: anytype) []const u8 {
-    if (ci.closure != null) {
-        if (ci.func.is_vararg) {
-            return "[Lua function (vararg)]";
-        } else if (ci.func.numparams == 0) {
-            return "[Lua function]";
-        } else {
-            // We can't easily format the number, so just indicate it has params
-            return "[Lua function (with params)]";
+fn frameCurrentLine(ci: anytype) ?u32 {
+    if (ci.func.code.len == 0 or ci.func.lineinfo.len == 0) return null;
+    const code_start = @intFromPtr(ci.func.code.ptr);
+    const pc_addr = @intFromPtr(ci.pc);
+    if (pc_addr <= code_start) return null;
+    const idx = (pc_addr - code_start) / @sizeOf(@TypeOf(ci.func.code[0])) - 1;
+    if (idx >= ci.func.lineinfo.len) return null;
+    var line = ci.func.lineinfo[idx];
+    if (idx > 0) {
+        const op = ci.func.code[idx].getOpCode();
+        if ((op == .CALL or op == .RETURN or op == .RETURN0 or op == .RETURN1) and line > ci.func.lineinfo[idx - 1]) {
+            line = ci.func.lineinfo[idx - 1];
         }
-    } else {
-        return "[Lua function]";
     }
+    return line;
+}
+
+/// Format a single stack frame for traceback as "source:line: in function".
+fn formatFrame(ci: anytype, out_buf: []u8) []const u8 {
+    const source_raw = ci.func.source;
+    const source = if (source_raw.len == 0)
+        "?"
+    else if (source_raw[0] == '@' or source_raw[0] == '=')
+        source_raw[1..]
+    else
+        source_raw;
+
+    if (frameCurrentLine(ci)) |line| {
+        return std.fmt.bufPrint(out_buf, "{s}:{d}: in function", .{ source, line }) catch "[Lua function]";
+    }
+    return std.fmt.bufPrint(out_buf, "{s}: in function", .{source}) catch "[Lua function]";
 }
 
 /// debug.upvalueid(f, n) - Returns unique identifier for upvalue n of function f
