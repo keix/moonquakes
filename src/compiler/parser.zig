@@ -4196,7 +4196,7 @@ pub const Parser = struct {
         }
         var_count += 1;
 
-        // Additional identifiers after comma (note: <close>/<const> only valid for single variable)
+        // Additional identifiers after comma (each name can have its own <const>/<close> attribute)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
@@ -4210,8 +4210,33 @@ pub const Parser = struct {
             var_names[var_count] = self.current.lexeme;
             var_is_close[var_count] = false;
             var_is_const[var_count] = false;
-            var_count += 1;
             self.advance();
+
+            // Check for per-variable <close>/<const> attribute
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "<")) {
+                self.advance(); // consume '<'
+                if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "close")) {
+                    var_is_close[var_count] = true;
+                    var_is_const[var_count] = true; // close variables are also const
+                    self.advance(); // consume 'close'
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume '>'
+                } else if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "const")) {
+                    var_is_const[var_count] = true;
+                    self.advance(); // consume 'const'
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume '>'
+                } else {
+                    const attr_name = if (self.current.kind == .Identifier) self.current.lexeme else "?";
+                    self.setError("unknown attribute '{s}'", .{attr_name});
+                    return error.InvalidAttribute;
+                }
+            }
+            var_count += 1;
         }
 
         // Allocate registers for all variables
