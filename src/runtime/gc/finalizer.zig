@@ -32,6 +32,14 @@ pub fn enqueueFinalizers(self: anytype) void {
                 else => null,
             };
             if (maybe_metatable) |mt| {
+                if (mt.metatable) |mt_of_mt| {
+                    const weak_mode = self.parseWeakMode(mt_of_mt);
+                    const weak_values = weak_mode == .weak_values or weak_mode == .weak_both;
+                    if (weak_values) {
+                        current = obj.next;
+                        continue;
+                    }
+                }
                 if (mt.get(TValue.fromString(self.mm_keys.get(.gc)))) |gc_fn| {
                     if (self.finalizer_queue.append(self.allocator, .{
                         .func = gc_fn,
