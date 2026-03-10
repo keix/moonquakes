@@ -111,33 +111,28 @@ fn compileWithAllocators(
             output_allocator.dupe(u8, parser_msg) catch ""
         else if (err == error.TooManyUpvalues)
             std.fmt.allocPrint(output_allocator, "too many upvalues (line {d})", .{line}) catch ""
-        else if (err == error.UnsupportedStatement)
-            blk: {
-                const near_tok = formatNearToken(output_allocator, p.current) catch "";
-                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "unexpected symbol") catch "";
-                if (std.mem.eql(u8, near_tok, "<eof>")) {
-                    break :blk output_allocator.dupe(u8, "unexpected symbol near <eof>") catch "";
-                }
-                break :blk std.fmt.allocPrint(output_allocator, "unexpected symbol near '{s}'", .{near_tok}) catch "";
+        else if (err == error.UnsupportedStatement) blk: {
+            const near_tok = formatNearToken(output_allocator, p.current) catch "";
+            if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "unexpected symbol") catch "";
+            if (std.mem.eql(u8, near_tok, "<eof>")) {
+                break :blk output_allocator.dupe(u8, "unexpected symbol near <eof>") catch "";
             }
-        else if (std.mem.startsWith(u8, err_name, "Expected"))
-            blk: {
-                const near_tok = formatNearToken(output_allocator, p.current) catch "";
-                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "expected") catch "";
-                if (std.mem.eql(u8, near_tok, "<eof>")) {
-                    break :blk output_allocator.dupe(u8, "expected near <eof>") catch "";
-                }
-                break :blk std.fmt.allocPrint(output_allocator, "expected near '{s}'", .{near_tok}) catch "";
+            break :blk std.fmt.allocPrint(output_allocator, "unexpected symbol near '{s}'", .{near_tok}) catch "";
+        } else if (std.mem.startsWith(u8, err_name, "Expected")) blk: {
+            const near_tok = formatNearToken(output_allocator, p.current) catch "";
+            if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "expected") catch "";
+            if (std.mem.eql(u8, near_tok, "<eof>")) {
+                break :blk output_allocator.dupe(u8, "expected near <eof>") catch "";
             }
-        else
-            blk: {
-                const near_tok = formatNearToken(output_allocator, p.current) catch "";
-                if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "syntax error") catch "";
-                if (std.mem.eql(u8, near_tok, "<eof>")) {
-                    break :blk output_allocator.dupe(u8, "syntax error near <eof>") catch "";
-                }
-                break :blk std.fmt.allocPrint(output_allocator, "syntax error near '{s}'", .{near_tok}) catch "";
-            };
+            break :blk std.fmt.allocPrint(output_allocator, "expected near '{s}'", .{near_tok}) catch "";
+        } else blk: {
+            const near_tok = formatNearToken(output_allocator, p.current) catch "";
+            if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "syntax error") catch "";
+            if (std.mem.eql(u8, near_tok, "<eof>")) {
+                break :blk output_allocator.dupe(u8, "syntax error near <eof>") catch "";
+            }
+            break :blk std.fmt.allocPrint(output_allocator, "syntax error near '{s}'", .{near_tok}) catch "";
+        };
 
         return .{ .err = .{ .line = line, .message = message } };
     };
