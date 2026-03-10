@@ -208,6 +208,11 @@ pub const GC = struct {
     /// IMPORTANT: this does not change the underlying collector algorithm yet.
     mode: GcMode = .incremental,
 
+    /// API-visible tuning values for collectgarbage("setpause"/"setstepmul").
+    /// Current collector does not yet use these to alter behavior.
+    pause: i64 = 200,
+    stepmul: i64 = 100,
+
     /// Current state in the GC cycle
     gc_state: GCState = .idle,
 

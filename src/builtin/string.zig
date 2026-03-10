@@ -610,8 +610,12 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                 var out: u32 = 2;
                 while (i < matcher.capture_count and out < nresults) : (i += 1) {
                     const cap = matcher.captures[i];
-                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
-                    vm.stack[vm.base + func_reg + out] = TValue.fromString(cap_str);
+                    if (cap.is_position) {
+                        vm.stack[vm.base + func_reg + out] = .{ .integer = @intCast(cap.start + 1) };
+                    } else {
+                        const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
+                        vm.stack[vm.base + func_reg + out] = TValue.fromString(cap_str);
+                    }
                     out += 1;
                 }
             }
@@ -675,8 +679,12 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                 var i: u32 = 0;
                 while (i < matcher.capture_count) : (i += 1) {
                     const cap = matcher.captures[i];
-                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
-                    vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                    if (cap.is_position) {
+                        vm.stack[vm.base + func_reg + i] = .{ .integer = @intCast(cap.start + 1) };
+                    } else {
+                        const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
+                        vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                    }
                 }
                 return;
             } else {
@@ -713,6 +721,7 @@ const PatternMatcher = struct {
     const Capture = struct {
         start: usize,
         end: usize,
+        is_position: bool,
     };
 
     fn init(pattern: []const u8, str: []const u8, start: usize) PatternMatcher {
@@ -760,6 +769,19 @@ const PatternMatcher = struct {
 
             // Capture start
             if (c == '(') {
+                // Position capture: "()" returns current 1-based position.
+                if (self.pat_pos + 1 < self.pattern.len and self.pattern[self.pat_pos + 1] == ')') {
+                    self.pat_pos += 2;
+                    if (self.capture_count < 32) {
+                        self.captures[self.capture_count] = .{
+                            .start = self.str_pos,
+                            .end = self.str_pos,
+                            .is_position = true,
+                        };
+                        self.capture_count += 1;
+                    }
+                    continue;
+                }
                 self.pat_pos += 1;
                 if (self.capture_stack_top < 32) {
                     self.capture_stack[self.capture_stack_top] = self.str_pos;
@@ -776,6 +798,7 @@ const PatternMatcher = struct {
                     self.captures[self.capture_count] = .{
                         .start = self.capture_stack[self.capture_stack_top],
                         .end = self.str_pos,
+                        .is_position = false,
                     };
                     self.capture_count += 1;
                 }
@@ -1172,8 +1195,12 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
                 var i: u32 = 0;
                 while (i < matcher.capture_count and i < nresults) : (i += 1) {
                     const cap = matcher.captures[i];
-                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
-                    vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                    if (cap.is_position) {
+                        vm.stack[vm.base + func_reg + i] = .{ .integer = @intCast(cap.start + 1) };
+                    } else {
+                        const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
+                        vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
+                    }
                 }
             } else {
                 // Return whole match
@@ -1316,13 +1343,18 @@ fn getGsubReplacement(
     // Table replacement
     if (repl_arg.asTable()) |repl_table| {
         // Use first capture or whole match as key
-        const key_str = if (matcher.capture_count > 0)
-            str[matcher.captures[0].start..matcher.captures[0].end]
-        else
-            str[matcher.match_start..matcher.match_end];
+        const key_val = if (matcher.capture_count > 0 and matcher.captures[0].is_position)
+            TValue{ .integer = @intCast(matcher.captures[0].start + 1) }
+        else blk: {
+            const key_str = if (matcher.capture_count > 0)
+                str[matcher.captures[0].start..matcher.captures[0].end]
+            else
+                str[matcher.match_start..matcher.match_end];
+            const key = try vm.gc().allocString(key_str);
+            break :blk TValue.fromString(key);
+        };
 
-        const key = try vm.gc().allocString(key_str);
-        if (repl_table.get(TValue.fromString(key))) |val| {
+        if (repl_table.get(key_val)) |val| {
             if (val.asString()) |s| {
                 return s.asSlice();
             }
@@ -1347,8 +1379,12 @@ fn getGsubReplacement(
             var i: u32 = 0;
             while (i < matcher.capture_count and i < 32) : (i += 1) {
                 const cap = matcher.captures[i];
-                const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
-                args_buf[arg_count] = TValue.fromString(cap_str);
+                if (cap.is_position) {
+                    args_buf[arg_count] = .{ .integer = @intCast(cap.start + 1) };
+                } else {
+                    const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
+                    args_buf[arg_count] = TValue.fromString(cap_str);
+                }
                 arg_count += 1;
             }
         } else {
@@ -1433,7 +1469,13 @@ fn expandGsubCaptures(
                 } else if (cap_idx <= matcher.capture_count) {
                     // %1-%9 = capture
                     const cap = matcher.captures[cap_idx - 1];
-                    try result.appendSlice(allocator, str[cap.start..cap.end]);
+                    if (cap.is_position) {
+                        const pos_buf = try std.fmt.allocPrint(allocator, "{d}", .{cap.start + 1});
+                        defer allocator.free(pos_buf);
+                        try result.appendSlice(allocator, pos_buf);
+                    } else {
+                        try result.appendSlice(allocator, str[cap.start..cap.end]);
+                    }
                 }
                 i += 2;
             } else {

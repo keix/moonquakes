@@ -124,11 +124,14 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
                 }
             }
 
-            // Deleted-key tombstones can hold collectable keys; mark them so
-            // key identity remains valid for next(t, k) checks.
-            var deleted_iter = table.deleted_keys.iterator();
-            while (deleted_iter.next()) |entry| {
-                markGrayValue(self, entry.key_ptr.*);
+            // Keep tombstone keys alive only for strong tables, where
+            // `next(t, k)` continuation semantics rely on key identity.
+            // For weak tables, tombstones must not retain collectable keys.
+            if (table.weak_mode == .none) {
+                var deleted_iter = table.deleted_keys.iterator();
+                while (deleted_iter.next()) |entry| {
+                    markGrayValue(self, entry.key_ptr.*);
+                }
             }
         },
         .closure => {

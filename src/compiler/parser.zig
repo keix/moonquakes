@@ -4100,7 +4100,13 @@ pub const Parser = struct {
                     (next.kind == .Symbol and std.mem.eql(u8, next.lexeme, "{"));
 
                 if (is_call_with_parens or is_call_no_parens) {
-                    _ = try self.parseExpr();
+                    const expr_reg = try self.parseExpr();
+                    if (self.current.kind == .Symbol and
+                        (std.mem.eql(u8, self.current.lexeme, "=") or
+                            std.mem.eql(u8, self.current.lexeme, ",")))
+                    {
+                        try self.parseSuffixAssignmentFromExpr(expr_reg);
+                    }
                 } else if (self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, "=")) {
                     // Simple assignment: x = expr
                     try self.parseAssignment();
@@ -4128,7 +4134,13 @@ pub const Parser = struct {
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
                 // Lua allows function-call statements whose prefixexp starts with parentheses,
                 // e.g. (Message or print)("...")
-                _ = try self.parseExpr();
+                const expr_reg = try self.parseExpr();
+                if (self.current.kind == .Symbol and
+                    (std.mem.eql(u8, self.current.lexeme, "=") or
+                        std.mem.eql(u8, self.current.lexeme, ",")))
+                {
+                    try self.parseSuffixAssignmentFromExpr(expr_reg);
+                }
             } else {
                 return error.UnsupportedStatement;
             }
@@ -4196,7 +4208,7 @@ pub const Parser = struct {
         }
         var_count += 1;
 
-        // Additional identifiers after comma (note: <close>/<const> only valid for single variable)
+        // Additional identifiers after comma (each name can have its own <const>/<close> attribute)
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
@@ -4210,8 +4222,33 @@ pub const Parser = struct {
             var_names[var_count] = self.current.lexeme;
             var_is_close[var_count] = false;
             var_is_const[var_count] = false;
-            var_count += 1;
             self.advance();
+
+            // Check for per-variable <close>/<const> attribute
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "<")) {
+                self.advance(); // consume '<'
+                if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "close")) {
+                    var_is_close[var_count] = true;
+                    var_is_const[var_count] = true; // close variables are also const
+                    self.advance(); // consume 'close'
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume '>'
+                } else if (self.current.kind == .Identifier and std.mem.eql(u8, self.current.lexeme, "const")) {
+                    var_is_const[var_count] = true;
+                    self.advance(); // consume 'const'
+                    if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ">"))) {
+                        return error.ExpectedCloseBracket;
+                    }
+                    self.advance(); // consume '>'
+                } else {
+                    const attr_name = if (self.current.kind == .Identifier) self.current.lexeme else "?";
+                    self.setError("unknown attribute '{s}'", .{attr_name});
+                    return error.InvalidAttribute;
+                }
+            }
+            var_count += 1;
         }
 
         // Allocate registers for all variables
@@ -5096,6 +5133,24 @@ pub const Parser = struct {
 
         // Create RawProto container early (address is fixed, content will be filled later)
         const proto_ptr = try self.proto.output_allocator.create(RawProto);
+        proto_ptr.* = .{
+            .code = &.{},
+            .booleans = &.{},
+            .integers = &.{},
+            .numbers = &.{},
+            .strings = &.{},
+            .native_ids = &.{},
+            .const_refs = &.{},
+            .protos = &.{},
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 0,
+            .nups = 0,
+            .upvalues = &.{},
+            .local_reg_names = &.{},
+            .source = "",
+            .lineinfo = &.{},
+        };
 
         // Temporarily add function for recursive calls with unfilled RawProto
         // Use the full qualified name for lookup (base.field1.field2 or base)

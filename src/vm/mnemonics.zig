@@ -38,6 +38,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
     return switch (id) {
         .table_unpack => 0, // C=0 sentinel: callee decides actual result count.
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
+        .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .next => 2, // next returns key, value
         .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
@@ -1249,6 +1250,9 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
         while (i >= 0) : (i -= 1) {
             const ci = &vm.callstack[@intCast(i)];
             if (ci == stop_before) break;
+            // TODO(traceback): Snapshot is currently fixed-size.
+            // If deep recursion diagnostics become important, clamp with
+            // @min(callstack_size, snapshot_cap) and emit a truncation log.
             if (count >= vm.traceback_snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
                 vm.traceback_snapshot_lines[count] = line;
@@ -1259,6 +1263,9 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
         var cur = vm.ci;
         while (cur) |ci| : (cur = ci.previous) {
             if (cur == stop_before) break;
+            // TODO(traceback): Snapshot is currently fixed-size.
+            // If deep recursion diagnostics become important, clamp with
+            // @min(callstack_size, snapshot_cap) and emit a truncation log.
             if (count >= vm.traceback_snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
                 vm.traceback_snapshot_lines[count] = line;

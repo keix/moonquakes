@@ -1572,6 +1572,8 @@ const GcOption = enum {
     restart,
     count,
     step,
+    setpause,
+    setstepmul,
     isrunning,
     incremental,
     generational,
@@ -1583,6 +1585,8 @@ const gc_options = std.StaticStringMap(GcOption).initComptime(.{
     .{ "restart", .restart },
     .{ "count", .count },
     .{ "step", .step },
+    .{ "setpause", .setpause },
+    .{ "setstepmul", .setstepmul },
     .{ "isrunning", .isrunning },
     .{ "incremental", .incremental },
     .{ "generational", .generational },
@@ -1625,6 +1629,30 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             } else 0;
             break :blk TValue{ .boolean = gc.stepSized(step_arg) };
         },
+        .setpause => blk: {
+            const prev = gc.pause;
+            if (nargs >= 2) {
+                const arg = vm.stack[vm.base + func_reg + 2];
+                const v = arg.toInteger() orelse {
+                    if (arg.toNumber() != null) return vm.raiseString("bad argument #2 to 'collectgarbage' (number has no integer representation)");
+                    return vm.raiseString("bad argument #2 to 'collectgarbage' (number expected)");
+                };
+                gc.pause = v;
+            }
+            break :blk TValue{ .integer = prev };
+        },
+        .setstepmul => blk: {
+            const prev = gc.stepmul;
+            if (nargs >= 2) {
+                const arg = vm.stack[vm.base + func_reg + 2];
+                const v = arg.toInteger() orelse {
+                    if (arg.toNumber() != null) return vm.raiseString("bad argument #2 to 'collectgarbage' (number has no integer representation)");
+                    return vm.raiseString("bad argument #2 to 'collectgarbage' (number expected)");
+                };
+                gc.stepmul = v;
+            }
+            break :blk TValue{ .integer = prev };
+        },
         .isrunning => TValue{ .boolean = gc.is_running },
         .incremental => blk: {
             // API compatibility mode switch only.
@@ -1658,6 +1686,8 @@ test "gc_options maps all valid Lua 5.4 options" {
     try std.testing.expectEqual(GcOption.restart, gc_options.get("restart").?);
     try std.testing.expectEqual(GcOption.count, gc_options.get("count").?);
     try std.testing.expectEqual(GcOption.step, gc_options.get("step").?);
+    try std.testing.expectEqual(GcOption.setpause, gc_options.get("setpause").?);
+    try std.testing.expectEqual(GcOption.setstepmul, gc_options.get("setstepmul").?);
     try std.testing.expectEqual(GcOption.isrunning, gc_options.get("isrunning").?);
     try std.testing.expectEqual(GcOption.incremental, gc_options.get("incremental").?);
     try std.testing.expectEqual(GcOption.generational, gc_options.get("generational").?);

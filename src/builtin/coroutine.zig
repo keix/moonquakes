@@ -98,14 +98,14 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
     };
 
-    if (vm.resume_c_depth >= resume_c_depth_limit) {
+    if (vm.rt.resume_c_depth >= resume_c_depth_limit) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
         vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("C stack overflow"));
         vm.top = vm.base + func_reg + 2;
         return;
     }
-    vm.resume_c_depth += 1;
-    defer vm.resume_c_depth -= 1;
+    vm.rt.resume_c_depth += 1;
+    defer vm.rt.resume_c_depth -= 1;
 
     // Check if the coroutine can be resumed
     if (thread.status == .dead) {
@@ -465,6 +465,12 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     vm.beginGCGuard();
     defer vm.endGCGuard();
+
+    if (vm.rt.resume_c_depth >= resume_c_depth_limit) {
+        return vm.raiseString("C stack overflow");
+    }
+    vm.rt.resume_c_depth += 1;
+    defer vm.rt.resume_c_depth -= 1;
 
     // __call is invoked as a native function.
     // Preferred layout: function at func_reg, wrapper at func_reg+1, user args after that.

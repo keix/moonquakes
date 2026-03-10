@@ -75,6 +75,7 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     // Collect keys to remove (can't remove during iteration)
     var to_remove: std.ArrayListUnmanaged(TValue) = .{};
     defer to_remove.deinit(self.allocator);
+    var removed_positive_integer_key = false;
 
     var iter = table.hash_part.iterator();
     while (iter.next()) |entry| {
@@ -98,7 +99,17 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
             }
         }
 
+        if (!remove and table.hasWeakKeys()) {
+            // String keys are not weak keys; keep surviving ones alive.
+            if (key == .object and key.object.type == .string) {
+                self.markGray(key.object);
+            }
+        }
+
         if (remove) {
+            if (key == .integer and key.integer > 0) {
+                removed_positive_integer_key = true;
+            }
             to_remove.append(self.allocator, key) catch {};
         }
     }
@@ -106,5 +117,12 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     // Remove dead entries
     for (to_remove.items) |key| {
         _ = table.hash_part.remove(key);
+    }
+
+    // Weak cleanup can remove integer keys creating holes while leaving
+    // hash count unchanged (due to non-integer keys). In that case, the
+    // seq_len heuristic can incorrectly classify table as pure array.
+    if (removed_positive_integer_key) {
+        table.seq_len = 0;
     }
 }
