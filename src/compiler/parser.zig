@@ -64,6 +64,7 @@ const ParseError = error{
     ExpectedColon,
     ExpectedIn,
     TooManyLoopVariables,
+    TooManyUpvalues,
     VarargOutsideVarargFunction,
     InvalidAttribute,
     ExpectedLabel,
@@ -87,6 +88,14 @@ pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
     allocator.free(proto.strings);
     allocator.free(proto.native_ids);
     allocator.free(proto.const_refs);
+    for (proto.upvalues) |upv| {
+        if (upv.name) |name| allocator.free(name);
+    }
+    allocator.free(proto.upvalues);
+    for (proto.local_reg_names) |name_opt| {
+        if (name_opt) |name| allocator.free(name);
+    }
+    allocator.free(proto.local_reg_names);
     // Recursively free nested protos
     for (proto.protos) |nested| {
         freeRawProto(allocator, @constCast(nested));
@@ -125,6 +134,7 @@ const ScopeMark = struct {
 const PendingGoto = struct {
     name: []const u8, // label name
     code_pos: usize, // position of the JMP instruction to patch
+    line: u32 = 0,
     scope_depth: usize = 0,
     scope_id: u32 = 0,
     next_decl_seq: u32 = 0,
@@ -132,6 +142,7 @@ const PendingGoto = struct {
 
 const LabelEntry = struct {
     code_pos: usize,
+    line: u32,
     scope_depth: usize,
     scope_id: u32,
     next_decl_seq: u32,
@@ -1122,15 +1133,18 @@ pub const ProtoBuilder = struct {
         const parent_loc = try parent.resolveVariable(name) orelse return null;
 
         // 5. Create upvalue to capture from parent
+        if (self.upvalues.items.len >= 255) {
+            return error.TooManyUpvalues;
+        }
         const upval_idx: u8 = @intCast(self.upvalues.items.len);
         switch (parent_loc) {
             .local => |reg| {
                 // Parent has it as a local - capture from parent's stack
-                try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg });
+                try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg, .name = name });
             },
             .upvalue => |idx| {
                 // Parent has it as upvalue - capture from parent's upvalues
-                try self.upvalues.append(self.allocator, .{ .instack = false, .idx = idx });
+                try self.upvalues.append(self.allocator, .{ .instack = false, .idx = idx, .name = name });
             },
         }
 
@@ -1154,8 +1168,23 @@ pub const ProtoBuilder = struct {
             strings_slice[i] = try allocator.dupe(u8, s);
         }
 
-        // Duplicate upvalues
-        const upvalues_slice = try allocator.dupe(Upvaldesc, self.upvalues.items);
+        // Duplicate upvalues (including names)
+        const upvalues_slice = try allocator.alloc(Upvaldesc, self.upvalues.items.len);
+        for (self.upvalues.items, 0..) |upv, i| {
+            upvalues_slice[i] = upv;
+            if (upv.name) |name| {
+                upvalues_slice[i].name = try allocator.dupe(u8, name);
+            }
+        }
+
+        // Build best-effort local register names for diagnostics
+        const local_reg_names = try allocator.alloc(?[]const u8, self.maxstacksize);
+        for (local_reg_names) |*slot| slot.* = null;
+        for (self.variables.items) |entry| {
+            if (entry.reg < self.maxstacksize and local_reg_names[entry.reg] == null) {
+                local_reg_names[entry.reg] = try allocator.dupe(u8, entry.name);
+            }
+        }
 
         // Duplicate source name
         const source_slice = try allocator.dupe(u8, self.source);
@@ -1179,6 +1208,7 @@ pub const ProtoBuilder = struct {
             .maxstacksize = self.maxstacksize,
             .nups = @intCast(self.upvalues.items.len),
             .upvalues = upvalues_slice,
+            .local_reg_names = local_reg_names,
             .source = source_slice,
             .lineinfo = lineinfo_slice,
         };
@@ -1391,6 +1421,17 @@ pub const Parser = struct {
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
+                    // Lua allows at most one optional semicolon after top-level return.
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        self.advance();
+                    }
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        return error.UnsupportedStatement;
+                    }
+                    // At top-level chunk, return must be the final statement.
+                    if (self.current.kind != .Eof) {
+                        return error.UnsupportedStatement;
+                    }
                     return; // return ends the chunk
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
                     try self.parseIf();
@@ -1455,6 +1496,15 @@ pub const Parser = struct {
                     // Index assignment: t[key] = expr
                     try self.parseAssignment();
                 } else {
+                    const near_lexeme = if (next.kind != .Eof and next.lexeme.len > 0) next.lexeme else self.current.lexeme;
+                    if (near_lexeme.len == 1) {
+                        const b = near_lexeme[0];
+                        if (b < 32 or b == 127 or b >= 128) {
+                            self.setError("syntax error near '<\\{d}>'", .{b});
+                            return error.UnsupportedStatement;
+                        }
+                    }
+                    self.setError("syntax error near '{s}'", .{near_lexeme});
                     return error.UnsupportedStatement;
                 }
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
@@ -1478,7 +1528,7 @@ pub const Parser = struct {
         // Check for unresolved gotos
         if (self.proto.pending_gotos.items.len > 0) {
             const first = self.proto.pending_gotos.items[0];
-            self.setError("no visible label '{s}' for <goto>", .{first.name});
+            self.setError("no visible label '{s}' for <goto> at line {d}", .{ first.name, first.line });
             return error.UndefinedLabel;
         }
 
@@ -2716,6 +2766,7 @@ pub const Parser = struct {
     /// Parse table constructor: { [field,]* }
     /// field = Name '=' expr | '[' expr ']' '=' expr | expr
     fn parseTableConstructor(self: *Parser) ParseError!u8 {
+        const open_line = self.current.line;
         // Consume '{'
         self.advance();
 
@@ -2728,6 +2779,10 @@ pub const Parser = struct {
 
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            if (self.current.kind == .Eof) {
+                self.setError("'}}' expected (to close '{{' at line {d}) near <eof>", .{open_line});
+                return error.ExpectedCloseBrace;
+            }
             // Check for indexed field: '[' expr ']' '=' expr
             if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
                 self.advance(); // consume '['
@@ -2893,6 +2948,9 @@ pub const Parser = struct {
 
         // Consume '}'
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
+            if (self.current.kind == .Eof) {
+                self.setError("'}}' expected (to close '{{' at line {d}) near <eof>", .{open_line});
+            }
             return error.ExpectedCloseBrace;
         }
         self.advance();
@@ -3120,6 +3178,10 @@ pub const Parser = struct {
 
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "..")) {
             self.advance(); // consume '..'
+            if (count >= operands.len) {
+                self.setError("too many syntax levels", .{});
+                return error.UnsupportedStatement;
+            }
             operands[count] = try self.parseAdd();
             count += 1;
         }
@@ -3861,6 +3923,7 @@ pub const Parser = struct {
     /// Parse 'goto label' statement
     fn parseGoto(self: *Parser) ParseError!void {
         self.advance(); // consume 'goto'
+        const goto_line = self.current.line;
 
         // Expect label name
         if (self.current.kind != .Identifier) {
@@ -3873,7 +3936,7 @@ pub const Parser = struct {
         if (self.proto.labels.get(label_name)) |target| {
             // Cannot jump into a deeper block.
             if (!self.isScopeAncestor(target.scope_id, self.currentScopeId())) {
-                self.setError("no visible label '{s}' for <goto>", .{label_name});
+                self.setError("no visible label '{s}' for <goto> at line {d}", .{ label_name, goto_line });
                 return error.UndefinedLabel;
             }
             if (target.code_pos <= self.proto.code.items.len) {
@@ -3892,6 +3955,7 @@ pub const Parser = struct {
             try self.proto.pending_gotos.append(self.proto.allocator, .{
                 .name = label_name,
                 .code_pos = jmp_addr,
+                .line = @intCast(goto_line),
                 .scope_depth = self.currentScopeDepth(),
                 .scope_id = self.currentScopeId(),
                 .next_decl_seq = self.proto.local_decl_seq,
@@ -3901,6 +3965,7 @@ pub const Parser = struct {
 
     /// Parse '::label::' label definition
     fn parseLabel(self: *Parser) ParseError!void {
+        const label_line = self.current.line;
         self.advance(); // consume first ':'
         self.advance(); // consume second ':'
 
@@ -3922,8 +3987,8 @@ pub const Parser = struct {
         self.advance(); // consume ':'
 
         // Repeated labels are not allowed.
-        if (self.proto.labels.get(label_name) != null) {
-            self.setError("label '{s}' already defined", .{label_name});
+        if (self.proto.labels.get(label_name)) |prev| {
+            self.setError("label '{s}' already defined on line {d}", .{ label_name, prev.line });
             return error.ExpectedLabel;
         }
 
@@ -3931,6 +3996,7 @@ pub const Parser = struct {
         const label_pos = self.proto.code.items.len;
         const label = LabelEntry{
             .code_pos = label_pos,
+            .line = @intCast(label_line),
             .scope_depth = self.currentScopeDepth(),
             .scope_id = self.currentScopeId(),
             .next_decl_seq = self.proto.local_decl_seq,
@@ -3990,9 +4056,12 @@ pub const Parser = struct {
             if (self.current.kind == .Keyword) {
                 if (std.mem.eql(u8, self.current.lexeme, "return")) {
                     try self.parseReturn();
-                    // Skip optional trailing semicolons after return
-                    while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                    // Lua allows at most one optional semicolon after return.
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
                         self.advance();
+                    }
+                    if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+                        return error.UnsupportedStatement;
                     }
                     return; // return ends the statement block
                 } else if (std.mem.eql(u8, self.current.lexeme, "if")) {
@@ -4073,6 +4142,7 @@ pub const Parser = struct {
     /// Variable is only visible AFTER its initializer (so `local a = a` refers to outer a)
     fn parseLocalDecl(self: *Parser) ParseError!void {
         self.advance(); // consume 'local'
+        const local_var_limit: u8 = 200;
 
         // Check for 'local function' syntax
         if (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "function")) {
@@ -4088,6 +4158,11 @@ pub const Parser = struct {
         // First identifier
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
+        }
+        if (var_count >= local_var_limit) {
+            const fn_line = if (self.current.line > 0) self.current.line - 1 else self.current.line;
+            self.setError("too many local variables (line {d})", .{fn_line});
+            return error.UnsupportedStatement;
         }
         var_names[var_count] = self.current.lexeme;
         var_is_close[var_count] = false;
@@ -4126,6 +4201,11 @@ pub const Parser = struct {
             self.advance(); // consume ','
             if (self.current.kind != .Identifier) {
                 return error.ExpectedIdentifier;
+            }
+            if (var_count >= local_var_limit) {
+                const fn_line = if (self.current.line > 0) self.current.line - 1 else self.current.line;
+                self.setError("too many local variables (line {d})", .{fn_line});
+                return error.UnsupportedStatement;
             }
             var_names[var_count] = self.current.lexeme;
             var_is_close[var_count] = false;
@@ -4514,6 +4594,7 @@ pub const Parser = struct {
         var arg_count: u8 = 0;
         var last_was_call = false;
         var last_was_vararg = false;
+        const max_register_index: u16 = 254;
 
         const detectTailCallInRange = struct {
             fn run(code: []Instruction, start: usize) bool {
@@ -4534,6 +4615,10 @@ pub const Parser = struct {
         // Check for no-parens call: f "string" or f {table}
         if (self.isNoParensArg()) {
             // Single argument without parentheses
+            if (@as(u16, func_reg) + 1 > max_register_index) {
+                self.setError("too many registers", .{});
+                return error.UnsupportedStatement;
+            }
             const arg_reg = if (self.current.kind == .String)
                 try self.parseStringLiteral()
             else
@@ -4563,6 +4648,10 @@ pub const Parser = struct {
                 last_was_vararg = true;
             } else {
                 // Parse first argument
+                if (@as(u16, func_reg) + 1 > max_register_index) {
+                    self.setError("too many registers", .{});
+                    return error.UnsupportedStatement;
+                }
                 const target_reg = func_reg + 1;
                 // Force next_reg to the argument target so call results remain contiguous.
                 const saved_next_reg = self.proto.next_reg;
@@ -4588,12 +4677,20 @@ pub const Parser = struct {
                         return error.VarargOutsideVarargFunction;
                     }
                     self.advance(); // consume '...'
+                    if (@as(u16, func_reg) + @as(u16, arg_count) + 1 > max_register_index) {
+                        self.setError("too many registers", .{});
+                        return error.UnsupportedStatement;
+                    }
                     // Emit VARARG with C=0 to load all varargs starting at func_reg+arg_count+1
                     try self.proto.emit(.VARARG, func_reg + arg_count + 1, 0, 0);
                     last_was_vararg = true;
                     break; // ... must be last argument
                 }
 
+                if (@as(u16, func_reg) + @as(u16, arg_count) + 2 > max_register_index) {
+                    self.setError("too many registers", .{});
+                    return error.UnsupportedStatement;
+                }
                 arg_count += 1;
                 const target_reg = func_reg + arg_count;
                 // Force next_reg to the argument target so call results remain contiguous.

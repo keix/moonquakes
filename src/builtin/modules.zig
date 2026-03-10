@@ -106,7 +106,8 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Step 4: Search for module file using package.path
-    const search_path = getPackagePath(package_table) orelse DEFAULT_PATH;
+    var search_path_buf: [2048]u8 = undefined;
+    const search_path = buildRequireSearchPath(vm, package_table, &search_path_buf);
 
     var path_buf: [1024]u8 = undefined;
     var path_len: usize = 0;
@@ -145,6 +146,33 @@ fn getPackagePath(package_table: ?*TableObject) ?[]const u8 {
         }
     }
     return null;
+}
+
+/// Build the effective search path for require.
+/// Prepends the running script's directory (arg[0]) when available.
+fn buildRequireSearchPath(vm: *VM, package_table: ?*TableObject, out_buf: []u8) []const u8 {
+    const base_path = getPackagePath(package_table) orelse DEFAULT_PATH;
+    const script_dir = getScriptDir(vm) orelse return base_path;
+
+    // If script has no directory component, base path already covers "./?.lua".
+    if (script_dir.len == 0 or std.mem.eql(u8, script_dir, ".")) {
+        return base_path;
+    }
+
+    return std.fmt.bufPrint(out_buf, "{s}/?.lua;{s}/?/init.lua;{s}", .{ script_dir, script_dir, base_path }) catch base_path;
+}
+
+/// Resolve script directory from arg[0].
+fn getScriptDir(vm: *VM) ?[]const u8 {
+    const arg_key = vm.gc().allocString("arg") catch return null;
+    const arg_table_val = vm.globals().get(TValue.fromString(arg_key)) orelse return null;
+    const arg_table = arg_table_val.asTable() orelse return null;
+
+    const script_val = arg_table.get(.{ .integer = 0 }) orelse return null;
+    const script_str = script_val.asString() orelse return null;
+    const script_name = script_str.asSlice();
+
+    return std.fs.path.dirname(script_name);
 }
 
 /// Load a module from file, execute it, and cache the result

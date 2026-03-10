@@ -235,7 +235,7 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
     } else &[_]u32{};
 
     // Allocate ProtoObject through GC
-    return gc.allocProto(k, code, protos, numparams, is_vararg, maxstacksize, nups, upvalues, source, lineinfo);
+    return gc.allocProto(k, code, protos, numparams, is_vararg, maxstacksize, nups, upvalues, &[_]?[]const u8{}, source, lineinfo);
 }
 
 fn readConstant(reader: *ByteReader, gc: anytype) !TValue {

@@ -64,7 +64,11 @@ pub const VM = struct {
     lua_error_value: TValue = .nil,
     last_field_reg: ?u8 = null,
     last_field_key: ?*object.StringObject = null,
+    last_field_is_global: bool = false,
+    last_field_is_method: bool = false,
+    last_field_tick: u64 = 0,
     int_repr_field_key: ?*object.StringObject = null,
+    exec_tick: u64 = 0,
 
     // Yield state
     yield_base: u32 = 0,
@@ -83,6 +87,9 @@ pub const VM = struct {
     hook_func: ?*ClosureObject = null,
     hook_mask: u8 = 0, // 1=call, 2=return, 4=line
     hook_count: u32 = 0,
+    error_handling_depth: u8 = 0,
+    traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
+    traceback_snapshot_count: u16 = 0,
 
     // Lifecycle
     pub const init = lifecycle.init;

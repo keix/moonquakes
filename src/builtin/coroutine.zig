@@ -40,6 +40,10 @@ var coroutine_bootstrap_proto = object.ProtoObject{
     .lineinfo = coroutine_bootstrap_lineinfo[0..],
 };
 
+// Guard native recursion through coroutine.resume chains to avoid host stack crashes.
+var resume_c_depth: u32 = 0;
+const resume_c_depth_limit: u32 = 197;
+
 fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
     if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
     return co_vm.stack[0];
@@ -94,6 +98,15 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const thread = thread_arg.asThread() orelse {
         return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
     };
+
+    if (resume_c_depth >= resume_c_depth_limit) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("C stack overflow"));
+        vm.top = vm.base + func_reg + 2;
+        return;
+    }
+    resume_c_depth += 1;
+    defer resume_c_depth -= 1;
 
     // Check if the coroutine can be resumed
     if (thread.status == .dead) {

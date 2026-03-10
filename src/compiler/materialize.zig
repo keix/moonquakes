@@ -43,7 +43,17 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
 
     // Duplicate code and upvalues using GC's allocator (ProtoObject owns its own copies)
     const code = try gc.allocator.dupe(Instruction, raw.code);
-    const upvalues = try gc.allocator.dupe(Upvaldesc, raw.upvalues);
+    const upvalues = try gc.allocator.alloc(Upvaldesc, raw.upvalues.len);
+    for (raw.upvalues, 0..) |upv, i| {
+        upvalues[i] = upv;
+        if (upv.name) |name| {
+            upvalues[i].name = try gc.allocator.dupe(u8, name);
+        }
+    }
+    const local_reg_names = try gc.allocator.alloc(?[]const u8, raw.local_reg_names.len);
+    for (raw.local_reg_names, 0..) |name_opt, i| {
+        local_reg_names[i] = if (name_opt) |name| try gc.allocator.dupe(u8, name) else null;
+    }
     const source = try gc.allocator.dupe(u8, raw.source);
     const lineinfo = try gc.allocator.dupe(u32, raw.lineinfo);
 
@@ -57,6 +67,7 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
         raw.maxstacksize,
         raw.nups,
         upvalues,
+        local_reg_names,
         source,
         lineinfo,
     );

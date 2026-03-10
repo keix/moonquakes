@@ -48,9 +48,12 @@ pub fn nativeToString(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     vm.beginGCGuard();
     defer vm.endGCGuard();
 
+    if (nargs == 0) {
+        return vm.raiseString("bad argument #1 to 'tostring' (value expected)");
+    }
     if (nresults == 0) return;
 
-    const arg = if (nargs > 0) vm.stack[vm.base + func_reg + 1] else TValue.nil;
+    const arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = try toStringValue(vm, arg);
     vm.stack[vm.base + func_reg] = TValue.fromString(str_obj);
     if (nresults > 1) {
@@ -149,29 +152,63 @@ pub fn nativeStringLen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
 /// string.sub(s, i [, j]) - Returns substring of s from i to j
 pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 2) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
-    }
+    _ = nresults;
+    const method_call = vm.last_field_is_method and vm.last_field_key != null and
+        std.mem.eql(u8, vm.last_field_key.?.asSlice(), "sub") and
+        vm.exec_tick - vm.last_field_tick <= 64;
 
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        const got = switch (str_arg) {
+            .nil => "nil",
+            .boolean => "boolean",
+            .integer, .number => "number",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .thread => "thread",
+                .userdata, .file => "userdata",
+                else => "userdata",
+            },
+        };
+        var msg_buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "calling 'sub' on bad self (string expected, got {s})", .{got}) catch "calling 'sub' on bad self";
+        return vm.raiseString(msg);
     };
     const str = str_obj.asSlice();
     const len: i64 = @intCast(str.len);
 
     // Get i (1-based, can be negative)
     const i_arg = vm.stack[vm.base + func_reg + 2];
-    var i: i64 = i_arg.toInteger() orelse 1;
+    var i: i64 = i_arg.toInteger() orelse {
+        const i_pos: u8 = if (method_call) 1 else 2;
+        if (i_arg.toNumber() != null) {
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "bad argument #{} to 'sub' (number has no integer representation)", .{i_pos}) catch "bad argument to 'sub'";
+            return vm.raiseString(msg);
+        }
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #{} to 'sub' (number expected)", .{i_pos}) catch "bad argument to 'sub'";
+        return vm.raiseString(msg);
+    };
 
     // Get j (optional, defaults to -1 meaning end of string)
     var j: i64 = -1;
     if (nargs > 2) {
         const j_arg = vm.stack[vm.base + func_reg + 3];
-        j = j_arg.toInteger() orelse -1;
+        j = j_arg.toInteger() orelse {
+            const j_pos: u8 = if (method_call) 2 else 3;
+            if (j_arg.toNumber() != null) {
+                var msg_buf: [96]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "bad argument #{} to 'sub' (number has no integer representation)", .{j_pos}) catch "bad argument to 'sub'";
+                return vm.raiseString(msg);
+            }
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "bad argument #{} to 'sub' (number expected)", .{j_pos}) catch "bad argument to 'sub'";
+            return vm.raiseString(msg);
+        };
     }
 
     // Handle negative indices (count from end)
@@ -348,7 +385,7 @@ pub fn nativeStringChar(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
 /// string.rep(s, n [, sep]) - Returns string that is concatenation of n copies of s separated by sep
 pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nresults == 0) return;
+    _ = nresults;
 
     if (nargs < 2) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -363,7 +400,12 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const str = str_obj.asSlice();
 
     const n_arg = vm.stack[vm.base + func_reg + 2];
-    const n = n_arg.toInteger() orelse 0;
+    const n = n_arg.toInteger() orelse {
+        if (n_arg.toNumber() != null) {
+            return vm.raiseString("bad argument #2 to 'rep' (number has no integer representation)");
+        }
+        return vm.raiseString("bad argument #2 to 'rep' (number expected)");
+    };
 
     if (n <= 0) {
         const result = try vm.gc().allocString("");
@@ -451,24 +493,54 @@ pub fn nativeStringReverse(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 /// Returns start and end indices (1-based) or nil if not found
 /// Currently only supports plain text search (no pattern matching)
 pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'find' (value expected)");
+    }
     if (nargs < 2) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #2 to 'find' (value expected)");
     }
 
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        const got = switch (str_arg) {
+            .nil => "nil",
+            .boolean => "boolean",
+            .integer, .number => "number",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .thread => "thread",
+                .userdata, .file => "userdata",
+                else => "userdata",
+            },
+        };
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #1 to 'find' (string expected, got {s})", .{got}) catch "bad argument to 'find'";
+        return vm.raiseString(msg);
     };
     const str = str_obj.asSlice();
 
     // Get pattern
     const pattern_arg = vm.stack[vm.base + func_reg + 2];
     const pattern_obj = pattern_arg.asString() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        const got = switch (pattern_arg) {
+            .nil => "nil",
+            .boolean => "boolean",
+            .integer, .number => "number",
+            .object => |obj| switch (obj.type) {
+                .string => "string",
+                .table => "table",
+                .closure, .native_closure => "function",
+                .thread => "thread",
+                .userdata, .file => "userdata",
+                else => "userdata",
+            },
+        };
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "bad argument #2 to 'find' (string expected, got {s})", .{got}) catch "bad argument to 'find'";
+        return vm.raiseString(msg);
     };
     const pattern = pattern_obj.asSlice();
 
@@ -772,8 +844,10 @@ const PatternMatcher = struct {
                     // Then try one match and recurse
                     while (self.matchItem(item)) {
                         const sp = self.pat_pos;
+                        const ss = self.str_pos;
                         if (self.matchPattern()) return true;
                         self.pat_pos = sp;
+                        self.str_pos = ss;
                     }
                     return false;
                 },

@@ -449,12 +449,19 @@ fn runUntilReturn(
             if (err == error.Yield) return error.Yield;
             // Handle LuaException by unwinding to protected frames (pcall)
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            if (err == error.LuaException) {
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                return error.LuaException;
+            }
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.CallStackOverflow or
                 err == error.ArithmeticError or
                 err == error.DivideByZero or
                 err == error.ModuloByZero or
                 err == error.IntegerRepresentation or
+                err == error.OrderComparisonError or
+                err == error.LengthError or
                 err == error.NotATable or
                 err == error.NotAFunction or
                 err == error.InvalidTableKey or
@@ -467,8 +474,14 @@ fn runUntilReturn(
                 // Set error message and try to handle as LuaException
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => "stack overflow",
-                    error.ArithmeticError => "attempt to perform arithmetic on a non-numeric value",
+                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.ArithmeticError => blk: {
+                        if (vm.last_field_key) |key| {
+                            vm.last_field_key = null;
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value (field '{s}')", .{key.asSlice()}) catch "attempt to perform arithmetic on a non-numeric value";
+                        }
+                        break :blk "attempt to perform arithmetic on a non-numeric value";
+                    },
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
                     error.IntegerRepresentation => blk: {
@@ -480,6 +493,8 @@ fn runUntilReturn(
                     },
                     error.NotATable => "attempt to index a non-table value",
                     error.NotAFunction => "attempt to call a non-function value",
+                    error.OrderComparisonError => "attempt to compare values",
+                    error.LengthError => "attempt to get length of a value",
                     error.InvalidTableKey => "table index is nil or NaN",
                     error.InvalidTableOperation => "attempt to index a non-table value",
                     error.InvalidForLoopInit => "'for' initial value must be a number",
@@ -493,6 +508,7 @@ fn runUntilReturn(
                     return err; // OOM: can't convert, propagate original error
                 });
                 if (mnemonics.handleLuaException(vm)) continue;
+                mnemonics.captureCurrentTracebackSnapshot(vm);
                 cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;
             }
@@ -567,6 +583,20 @@ fn runUntilReturnInto(
         const result = mnemonics.do(vm, inst) catch |err| {
             if (err == error.Yield) return error.Yield;
             if (err == error.LuaException and mnemonics.handleLuaException(vm)) continue;
+            if (err == error.CallStackOverflow) {
+                const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                    cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                    return err;
+                });
+                if (mnemonics.handleLuaException(vm)) continue;
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupOnError(vm, saved_depth, saved_base, saved_top);
+                return error.LuaException;
+            }
+            if (err == error.LuaException) {
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+            }
             cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return err;
         };
