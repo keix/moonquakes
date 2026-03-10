@@ -121,7 +121,9 @@ pub fn allocTable(self: anytype) !*TableObject {
     obj.hash_part = TableObject.HashMap.init(self.allocator);
     obj.deleted_keys = TableObject.DeletedKeySet.init(self.allocator);
     obj.allocator = self.allocator;
+    obj.seq_len = 0;
     obj.metatable = null; // No metatable by default
+    obj.weak_mode = .none;
 
     // Add to GC object list
     self.objects = &obj.header;

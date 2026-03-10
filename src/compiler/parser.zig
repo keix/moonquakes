@@ -5133,6 +5133,24 @@ pub const Parser = struct {
 
         // Create RawProto container early (address is fixed, content will be filled later)
         const proto_ptr = try self.proto.output_allocator.create(RawProto);
+        proto_ptr.* = .{
+            .code = &.{},
+            .booleans = &.{},
+            .integers = &.{},
+            .numbers = &.{},
+            .strings = &.{},
+            .native_ids = &.{},
+            .const_refs = &.{},
+            .protos = &.{},
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 0,
+            .nups = 0,
+            .upvalues = &.{},
+            .local_reg_names = &.{},
+            .source = "",
+            .lineinfo = &.{},
+        };
 
         // Temporarily add function for recursive calls with unfilled RawProto
         // Use the full qualified name for lookup (base.field1.field2 or base)
