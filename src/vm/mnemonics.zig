@@ -816,6 +816,278 @@ fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
     return null;
 }
 
+pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []const u8 {
+    if (vm.ci) |cur_ci| {
+        const reg_opt: ?u8 = switch (inst.getOpCode()) {
+            .GETTABLE, .GETFIELD, .GETI, .SELF => inst.getB(),
+            .SETTABLE, .SETFIELD, .SETI => inst.getA(),
+            else => null,
+        };
+        if (reg_opt) |bad_reg| {
+            if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                const kind = switch (ctx.kind) {
+                    .global_name => "global",
+                    .field_name => "field",
+                    .method_name => "method",
+                    .local_name => "local",
+                    .upvalue_name => "upvalue",
+                };
+                const ty = callableValueTypeName(vm.stack[vm.base + bad_reg]);
+                return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, ctx.name }) catch "attempt to index a non-table value";
+            }
+        }
+    }
+    if (vm.last_field_key) |key| {
+        const reg = vm.last_field_reg orelse 0;
+        const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
+        const kind = if (vm.last_field_is_global) "global" else "field";
+        vm.last_field_key = null;
+        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+    }
+    return "attempt to index a non-table value";
+}
+
+pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []const u8 {
+    const op_name: ?[]const u8 = switch (inst.getOpCode()) {
+        .BAND, .BANDK => "'band'",
+        .BOR, .BORK => "'bor'",
+        .BXOR, .BXORK => "'bxor'",
+        .BNOT => "'bnot'",
+        .SHL, .SHLI => "'shl'",
+        .SHR, .SHRI => "'shr'",
+        else => null,
+    };
+    if (op_name) |name| {
+        const bad_ty: []const u8 = blkty: {
+            switch (inst.getOpCode()) {
+                .BNOT => break :blkty namedValueTypeName(vm, vm.stack[vm.base + inst.getB()]),
+                .BAND, .BOR, .BXOR, .SHL, .SHR => {
+                    const rb = inst.getB();
+                    const rc = inst.getC();
+                    var vb = vm.stack[vm.base + rb];
+                    var vc = vm.stack[vm.base + rc];
+                    if (toIntForBitwise(&vb)) |_| {} else |_| break :blkty namedValueTypeName(vm, vb);
+                    if (toIntForBitwise(&vc)) |_| {} else |_| break :blkty namedValueTypeName(vm, vc);
+                    break :blkty "non-numeric";
+                },
+                .BANDK, .BORK, .BXORK, .SHLI, .SHRI => break :blkty namedValueTypeName(vm, vm.stack[vm.base + inst.getB()]),
+                else => break :blkty "non-numeric",
+            }
+        };
+        return std.fmt.bufPrint(msg_buf, "attempt to perform bitwise operation {s} on a {s} value", .{ name, bad_ty }) catch "attempt to perform arithmetic on a non-numeric value";
+    }
+
+    if (customNamedArithmeticType(vm, inst)) |ty| {
+        return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a {s} value", .{ty}) catch "attempt to perform arithmetic on a non-numeric value";
+    }
+
+    if (vm.ci) |cur_ci| {
+        const op = inst.getOpCode();
+        if (op == .ADD or op == .SUB or op == .MUL or op == .DIV or op == .MOD or op == .POW or op == .IDIV or
+            op == .BAND or op == .BOR or op == .BXOR or op == .SHL or op == .SHR or
+            op == .MMBIN or op == .MMBINI or op == .MMBINK)
+        {
+            const r1: u8 = switch (op) {
+                .MMBIN, .MMBINI, .MMBINK => inst.getA(),
+                else => inst.getB(),
+            };
+            const r2: ?u8 = switch (op) {
+                .MMBIN => inst.getB(),
+                .MMBINI, .MMBINK => null,
+                else => inst.getC(),
+            };
+
+            var best_ctx: ?CallNameContext = null;
+            var best_score: u8 = 0;
+            var ctx1_opt: ?CallNameContext = null;
+            var ctx2_opt: ?CallNameContext = null;
+
+            const v1 = vm.stack[vm.base + r1];
+            if (v1.toNumber() == null) {
+                if (resolveRegisterNameContext(cur_ci, r1)) |ctx| {
+                    ctx1_opt = ctx;
+                    const score: u8 = switch (ctx.kind) {
+                        .local_name => 3,
+                        .upvalue_name => if (std.mem.eql(u8, ctx.name, "_ENV")) 0 else 3,
+                        .global_name, .field_name, .method_name => 2,
+                    };
+                    if (score > 0) {
+                        best_ctx = ctx;
+                        best_score = score;
+                    }
+                }
+                if (findUniqueLocalNameByValue(cur_ci, vm, v1)) |lname| {
+                    if (best_ctx == null or best_score < 3) {
+                        best_ctx = .{ .kind = .local_name, .name = lname };
+                        best_score = 3;
+                    }
+                }
+            }
+            if (r2) |rr| {
+                const v2 = vm.stack[vm.base + rr];
+                if (v2.toNumber() == null) {
+                    if (resolveRegisterNameContext(cur_ci, rr)) |ctx| {
+                        ctx2_opt = ctx;
+                        const score: u8 = switch (ctx.kind) {
+                            .local_name => 3,
+                            .upvalue_name => if (std.mem.eql(u8, ctx.name, "_ENV")) 0 else 3,
+                            .global_name, .field_name, .method_name => 2,
+                        };
+                        if (score > 0 and (best_ctx == null or score > best_score)) {
+                            best_ctx = ctx;
+                            best_score = score;
+                        }
+                    }
+                    if (findUniqueLocalNameByValue(cur_ci, vm, v2)) |lname| {
+                        if (best_ctx == null or best_score < 3) {
+                            best_ctx = .{ .kind = .local_name, .name = lname };
+                            best_score = 3;
+                        }
+                    }
+                }
+            }
+
+            if (ctx1_opt) |ctx1| {
+                if (ctx2_opt) |ctx2| {
+                    if (ctx1.kind == ctx2.kind and std.mem.eql(u8, ctx1.name, ctx2.name) and
+                        (ctx1.kind == .global_name or ctx1.kind == .field_name))
+                    {
+                        best_ctx = null;
+                    }
+                }
+            }
+
+            if (best_ctx) |ctx| {
+                const kind = switch (ctx.kind) {
+                    .global_name => "global",
+                    .field_name => "field",
+                    .method_name => "method",
+                    .local_name => "local",
+                    .upvalue_name => "upvalue",
+                };
+                return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, ctx.name }) catch "attempt to perform arithmetic on a non-numeric value";
+            }
+        }
+    }
+
+    if (vm.last_field_key) |key| {
+        var suppress_field_hint = false;
+        switch (inst.getOpCode()) {
+            .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
+                const rb = inst.getB();
+                const rc = inst.getC();
+                const vb = vm.stack[vm.base + rb];
+                const vc = vm.stack[vm.base + rc];
+                suppress_field_hint = (vb.toNumber() == null and vc.toNumber() == null and vb.eql(vc));
+            },
+            .MMBIN => {
+                const ra = inst.getA();
+                const rb = inst.getB();
+                const va = vm.stack[vm.base + ra];
+                const vb = vm.stack[vm.base + rb];
+                suppress_field_hint = (va.toNumber() == null and vb.toNumber() == null and va.eql(vb));
+            },
+            else => {},
+        }
+        if (suppress_field_hint) {
+            vm.last_field_key = null;
+            return "attempt to perform arithmetic on a non-numeric value";
+        }
+        const kind = if (vm.last_field_is_global) "global" else "field";
+        vm.last_field_key = null;
+        return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
+    }
+
+    if (firstArithmeticBadOperand(vm, inst)) |bad| {
+        const ty = namedValueTypeName(vm, bad);
+        return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} value)", .{ty}) catch "attempt to perform arithmetic on a non-numeric value";
+    }
+    return "attempt to perform arithmetic on a non-numeric value";
+}
+
+pub fn formatIntegerRepresentationError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []const u8 {
+    if (vm.ci) |cur_ci| {
+        const reg_opt: ?u8 = switch (inst.getOpCode()) {
+            .BNOT => inst.getB(),
+            .SHLI, .SHRI, .BANDK, .BORK, .BXORK => inst.getB(),
+            .BAND, .BOR, .BXOR, .SHL, .SHR => badreg: {
+                const rb = inst.getB();
+                const rc = inst.getC();
+                var vb = vm.stack[vm.base + rb];
+                var vc = vm.stack[vm.base + rc];
+                if (toIntForBitwise(&vb)) |_| {} else |_| break :badreg rb;
+                if (toIntForBitwise(&vc)) |_| {} else |_| break :badreg rc;
+                break :badreg null;
+            },
+            else => null,
+        };
+        if (reg_opt) |bad_reg| {
+            if (resolveRegisterNameContext(cur_ci, bad_reg)) |ctx| {
+                const kind = switch (ctx.kind) {
+                    .global_name => "global",
+                    .field_name => "field",
+                    .method_name => "method",
+                    .local_name => "local",
+                    .upvalue_name => "upvalue",
+                };
+                if (ctx.kind == .local_name) {
+                    return std.fmt.bufPrint(msg_buf, "number has no integer representation (local {s})", .{ctx.name}) catch "number has no integer representation";
+                }
+                return std.fmt.bufPrint(msg_buf, "number has no integer representation ({s} '{s}')", .{ kind, ctx.name }) catch "number has no integer representation";
+            }
+            if (findUniqueLocalNameByValue(cur_ci, vm, vm.stack[vm.base + bad_reg])) |lname| {
+                return std.fmt.bufPrint(msg_buf, "number has no integer representation (local {s})", .{lname}) catch "number has no integer representation";
+            }
+        }
+    }
+
+    if (vm.int_repr_field_key) |key| {
+        vm.int_repr_field_key = null;
+        return std.fmt.bufPrint(msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
+    }
+    return "number has no integer representation";
+}
+
+pub fn formatForLoopError(vm: *VM, inst: Instruction, err: anyerror, msg_buf: *[128]u8) []const u8 {
+    return switch (err) {
+        error.InvalidForLoopInit => blk: {
+            if (forLoopArgValue(vm, inst, .init)) |v| {
+                const ty = namedValueTypeName(vm, v);
+                break :blk std.fmt.bufPrint(msg_buf, "'for' initial value must be a number (got {s})", .{ty}) catch "'for' initial value must be a number";
+            }
+            break :blk "'for' initial value must be a number";
+        },
+        error.InvalidForLoopLimit => blk: {
+            if (forLoopArgValue(vm, inst, .limit)) |v| {
+                const ty = namedValueTypeName(vm, v);
+                break :blk std.fmt.bufPrint(msg_buf, "'for' limit must be a number (got {s})", .{ty}) catch "'for' limit must be a number";
+            }
+            break :blk "'for' limit must be a number";
+        },
+        error.InvalidForLoopStep => blk: {
+            if (forLoopArgValue(vm, inst, .step)) |v| {
+                if (v.toNumber()) |n| {
+                    if (n == 0) break :blk "'for' step is zero";
+                }
+                const ty = namedValueTypeName(vm, v);
+                break :blk std.fmt.bufPrint(msg_buf, "'for' step must be a number (got {s})", .{ty}) catch "'for' step must be a number";
+            }
+            break :blk "'for' step must be a number";
+        },
+        else => "runtime error",
+    };
+}
+
+pub fn formatNoCloseMetamethodError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []const u8 {
+    const reg = inst.getA();
+    const ci = vm.ci orelse return "variable got a non-closable value";
+    const name = if (reg < ci.func.local_reg_names.len and ci.func.local_reg_names[reg] != null)
+        ci.func.local_reg_names[reg].?
+    else
+        "?";
+    return std.fmt.bufPrint(msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
+}
+
 fn findUniqueLocalNameByValue(ci: *const CallInfo, vm: *VM, value: TValue) ?[]const u8 {
     const max_regs = @min(ci.func.local_reg_names.len, ci.func.maxstacksize);
     var found: ?[]const u8 = null;
@@ -1248,6 +1520,10 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
 
     var current_err = err_obj;
     var had_error = !current_err.isNil();
+
+    const saved_name_override = vm.hook_name_override;
+    if (!err_obj.isNil()) vm.hook_name_override = "pcall";
+    defer vm.hook_name_override = saved_name_override;
 
     const setCloseCallError = struct {
         fn run(vm2: *VM, mm_val: TValue) TValue {
@@ -3479,8 +3755,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Top-level return - close TBC variables
-            closeTBCVariables(vm, vm.ci.?, 0, .nil) catch |err| {
-                const top_ci = vm.ci.?;
+            const top_ci = vm.ci.?;
+            closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
                 if (err == error.Yield) {
                     top_ci.pending_return_reexec = true;
                 }
