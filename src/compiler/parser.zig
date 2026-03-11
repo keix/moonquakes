@@ -4603,7 +4603,6 @@ pub const Parser = struct {
                         if (target_idx) |idx| {
                             // Adjust CALL/PCALL/VARARG to return needed_from_last results
                             self.proto.code.items[idx].c = needed_from_last + 1;
-
                             // Copy expanded results from the last expression into remaining vars.
                             // Destination starts at first_reg + fixed_values (the first slot of last expr).
                             const dst_start = first_reg + fixed_values;
@@ -4813,34 +4812,6 @@ pub const Parser = struct {
 
         // Return the register where the result is stored
         return func_reg;
-    }
-
-    /// Parse pcall(f, ...) and emit PCALL opcode
-    /// PCALL layout: R(A) = status, R(A+1) = function, R(A+2...) = args
-    fn parsePcallExpr(self: *Parser) ParseError!u8 {
-        self.advance(); // consume "pcall"
-
-        // Allocate result register - this is where the status boolean will go
-        // Arguments will be placed at result_reg+1, result_reg+2, etc.
-        const result_reg = self.proto.allocTemp();
-
-        // parseCallArgs expects func_reg and places args at func_reg+1, func_reg+2...
-        // For PCALL: result_reg = status, result_reg+1 = function, result_reg+2... = args
-        // So we pass result_reg as "func_reg" and it places pcall's arguments correctly
-        const arg_count = try self.parseCallArgs(result_reg);
-        const total_args: u8 = if (arg_count == ProtoBuilder.VARARG_SENTINEL)
-            ProtoBuilder.VARARG_SENTINEL
-        else
-            arg_count + 1;
-
-        // Emit PCALL instruction
-        // nresults = 2 means status + 1 return value (typical usage)
-        // Use VARARG_SENTINEL for variable results if caller wants multiple
-        try self.proto.emitPcall(result_reg, total_args, 2);
-
-        // Return the result register (where status boolean is stored)
-        // Note: caller may need to handle multiple return values
-        return result_reg;
     }
 
     /// Parse a function call where the function is stored in a local register

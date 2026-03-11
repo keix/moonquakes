@@ -508,7 +508,9 @@ fn runUntilReturn(
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                var full_msg_buf: [320]u8 = undefined;
+                const full_msg = mnemonics.runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err; // OOM: can't convert, propagate original error
                 });
@@ -571,9 +573,9 @@ fn runUntilReturnInto(
     const saved_depth = vm.callstack_size;
     _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, @intCast(out.len), vararg_base, vararg_count);
 
-    var direct_results: ?[]const TValue = null;
     var direct_single: ?TValue = null;
     var direct_none = false;
+    var direct_written = false;
 
     while (vm.callstack_size > saved_depth) {
         if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
@@ -642,7 +644,9 @@ fn runUntilReturnInto(
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch {
+                var full_msg_buf: [320]u8 = undefined;
+                const full_msg = mnemonics.runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err;
                 });
@@ -662,9 +666,19 @@ fn runUntilReturnInto(
             .LoopContinue => {},
             .ReturnVM => |ret| {
                 switch (ret) {
-                    .none => direct_none = true,
-                    .single => |v| direct_single = v,
-                    .multiple => |vs| direct_results = vs,
+                    .none => {
+                        direct_none = true;
+                    },
+                    .single => |v| {
+                        direct_single = v;
+                    },
+                    .multiple => |vs| {
+                        var i: usize = 0;
+                        while (i < out.len) : (i += 1) {
+                            out[i] = if (i < vs.len) vs[i] else .nil;
+                        }
+                        direct_written = true;
+                    },
                 }
                 mnemonics.popCallInfo(vm);
                 break;
@@ -672,18 +686,15 @@ fn runUntilReturnInto(
         }
     }
 
-    if (direct_none) {
+    if (direct_written) {
+        // already copied from ReturnVM.multiple
+    } else if (direct_none) {
         var i: usize = 0;
         while (i < out.len) : (i += 1) out[i] = .nil;
     } else if (direct_single) |v| {
         if (out.len > 0) out[0] = v;
         var i: usize = 1;
         while (i < out.len) : (i += 1) out[i] = .nil;
-    } else if (direct_results) |vs| {
-        var i: usize = 0;
-        while (i < out.len) : (i += 1) {
-            out[i] = if (i < vs.len) vs[i] else .nil;
-        }
     } else {
         var i: usize = 0;
         while (i < out.len) : (i += 1) {

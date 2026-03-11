@@ -750,6 +750,11 @@ fn raiseWithLocation(vm: *VM, ci: *const CallInfo, inst: Instruction, err: anyer
     return vm.raiseString(full_msg);
 }
 
+pub fn runtimeErrorWithCurrentLocation(vm: *VM, inst: Instruction, err: anyerror, msg: []const u8, out_buf: *[320]u8) []const u8 {
+    const ci = vm.ci orelse return msg;
+    return runtimeErrorWithLocation(ci, inst, err, msg, out_buf);
+}
+
 fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
     const cur_idx = currentInstructionIndex(ci) orelse return null;
     if (cur_idx > ci.func.code.len) return null;
@@ -1647,7 +1652,6 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             const ret_base = ci.ret_base;
             const target_ci = ci.previous;
             captureTracebackSnapshot(vm, target_ci);
-
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
                 closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch |cerr| switch (cerr) {
@@ -4479,7 +4483,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-
             // NOTE: PCALL uses direct total counts (function+args, status+values);
             // CALL uses +1 encoding.
             const total_args: u32 = b;
