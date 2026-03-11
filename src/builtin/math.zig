@@ -723,7 +723,7 @@ pub const MATH_PI: f64 = std.math.pi;
 pub const MATH_HUGE: f64 = std.math.inf(f64);
 
 /// math.maxinteger - An integer with the maximum value for an integer
-pub const MATH_MAXINTEGER: i64 = 9007199254740991; // 2^53 - 1 (exactly representable in f64)
+pub const MATH_MAXINTEGER: i64 = std.math.maxInt(i64);
 
 /// math.mininteger - An integer with the minimum value for an integer
-pub const MATH_MININTEGER: i64 = -9007199254740991; // -(2^53 - 1)
+pub const MATH_MININTEGER: i64 = std.math.minInt(i64);
