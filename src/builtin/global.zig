@@ -251,6 +251,28 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(type_name);
 }
 
+fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
+    const ty: []const u8 = switch (val) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .upvalue => "upvalue",
+            .userdata, .file => "userdata",
+            .proto => "proto",
+            .thread => "thread",
+        },
+    };
+
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value", .{ty}) catch "attempt to call a value";
+    const msg_obj = try vm.gc().allocString(msg);
+    vm.lua_error_value = TValue.fromString(msg_obj);
+}
+
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
 /// Returns: (true, results...) on success, (false, error_value) on failure
 pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
@@ -278,15 +300,28 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
-        if (nresults > 1) {
+        if (nresults == 0) {
+            var payload_len = out_len;
+            while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
+            var i: u32 = 0;
+            while (i < payload_len) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = payload[i];
+            }
+            vm.top = vm.base + func_reg + 1 + payload_len;
+        } else if (nresults > 1) {
             var i: u32 = 0;
             while (i < nresults - 1) : (i += 1) {
                 vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
             }
+            vm.top = vm.base + func_reg + nresults;
+        } else {
+            vm.top = vm.base + func_reg + 1;
         }
-        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
-        error.LuaException => {
+        error.LuaException, error.NotCallable => {
+            if (err == error.NotCallable) {
+                try setNotCallableErrorValue(vm, func_val);
+            }
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults > 1) {
@@ -331,15 +366,28 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
-        if (nresults > 1) {
+        if (nresults == 0) {
+            var payload_len = out_len;
+            while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
+            var i: u32 = 0;
+            while (i < payload_len) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = payload[i];
+            }
+            vm.top = vm.base + func_reg + 1 + payload_len;
+        } else if (nresults > 1) {
             var i: u32 = 0;
             while (i < nresults - 1) : (i += 1) {
                 vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
             }
+            vm.top = vm.base + func_reg + nresults;
+        } else {
+            vm.top = vm.base + func_reg + 1;
         }
-        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
-        error.LuaException => {
+        error.LuaException, error.NotCallable => {
+            if (err == error.NotCallable) {
+                try setNotCallableErrorValue(vm, func_val);
+            }
             // Get error value and call handler
             const error_value = vm.lua_error_value;
             vm.lua_error_value = .nil;

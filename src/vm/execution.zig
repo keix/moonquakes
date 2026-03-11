@@ -58,6 +58,11 @@ pub const CallInfo = struct {
     // Bitmap tracking which registers are marked as TBC (up to 64 registers)
     tbc_bitmap: u64 = 0,
 
+    // RETURN(B=0) state across yield/resume during close unwinding.
+    pending_return_a: ?u8 = null,
+    pending_return_count: ?u32 = null,
+    pending_return_reexec: bool = false,
+
     /// Mark a register as to-be-closed
     pub fn markTBC(self: *CallInfo, reg: u8) void {
         if (reg < 64) {
@@ -95,6 +100,12 @@ pub const CallInfo = struct {
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
+        if (self.pending_return_reexec) {
+            if (@intFromPtr(self.pc) > @intFromPtr(self.func.code.ptr)) {
+                self.pc -= 1;
+            }
+            self.pending_return_reexec = false;
+        }
         try self.validatePC();
         const inst = self.pc[0];
         self.skip();

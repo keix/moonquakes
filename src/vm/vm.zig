@@ -87,6 +87,10 @@ pub const VM = struct {
     hook_func: ?*ClosureObject = null,
     hook_mask: u8 = 0, // 1=call, 2=return, 4=line
     hook_count: u32 = 0,
+    hook_name_override: ?[]const u8 = null,
+    close_metamethod_depth: u8 = 0,
+    pending_error_unwind: bool = false,
+    pending_error_unwind_ci: ?*CallInfo = null,
     error_handling_depth: u8 = 0,
     traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
     traceback_snapshot_count: u16 = 0,
@@ -127,4 +131,5 @@ pub const VM = struct {
     pub const DebugLocalMeta = vm_debug.DebugLocalMeta;
     pub const debugGetFrameInfoAtLevel = vm_debug.debugGetFrameInfoAtLevel;
     pub const debugWriteLocalAtLevel = vm_debug.debugWriteLocalAtLevel;
+    pub const debugInferFunctionNameAtLevel = vm_debug.debugInferFunctionNameAtLevel;
 };

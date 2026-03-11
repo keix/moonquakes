@@ -7,6 +7,7 @@ const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const CallInfo = @import("execution.zig").CallInfo;
 const VM = @import("vm.zig").VM;
+const std = @import("std");
 
 fn getCallInfoAtLevel(self: *VM, level: i64) ?*const CallInfo {
     if (level < 1) return null;
@@ -47,6 +48,32 @@ pub fn debugGetFrameInfoAtLevel(self: *VM, level: i64) ?DebugFrameInfo {
 pub const DebugLocalMeta = struct {
     is_for_state: bool,
 };
+
+/// Best-effort function name inference from caller frame locals.
+/// For debug.getinfo(level): inspect frame at level+1 and try to find a local
+/// whose value is exactly the closure of frame `level`.
+pub fn debugInferFunctionNameAtLevel(self: *VM, level: i64, target_closure: *ClosureObject) ?[]const u8 {
+    if (level < 1) return null;
+    const caller = getCallInfoAtLevel(self, level + 1) orelse return null;
+
+    var found: ?[]const u8 = null;
+    var r: usize = 0;
+    while (r < caller.func.local_reg_names.len) : (r += 1) {
+        const name = caller.func.local_reg_names[r] orelse continue;
+        const stack_pos = caller.base + @as(u32, @intCast(r));
+        if (stack_pos >= self.stack.len) break;
+        const clo = self.stack[stack_pos].asClosure() orelse continue;
+        if (clo != target_closure) continue;
+        if (found == null) {
+            found = name;
+        } else if (!std.mem.eql(u8, found.?, name)) {
+            // Ambiguous in caller scope.
+            return null;
+        }
+    }
+
+    return found;
+}
 
 /// Write local value at (level, local_idx) directly into caller frame dst slot.
 /// Returns metadata used by debug library (currently only generic-for marker).

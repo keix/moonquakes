@@ -281,14 +281,14 @@ pub const TValue = union(enum) {
                 .integer => |bi| ai == bi,
                 .number => |bn| blk: {
                     if (floatToIntExact(bn)) |bi| break :blk ai == bi;
-                    break :blk @as(f64, @floatFromInt(ai)) == bn;
+                    break :blk false;
                 },
                 else => false,
             },
             .number => |an| switch (b) {
                 .integer => |bi| blk: {
                     if (floatToIntExact(an)) |ai| break :blk ai == bi;
-                    break :blk an == @as(f64, @floatFromInt(bi));
+                    break :blk false;
                 },
                 .number => |bn| an == bn,
                 else => false,

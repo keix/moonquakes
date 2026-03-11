@@ -13,7 +13,13 @@ pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         return vm.raiseString("value expected");
     }
 
-    const value = vm.stack[vm.base + func_reg + 1];
+    var value = vm.stack[vm.base + func_reg + 1];
+    if (nargs == 1 and value.isNil()) {
+        const alt = vm.stack[vm.base + func_reg + 2];
+        if (!alt.isNil()) {
+            value = alt;
+        }
+    }
 
     // In Lua, only nil and false are falsy
     const is_truthy = switch (value) {

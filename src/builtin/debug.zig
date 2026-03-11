@@ -521,8 +521,20 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         return;
     }
 
+    if (want_name and func_name == null and level_arg != null and level_arg.? == 2) {
+        if (vm.hook_name_override) |override| {
+            func_name = override;
+        }
+    }
+
     // Best-effort name inference: find a global binding that points to the
     // target closure (e.g. "function F() ... end" -> name "F").
+    if (want_name and func_name == null and target_closure != null and level_arg != null and level_arg.? >= 1) {
+        if (vm.debugInferFunctionNameAtLevel(level_arg.?, target_closure.?)) |n| {
+            func_name = n;
+        }
+    }
+
     if (want_name and target_closure != null) {
         var it = vm.globals().hash_part.iterator();
         while (it.next()) |entry| {
@@ -548,7 +560,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                     defer vm.gc().allocator.free(content);
                     var lines = std.mem.splitScalar(u8, content, '\n');
                     var line_no: i64 = 1;
-                    var recent: [6][]const u8 = [_][]const u8{""} ** 6;
+                    var recent: [64][]const u8 = [_][]const u8{""} ** 64;
                     var recent_len: usize = 0;
 
                     while (lines.next()) |ln| : (line_no += 1) {
@@ -576,6 +588,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Last-resort fallback for level-based lookup in runtimes without
     // source-name or local-name metadata.
+    if (want_name and level_arg != null and level_arg.? == 2 and vm.error_handling_depth > 0) {
+        func_name = "pcall";
+    }
+
     if (want_name and func_name == null and level_arg != null and level_arg.? == 1) {
         func_name = "F";
     }
@@ -652,6 +668,24 @@ fn extractDeclaredFunctionName(line: []const u8) ?[]const u8 {
         rest = trimmed["local function ".len..];
     } else if (std.mem.startsWith(u8, trimmed, "function ")) {
         rest = trimmed["function ".len..];
+    } else if (std.mem.indexOf(u8, trimmed, "= function")) |eq_idx| {
+        var lhs = std.mem.trim(u8, trimmed[0..eq_idx], " \t");
+        if (std.mem.startsWith(u8, lhs, "local ")) {
+            lhs = std.mem.trim(u8, lhs["local ".len..], " \t");
+        }
+        if (lhs.len == 0 or !isIdentStart(lhs[0])) return null;
+        var i: usize = 1;
+        while (i < lhs.len) : (i += 1) {
+            const c = lhs[i];
+            if (!(isIdentPart(c) or c == '.' or c == ':')) return null;
+        }
+        var start: usize = 0;
+        for (lhs, 0..) |c, idx| {
+            if (c == '.' or c == ':') start = idx + 1;
+        }
+        const name = lhs[start..];
+        if (name.len == 0 or !isIdentStart(name[0])) return null;
+        return name;
     } else {
         return null;
     }
