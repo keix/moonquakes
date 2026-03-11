@@ -233,7 +233,38 @@ pub const TableObject = struct {
 
     /// Get a value by TValue key
     pub fn get(self: *const TableObject, key: TValue) ?TValue {
-        return self.hash_part.get(key);
+        const canonical_key: TValue = switch (key) {
+            .number => |n| blk: {
+                if (std.math.isFinite(n) and n == @floor(n)) {
+                    const max_i = std.math.maxInt(i64);
+                    const min_i = std.math.minInt(i64);
+                    const max_f: f64 = @floatFromInt(max_i);
+                    const min_f: f64 = @floatFromInt(min_i);
+                    if (n >= min_f and n <= max_f) {
+                        const i: i64 = @intFromFloat(n);
+                        if (@as(f64, @floatFromInt(i)) == n) break :blk TValue{ .integer = i };
+                    }
+                }
+                break :blk key;
+            },
+            else => key,
+        };
+        if (self.hash_part.get(canonical_key)) |v| return v;
+
+        // Lua compatibility: integer and float keys that compare equal
+        // should refer to the same entry.
+        if (key == .number) {
+            const n = key.number;
+            var iter = self.hash_part.iterator();
+            while (iter.next()) |entry| {
+                if (entry.key_ptr.* == .integer) {
+                    const i = entry.key_ptr.*.integer;
+                    const as_num: f64 = @floatFromInt(i);
+                    if (as_num == n) return entry.value_ptr.*;
+                }
+            }
+        }
+        return null;
     }
 
     pub fn rawLen(self: *const TableObject) i64 {
@@ -374,6 +405,16 @@ pub const TableObject = struct {
                     if (n >= min_f and n <= max_f) {
                         const i: i64 = @intFromFloat(n);
                         if (@as(f64, @floatFromInt(i)) == n) break :blk TValue{ .integer = i };
+                    }
+                }
+                // If there is an integer key with equal numeric value,
+                // canonicalize to that integer key.
+                var iter = self.hash_part.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.key_ptr.* == .integer) {
+                        const i = entry.key_ptr.*.integer;
+                        const as_num: f64 = @floatFromInt(i);
+                        if (as_num == n) break :blk TValue{ .integer = i };
                     }
                 }
                 break :blk key;

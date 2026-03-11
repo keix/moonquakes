@@ -214,13 +214,14 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
         }
 
-        // Match CALL vararg frame layout: fixed params in frame, varargs after maxstacksize.
+        // Match CALL vararg frame layout and keep varargs out of the fixed frame scratch area.
         const total_args: u32 = 1 + @as(u32, @intCast(args.len));
         var vararg_base: u32 = 0;
         var vararg_count: u32 = 0;
         if (proto.is_vararg and total_args > proto.numparams) {
             vararg_count = total_args - proto.numparams;
-            vararg_base = call_base + proto.maxstacksize;
+            const min_vararg_base = call_base + proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
             var i: u32 = vararg_count;
             while (i > 0) {
                 i -= 1;
@@ -234,7 +235,7 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.stack[call_base + i] = .nil;
         }
 
-        vm.top = call_base + proto.maxstacksize + vararg_count;
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
         return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
     }
@@ -332,19 +333,20 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
         vm.stack[call_base + i] = .nil;
     }
 
-    // Match CALL vararg frame layout: extra args live after maxstacksize.
+    // Match CALL vararg frame layout and keep varargs out of the fixed frame scratch area.
     var vararg_base: u32 = 0;
     var vararg_count: u32 = 0;
     if (proto.is_vararg and arg_count > proto.numparams) {
         vararg_count = arg_count - proto.numparams;
-        vararg_base = call_base + proto.maxstacksize;
+        const min_vararg_base = call_base + proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
         var vi: u32 = 0;
         while (vi < vararg_count) : (vi += 1) {
             vm.stack[vararg_base + vi] = args[proto.numparams + vi];
         }
     }
 
-    vm.top = call_base + proto.maxstacksize + vararg_count;
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
     // Execute until return, then restore caller's frame state
     return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
@@ -380,14 +382,15 @@ fn callClosureIntoWithResultBase(vm: *VM, closure: *ClosureObject, args: []const
     var vararg_count: u32 = 0;
     if (proto.is_vararg and arg_count > proto.numparams) {
         vararg_count = arg_count - proto.numparams;
-        vararg_base = call_base + proto.maxstacksize;
+        const min_vararg_base = call_base + proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
         var vi: u32 = 0;
         while (vi < vararg_count) : (vi += 1) {
             vm.stack[vararg_base + vi] = args[proto.numparams + vi];
         }
     }
 
-    vm.top = call_base + proto.maxstacksize + vararg_count;
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
     return runUntilReturnInto(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count, out);
 }
@@ -446,7 +449,7 @@ fn runUntilReturn(
             // Otherwise, restore to the previous frame in the callstack
             const prev_ci = &vm.callstack[vm.callstack_size - 1];
             vm.base = prev_ci.ret_base;
-            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
+            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
             continue;
         };
         const result = mnemonics.do(vm, inst) catch |err| {
@@ -587,7 +590,7 @@ fn runUntilReturnInto(
             if (vm.callstack_size == saved_depth) break;
             const prev_ci = &vm.callstack[vm.callstack_size - 1];
             vm.base = prev_ci.ret_base;
-            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
+            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
             continue;
         };
         const result = mnemonics.do(vm, inst) catch |err| {

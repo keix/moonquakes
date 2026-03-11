@@ -1615,6 +1615,44 @@ pub const Parser = struct {
         }
     }
 
+    fn parseComplexAssignTarget(self: *Parser, code_start: usize, expr_reg: u8) ParseError!AssignTarget {
+        if (self.proto.code.items.len == 0 or self.proto.code.items.len <= code_start) return error.UnsupportedStatement;
+
+        var probe_idx: usize = self.proto.code.items.len - 1;
+        var probe_reg: u8 = expr_reg;
+        var moves_to_pop: usize = 0;
+        while (probe_idx > code_start) {
+            const inst = self.proto.code.items[probe_idx];
+            if (inst.getOpCode() == .MOVE and inst.a == probe_reg and probe_idx > code_start) {
+                probe_reg = inst.b;
+                probe_idx -= 1;
+                moves_to_pop += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (probe_idx < code_start) return error.UnsupportedStatement;
+        const op_inst = self.proto.code.items[probe_idx];
+        const target: AssignTarget = switch (op_inst.getOpCode()) {
+            .GETFIELD => blk: {
+                if (op_inst.a != probe_reg) return error.UnsupportedStatement;
+                break :blk .{ .field = .{ .table_reg = op_inst.b, .field_const = op_inst.c } };
+            },
+            .GETTABLE => blk: {
+                if (op_inst.a != probe_reg) return error.UnsupportedStatement;
+                break :blk .{ .index = .{ .table_reg = op_inst.b, .key_reg = op_inst.c } };
+            },
+            else => return error.UnsupportedStatement,
+        };
+
+        var pops: usize = moves_to_pop + 1;
+        while (pops > 0) : (pops -= 1) {
+            _ = self.proto.code.pop();
+        }
+        return target;
+    }
+
     // Statement parsing
     fn parseReturn(self: *Parser) ParseError!void {
         const hasControlFlowInRange = struct {
@@ -2088,10 +2126,21 @@ pub const Parser = struct {
         // Parse remaining targets after commas
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
-            if (self.current.kind != .Identifier) {
-                return error.ExpectedIdentifier;
+            if (self.current.kind == .Identifier) {
+                const next_tok = self.peek();
+                const complex_target =
+                    (next_tok.kind == .Symbol and std.mem.eql(u8, next_tok.lexeme, "(")) or
+                    next_tok.kind == .String or
+                    (next_tok.kind == .Symbol and std.mem.eql(u8, next_tok.lexeme, "{"));
+                if (!complex_target) {
+                    targets[target_count] = try self.parseAssignTarget();
+                    target_count += 1;
+                    continue;
+                }
             }
-            targets[target_count] = try self.parseAssignTarget();
+            const code_start = self.proto.code.items.len;
+            const expr_reg = try self.parseExpr();
+            targets[target_count] = try self.parseComplexAssignTarget(code_start, expr_reg);
             target_count += 1;
         }
 
@@ -2103,6 +2152,34 @@ pub const Parser = struct {
                     self.setError("attempt to assign to const variable '{s}'", .{var_name});
                     return error.AssignToConst;
                 }
+            }
+        }
+
+        // Snapshot table/index assignment receivers before evaluating RHS.
+        // This preserves Lua semantics for conflicts like:
+        //   i, a[i], a = ...
+        var ti: u8 = 0;
+        while (ti < target_count) : (ti += 1) {
+            switch (targets[ti]) {
+                .field => |f| {
+                    const tbl_snap = self.proto.allocTemp();
+                    if (tbl_snap != f.table_reg) {
+                        try self.proto.emitMOVE(tbl_snap, f.table_reg);
+                    }
+                    targets[ti] = .{ .field = .{ .table_reg = tbl_snap, .field_const = f.field_const } };
+                },
+                .index => |idx| {
+                    const tbl_snap = self.proto.allocTemp();
+                    if (tbl_snap != idx.table_reg) {
+                        try self.proto.emitMOVE(tbl_snap, idx.table_reg);
+                    }
+                    const key_snap = self.proto.allocTemp();
+                    if (key_snap != idx.key_reg) {
+                        try self.proto.emitMOVE(key_snap, idx.key_reg);
+                    }
+                    targets[ti] = .{ .index = .{ .table_reg = tbl_snap, .key_reg = key_snap } };
+                },
+                else => {},
             }
         }
 
@@ -2342,10 +2419,21 @@ pub const Parser = struct {
         // Parse remaining targets after commas
         while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
-            if (self.current.kind != .Identifier) {
-                return error.ExpectedIdentifier;
+            if (self.current.kind == .Identifier) {
+                const next_tok = self.peek();
+                const complex_target =
+                    (next_tok.kind == .Symbol and std.mem.eql(u8, next_tok.lexeme, "(")) or
+                    next_tok.kind == .String or
+                    (next_tok.kind == .Symbol and std.mem.eql(u8, next_tok.lexeme, "{"));
+                if (!complex_target) {
+                    targets[target_count] = try self.parseAssignTarget();
+                    target_count += 1;
+                    continue;
+                }
             }
-            targets[target_count] = try self.parseAssignTarget();
+            const code_start = self.proto.code.items.len;
+            const expr_reg = try self.parseExpr();
+            targets[target_count] = try self.parseComplexAssignTarget(code_start, expr_reg);
             target_count += 1;
         }
 
@@ -2357,6 +2445,32 @@ pub const Parser = struct {
                     self.setError("attempt to assign to const variable '{s}'", .{var_name});
                     return error.AssignToConst;
                 }
+            }
+        }
+
+        // Snapshot table/index assignment receivers before evaluating RHS.
+        var ti: u8 = 0;
+        while (ti < target_count) : (ti += 1) {
+            switch (targets[ti]) {
+                .field => |f| {
+                    const tbl_snap = self.proto.allocTemp();
+                    if (tbl_snap != f.table_reg) {
+                        try self.proto.emitMOVE(tbl_snap, f.table_reg);
+                    }
+                    targets[ti] = .{ .field = .{ .table_reg = tbl_snap, .field_const = f.field_const } };
+                },
+                .index => |idx| {
+                    const tbl_snap = self.proto.allocTemp();
+                    if (tbl_snap != idx.table_reg) {
+                        try self.proto.emitMOVE(tbl_snap, idx.table_reg);
+                    }
+                    const key_snap = self.proto.allocTemp();
+                    if (key_snap != idx.key_reg) {
+                        try self.proto.emitMOVE(key_snap, idx.key_reg);
+                    }
+                    targets[ti] = .{ .index = .{ .table_reg = tbl_snap, .key_reg = key_snap } };
+                },
+                else => {},
             }
         }
 
@@ -2397,8 +2511,54 @@ pub const Parser = struct {
             expr_count += 1;
         }
 
+        // Handle multiple return values from the last expression.
+        // In Lua, only the last expression in assignment can expand.
+        var handled_multi_return = false;
+        if (expr_count >= 1 and target_count >= expr_count) {
+            const fixed_values: u8 = expr_count - 1;
+            const needed_from_last: u8 = target_count - fixed_values;
+            if (needed_from_last > 1) {
+                if (self.proto.code.items.len > 0) {
+                    var call_idx: ?usize = null;
+                    var call_func_reg: u8 = 0;
+                    const last_idx = self.proto.code.items.len - 1;
+                    const last_inst = self.proto.code.items[last_idx];
+
+                    if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
+                        call_idx = last_idx;
+                        call_func_reg = last_inst.a;
+                    } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                        const prev_idx = last_idx - 1;
+                        const prev_inst = self.proto.code.items[prev_idx];
+                        if (prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL) {
+                            call_idx = prev_idx;
+                            call_func_reg = prev_inst.a;
+                            _ = self.proto.code.pop();
+                        }
+                    }
+
+                    if (call_idx) |idx| {
+                        // Adjust CALL/PCALL to return needed_from_last results
+                        self.proto.code.items[idx].c = needed_from_last + 1;
+
+                        // Move expanded results into remaining target temp slots.
+                        const dst_start = first_temp + fixed_values;
+                        var vi: u8 = 0;
+                        while (vi < needed_from_last) : (vi += 1) {
+                            const src = call_func_reg + vi;
+                            const dst = dst_start + vi;
+                            if (src != dst) {
+                                try self.proto.emitMOVE(dst, src);
+                            }
+                        }
+                        handled_multi_return = true;
+                    }
+                }
+            }
+        }
+
         // Fill remaining temps with nil if fewer values
-        if (expr_count < target_count) {
+        if (expr_count < target_count and !handled_multi_return) {
             const nil_start = first_temp + expr_count;
             const nil_count = target_count - expr_count;
             try self.proto.emitLOADNIL(nil_start, nil_count);
@@ -3349,11 +3509,13 @@ pub const Parser = struct {
             self.advance(); // consume 'and'
 
             const dst = self.proto.allocTemp();
-
-            // TESTSET dst, left, false:
-            //   if left is falsy (== false): dst := left, continue to JMP -> end
-            //   if left is truthy (!= false): skip JMP -> evaluate b
-            try self.proto.emitTESTSET(dst, left, false);
+            if (left != dst) {
+                try self.proto.emitMOVE(dst, left);
+            }
+            // If dst is falsy, jump to end and keep dst.
+            // TEST A k skips next when toBoolean(A) != k.
+            // With k=false: truthy skips JMP, falsy executes JMP.
+            try self.proto.emitTEST(dst, false);
             const jmp_addr = try self.proto.emitPatchableJMP();
 
             // Parse right operand
@@ -3380,11 +3542,12 @@ pub const Parser = struct {
             self.advance(); // consume 'or'
 
             const dst = self.proto.allocTemp();
-
-            // TESTSET dst, left, true:
-            //   if left is truthy (== true): dst := left, continue to JMP -> end
-            //   if left is falsy (!= true): skip JMP -> evaluate b
-            try self.proto.emitTESTSET(dst, left, true);
+            if (left != dst) {
+                try self.proto.emitMOVE(dst, left);
+            }
+            // If dst is truthy, jump to end and keep dst.
+            // With k=true: truthy executes JMP, falsy skips JMP.
+            try self.proto.emitTEST(dst, true);
             const jmp_addr = try self.proto.emitPatchableJMP();
 
             // Parse right operand
@@ -4734,17 +4897,27 @@ pub const Parser = struct {
         var last_was_vararg = false;
         const max_register_index: u16 = 254;
 
-        const detectTailCallInRange = struct {
-            fn run(code: []Instruction, start: usize) bool {
+        const detectDirectCallResult = struct {
+            fn run(code: []Instruction, start: usize, target_reg: u8) bool {
                 if (code.len <= start) return false;
-                var idx = code.len;
-                while (idx > start) {
-                    idx -= 1;
-                    const inst = code[idx];
-                    if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
+                // Complex expressions (comparisons/short-circuit/jumps) are not
+                // direct call results and must not trigger multret propagation.
+                for (code[start..]) |inst| {
+                    switch (inst.getOpCode()) {
+                        .EQ, .EQK, .EQI, .LT, .LE, .LTI, .LEI, .GTI, .GEI, .TEST, .TESTSET, .JMP => return false,
+                        else => {},
+                    }
+                }
+                const last_idx = code.len - 1;
+                const last_inst = code[last_idx];
+                if ((last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) and last_inst.a == target_reg) {
+                    return true;
+                }
+                if (last_inst.getOpCode() == .MOVE and last_inst.a == target_reg and last_idx > start) {
+                    const prev_inst = code[last_idx - 1];
+                    if ((prev_inst.getOpCode() == .CALL or prev_inst.getOpCode() == .PCALL) and last_inst.b == prev_inst.a) {
                         return true;
                     }
-                    if (inst.getOpCode() != .MOVE) break;
                 }
                 return false;
             }
@@ -4775,8 +4948,14 @@ pub const Parser = struct {
 
         // Parse arguments
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Check for vararg as first/only argument: f(...)
-            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            // Check for vararg expansion as first/only argument: f(...)
+            // If token after "..." continues an expression (e.g. "... == x"),
+            // parse it as a regular expression argument instead.
+            if (self.current.kind == .Symbol and
+                std.mem.eql(u8, self.current.lexeme, "...") and
+                self.peek().kind == .Symbol and
+                std.mem.eql(u8, self.peek().lexeme, ")"))
+            {
                 if (!self.proto.is_vararg) {
                     return error.VarargOutsideVarargFunction;
                 }
@@ -4802,15 +4981,19 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(target_reg, arg_reg);
                 }
                 arg_count = 1;
-                last_was_call = detectTailCallInRange(self.proto.code.items, code_len_before);
+                last_was_call = detectDirectCallResult(self.proto.code.items, code_len_before, target_reg);
             }
 
             // Parse additional arguments
             while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 self.advance(); // consume ','
 
-                // Check for vararg as last argument: f(a, b, ...)
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                // Check for vararg expansion as last argument: f(a, b, ...)
+                if (self.current.kind == .Symbol and
+                    std.mem.eql(u8, self.current.lexeme, "...") and
+                    self.peek().kind == .Symbol and
+                    std.mem.eql(u8, self.peek().lexeme, ")"))
+                {
                     if (!self.proto.is_vararg) {
                         return error.VarargOutsideVarargFunction;
                     }
@@ -4836,7 +5019,7 @@ pub const Parser = struct {
                 self.proto.next_reg = target_reg;
                 const code_len_before2 = self.proto.code.items.len;
                 const next_arg = try self.parseExpr();
-                const arg_is_call = detectTailCallInRange(self.proto.code.items, code_len_before2);
+                const arg_is_call = detectDirectCallResult(self.proto.code.items, code_len_before2, target_reg);
                 // Restore next_reg to max of saved and current (in case parseExpr allocated more)
                 self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
                 if (next_arg != target_reg) {

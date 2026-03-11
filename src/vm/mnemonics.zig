@@ -41,6 +41,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
         .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
+        .require => 2, // require returns module value and loader data.
         .next => 2, // next returns key, value
         .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
         .coroutine_resume => 0, // C=0 sentinel: callee decides actual result count.

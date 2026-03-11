@@ -387,6 +387,8 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     const searchers_table = try gc.allocTable();
     try setStringKey(package_table, gc, "searchers", TValue.fromTable(searchers_table));
 
+    // Stable internal reference used by require even if global "package" is reassigned.
+    try setStringKey(globals, gc, "__moonquakes_package", TValue.fromTable(package_table));
     try setStringKey(globals, gc, "package", TValue.fromTable(package_table));
 }
 
