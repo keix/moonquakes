@@ -208,11 +208,23 @@ pub const ProtoBuilder = struct {
             .pending_gotos = .{},
         };
 
-        // All functions have _ENV as upvalue[0]
-        // This ensures GETTABUP with B=0 always accesses _ENV
-        if (parent != null) {
-            // Nested function: _ENV comes from parent's upvalue[0]
-            try builder.upvalues.append(allocator, .{ .instack = false, .idx = 0, .name = "_ENV" });
+        // All functions have _ENV as upvalue[0].
+        if (parent) |p| {
+            // Nested function: bind _ENV to the nearest visible _ENV in parent scope.
+            if (p.findVariable("_ENV")) |env_reg| {
+                try builder.upvalues.append(allocator, .{ .instack = true, .idx = env_reg, .name = "_ENV" });
+            } else {
+                var env_upidx: u8 = 0;
+                for (p.upvalues.items, 0..) |upv, i| {
+                    if (upv.name) |n| {
+                        if (std.mem.eql(u8, n, "_ENV")) {
+                            env_upidx = @intCast(i);
+                            break;
+                        }
+                    }
+                }
+                try builder.upvalues.append(allocator, .{ .instack = false, .idx = env_upidx, .name = "_ENV" });
+            }
         } else {
             // Main chunk: _ENV comes from loader (instack=true, idx=0)
             try builder.upvalues.append(allocator, .{ .instack = true, .idx = 0, .name = "_ENV" });
@@ -1119,11 +1131,11 @@ pub const ProtoBuilder = struct {
 
         // 2. Check if already captured as upvalue
         for (self.upvalues.items, 0..) |upval, i| {
-            // Compare by checking parent's variable at that location
-            // For simplicity, we'd need to store name in Upvaldesc or track differently
-            // For now, rely on not creating duplicates by searching parent fresh each time
-            _ = upval;
-            _ = i;
+            if (upval.name) |up_name| {
+                if (std.mem.eql(u8, up_name, name)) {
+                    return .{ .upvalue = @intCast(i) };
+                }
+            }
         }
 
         // 3. If no parent, variable not found
@@ -1224,9 +1236,11 @@ pub const Parser = struct {
     loop_depth: usize,
     active_label_names: std.ArrayList([]const u8),
     scope_label_marks: std.ArrayList(usize),
+    tbc_scope_marks: std.ArrayList(u32),
     scope_ids: std.ArrayList(u32),
     scope_parents: std.ArrayList(u32),
     next_scope_id: u32,
+    active_tbc_count: u32,
     /// Error message buffer for detailed parse error reporting
     error_msg: [256]u8 = undefined,
     error_len: usize = 0,
@@ -1241,11 +1255,14 @@ pub const Parser = struct {
             .loop_depth = 0,
             .active_label_names = .{},
             .scope_label_marks = .{},
+            .tbc_scope_marks = .{},
             .scope_ids = .{},
             .scope_parents = .{},
             .next_scope_id = 0,
+            .active_tbc_count = 0,
         };
         p.scope_label_marks.append(proto.allocator, 0) catch unreachable;
+        p.tbc_scope_marks.append(proto.allocator, 0) catch unreachable;
         p.scope_ids.append(proto.allocator, 0) catch unreachable;
         p.scope_parents.append(proto.allocator, 0) catch unreachable;
         p.advance();
@@ -1272,6 +1289,7 @@ pub const Parser = struct {
         self.loop_close_regs.deinit(self.proto.allocator);
         self.active_label_names.deinit(self.proto.allocator);
         self.scope_label_marks.deinit(self.proto.allocator);
+        self.tbc_scope_marks.deinit(self.proto.allocator);
         self.scope_ids.deinit(self.proto.allocator);
         self.scope_parents.deinit(self.proto.allocator);
     }
@@ -1307,6 +1325,7 @@ pub const Parser = struct {
     fn enterScope(self: *Parser) !void {
         try self.proto.enterScope();
         try self.scope_label_marks.append(self.proto.allocator, self.active_label_names.items.len);
+        try self.tbc_scope_marks.append(self.proto.allocator, self.active_tbc_count);
         self.next_scope_id += 1;
         const new_id = self.next_scope_id;
         const parent_id = self.scope_ids.items[self.scope_ids.items.len - 1];
@@ -1316,6 +1335,8 @@ pub const Parser = struct {
 
     fn leaveScope(self: *Parser) void {
         const mark = self.scope_label_marks.pop().?;
+        const tbc_mark = self.tbc_scope_marks.pop().?;
+        self.active_tbc_count = tbc_mark;
         var i = self.active_label_names.items.len;
         while (i > mark) {
             i -= 1;
@@ -1596,6 +1617,20 @@ pub const Parser = struct {
 
     // Statement parsing
     fn parseReturn(self: *Parser) ParseError!void {
+        const hasControlFlowInRange = struct {
+            fn run(code: []Instruction, start: usize, end_exclusive: usize) bool {
+                var i = start;
+                while (i < end_exclusive and i < code.len) : (i += 1) {
+                    const op = code[i].getOpCode();
+                    switch (op) {
+                        .JMP, .EQ, .LT, .LE, .EQK, .EQI, .LTI, .LEI, .GTI, .GEI, .TEST, .TESTSET, .LFALSESKIP => return true,
+                        else => {},
+                    }
+                }
+                return false;
+            }
+        }.run;
+
         self.advance(); // consume 'return'
 
         // Check for bare return (no values)
@@ -1647,24 +1682,41 @@ pub const Parser = struct {
                 const last_idx = self.proto.code.items.len - 1;
                 const last_inst = self.proto.code.items[last_idx];
                 var call_idx_opt: ?usize = null;
-                if (last_inst.getOpCode() == .CALL) {
+                if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                     call_idx_opt = last_idx;
+                } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
+                    const prev_idx = last_idx - 1;
+                    const prev_op = self.proto.code.items[prev_idx].getOpCode();
+                    if (prev_op == .CALL or prev_op == .PCALL) {
+                        call_idx_opt = prev_idx;
+                    }
                 }
                 if (call_idx_opt) |call_idx| {
                     if (call_idx < ret_code_before) {
                         // Last CALL belongs to previous statement; ignore.
+                    } else if (hasControlFlowInRange(self.proto.code.items, ret_code_before, call_idx)) {
+                        // Expression with short-circuit/conditionals (e.g. "nil or f()")
+                        // must keep single-value semantics.
                     } else {
                         // Drop trailing MOVE after CALL; tailcall must be the final instruction.
                         if (call_idx != last_idx and self.proto.code.items[last_idx].getOpCode() == .MOVE) {
                             self.proto.code.items.len -= 1;
                         }
-                        // Convert CALL to TAILCALL
-                        // CALL A B C -> TAILCALL A B 0
                         const call_inst = self.proto.code.items[call_idx];
                         const a = call_inst.getA();
-                        const b = call_inst.getB();
-                        self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
-                        return; // TAILCALL handles the return
+                        if (call_inst.getOpCode() == .CALL and self.active_tbc_count == 0) {
+                            // Convert CALL to TAILCALL
+                            // CALL A B C -> TAILCALL A B 0
+                            const b = call_inst.getB();
+                            self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
+                            return; // TAILCALL handles the return
+                        } else {
+                            // Not tail-callable due active TBC in scope.
+                            // Keep CALL and return all its values.
+                            self.proto.code.items[call_idx].c = 0;
+                            try self.proto.emit(.RETURN, a, 0, 0);
+                            return;
+                        }
                     }
                 }
             }
@@ -1706,17 +1758,20 @@ pub const Parser = struct {
                     const last_idx = self.proto.code.items.len - 1;
                     const last_inst = self.proto.code.items[last_idx];
                     var call_idx_opt: ?usize = null;
-                    if (last_inst.getOpCode() == .CALL) {
+                    if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                         call_idx_opt = last_idx;
                     } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
                         const prev_idx = last_idx - 1;
-                        if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                        const prev_op = self.proto.code.items[prev_idx].getOpCode();
+                        if (prev_op == .CALL or prev_op == .PCALL) {
                             call_idx_opt = prev_idx;
                         }
                     }
                     if (call_idx_opt) |call_idx| {
                         if (call_idx < expr_code_before) {
                             // Last CALL belongs to previous expression; ignore.
+                        } else if (hasControlFlowInRange(self.proto.code.items, expr_code_before, call_idx)) {
+                            // Short-circuit expression as last return value must not become MULTRET.
                         } else {
                             // Drop trailing MOVE after CALL to avoid duplicating first result
                             // when RETURN B=0 collects from first_reg to top.
@@ -1727,7 +1782,7 @@ pub const Parser = struct {
                             const call_inst = self.proto.code.items[call_idx];
                             const a = call_inst.getA();
                             const b = call_inst.getB();
-                            self.proto.code.items[call_idx] = Instruction.initABC(.CALL, a, b, 0);
+                            self.proto.code.items[call_idx] = Instruction.initABC(call_inst.getOpCode(), a, b, 0);
 
                             // Ensure fixed return values are contiguous immediately before
                             // the CALL result block: [fixed..., call_results...].
@@ -1812,9 +1867,8 @@ pub const Parser = struct {
                     // _ENV is the environment upvalue itself.
                     try self.proto.emitGETUPVAL(table_reg, 0);
                 } else {
-                    // Global variable: load from _ENV
                     const name_const = try self.proto.addConstString(name);
-                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
+                    try self.emitGetGlobal(table_reg, name_const);
                 }
             }
 
@@ -1984,10 +2038,29 @@ pub const Parser = struct {
                     .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
                 }
             } else {
-                // Global variable: SETTABUP (_ENV[name] = value)
                 const name_const = try self.proto.addConstString(name);
-                try self.proto.emitSETTABUP(0, name_const, value_reg);
+                try self.emitSetGlobal(name_const, value_reg);
             }
+        }
+    }
+
+    fn resolveEnvLocation(self: *Parser) ParseError!ProtoBuilder.VarLocation {
+        if (try self.proto.resolveVariable("_ENV")) |loc| return loc;
+        // Main chunk fallback: implicit loader-provided _ENV at upvalue 0.
+        return .{ .upvalue = 0 };
+    }
+
+    fn emitGetGlobal(self: *Parser, dst: u8, name_const: u32) ParseError!void {
+        switch (try self.resolveEnvLocation()) {
+            .local => |env_reg| try self.proto.emitGETFIELD(dst, env_reg, name_const),
+            .upvalue => |env_up| try self.proto.emitGETTABUP(dst, env_up, name_const),
+        }
+    }
+
+    fn emitSetGlobal(self: *Parser, name_const: u32, src: u8) ParseError!void {
+        switch (try self.resolveEnvLocation()) {
+            .local => |env_reg| try self.proto.emitSETFIELD(env_reg, name_const, src),
+            .upvalue => |env_up| try self.proto.emitSETTABUP(env_up, name_const, src),
         }
     }
 
@@ -2540,10 +2613,8 @@ pub const Parser = struct {
                     // _ENV is the environment upvalue itself, not _ENV["_ENV"].
                     try self.proto.emitGETUPVAL(base_reg, 0);
                 } else {
-                    // Fall back to global lookup via GETTABUP
-                    // This handles global tables like `table`, `string`, `io`, `_G`, etc.
                     const name_const = try self.proto.addConstString(var_name);
-                    try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                    try self.emitGetGlobal(base_reg, name_const);
                 }
                 self.advance();
             }
@@ -3641,49 +3712,79 @@ pub const Parser = struct {
         _ = self.proto.allocTemp(); // control
         _ = self.proto.allocTemp(); // to-be-closed state
 
-        // Record code position before parsing expression
-        const code_before = self.proto.code.items.len;
+        // Parse explist after 'in' (Lua 5.4): e1, e2, ..., en
+        // Prefix expressions contribute one value; the last can expand.
+        var first_expr_regs: [4]u8 = undefined;
+        var expr_count: u8 = 0;
+        var last_expr_reg: u8 = 0;
+        var last_expr_code_start: usize = self.proto.code.items.len;
 
-        // Parse iterator expression (e.g., pairs(t) or ipairs(t))
-        // The expression should return: iterator function, state, initial control value,
-        // and optional to-be-closed state.
-        const expr_reg = try self.parseExpr();
-
-        // Check if last instruction was a CALL (or trailing MOVE after CALL)
-        // and patch it to return 4 values.
-        var call_patched_for4 = false;
-        if (self.proto.code.items.len > code_before) {
-            const last_idx = self.proto.code.items.len - 1;
-            const last_instr = self.proto.code.items[last_idx];
-            var call_idx_opt: ?usize = null;
-            if (last_instr.getOpCode() == .CALL) {
-                call_idx_opt = last_idx;
-            } else if (last_instr.getOpCode() == .MOVE and last_idx > code_before) {
-                const prev_idx = last_idx - 1;
-                if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
-                    call_idx_opt = prev_idx;
-                }
+        while (true) {
+            last_expr_code_start = self.proto.code.items.len;
+            const reg = try self.parseExpr();
+            last_expr_reg = reg;
+            if (expr_count < 4) {
+                first_expr_regs[expr_count] = reg;
             }
-            if (call_idx_opt) |call_idx| {
-                self.proto.patchCallResults(@intCast(call_idx), 4);
-                call_patched_for4 = true;
+            expr_count +|= 1;
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) break;
+            self.advance(); // consume ','
+        }
+
+        // Patch last CALL (if present) to produce enough values to fill 4 slots.
+        var last_call_patched_results: u8 = 1;
+        var last_result_base: u8 = last_expr_reg;
+        if (expr_count > 0 and expr_count <= 4) {
+            const prefix_count: u8 = expr_count - 1;
+            const need_from_last: u8 = 4 - prefix_count;
+            if (need_from_last > 1 and self.proto.code.items.len > last_expr_code_start) {
+                var call_idx_opt: ?usize = null;
+                var scan = self.proto.code.items.len;
+                while (scan > last_expr_code_start) {
+                    scan -= 1;
+                    if (self.proto.code.items[scan].getOpCode() == .CALL) {
+                        call_idx_opt = scan;
+                        break;
+                    }
+                }
+                if (call_idx_opt) |call_idx| {
+                    self.proto.patchCallResults(@intCast(call_idx), need_from_last);
+                    last_call_patched_results = need_from_last;
+                    last_result_base = self.proto.code.items[call_idx].getA();
+                }
             }
         }
 
-        // Move iterator results to proper positions
-        // The call should have put results at expr_reg..expr_reg+3
-        if (expr_reg != base_reg) {
-            try self.proto.emitMOVE(base_reg, expr_reg);
-            try self.proto.emitMOVE(base_reg + 1, expr_reg + 1);
-            try self.proto.emitMOVE(base_reg + 2, expr_reg + 2);
-            if (call_patched_for4) {
-                try self.proto.emitMOVE(base_reg + 3, expr_reg + 3);
-            } else {
-                try self.proto.emitLOADNIL(base_reg + 3, 1);
+        // Move values into canonical generic-for layout: iter/state/control/tbc.
+        if (expr_count > 4) {
+            var i: u8 = 0;
+            while (i < 4) : (i += 1) {
+                const src = first_expr_regs[i];
+                const dst = base_reg + i;
+                if (src != dst) try self.proto.emitMOVE(dst, src);
             }
-        } else if (!call_patched_for4) {
-            // Non-call iterators may produce only one value; ensure tbc state is nil.
-            try self.proto.emitLOADNIL(base_reg + 3, 1);
+        } else {
+            const prefix_count: u8 = if (expr_count > 0) expr_count - 1 else 0;
+            var i: u8 = 0;
+            while (i < prefix_count) : (i += 1) {
+                const src = first_expr_regs[i];
+                const dst = base_reg + i;
+                if (src != dst) try self.proto.emitMOVE(dst, src);
+            }
+
+            const max_last_take: u8 = 4 - prefix_count;
+            const last_take: u8 = @min(last_call_patched_results, max_last_take);
+            var j: u8 = 0;
+            while (j < last_take) : (j += 1) {
+                const src = last_result_base + j;
+                const dst = base_reg + prefix_count + j;
+                if (src != dst) try self.proto.emitMOVE(dst, src);
+            }
+
+            const filled: u8 = prefix_count + last_take;
+            if (filled < 4) {
+                try self.proto.emitLOADNIL(base_reg + filled, 4 - filled);
+            }
         }
 
         // Expect 'do'
@@ -3691,6 +3792,14 @@ pub const Parser = struct {
             return error.ExpectedDo;
         }
         self.advance(); // consume 'do'
+
+        // Mark to-be-closed state before loop dispatch.
+        // Must run before TFORPREP, otherwise empty iterators skip TBC.
+        try self.proto.emit(.TBC, base_reg + 3, 0, 0);
+        self.active_tbc_count += 1;
+        defer self.active_tbc_count -= 1;
+        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
+        defer _ = self.loop_close_regs.pop();
 
         // TFORPREP: jump to TFORCALL
         const tforprep_addr = try self.proto.emitPatchableTFORPREP(base_reg);
@@ -3713,11 +3822,6 @@ pub const Parser = struct {
         while (i < var_count) : (i += 1) {
             try self.proto.addVariable(var_names[i], base_reg + GENERIC_FOR_BASE_REGS + i);
         }
-
-        // Mark to-be-closed state.
-        try self.proto.emit(.TBC, base_reg + 3, 0, 0);
-        try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
-        defer _ = self.loop_close_regs.pop();
 
         // Mark for loop body
         const loop_body_mark = self.proto.markTemps();
@@ -4381,6 +4485,7 @@ pub const Parser = struct {
         while (i < var_count) : (i += 1) {
             if (var_is_close[i]) {
                 try self.proto.emit(.TBC, first_reg + i, 0, 0);
+                self.active_tbc_count += 1;
             }
         }
     }
@@ -4474,10 +4579,9 @@ pub const Parser = struct {
         if (self.proto.findFunction(func_name)) |_| {
             self.advance(); // consume function name
 
-            // Load closure from _ENV[func_name] via GETTABUP
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
-            try self.proto.emitGETTABUP(func_reg, 0, name_const);
+            try self.emitGetGlobal(func_reg, name_const);
 
             // Parse arguments (handles both parens and no-parens styles)
             const arg_count = try self.parseCallArgs(func_reg);
@@ -4486,13 +4590,12 @@ pub const Parser = struct {
             return;
         }
 
-        // Fall back to global lookup via GETTABUP for any unresolved function
-        // This handles builtin functions like assert, setmetatable, getmetatable, etc.
+        // Fall back to global lookup for unresolved function names.
         self.advance(); // consume function name
 
         const func_reg = self.proto.allocTemp();
         const name_const = try self.proto.addConstString(func_name);
-        try self.proto.emitGETTABUP(func_reg, 0, name_const);
+        try self.emitGetGlobal(func_reg, name_const);
 
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
@@ -4518,10 +4621,9 @@ pub const Parser = struct {
             // Handle user-defined function call with return value
             self.advance(); // consume function name
 
-            // Load closure from _ENV[func_name] via GETTABUP (not creating new closure!)
             const func_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(func_name);
-            try self.proto.emitGETTABUP(func_reg, 0, name_const);
+            try self.emitGetGlobal(func_reg, name_const);
 
             // Parse arguments (handles both parens and no-parens styles)
             const arg_count = try self.parseCallArgs(func_reg);
@@ -4538,13 +4640,12 @@ pub const Parser = struct {
             return self.parsePcallExpr();
         }
 
-        // Fall back to global lookup via GETTABUP for any unresolved function
-        // This handles builtin functions like assert, setmetatable, getmetatable, etc.
+        // Fall back to global lookup for unresolved function names.
         self.advance(); // consume function name
 
         const func_reg = self.proto.allocTemp();
         const name_const = try self.proto.addConstString(func_name);
-        try self.proto.emitGETTABUP(func_reg, 0, name_const);
+        try self.emitGetGlobal(func_reg, name_const);
 
         // Parse arguments (handles both parens and no-parens styles)
         const arg_count = try self.parseCallArgs(func_reg);
@@ -4640,7 +4741,7 @@ pub const Parser = struct {
                 while (idx > start) {
                     idx -= 1;
                     const inst = code[idx];
-                    if (inst.getOpCode() == .CALL) {
+                    if (inst.getOpCode() == .CALL or inst.getOpCode() == .PCALL) {
                         return true;
                     }
                     if (inst.getOpCode() != .MOVE) break;
@@ -4763,11 +4864,12 @@ pub const Parser = struct {
             const last_inst = self.proto.code.items[last_idx];
             var call_idx_opt: ?usize = null;
 
-            if (last_inst.getOpCode() == .CALL) {
+            if (last_inst.getOpCode() == .CALL or last_inst.getOpCode() == .PCALL) {
                 call_idx_opt = last_idx;
             } else if (last_inst.getOpCode() == .MOVE and last_idx > 0) {
                 const prev_idx = last_idx - 1;
-                if (self.proto.code.items[prev_idx].getOpCode() == .CALL) {
+                const prev_op = self.proto.code.items[prev_idx].getOpCode();
+                if (prev_op == .CALL or prev_op == .PCALL) {
                     call_idx_opt = prev_idx;
                     // Drop trailing MOVE; MULTRET result width is dynamic.
                     self.proto.code.items.len -= 1;
@@ -4799,10 +4901,9 @@ pub const Parser = struct {
                 .upvalue => |idx| try self.proto.emitGETUPVAL(receiver_reg, idx),
             }
         } else {
-            // Fall back to global lookup via GETTABUP
             receiver_reg = self.proto.allocTemp();
             const name_const = try self.proto.addConstString(receiver_name);
-            try self.proto.emitGETTABUP(receiver_reg, 0, name_const);
+            try self.emitGetGlobal(receiver_reg, name_const);
         }
         self.advance(); // consume receiver name
 
@@ -4903,9 +5004,8 @@ pub const Parser = struct {
             if (std.mem.eql(u8, base_name, "_ENV")) {
                 try self.proto.emitGETUPVAL(base_reg, 0);
             } else {
-                // Fall back to global lookup via GETTABUP
                 const name_const = try self.proto.addConstString(base_name);
-                try self.proto.emitGETTABUP(base_reg, 0, name_const);
+                try self.emitGetGlobal(base_reg, name_const);
             }
         }
         self.advance(); // consume base name
@@ -5045,7 +5145,7 @@ pub const Parser = struct {
         // Get io table from global
         const io_reg = self.proto.allocTemp();
         const io_key_const = try self.proto.addConstString("io");
-        try self.proto.emitGETTABUP(io_reg, 0, io_key_const);
+        try self.emitGetGlobal(io_reg, io_key_const);
 
         // Get method from io table
         const method_reg = self.proto.allocTemp();
@@ -5129,6 +5229,7 @@ pub const Parser = struct {
 
         // Create a separate builder for function body with parent reference
         var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
+        func_builder.source = self.proto.source;
         defer func_builder.deinit(); // Clean up at end of function
 
         // Create RawProto container early (address is fixed, content will be filled later)
@@ -5243,6 +5344,10 @@ pub const Parser = struct {
         // Store the closure based on how the function was defined
         if (field_count == 0) {
             // Simple function: function name() -> name = closure
+            if (old_proto.isVariableConst(base_name)) {
+                self.setError("attempt to assign to const variable '{s}'", .{base_name});
+                return error.AssignToConst;
+            }
             // First check if there's a local or upvalue with this name
             if (try old_proto.resolveVariable(base_name)) |loc| {
                 switch (loc) {
@@ -5315,6 +5420,7 @@ pub const Parser = struct {
 
         // Create a separate builder for function body with parent reference
         var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
+        func_builder.source = self.proto.source;
         defer func_builder.deinit();
 
         // Create RawProto container with safe default values
@@ -5424,6 +5530,7 @@ pub const Parser = struct {
 
         // Create a separate builder for function body with parent reference
         var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
+        func_builder.source = self.proto.source;
         defer func_builder.deinit();
 
         // Create RawProto container with safe default values

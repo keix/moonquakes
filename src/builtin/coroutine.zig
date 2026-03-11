@@ -284,6 +284,12 @@ fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_
 fn executeCoroutine(co_vm: *VM) CoroutineResult {
     // Execute instructions until we return from the main function
     while (co_vm.ci != null) {
+        if (co_vm.pending_error_unwind and co_vm.pending_error_unwind_ci != null and co_vm.ci == co_vm.pending_error_unwind_ci.?) {
+            if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
+                error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+            }) continue;
+            return .{ .errored = co_vm.lua_error_value };
+        }
         const ci = co_vm.ci.?;
         const inst = ci.fetch() catch {
             // End of function - check if this is the base frame
@@ -306,7 +312,23 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
         const exec_result = mnemonics.do(co_vm, inst) catch |err| {
             // Handle LuaException
             if (err == error.LuaException) {
-                if (mnemonics.handleLuaException(co_vm)) continue;
+                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
+                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+                }) continue;
+                while (co_vm.ci) |unwind_ci| {
+                    mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, co_vm.lua_error_value) catch |cerr| switch (cerr) {
+                        error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+                        else => {},
+                    };
+                    co_vm.closeUpvalues(unwind_ci.base);
+                    if (unwind_ci.previous != null) {
+                        mnemonics.popCallInfo(co_vm);
+                    } else {
+                        co_vm.ci = null;
+                        co_vm.callstack_size = 0;
+                        break;
+                    }
+                }
                 // Unhandled exception - return error
                 return .{ .errored = co_vm.lua_error_value };
             }

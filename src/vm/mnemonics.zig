@@ -40,6 +40,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
         .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
+        .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
         .next => 2, // next returns key, value
         .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
         .coroutine_resume => 0, // C=0 sentinel: callee decides actual result count.
@@ -496,6 +497,14 @@ fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
             .GETFIELD => {
                 const key_val = ci.func.k[inst.getC()];
                 if (key_val.asString()) |key| {
+                    const table_reg = inst.getB();
+                    if (table_reg < ci.func.local_reg_names.len) {
+                        if (ci.func.local_reg_names[table_reg]) |local_name| {
+                            if (std.mem.eql(u8, local_name, "_ENV")) {
+                                return .{ .kind = .global_name, .name = key.asSlice() };
+                            }
+                        }
+                    }
                     return .{ .kind = .field_name, .name = key.asSlice() };
                 }
                 continue;
@@ -768,6 +777,14 @@ fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext {
             .GETFIELD => {
                 const key_val = ci.func.k[inst.getC()];
                 if (key_val.asString()) |key| {
+                    const table_reg = inst.getB();
+                    if (table_reg < ci.func.local_reg_names.len) {
+                        if (ci.func.local_reg_names[table_reg]) |local_name| {
+                            if (std.mem.eql(u8, local_name, "_ENV")) {
+                                return .{ .kind = .global_name, .name = key.asSlice() };
+                            }
+                        }
+                    }
                     return .{ .kind = .field_name, .name = key.asSlice() };
                 }
                 continue;
@@ -1073,6 +1090,12 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
     const safe_base = caller_ci.base + caller_ci.func.maxstacksize;
     const call_base = @max(vm.top, safe_base);
     const result_slot = call_base;
+    const argc: u32 = @intCast(args.len);
+
+    // Ensure there is room for argument setup and callee frame.
+    const min_arg_slots = @max(argc, @as(u32, proto.numparams));
+    try ensureStackTop(vm, call_base + min_arg_slots);
+    try ensureStackTop(vm, call_base + proto.maxstacksize);
 
     // Set up arguments
     for (args, 0..) |arg, i| {
@@ -1081,7 +1104,6 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 
     var vararg_base: u32 = 0;
     var vararg_count: u32 = 0;
-    const argc: u32 = @intCast(args.len);
     if (proto.is_vararg and argc > proto.numparams) {
         vararg_count = argc - proto.numparams;
         const min_vararg_base = call_base + proto.maxstacksize;
@@ -1102,6 +1124,22 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 
     // Save current call depth
     const saved_depth = vm.callstack_size;
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+    const cleanupToSavedDepth = struct {
+        fn run(vm2: *VM, depth: u8, base: u32, top: u32) void {
+            while (vm2.callstack_size > depth) {
+                popCallInfo(vm2);
+            }
+            if (vm2.callstack_size == 0) {
+                vm2.ci = null;
+            } else {
+                vm2.ci = &vm2.callstack[vm2.callstack_size - 1];
+            }
+            vm2.base = base;
+            vm2.top = top;
+        }
+    }.run;
 
     // Push call info for metamethod
     _ = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
@@ -1116,51 +1154,188 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
             popCallInfo(vm);
             continue;
         };
-        switch (try do(vm, inst)) {
+        const step = do(vm, inst) catch |err| {
+            if (err == error.LuaException) {
+                while (vm.callstack_size > saved_depth) {
+                    const unwind_ci = &vm.callstack[vm.callstack_size - 1];
+                    closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
+                    vm.closeUpvalues(unwind_ci.base);
+                    popCallInfo(vm);
+                }
+                vm.base = saved_base;
+                vm.top = saved_top;
+                return error.LuaException;
+            }
+            if (err == error.NoCloseMetamethod) {
+                const reg = inst.getA();
+                const name = if (reg < ci.func.local_reg_names.len and ci.func.local_reg_names[reg] != null)
+                    ci.func.local_reg_names[reg].?
+                else
+                    "?";
+                var msg_buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
+                cleanupToSavedDepth(vm, saved_depth, saved_base, saved_top);
+                return error.LuaException;
+            }
+            if (err == error.Yield) {
+                // Preserve stack/frame state for coroutine resume.
+                return error.Yield;
+            }
+            cleanupToSavedDepth(vm, saved_depth, saved_base, saved_top);
+            return err;
+        };
+        switch (step) {
             .Continue => {},
             .LoopContinue => {},
             .ReturnVM => break,
         }
     }
 
-    return vm.stack[result_slot];
+    const result = vm.stack[result_slot];
+    vm.base = saved_base;
+    vm.top = saved_top;
+    return result;
+}
+
+fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
+    return switch (id) {
+        .debug_sethook => "sethook",
+        else => null,
+    };
+}
+
+fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
+    if ((vm.hook_mask & 0x02) == 0) return;
+    const hook = vm.hook_func orelse return;
+
+    const event_name = try vm.gc().allocString("return");
+    const effective_name: ?[]const u8 = if (name_override) |n|
+        n
+    else if (vm.close_metamethod_depth > 0)
+        "close"
+    else
+        null;
+    const saved_name_override = vm.hook_name_override;
+    const saved_mask = vm.hook_mask;
+    const saved_top = vm.top;
+    vm.hook_name_override = effective_name;
+    vm.hook_mask = 0;
+    defer {
+        vm.hook_name_override = saved_name_override;
+        vm.hook_mask = saved_mask;
+        vm.top = saved_top;
+    }
+
+    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
-fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8) !void {
+pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) !void {
+    const close_tag = "in metamethod 'close'";
+    const annotateCloseError = struct {
+        fn run(vm2: *VM, tag: []const u8) void {
+            const s = vm2.lua_error_value.asString() orelse return;
+            if (std.mem.indexOf(u8, s.asSlice(), tag) != null) return;
+            const merged = std.fmt.allocPrint(vm2.gc().allocator, "{s} {s}", .{ s.asSlice(), tag }) catch return;
+            defer vm2.gc().allocator.free(merged);
+            const merged_obj = vm2.gc().allocString(merged) catch return;
+            vm2.lua_error_value = TValue.fromString(merged_obj);
+        }
+    }.run;
+
+    var current_err = err_obj;
+    var had_error = !current_err.isNil();
+
+    const setCloseCallError = struct {
+        fn run(vm2: *VM, mm_val: TValue) TValue {
+            var msg_buf: [128]u8 = undefined;
+            const ty = callableValueTypeName(mm_val);
+            const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value (metamethod 'close')", .{ty}) catch "attempt to call a value (metamethod 'close')";
+            const obj = vm2.gc().allocString(msg) catch return vm2.lua_error_value;
+            const v = TValue.fromString(obj);
+            vm2.lua_error_value = v;
+            return v;
+        }
+    }.run;
+
     // Process TBC variables from high to low (reverse order)
     var reg = ci.getHighestTBC(from_reg);
     while (reg) |r| {
         const val = vm.stack[vm.base + r];
+        // Clear mark before invoking __close to avoid re-entering the same slot
+        // if __close raises and unwinding runs close logic again.
+        ci.clearTBC(r);
 
         // Get __close metamethod
         if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
-            // Call __close(val, nil) - second arg is error object (nil for normal close)
+            // Call __close(val, err_obj) where err_obj is nil on normal close
+            // or current error object during unwinding.
             const saved_top = vm.top;
 
             if (mm.asClosure()) |closure| {
                 // executeSyncMM handles stack setup using vm.top
-                _ = try executeSyncMM(vm, closure, &[_]TValue{ val, .nil });
+                vm.close_metamethod_depth +|= 1;
+                defer {
+                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                }
+                _ = executeSyncMM(vm, closure, &[_]TValue{ val, current_err }) catch |err| switch (err) {
+                    error.LuaException => {
+                        annotateCloseError(vm, close_tag);
+                        current_err = vm.lua_error_value;
+                        had_error = true;
+                        vm.top = saved_top;
+                        if (r == 0) break;
+                        reg = ci.getHighestTBC(from_reg);
+                        continue;
+                    },
+                    else => return err,
+                };
             } else if (mm.isObject() and mm.object.type == .native_closure) {
                 const nc = object.getObject(NativeClosureObject, mm.object);
                 // Set up arguments for native call
                 const temp = vm.top;
                 vm.stack[temp] = mm;
                 vm.stack[temp + 1] = val;
-                vm.stack[temp + 2] = .nil;
+                vm.stack[temp + 2] = current_err;
                 vm.top = temp + 3;
-                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0);
+                vm.close_metamethod_depth +|= 1;
+                defer {
+                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                }
+                vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
+                    error.LuaException => {
+                        annotateCloseError(vm, close_tag);
+                        current_err = vm.lua_error_value;
+                        had_error = true;
+                        vm.top = saved_top;
+                        if (r == 0) break;
+                        reg = ci.getHighestTBC(from_reg);
+                        continue;
+                    },
+                    else => return err,
+                };
+                try dispatchReturnHook(vm, "close");
+            } else {
+                current_err = setCloseCallError(vm, mm);
+                had_error = true;
             }
             vm.top = saved_top;
+        } else {
+            // Value became non-closable (e.g. __close removed) before close time.
+            current_err = setCloseCallError(vm, .nil);
+            had_error = true;
         }
-
-        // Clear TBC mark
-        ci.clearTBC(r);
 
         // Get next TBC variable
         if (r == 0) break;
         reg = ci.getHighestTBC(from_reg);
+    }
+
+    if (had_error) {
+        vm.lua_error_value = current_err;
+        return error.LuaException;
     }
 }
 
@@ -1183,7 +1358,11 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 /// Handle a LuaException by unwinding to the nearest protected frame.
 /// Returns true if error was handled by a protected frame, false otherwise.
 /// The error value is taken from vm.lua_error_value (set by vm.raise()).
-pub fn handleLuaException(vm: *VM) bool {
+pub fn handleLuaException(vm: *VM) error{Yield}!bool {
+    vm.error_handling_depth +|= 1;
+    defer {
+        if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+    }
     vm.traceback_snapshot_count = 0;
     var current = vm.ci;
     while (current) |ci| {
@@ -1194,7 +1373,14 @@ pub fn handleLuaException(vm: *VM) bool {
 
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
-                closeTBCVariables(vm, unwind_ci, 0) catch {};
+                closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch |cerr| switch (cerr) {
+                    error.Yield => {
+                        vm.pending_error_unwind = true;
+                        vm.pending_error_unwind_ci = unwind_ci;
+                        return error.Yield;
+                    },
+                    else => {},
+                };
                 vm.closeUpvalues(unwind_ci.base);
                 popCallInfo(vm);
             }
@@ -1213,12 +1399,16 @@ pub fn handleLuaException(vm: *VM) bool {
             }
             vm.lua_error_value = .nil; // Clear after use
             vm.top = if (ci.nresults < 0) ret_base + 2 else vm.base + vm.ci.?.func.maxstacksize;
+            vm.pending_error_unwind = false;
+            vm.pending_error_unwind_ci = null;
 
             return true;
         }
         current = ci.previous;
     }
 
+    vm.pending_error_unwind = false;
+    vm.pending_error_unwind_ci = null;
     return false;
 }
 
@@ -1312,14 +1502,18 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
         if (vm.gc().hasPendingFinalizers()) {
             vm.gc().drainFinalizers();
         }
+        if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
+            if (try handleLuaException(vm)) continue;
+            return error.LuaException;
+        }
         const ci = vm.ci.?;
         const inst = ci.fetch() catch |err| {
-            if (err == error.LuaException and handleLuaException(vm)) continue;
+            if (err == error.LuaException and try handleLuaException(vm)) continue;
             return err;
         };
 
         const result = do(vm, inst) catch |err| {
-            if (err == error.LuaException and handleLuaException(vm)) continue;
+            if (err == error.LuaException and try handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.CallStackOverflow or
                 err == error.ArithmeticError or
@@ -1335,6 +1529,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                 err == error.InvalidForLoopInit or
                 err == error.InvalidForLoopLimit or
                 err == error.InvalidForLoopStep or
+                err == error.NoCloseMetamethod or
                 err == error.FormatError)
             {
                 var msg_buf: [128]u8 = undefined;
@@ -1643,6 +1838,14 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                         }
                         break :blk "'for' step is zero";
                     },
+                    error.NoCloseMetamethod => blk: {
+                        const reg = inst.getA();
+                        const name = if (reg < ci.func.local_reg_names.len and ci.func.local_reg_names[reg] != null)
+                            ci.func.local_reg_names[reg].?
+                        else
+                            "?";
+                        break :blk std.fmt.bufPrint(&msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
+                    },
                     error.FormatError => "bad argument to string format",
                     else => "runtime error",
                 };
@@ -1651,7 +1854,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
                 vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
-                if (handleLuaException(vm)) continue;
+                if (try handleLuaException(vm)) continue;
                 return error.LuaException;
             }
             return err;
@@ -2609,6 +2812,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     vm.top = frame_max;
+                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
                     return .Continue;
                 }
             }
@@ -2706,6 +2910,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
+                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
                     return .LoopContinue;
                 }
             }
@@ -2824,7 +3029,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Close TBC variables if k flag is set
             if (k) {
-                try closeTBCVariables(vm, current_ci, 0);
+                try closeTBCVariables(vm, current_ci, 0, .nil);
             }
 
             // Close upvalues before tail call
@@ -2950,6 +3155,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 current_ci.vararg_base = vararg_base;
                 current_ci.vararg_count = vararg_count;
                 current_ci.tbc_bitmap = 0; // Reset TBC tracking
+                current_ci.pending_return_a = null;
+                current_ci.pending_return_count = null;
+                current_ci.pending_return_reexec = false;
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -2975,6 +3183,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
                     const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
                     try vm.callNative(nc.func.id, a, nargs, native_nresults);
+                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
@@ -3021,14 +3230,26 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const nresults = returning_ci.nresults;
                 const dst_base = returning_ci.ret_base;
                 const is_protected = returning_ci.is_protected;
+                if (b == 0) {
+                    if (returning_ci.pending_return_count == null or returning_ci.pending_return_a == null or returning_ci.pending_return_a.? != a) {
+                        returning_ci.pending_return_a = a;
+                        returning_ci.pending_return_count = vm.top - (returning_ci.base + a);
+                    }
+                }
 
                 // Close TBC variables before returning (Lua 5.4)
                 if (returning_ci.tbc_bitmap != 0) {
-                    try closeTBCVariables(vm, returning_ci, 0);
+                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
+                        if (err == error.Yield) {
+                            returning_ci.pending_return_reexec = true;
+                        }
+                        return err;
+                    };
                 }
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -3039,7 +3260,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // B=0 means variable returns (from R[A] to top)
                 // B>0 means B-1 fixed returns
                 const ret_count: u32 = if (b == 0)
-                    vm.top - (returning_ci.base + a)
+                    returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
                 else if (b == 1)
                     0
                 else
@@ -3106,15 +3327,27 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Top-level return (no previous call frame)
             // Close TBC variables before returning
             const top_ci = vm.ci.?;
+            if (b == 0) {
+                if (top_ci.pending_return_count == null or top_ci.pending_return_a == null or top_ci.pending_return_a.? != a) {
+                    top_ci.pending_return_a = a;
+                    top_ci.pending_return_count = vm.top - (vm.base + a);
+                }
+            }
             if (top_ci.tbc_bitmap != 0) {
-                try closeTBCVariables(vm, top_ci, 0);
+                closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
+                    if (err == error.Yield) {
+                        top_ci.pending_return_reexec = true;
+                    }
+                    return err;
+                };
             }
             const ret_count: u32 = if (b == 0)
-                vm.top - (vm.base + a)
+                top_ci.pending_return_count orelse (vm.top - (vm.base + a))
             else if (b == 1)
                 0
             else
                 b - 1;
+            try dispatchReturnHook(vm, null);
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -3134,11 +3367,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 // Close TBC variables before returning (Lua 5.4)
                 if (returning_ci.tbc_bitmap != 0) {
-                    try closeTBCVariables(vm, returning_ci, 0);
+                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
+                        if (err == error.Yield) {
+                            returning_ci.pending_return_reexec = true;
+                        }
+                        return err;
+                    };
                 }
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -3169,8 +3408,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Top-level return - close TBC variables
             const top_ci = vm.ci.?;
             if (top_ci.tbc_bitmap != 0) {
-                try closeTBCVariables(vm, top_ci, 0);
+                closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
+                    if (err == error.Yield) {
+                        top_ci.pending_return_reexec = true;
+                    }
+                    return err;
+                };
             }
+            try dispatchReturnHook(vm, null);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -3184,11 +3429,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 // Close TBC variables before returning (Lua 5.4)
                 if (returning_ci.tbc_bitmap != 0) {
-                    try closeTBCVariables(vm, returning_ci, 0);
+                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
+                        if (err == error.Yield) {
+                            returning_ci.pending_return_reexec = true;
+                        }
+                        return err;
+                    };
                 }
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -3227,7 +3478,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
 
             // Top-level return - close TBC variables
-            try closeTBCVariables(vm, vm.ci.?, 0);
+            closeTBCVariables(vm, vm.ci.?, 0, .nil) catch |err| {
+                const top_ci = vm.ci.?;
+                if (err == error.Yield) {
+                    top_ci.pending_return_reexec = true;
+                }
+                return err;
+            };
+            try dispatchReturnHook(vm, null);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
@@ -3657,7 +3915,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .CLOSE => {
             const a = inst.getA();
             // First, call __close on any TBC variables from top down to 'a'
-            try closeTBCVariables(vm, ci, a);
+            try closeTBCVariables(vm, ci, a, .nil);
             // Then close upvalues
             vm.closeUpvalues(vm.base + a);
             return .Continue;

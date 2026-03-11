@@ -278,13 +278,23 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
-        if (nresults > 1) {
+        if (nresults == 0) {
+            var payload_len = out_len;
+            while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
+            var i: u32 = 0;
+            while (i < payload_len) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = payload[i];
+            }
+            vm.top = vm.base + func_reg + 1 + payload_len;
+        } else if (nresults > 1) {
             var i: u32 = 0;
             while (i < nresults - 1) : (i += 1) {
                 vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
             }
+            vm.top = vm.base + func_reg + nresults;
+        } else {
+            vm.top = vm.base + func_reg + 1;
         }
-        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
         error.LuaException => {
             // Lua error: return (false, error_value)
@@ -331,13 +341,23 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
-        if (nresults > 1) {
+        if (nresults == 0) {
+            var payload_len = out_len;
+            while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
+            var i: u32 = 0;
+            while (i < payload_len) : (i += 1) {
+                vm.stack[vm.base + func_reg + 1 + i] = payload[i];
+            }
+            vm.top = vm.base + func_reg + 1 + payload_len;
+        } else if (nresults > 1) {
             var i: u32 = 0;
             while (i < nresults - 1) : (i += 1) {
                 vm.stack[vm.base + func_reg + 1 + i] = if (i < out_len) payload[i] else .nil;
             }
+            vm.top = vm.base + func_reg + nresults;
+        } else {
+            vm.top = vm.base + func_reg + 1;
         }
-        vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 1 + out_len;
     } else |err| switch (err) {
         error.LuaException => {
             // Get error value and call handler

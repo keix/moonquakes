@@ -60,8 +60,16 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
 /// Full execution pipeline with options
 /// Creates Runtime, VM, injects context, compiles, executes, returns owned result
 pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !OwnedReturnValue {
+    var source_name_buf: ?[]u8 = null;
+    defer if (source_name_buf) |buf| allocator.free(buf);
+
+    const source_name: []const u8 = if (options.script_name.len > 0) blk: {
+        source_name_buf = try std.fmt.allocPrint(allocator, "@{s}", .{options.script_name});
+        break :blk source_name_buf.?;
+    } else "[string]";
+
     // Phase 1: Compile to RawProto (no GC needed)
-    const compile_result = pipeline.compile(allocator, source, .{});
+    const compile_result = pipeline.compile(allocator, source, .{ .source_name = source_name });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(allocator);
