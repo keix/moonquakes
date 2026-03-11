@@ -4778,6 +4778,13 @@ pub const Parser = struct {
             };
         }
 
+        // Special handling for pcall:
+        // - fixed-arg calls use PCALL opcode (needed for yield-safe protected calls)
+        // - vararg-arg calls (pcall(f, ...)) fall back to regular CALL pcall(...)
+        if (std.mem.eql(u8, func_name, "pcall")) {
+            return self.parsePcallExpr();
+        }
+
         // Check if it's a user-defined global function
         if (self.proto.findFunction(func_name)) |_| {
             // Handle user-defined function call with return value
@@ -4812,6 +4819,32 @@ pub const Parser = struct {
 
         // Return the register where the result is stored
         return func_reg;
+    }
+
+    /// Parse pcall(f, ...) and emit PCALL opcode when safe.
+    /// For pcall(f, ...) where args include VARARG (...), fall back to regular CALL pcall(...)
+    /// to preserve dynamic-arg behavior.
+    fn parsePcallExpr(self: *Parser) ParseError!u8 {
+        self.advance(); // consume "pcall"
+
+        // Reserve call base. For PCALL this is status register; for CALL fallback this is callee register.
+        const result_reg = self.proto.allocTemp();
+
+        // Parse pcall arguments into result_reg+1...
+        const arg_count = try self.parseCallArgs(result_reg);
+
+        // Vararg arguments (pcall(f, ...)) require dynamic nargs at runtime.
+        // Existing PCALL path is not robust for this form, so compile to regular CALL pcall(...).
+        if (arg_count == ProtoBuilder.VARARG_SENTINEL) {
+            const pcall_const = try self.proto.addConstString("pcall");
+            try self.emitGetGlobal(result_reg, pcall_const);
+            try self.proto.emitCallVararg(result_reg, arg_count, 1);
+            return result_reg;
+        }
+
+        // Fixed-arg pcall can use dedicated opcode.
+        try self.proto.emitPcall(result_reg, arg_count, 2);
+        return result_reg;
     }
 
     /// Parse a function call where the function is stored in a local register
