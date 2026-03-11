@@ -187,14 +187,15 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
 
         vm.base = call_base;
         vm.top = call_base + 1 + @as(u32, @intCast(args.len));
+        defer {
+            vm.base = saved_base;
+            vm.top = saved_top;
+        }
 
         // nargs is args.len + 1 (includes self)
         try vm.callNative(nc.func.id, 0, @as(u32, @intCast(args.len)) + 1, 1);
 
         const result = vm.stack[result_slot];
-        vm.base = saved_base;
-        vm.top = saved_top;
-
         return result;
     }
 

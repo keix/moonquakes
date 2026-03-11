@@ -4798,11 +4798,6 @@ pub const Parser = struct {
             return func_reg;
         }
 
-        // Special handling for pcall - emits PCALL opcode
-        if (std.mem.eql(u8, func_name, "pcall")) {
-            return self.parsePcallExpr();
-        }
-
         // Fall back to global lookup for unresolved function names.
         self.advance(); // consume function name
 
@@ -4832,7 +4827,11 @@ pub const Parser = struct {
         // parseCallArgs expects func_reg and places args at func_reg+1, func_reg+2...
         // For PCALL: result_reg = status, result_reg+1 = function, result_reg+2... = args
         // So we pass result_reg as "func_reg" and it places pcall's arguments correctly
-        const total_args = try self.parseCallArgs(result_reg);
+        const arg_count = try self.parseCallArgs(result_reg);
+        const total_args: u8 = if (arg_count == ProtoBuilder.VARARG_SENTINEL)
+            ProtoBuilder.VARARG_SENTINEL
+        else
+            arg_count + 1;
 
         // Emit PCALL instruction
         // nresults = 2 means status + 1 return value (typical usage)

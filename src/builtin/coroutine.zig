@@ -652,25 +652,76 @@ pub fn nativeCoroutineIsYieldable(vm: *VM, func_reg: u32, nargs: u32, nresults: 
 /// coroutine.close(co) - Closes coroutine co (Lua 5.4 feature)
 /// Closes coroutine and runs to-be-closed variables
 pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
+    const result_base = vm.base + func_reg;
+    const setResult = struct {
+        fn run(vm2: *VM, base: u32, ok: bool, err_val: ?TValue, nres: u32) void {
+            vm2.stack[base] = .{ .boolean = ok };
+            if (err_val) |err| {
+                vm2.stack[base + 1] = err;
+                vm2.top = if (nres == 0) base + 2 else base + @min(@as(u32, 2), nres);
+            } else {
+                vm2.top = if (nres == 0) base + 1 else base + @min(@as(u32, 1), nres);
+            }
+        }
+    }.run;
+
     if (nargs < 1) {
         return vm.raiseString("bad argument #1 to 'close' (thread expected)");
     }
 
-    const thread_arg = vm.stack[vm.base + func_reg + 1];
+    const thread_arg = vm.stack[result_base + 1];
     const thread = thread_arg.asThread() orelse {
         return vm.raiseString("bad argument #1 to 'close' (thread expected)");
     };
 
+    if (vm.rt.resume_c_depth >= resume_c_depth_limit) {
+        const err_str = try vm.gc().allocString("C stack overflow");
+        setResult(vm, result_base, false, TValue.fromString(err_str), nresults);
+        return;
+    }
+    vm.rt.resume_c_depth += 1;
+    defer vm.rt.resume_c_depth -= 1;
+
     // Can only close suspended or dead coroutines
     if (thread.status == .running or thread.status == .normal) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        if (nresults >= 2) {
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot close a running coroutine"));
-        }
+        const err_str = try vm.gc().allocString("cannot close a running coroutine");
+        setResult(vm, result_base, false, TValue.fromString(err_str), nresults);
         return;
     }
 
+    // Dead coroutines are already closed.
+    if (thread.status == .dead) {
+        setResult(vm, result_base, true, null, nresults);
+        return;
+    }
+
+    const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
+
+    // Closing a suspended coroutine must run pending to-be-closed variables.
+    if (thread.status == .suspended) {
+        while (co_vm.ci) |unwind_ci| {
+            mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, .nil) catch |cerr| switch (cerr) {
+                error.LuaException => {
+                    thread.status = .dead;
+                    setResult(vm, result_base, false, co_vm.lua_error_value, nresults);
+                    return;
+                },
+                else => return cerr,
+            };
+            co_vm.closeUpvalues(unwind_ci.base);
+            if (unwind_ci.previous != null) {
+                mnemonics.popCallInfo(co_vm);
+            } else {
+                co_vm.ci = null;
+                co_vm.callstack_size = 0;
+                break;
+            }
+        }
+    }
+
     thread.status = .dead;
-    // NOTE: To-be-closed variables (__close) not yet implemented
-    vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    setResult(vm, result_base, true, null, nresults);
 }

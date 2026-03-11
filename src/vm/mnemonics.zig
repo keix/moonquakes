@@ -1233,7 +1233,7 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
 
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
-pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) !void {
+pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) anyerror!void {
     const close_tag = "in metamethod 'close'";
     const annotateCloseError = struct {
         fn run(vm2: *VM, tag: []const u8) void {
