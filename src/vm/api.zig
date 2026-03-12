@@ -97,6 +97,10 @@ pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults
             }
         }
     }
+    self.native_call_depth +|= 1;
+    defer {
+        if (self.native_call_depth > 0) self.native_call_depth -= 1;
+    }
     try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }
 

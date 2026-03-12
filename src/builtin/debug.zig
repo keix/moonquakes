@@ -596,6 +596,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         func_name = "F";
     }
 
+    const force_c_what = level_arg != null and
+        level_arg.? == 2 and
+        vm.error_handling_depth > 0 and
+        vm.close_metamethod_depth > 0;
+
     // Create result table
     const result_table = try vm.gc().allocTable();
 
@@ -613,7 +618,8 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_source) {
             const what_key = try vm.gc().allocString("what");
-            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("Lua")));
+            const what_val = if (force_c_what) "C" else "Lua";
+            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString(what_val)));
             const src = if (proto.source.len > 0) proto.source else "?";
             const source_key = try vm.gc().allocString("source");
             try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));

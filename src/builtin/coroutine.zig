@@ -1,6 +1,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
+const NativeClosureObject = object.NativeClosureObject;
 const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -131,6 +132,11 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
         const is_native_body = body.isObject() and body.object.type == .native_closure;
+        co_vm.entry_is_pcall = false;
+        if (is_native_body and body.isObject()) {
+            const nc = object.getObject(NativeClosureObject, body.object);
+            co_vm.entry_is_pcall = nc.func.id == .pcall;
+        }
         if (!is_lua_body and !is_native_body) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
@@ -217,10 +223,29 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         .errored => |err_val| {
             // Coroutine errored - mark as dead
             thread.status = .dead;
-            vm.stack[vm.base + func_reg] = .{ .boolean = false };
-            vm.stack[vm.base + func_reg + 1] = err_val;
-            // Update vm.top for MULTRET support (false + error message)
-            vm.top = vm.base + func_reg + 2;
+            if (co_vm.entry_is_pcall) {
+                // pcall as coroutine entry should return (true, false, err)
+                vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                if (nresults == 0) {
+                    vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
+                    vm.stack[vm.base + func_reg + 2] = err_val;
+                    vm.top = vm.base + func_reg + 3;
+                } else {
+                    if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
+                    if (nresults >= 3) vm.stack[vm.base + func_reg + 2] = err_val;
+                    if (nresults > 3) {
+                        var i: u32 = 3;
+                        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+                    }
+                    vm.top = vm.base + func_reg + nresults;
+                }
+                co_vm.lua_error_value = .nil;
+            } else {
+                vm.stack[vm.base + func_reg] = .{ .boolean = false };
+                vm.stack[vm.base + func_reg + 1] = err_val;
+                // Update vm.top for MULTRET support (false + error message)
+                vm.top = vm.base + func_reg + 2;
+            }
         },
     }
 }
@@ -259,6 +284,36 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
 
 /// Set up coroutine for resume after yield (pass values to yield return)
 fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
+    if (co_vm.yield_from_tailcall) {
+        co_vm.yield_from_tailcall = false;
+        const ci = co_vm.ci orelse return;
+        const dst_base = ci.ret_base;
+        const nresults = ci.nresults;
+
+        if (ci.previous != null) {
+            if (nresults < 0) {
+                var i: u32 = 0;
+                while (i < num_args) : (i += 1) {
+                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
+                }
+            } else {
+                const expected: u32 = @intCast(nresults);
+                const copy_count = @min(num_args, expected);
+                var i: u32 = 0;
+                while (i < copy_count) : (i += 1) {
+                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
+                }
+                while (i < expected) : (i += 1) {
+                    co_vm.stack[dst_base + i] = .nil;
+                }
+            }
+            mnemonics.popCallInfo(co_vm);
+            const caller_frame_max = co_vm.base + co_vm.ci.?.func.maxstacksize;
+            co_vm.top = if (nresults < 0) dst_base + num_args else caller_frame_max;
+            return;
+        }
+    }
+
     const ret_base = co_vm.yield_ret_base;
     const nres = co_vm.yield_nresults;
 
@@ -533,6 +588,11 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
         const is_native_body = body.isObject() and body.object.type == .native_closure;
+        co_vm.entry_is_pcall = false;
+        if (is_native_body and body.isObject()) {
+            const nc = object.getObject(NativeClosureObject, body.object);
+            co_vm.entry_is_pcall = nc.func.id == .pcall;
+        }
         if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
@@ -603,9 +663,26 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         },
         .errored => |err_val| {
             thread.status = .dead;
-            // Propagate the error (unlike resume which returns false)
-            vm.lua_error_value = err_val;
-            return error.LuaException;
+            if (co_vm.entry_is_pcall) {
+                if (nresults == 0) {
+                    vm.stack[vm.base + func_reg] = .{ .boolean = false };
+                    vm.stack[vm.base + func_reg + 1] = err_val;
+                    vm.top = vm.base + func_reg + 2;
+                } else {
+                    if (nresults >= 1) vm.stack[vm.base + func_reg] = .{ .boolean = false };
+                    if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = err_val;
+                    if (nresults > 2) {
+                        var i: u32 = 2;
+                        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+                    }
+                    vm.top = vm.base + func_reg + nresults;
+                }
+                co_vm.lua_error_value = .nil;
+            } else {
+                // Propagate the error (unlike resume which returns false)
+                vm.lua_error_value = err_val;
+                return error.LuaException;
+            }
         },
     }
 }
@@ -630,8 +707,17 @@ pub fn nativeCoroutineYield(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
 
     // Store where resume's return values should go (when coroutine is resumed)
     // This is where CALL expects its results: stack[base + func_reg]
-    vm.yield_ret_base = vm.base + func_reg;
-    vm.yield_nresults = @as(i32, @intCast(nresults));
+    const ci = vm.ci orelse return vm.raiseString("attempt to yield from outside a coroutine");
+    const is_tailcall_site = blk: {
+        const code_start = @intFromPtr(ci.func.code.ptr);
+        const pc_addr = @intFromPtr(ci.pc);
+        if (pc_addr <= code_start) break :blk false;
+        const prev_inst = (ci.pc - 1)[0];
+        break :blk prev_inst.getOpCode() == .TAILCALL;
+    };
+    vm.yield_from_tailcall = is_tailcall_site;
+    vm.yield_ret_base = if (is_tailcall_site) ci.ret_base else vm.base + func_reg;
+    vm.yield_nresults = if (nresults == 0) -1 else @as(i32, @intCast(nresults));
 
     // Suspend execution - will be caught by executeCoroutine
     return error.Yield;
@@ -640,12 +726,26 @@ pub fn nativeCoroutineYield(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
 /// coroutine.isyieldable() - Returns true if running coroutine can yield
 /// Returns false for main thread
 pub fn nativeCoroutineIsYieldable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nargs;
-
     if (nresults == 0) return;
 
-    // Main thread cannot yield
-    const can_yield = !vm.isMainThread();
+    const can_yield = blk: {
+        if (nargs >= 1) {
+            const thread_arg = vm.stack[vm.base + func_reg + 1];
+            const thread = thread_arg.asThread() orelse {
+                return vm.raiseString("bad argument #1 to 'isyieldable' (thread expected)");
+            };
+            if (vm.rt.main_thread) |main_thread| {
+                if (thread == main_thread) break :blk false;
+            }
+            break :blk switch (thread.status) {
+                .dead, .normal => false,
+                .created, .suspended => true,
+                .running => thread == vm.thread and !vm.isMainThread() and vm.native_call_depth <= 1,
+            };
+        }
+        break :blk !vm.isMainThread() and vm.native_call_depth <= 1;
+    };
+
     vm.stack[vm.base + func_reg] = .{ .boolean = can_yield };
 }
 
@@ -663,6 +763,12 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
                 vm2.stack[base + 1] = err;
                 vm2.top = if (nres == 0) base + 2 else base + @min(@as(u32, 2), nres);
             } else {
+                if (nres > 1) {
+                    var i: u32 = 1;
+                    while (i < nres) : (i += 1) {
+                        vm2.stack[base + i] = .nil;
+                    }
+                }
                 vm2.top = if (nres == 0) base + 1 else base + @min(@as(u32, 1), nres);
             }
         }
@@ -685,20 +791,32 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
     vm.rt.resume_c_depth += 1;
     defer vm.rt.resume_c_depth -= 1;
 
-    // Can only close suspended or dead coroutines
-    if (thread.status == .running or thread.status == .normal) {
-        const err_str = try vm.gc().allocString("cannot close a running coroutine");
-        setResult(vm, result_base, false, TValue.fromString(err_str), nresults);
-        return;
+    const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
+
+    // Reentrant self-close while running __close must fail.
+    if (thread == vm.thread and vm.close_metamethod_depth > 0) {
+        return vm.raiseString("cannot close a running coroutine");
     }
 
-    // Dead coroutines are already closed.
+    // Can only close suspended or dead coroutines.
+    if (thread.status == .running) {
+        return vm.raiseString("cannot close a running coroutine");
+    }
+    if (thread.status == .normal) {
+        return vm.raiseString("cannot close a normal coroutine");
+    }
+
+    // Dead coroutines: first close after an unhandled error returns that error.
     if (thread.status == .dead) {
+        if (!co_vm.lua_error_value.isNil()) {
+            const err_val = co_vm.lua_error_value;
+            co_vm.lua_error_value = .nil;
+            setResult(vm, result_base, false, err_val, nresults);
+            return;
+        }
         setResult(vm, result_base, true, null, nresults);
         return;
     }
-
-    const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
 
     // Closing a suspended coroutine must run pending to-be-closed variables.
     if (thread.status == .suspended) {
@@ -706,7 +824,9 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
             mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, .nil) catch |cerr| switch (cerr) {
                 error.LuaException => {
                     thread.status = .dead;
-                    setResult(vm, result_base, false, co_vm.lua_error_value, nresults);
+                    const err_val = co_vm.lua_error_value;
+                    co_vm.lua_error_value = .nil;
+                    setResult(vm, result_base, false, err_val, nresults);
                     return;
                 },
                 else => return cerr,
