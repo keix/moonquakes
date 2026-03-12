@@ -34,7 +34,7 @@ pub const Proto = struct {
 /// Constant reference - type tag + index into type-specific array
 pub const ConstRef = struct {
     kind: ConstKind,
-    index: u16,
+    index: u32,
 
     pub const ConstKind = enum(u8) {
         nil,

@@ -187,6 +187,12 @@ pub const TableObject = struct {
         TValueKeyContext,
         std.hash_map.default_max_load_percentage,
     );
+    pub const KeyIndexMap = std.HashMap(
+        TValue,
+        u32,
+        TValueKeyContext,
+        std.hash_map.default_max_load_percentage,
+    );
 
     /// Stores keys explicitly deleted from this table.
     /// This allows `next(t, k)` to continue iteration when `k` was
@@ -201,7 +207,47 @@ pub const TableObject = struct {
         key: TValue,
         value: TValue,
     };
-    pub const NextSlotError = error{InvalidKey};
+    pub const NextSlotError = error{ InvalidKey, OutOfMemory };
+
+    fn floatToExactIntKey(n: f64) ?i64 {
+        if (!std.math.isFinite(n) or n != @floor(n)) return null;
+        const max_i = std.math.maxInt(i64);
+        const min_i = std.math.minInt(i64);
+        const max_f: f64 = @floatFromInt(max_i);
+        const min_f: f64 = @floatFromInt(min_i);
+        if (n < min_f or n > max_f) return null;
+        const i: i64 = @intFromFloat(n);
+        if (@as(f64, @floatFromInt(i)) != n) return null;
+        return i;
+    }
+
+    fn canonicalizeLookupKey(key: TValue) TValue {
+        return switch (key) {
+            .number => |n| blk: {
+                if (floatToExactIntKey(n)) |i| break :blk TValue{ .integer = i };
+                break :blk key;
+            },
+            else => key,
+        };
+    }
+
+    fn canonicalizeStoreKey(self: *const TableObject, key: TValue) TValue {
+        const lookup_key = canonicalizeLookupKey(key);
+        // Preserve Lua behavior for numeric keys: if a number key compares equal
+        // to an existing integer key, update that integer slot.
+        if (lookup_key == .number) {
+            const n = lookup_key.number;
+            var iter = self.hash_part.iterator();
+            while (iter.next()) |entry| {
+                if (entry.key_ptr.* == .integer) {
+                    const i = entry.key_ptr.*.integer;
+                    const as_num: f64 = @floatFromInt(i);
+                    if (as_num == n) return TValue{ .integer = i };
+                }
+            }
+        }
+        return lookup_key;
+    }
 
     /// Weak table mode for __mode metamethod
     pub const WeakMode = enum(u2) {
@@ -214,6 +260,10 @@ pub const TableObject = struct {
     header: GCObject,
     hash_part: HashMap,
     deleted_keys: DeletedKeySet,
+    iter_keys: std.ArrayListUnmanaged(TValue),
+    iter_index: KeyIndexMap,
+    mod_count: u64 = 0,
+    iter_cache_mod_count: u64 = std.math.maxInt(u64),
     allocator: std.mem.Allocator,
     seq_len: i64 = 0,
     /// Metatable for metamethod dispatch (null if no metatable)
@@ -233,37 +283,8 @@ pub const TableObject = struct {
 
     /// Get a value by TValue key
     pub fn get(self: *const TableObject, key: TValue) ?TValue {
-        const canonical_key: TValue = switch (key) {
-            .number => |n| blk: {
-                if (std.math.isFinite(n) and n == @floor(n)) {
-                    const max_i = std.math.maxInt(i64);
-                    const min_i = std.math.minInt(i64);
-                    const max_f: f64 = @floatFromInt(max_i);
-                    const min_f: f64 = @floatFromInt(min_i);
-                    if (n >= min_f and n <= max_f) {
-                        const i: i64 = @intFromFloat(n);
-                        if (@as(f64, @floatFromInt(i)) == n) break :blk TValue{ .integer = i };
-                    }
-                }
-                break :blk key;
-            },
-            else => key,
-        };
+        const canonical_key = canonicalizeLookupKey(key);
         if (self.hash_part.get(canonical_key)) |v| return v;
-
-        // Lua compatibility: integer and float keys that compare equal
-        // should refer to the same entry.
-        if (key == .number) {
-            const n = key.number;
-            var iter = self.hash_part.iterator();
-            while (iter.next()) |entry| {
-                if (entry.key_ptr.* == .integer) {
-                    const i = entry.key_ptr.*.integer;
-                    const as_num: f64 = @floatFromInt(i);
-                    if (as_num == n) return entry.value_ptr.*;
-                }
-            }
-        }
         return null;
     }
 
@@ -313,6 +334,31 @@ pub const TableObject = struct {
 
         if (best_key) |key| return .{ .key = key, .value = best_val };
         return null;
+    }
+
+    fn rebuildIterCache(self: *TableObject) !void {
+        self.iter_keys.clearRetainingCapacity();
+        self.iter_index.clearRetainingCapacity();
+
+        var iter = self.hash_part.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            if (value.isNil()) continue;
+            try self.iter_keys.append(self.allocator, key);
+        }
+
+        const SortCtx = struct {
+            fn lessThan(_: void, a: TValue, b: TValue) bool {
+                return keyLessThan(a, b);
+            }
+        };
+        std.mem.sort(TValue, self.iter_keys.items, {}, SortCtx.lessThan);
+
+        for (self.iter_keys.items, 0..) |key, i| {
+            try self.iter_index.put(key, @intCast(i));
+        }
+        self.iter_cache_mod_count = self.mod_count;
     }
 
     fn keyExactEq(a: TValue, b: TValue) bool {
@@ -375,14 +421,36 @@ pub const TableObject = struct {
             }
         }
 
-        if (prev == null) return self.selectNext(null);
+        if (self.iter_cache_mod_count != self.mod_count) {
+            try self.rebuildIterCache();
+        }
+
+        if (prev == null) {
+            for (self.iter_keys.items) |key| {
+                if (self.hash_part.get(key)) |value| {
+                    if (!value.isNil()) return .{ .key = key, .value = value };
+                }
+            }
+            return null;
+        }
         const prev_key = prev.?;
+
+        if (self.iter_index.get(prev_key)) |pos| {
+            var i: usize = @as(usize, @intCast(pos)) + 1;
+            while (i < self.iter_keys.items.len) : (i += 1) {
+                const key = self.iter_keys.items[i];
+                if (self.hash_part.get(key)) |value| {
+                    if (!value.isNil()) return .{ .key = key, .value = value };
+                }
+            }
+            return null;
+        }
 
         if (self.hasExactKey(prev_key)) return self.selectNext(prev_key);
 
         if (self.hasExactDeletedKey(prev_key)) {
             _ = self.deleted_keys.remove(prev_key);
-            return self.selectNext(null);
+            return self.selectNext(prev_key);
         }
 
         return error.InvalidKey;
@@ -395,32 +463,7 @@ pub const TableObject = struct {
         // route table mutations through a write barrier helper here.
         if (key.isNil()) return error.InvalidTableKey;
         if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
-        const canonical_key: TValue = switch (key) {
-            .number => |n| blk: {
-                if (std.math.isFinite(n) and n == @floor(n)) {
-                    const max_i = std.math.maxInt(i64);
-                    const min_i = std.math.minInt(i64);
-                    const max_f: f64 = @floatFromInt(max_i);
-                    const min_f: f64 = @floatFromInt(min_i);
-                    if (n >= min_f and n <= max_f) {
-                        const i: i64 = @intFromFloat(n);
-                        if (@as(f64, @floatFromInt(i)) == n) break :blk TValue{ .integer = i };
-                    }
-                }
-                // If there is an integer key with equal numeric value,
-                // canonicalize to that integer key.
-                var iter = self.hash_part.iterator();
-                while (iter.next()) |entry| {
-                    if (entry.key_ptr.* == .integer) {
-                        const i = entry.key_ptr.*.integer;
-                        const as_num: f64 = @floatFromInt(i);
-                        if (as_num == n) break :blk TValue{ .integer = i };
-                    }
-                }
-                break :blk key;
-            },
-            else => key,
-        };
+        const canonical_key = canonicalizeStoreKey(self, key);
         const seq_key: ?i64 = switch (canonical_key) {
             .integer => |i| if (i > 0) i else null,
             else => null,
@@ -431,6 +474,7 @@ pub const TableObject = struct {
             if (self.hash_part.contains(canonical_key)) {
                 _ = self.hash_part.remove(canonical_key);
                 try self.deleted_keys.put(canonical_key, {});
+                self.mod_count +%= 1;
                 self.pruneDeletedKeys();
                 if (seq_key) |k| {
                     if (k == self.seq_len) {
@@ -445,6 +489,7 @@ pub const TableObject = struct {
         } else {
             try self.hash_part.put(canonical_key, value);
             _ = self.deleted_keys.remove(canonical_key);
+            self.mod_count +%= 1;
             if (seq_key) |k| {
                 if (k == self.seq_len + 1) {
                     var cursor = self.seq_len + 1;
@@ -460,6 +505,8 @@ pub const TableObject = struct {
 
     /// Clean up internal data structures (called by GC during sweep)
     pub fn deinit(self: *TableObject) void {
+        self.iter_index.deinit();
+        self.iter_keys.deinit(self.allocator);
         self.deleted_keys.deinit();
         self.hash_part.deinit();
     }

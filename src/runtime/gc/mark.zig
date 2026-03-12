@@ -5,6 +5,7 @@
 //!   - Mark phase traversal (scanChildren/propagate)
 //!   - Write barrier for incremental invariants
 
+const std = @import("std");
 const object = @import("object.zig");
 const GCObject = object.GCObject;
 const TableObject = object.TableObject;
@@ -132,6 +133,16 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
                 while (deleted_iter.next()) |entry| {
                     markGrayValue(self, entry.key_ptr.*);
                 }
+
+                // next() iteration cache keeps TValue keys; keep them alive for strong tables.
+                for (table.iter_keys.items) |key| {
+                    markGrayValue(self, key);
+                }
+            } else {
+                // Weak tables must not keep cached keys alive across GC cycles.
+                table.iter_keys.clearRetainingCapacity();
+                table.iter_index.clearRetainingCapacity();
+                table.iter_cache_mod_count = std.math.maxInt(u64);
             }
         },
         .closure => {

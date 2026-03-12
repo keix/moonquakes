@@ -111,6 +111,8 @@ fn compileWithAllocators(
             output_allocator.dupe(u8, parser_msg) catch ""
         else if (err == error.TooManyUpvalues)
             std.fmt.allocPrint(output_allocator, "too many upvalues (line {d})", .{line}) catch ""
+        else if (err == error.TooManyConstants)
+            std.fmt.allocPrint(output_allocator, "too many constants (line {d})", .{line}) catch ""
         else if (err == error.UnsupportedStatement) blk: {
             const near_tok = formatNearToken(output_allocator, p.current) catch "";
             if (near_tok.len == 0) break :blk output_allocator.dupe(u8, "unexpected symbol") catch "";
