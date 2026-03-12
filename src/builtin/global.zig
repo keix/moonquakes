@@ -446,6 +446,7 @@ pub fn nativeNext(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const prev = if (index_arg.isNil()) null else index_arg;
     const next_pair = table.nextSlot(prev) catch |err| switch (err) {
         error.InvalidKey => return vm.raiseString("invalid key to 'next'"),
+        else => return err,
     };
 
     if (next_pair) |pair| {

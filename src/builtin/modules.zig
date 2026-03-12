@@ -62,6 +62,8 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Step 1: Check package.loaded[modname]
     const mod_key = try vm.gc().allocString(modname);
+    if (!vm.pushTempRoot(TValue.fromString(mod_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     if (loaded_table.?.get(TValue.fromString(mod_key))) |cached| {
         if (cached.toBoolean()) {
             if (nresults > 0) {
@@ -319,6 +321,12 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
         return vm.raiseString("failed to load module");
     };
 
+    // GC safety: closure/upvalue/filename allocations below must be atomic with
+    // respect to collection because these objects are not yet rooted in VM stack.
+    var gc_inhibited = true;
+    vm.gc().inhibitGC();
+    defer if (gc_inhibited) vm.gc().allowGC();
+
     // Create closure
     const closure = try vm.gc().allocClosure(proto);
 
@@ -331,6 +339,8 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
     const func_val = TValue.fromClosure(closure);
 
     const filename_obj = try vm.gc().allocString(filename_copy[0..len]);
+    vm.gc().allowGC();
+    gc_inhibited = false;
 
     // Execute the module - LuaException propagates up
     return call.callValue(vm, func_val, &[_]TValue{

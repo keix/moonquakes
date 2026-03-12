@@ -120,6 +120,10 @@ pub fn allocTable(self: anytype) !*TableObject {
     // Currently disabled due to potential GC interaction issues
     obj.hash_part = TableObject.HashMap.init(self.allocator);
     obj.deleted_keys = TableObject.DeletedKeySet.init(self.allocator);
+    obj.iter_keys = .{};
+    obj.iter_index = TableObject.KeyIndexMap.init(self.allocator);
+    obj.mod_count = 0;
+    obj.iter_cache_mod_count = std.math.maxInt(u64);
     obj.allocator = self.allocator;
     obj.seq_len = 0;
     obj.metatable = null; // No metatable by default

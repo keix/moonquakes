@@ -65,6 +65,7 @@ const ParseError = error{
     ExpectedIn,
     TooManyLoopVariables,
     TooManyUpvalues,
+    TooManyConstants,
     VarargOutsideVarargFunction,
     InvalidAttribute,
     ExpectedLabel,
@@ -516,9 +517,19 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn emitLoadK(self: *ProtoBuilder, reg: u8, const_idx: u32) !void {
-        const instr = Instruction.initABx(.LOADK, reg, @intCast(const_idx));
-        try self.code.append(self.allocator, instr);
-        try self.lineinfo.append(self.allocator, self.current_line);
+        const max_loadk_bx: u32 = std.math.maxInt(u17);
+        const max_loadkx_ax: u32 = std.math.maxInt(u25);
+        if (const_idx <= max_loadk_bx) {
+            const instr = Instruction.initABx(.LOADK, reg, @intCast(const_idx));
+            try self.code.append(self.allocator, instr);
+            try self.lineinfo.append(self.allocator, self.current_line);
+        } else {
+            if (const_idx > max_loadkx_ax) return error.TooManyConstants;
+            const loadkx = Instruction.initABx(.LOADKX, reg, 0);
+            try self.code.append(self.allocator, loadkx);
+            try self.lineinfo.append(self.allocator, self.current_line);
+            try self.emitExtraArg(@intCast(const_idx));
+        }
         self.updateMaxStack(reg + 1);
     }
 
@@ -666,12 +677,19 @@ pub const ProtoBuilder = struct {
             try self.code.append(self.allocator, instr);
             try self.lineinfo.append(self.allocator, self.current_line);
         } else {
-            // For large index, load it into a temp register and use SETTABLE
+            // For large index, load it into a temp register and use SETTABLE.
             const temp = self.allocTemp();
-            const index_i17: i17 = @intCast(index);
-            const loadi = Instruction.initAsBx(.LOADI, temp, index_i17);
-            try self.code.append(self.allocator, loadi);
-            try self.lineinfo.append(self.allocator, self.current_line);
+            if (index <= std.math.maxInt(i17)) {
+                const index_i17: i17 = @intCast(index);
+                const loadi = Instruction.initAsBx(.LOADI, temp, index_i17);
+                try self.code.append(self.allocator, loadi);
+                try self.lineinfo.append(self.allocator, self.current_line);
+            } else {
+                var idx_buf: [32]u8 = undefined;
+                const idx_lexeme = std.fmt.bufPrint(&idx_buf, "{d}", .{index}) catch return error.OutOfMemory;
+                const key_const = try self.addConstNumber(idx_lexeme);
+                try self.emitLoadK(temp, key_const);
+            }
             const settable = Instruction.initABC(.SETTABLE, table, temp, src);
             try self.code.append(self.allocator, settable);
             try self.lineinfo.append(self.allocator, self.current_line);
@@ -860,20 +878,20 @@ pub const ProtoBuilder = struct {
             if (is_hex_float) {
                 // Parse as hex float
                 const value = parseHexFloat(lexeme) catch return error.InvalidNumber;
-                const idx: u16 = @intCast(self.numbers.items.len);
+                const idx: u32 = @intCast(self.numbers.items.len);
                 try self.numbers.append(self.allocator, value);
                 try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
                 return @intCast(self.const_refs.items.len - 1);
             } else {
                 // Parse as hex integer with Lua 5.4 wrap semantics (mod 2^64)
                 if (std.fmt.parseInt(i64, hex_part, 16)) |value| {
-                    const idx: u16 = @intCast(self.integers.items.len);
+                    const idx: u32 = @intCast(self.integers.items.len);
                     try self.integers.append(self.allocator, value);
                     try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
                     return @intCast(self.const_refs.items.len - 1);
                 } else |_| {
                     if (parseHexIntegerWrap(lexeme)) |value| {
-                        const idx: u16 = @intCast(self.integers.items.len);
+                        const idx: u32 = @intCast(self.integers.items.len);
                         try self.integers.append(self.allocator, value);
                         try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
                         return @intCast(self.const_refs.items.len - 1);
@@ -885,14 +903,14 @@ pub const ProtoBuilder = struct {
 
         // Try parsing as decimal integer first, fall back to float on overflow
         if (std.fmt.parseInt(i64, lexeme, 10)) |value| {
-            const idx: u16 = @intCast(self.integers.items.len);
+            const idx: u32 = @intCast(self.integers.items.len);
             try self.integers.append(self.allocator, value);
             try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
         } else |_| {
             // Try parsing as float (handles both floats and overflowed integers)
             const value = std.fmt.parseFloat(f64, lexeme) catch return error.InvalidNumber;
-            const idx: u16 = @intCast(self.numbers.items.len);
+            const idx: u32 = @intCast(self.numbers.items.len);
             try self.numbers.append(self.allocator, value);
             try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
             return @intCast(self.const_refs.items.len - 1);
@@ -1012,7 +1030,7 @@ pub const ProtoBuilder = struct {
         }
 
         // Add new constant
-        const str_idx: u16 = @intCast(self.strings.items.len);
+        const str_idx: u32 = @intCast(self.strings.items.len);
         const duped = try self.allocator.dupe(u8, lexeme);
         try self.strings.append(self.allocator, duped);
         try self.const_refs.append(self.allocator, .{ .kind = .string, .index = str_idx });
@@ -1025,7 +1043,7 @@ pub const ProtoBuilder = struct {
 
     pub fn addNativeFunc(self: *ProtoBuilder, native_id: NativeFnId) !u32 {
         // Store native function ID (no GC allocation)
-        const idx: u16 = @intCast(self.native_ids.items.len);
+        const idx: u32 = @intCast(self.native_ids.items.len);
         try self.native_ids.append(self.allocator, native_id);
         try self.const_refs.append(self.allocator, .{ .kind = .native_fn, .index = idx });
         return @intCast(self.const_refs.items.len - 1);

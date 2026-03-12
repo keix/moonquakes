@@ -187,6 +187,12 @@ pub const TableObject = struct {
         TValueKeyContext,
         std.hash_map.default_max_load_percentage,
     );
+    pub const KeyIndexMap = std.HashMap(
+        TValue,
+        u32,
+        TValueKeyContext,
+        std.hash_map.default_max_load_percentage,
+    );
 
     /// Stores keys explicitly deleted from this table.
     /// This allows `next(t, k)` to continue iteration when `k` was
@@ -201,7 +207,7 @@ pub const TableObject = struct {
         key: TValue,
         value: TValue,
     };
-    pub const NextSlotError = error{InvalidKey};
+    pub const NextSlotError = error{ InvalidKey, OutOfMemory };
 
     /// Weak table mode for __mode metamethod
     pub const WeakMode = enum(u2) {
@@ -214,6 +220,10 @@ pub const TableObject = struct {
     header: GCObject,
     hash_part: HashMap,
     deleted_keys: DeletedKeySet,
+    iter_keys: std.ArrayListUnmanaged(TValue),
+    iter_index: KeyIndexMap,
+    mod_count: u64 = 0,
+    iter_cache_mod_count: u64 = std.math.maxInt(u64),
     allocator: std.mem.Allocator,
     seq_len: i64 = 0,
     /// Metatable for metamethod dispatch (null if no metatable)
@@ -250,6 +260,15 @@ pub const TableObject = struct {
             else => key,
         };
         if (self.hash_part.get(canonical_key)) |v| return v;
+
+        // Be tolerant to hash/key-canonicalization drift: match equal string keys
+        // by content when direct hash lookup misses.
+        if (canonical_key == .object and canonical_key.object.type == .string) {
+            var siter = self.hash_part.iterator();
+            while (siter.next()) |entry| {
+                if (entry.key_ptr.*.eql(canonical_key)) return entry.value_ptr.*;
+            }
+        }
 
         // Lua compatibility: integer and float keys that compare equal
         // should refer to the same entry.
@@ -315,6 +334,31 @@ pub const TableObject = struct {
         return null;
     }
 
+    fn rebuildIterCache(self: *TableObject) !void {
+        self.iter_keys.clearRetainingCapacity();
+        self.iter_index.clearRetainingCapacity();
+
+        var iter = self.hash_part.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            if (value.isNil()) continue;
+            try self.iter_keys.append(self.allocator, key);
+        }
+
+        const SortCtx = struct {
+            fn lessThan(_: void, a: TValue, b: TValue) bool {
+                return keyLessThan(a, b);
+            }
+        };
+        std.mem.sort(TValue, self.iter_keys.items, {}, SortCtx.lessThan);
+
+        for (self.iter_keys.items, 0..) |key, i| {
+            try self.iter_index.put(key, @intCast(i));
+        }
+        self.iter_cache_mod_count = self.mod_count;
+    }
+
     fn keyExactEq(a: TValue, b: TValue) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
@@ -375,14 +419,36 @@ pub const TableObject = struct {
             }
         }
 
-        if (prev == null) return self.selectNext(null);
+        if (self.iter_cache_mod_count != self.mod_count) {
+            try self.rebuildIterCache();
+        }
+
+        if (prev == null) {
+            for (self.iter_keys.items) |key| {
+                if (self.hash_part.get(key)) |value| {
+                    if (!value.isNil()) return .{ .key = key, .value = value };
+                }
+            }
+            return null;
+        }
         const prev_key = prev.?;
+
+        if (self.iter_index.get(prev_key)) |pos| {
+            var i: usize = @as(usize, @intCast(pos)) + 1;
+            while (i < self.iter_keys.items.len) : (i += 1) {
+                const key = self.iter_keys.items[i];
+                if (self.hash_part.get(key)) |value| {
+                    if (!value.isNil()) return .{ .key = key, .value = value };
+                }
+            }
+            return null;
+        }
 
         if (self.hasExactKey(prev_key)) return self.selectNext(prev_key);
 
         if (self.hasExactDeletedKey(prev_key)) {
             _ = self.deleted_keys.remove(prev_key);
-            return self.selectNext(null);
+            return self.selectNext(prev_key);
         }
 
         return error.InvalidKey;
@@ -395,7 +461,7 @@ pub const TableObject = struct {
         // route table mutations through a write barrier helper here.
         if (key.isNil()) return error.InvalidTableKey;
         if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
-        const canonical_key: TValue = switch (key) {
+        var canonical_key: TValue = switch (key) {
             .number => |n| blk: {
                 if (std.math.isFinite(n) and n == @floor(n)) {
                     const max_i = std.math.maxInt(i64);
@@ -421,6 +487,15 @@ pub const TableObject = struct {
             },
             else => key,
         };
+        if (canonical_key == .object and canonical_key.object.type == .string) {
+            var siter = self.hash_part.iterator();
+            while (siter.next()) |entry| {
+                if (entry.key_ptr.*.eql(canonical_key)) {
+                    canonical_key = entry.key_ptr.*;
+                    break;
+                }
+            }
+        }
         const seq_key: ?i64 = switch (canonical_key) {
             .integer => |i| if (i > 0) i else null,
             else => null,
@@ -431,6 +506,7 @@ pub const TableObject = struct {
             if (self.hash_part.contains(canonical_key)) {
                 _ = self.hash_part.remove(canonical_key);
                 try self.deleted_keys.put(canonical_key, {});
+                self.mod_count +%= 1;
                 self.pruneDeletedKeys();
                 if (seq_key) |k| {
                     if (k == self.seq_len) {
@@ -445,6 +521,7 @@ pub const TableObject = struct {
         } else {
             try self.hash_part.put(canonical_key, value);
             _ = self.deleted_keys.remove(canonical_key);
+            self.mod_count +%= 1;
             if (seq_key) |k| {
                 if (k == self.seq_len + 1) {
                     var cursor = self.seq_len + 1;
@@ -460,6 +537,8 @@ pub const TableObject = struct {
 
     /// Clean up internal data structures (called by GC during sweep)
     pub fn deinit(self: *TableObject) void {
+        self.iter_index.deinit();
+        self.iter_keys.deinit(self.allocator);
         self.deleted_keys.deinit();
         self.hash_part.deinit();
     }
