@@ -1,7 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
-const NativeClosureObject = object.NativeClosureObject;
 const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -117,7 +116,12 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 
     if (thread.status == .running) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume running coroutine"));
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
+        return;
+    }
+    if (thread.status == .normal) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
         return;
     }
 
@@ -132,11 +136,6 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
         const is_native_body = body.isObject() and body.object.type == .native_closure;
-        co_vm.entry_is_pcall = false;
-        if (is_native_body and body.isObject()) {
-            const nc = object.getObject(NativeClosureObject, body.object);
-            co_vm.entry_is_pcall = nc.func.id == .pcall;
-        }
         if (!is_lua_body and !is_native_body) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
@@ -223,29 +222,10 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
         .errored => |err_val| {
             // Coroutine errored - mark as dead
             thread.status = .dead;
-            if (co_vm.entry_is_pcall) {
-                // pcall as coroutine entry should return (true, false, err)
-                vm.stack[vm.base + func_reg] = .{ .boolean = true };
-                if (nresults == 0) {
-                    vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
-                    vm.stack[vm.base + func_reg + 2] = err_val;
-                    vm.top = vm.base + func_reg + 3;
-                } else {
-                    if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
-                    if (nresults >= 3) vm.stack[vm.base + func_reg + 2] = err_val;
-                    if (nresults > 3) {
-                        var i: u32 = 3;
-                        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
-                    }
-                    vm.top = vm.base + func_reg + nresults;
-                }
-                co_vm.lua_error_value = .nil;
-            } else {
-                vm.stack[vm.base + func_reg] = .{ .boolean = false };
-                vm.stack[vm.base + func_reg + 1] = err_val;
-                // Update vm.top for MULTRET support (false + error message)
-                vm.top = vm.base + func_reg + 2;
-            }
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = err_val;
+            // Update vm.top for MULTRET support (false + error message)
+            vm.top = vm.base + func_reg + 2;
         },
     }
 }
@@ -346,6 +326,20 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             return .{ .errored = co_vm.lua_error_value };
         }
         const ci = co_vm.ci.?;
+        if (ci.pending_compare_active) {
+            var is_true = co_vm.stack[ci.pending_compare_result_slot].toBoolean();
+            if (ci.pending_compare_invert) is_true = !is_true;
+            if ((is_true and ci.pending_compare_negate == 0) or (!is_true and ci.pending_compare_negate != 0)) {
+                ci.skip();
+            }
+            ci.pending_compare_active = false;
+        }
+        if (ci.pending_concat_active) {
+            if (mnemonics.continueConcatFold(co_vm, ci) catch |cerr| switch (cerr) {
+                error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+                else => return .{ .errored = co_vm.lua_error_value },
+            }) continue;
+        }
         const inst = ci.fetch() catch {
             // End of function - check if this is the base frame
             if (ci.previous == null) {
@@ -390,6 +384,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
 
             // Handle yield - coroutine suspended
             if (err == error.Yield) {
+                mnemonics.dispatchReturnHookOnYield(co_vm) catch {};
                 return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } };
             }
 
@@ -574,7 +569,22 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     }
 
     if (thread.status == .running) {
-        return vm.raiseString("cannot resume running coroutine");
+        if (thread == vm.thread and vm.close_metamethod_depth > 0) {
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
+            vm.top = vm.base + func_reg + 2;
+            return;
+        }
+        return vm.raiseString("cannot resume non-suspended coroutine");
+    }
+    if (thread.status == .normal) {
+        if (thread == vm.thread and vm.close_metamethod_depth > 0) {
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
+            vm.top = vm.base + func_reg + 2;
+            return;
+        }
+        return vm.raiseString("cannot resume non-suspended coroutine");
     }
 
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
@@ -588,11 +598,6 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
         const is_native_body = body.isObject() and body.object.type == .native_closure;
-        co_vm.entry_is_pcall = false;
-        if (is_native_body and body.isObject()) {
-            const nc = object.getObject(NativeClosureObject, body.object);
-            co_vm.entry_is_pcall = nc.func.id == .pcall;
-        }
         if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
@@ -663,26 +668,9 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         },
         .errored => |err_val| {
             thread.status = .dead;
-            if (co_vm.entry_is_pcall) {
-                if (nresults == 0) {
-                    vm.stack[vm.base + func_reg] = .{ .boolean = false };
-                    vm.stack[vm.base + func_reg + 1] = err_val;
-                    vm.top = vm.base + func_reg + 2;
-                } else {
-                    if (nresults >= 1) vm.stack[vm.base + func_reg] = .{ .boolean = false };
-                    if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = err_val;
-                    if (nresults > 2) {
-                        var i: u32 = 2;
-                        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
-                    }
-                    vm.top = vm.base + func_reg + nresults;
-                }
-                co_vm.lua_error_value = .nil;
-            } else {
-                // Propagate the error (unlike resume which returns false)
-                vm.lua_error_value = err_val;
-                return error.LuaException;
-            }
+            // Propagate the error (unlike resume which returns false)
+            vm.lua_error_value = err_val;
+            return error.LuaException;
         },
     }
 }

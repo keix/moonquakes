@@ -53,6 +53,7 @@ pub const CallInfo = struct {
 
     // Protected call support (for pcall)
     is_protected: bool = false, // true if this is a pcall frame
+    error_handler: TValue = .nil, // xpcall message handler (nil for pcall)
 
     // To-be-closed variable support (Lua 5.4)
     // Bitmap tracking which registers are marked as TBC (up to 64 registers)
@@ -62,6 +63,18 @@ pub const CallInfo = struct {
     pending_return_a: ?u8 = null,
     pending_return_count: ?u32 = null,
     pending_return_reexec: bool = false,
+
+    // Comparison metamethod continuation state (for yielded __le fallback).
+    pending_compare_active: bool = false,
+    pending_compare_negate: u8 = 0,
+    pending_compare_invert: bool = false,
+    pending_compare_result_slot: u32 = 0,
+
+    // CONCAT continuation state when __concat yields.
+    pending_concat_active: bool = false,
+    pending_concat_a: u8 = 0,
+    pending_concat_b: u8 = 0,
+    pending_concat_i: i16 = -1,
 
     /// Mark a register as to-be-closed
     pub fn markTBC(self: *CallInfo, reg: u8) void {

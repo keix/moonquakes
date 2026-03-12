@@ -89,6 +89,7 @@ pub const VM = struct {
     hook_mask: u8 = 0, // 1=call, 2=return, 4=line
     hook_count: u32 = 0,
     hook_name_override: ?[]const u8 = null,
+    hook_last_line: i64 = -1,
     close_metamethod_depth: u8 = 0,
     pending_error_unwind: bool = false,
     pending_error_unwind_ci: ?*CallInfo = null,
@@ -96,7 +97,6 @@ pub const VM = struct {
     traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
     traceback_snapshot_count: u16 = 0,
     native_call_depth: u16 = 0,
-    entry_is_pcall: bool = false,
 
     // Lifecycle
     pub const init = lifecycle.init;
