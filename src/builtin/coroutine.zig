@@ -359,6 +359,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
         };
 
         const exec_result = mnemonics.do(co_vm, inst) catch |err| {
+            if (err == error.HandledException) continue;
             // Handle LuaException
             if (err == error.LuaException) {
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
@@ -386,6 +387,16 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             if (err == error.Yield) {
                 mnemonics.dispatchReturnHookOnYield(co_vm) catch {};
                 return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } };
+            }
+
+            if (err == error.CallStackOverflow) {
+                const msg = if (co_vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                const msg_obj = co_vm.gc().allocString(msg) catch return .{ .errored = .nil };
+                co_vm.lua_error_value = TValue.fromString(msg_obj);
+                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
+                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+                }) continue;
+                return .{ .errored = co_vm.lua_error_value };
             }
 
             // Other errors - create error message

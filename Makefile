@@ -23,6 +23,7 @@ STATIC  = $(ZIG_LIBDIR)/libmoonquakes.a
 SHARED  = $(ZIG_LIBDIR)/libmoonquakes.so
 
 TARGET  = $(BINDIR)/minimal
+PASSING_TESTS = $(sort $(wildcard passing/*.lua))
 
 all: $(TARGET)
 
@@ -51,4 +52,16 @@ run: $(TARGET)
 	LD_LIBRARY_PATH=$(ZIG_LIBDIR) ./$(TARGET)
 
 test: zig-libs
-	cd passing && for f in *.lua; do ../zig-out/bin/moonquakes "$$f"; done
+	@rc=0; \
+	cd passing && for f in *.lua; do \
+		echo "===========================> $$f"; \
+		if ../zig-out/bin/moonquakes "$$f"; then \
+			st=0; \
+		else \
+			st=$$?; \
+			rc=1; \
+		fi; \
+		echo "[$$st] passing/$$f"; \
+		echo; echo; \
+	done; \
+	exit $$rc
