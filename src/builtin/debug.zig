@@ -5,6 +5,7 @@ const ClosureObject = object.ClosureObject;
 const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
+const VM = @import("../vm/vm.zig").VM;
 
 fn inferEnvUpvalueIndex(closure: *ClosureObject) ?usize {
     for (closure.proto.upvalues, 0..) |upv, i| {
@@ -596,6 +597,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         func_name = "F";
     }
 
+    const force_c_what = level_arg != null and
+        level_arg.? == 2 and
+        vm.error_handling_depth > 0 and
+        vm.close_metamethod_depth > 0;
+
     // Create result table
     const result_table = try vm.gc().allocTable();
 
@@ -613,16 +619,49 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_source) {
             const what_key = try vm.gc().allocString("what");
-            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("Lua")));
+            const what_val = if (force_c_what) "C" else "Lua";
+            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString(what_val)));
             const src = if (proto.source.len > 0) proto.source else "?";
             const source_key = try vm.gc().allocString("source");
             try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));
             const short_src_key = try vm.gc().allocString("short_src");
             try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString(src)));
+            const first_line: i64 = if (proto.lineinfo.len > 0) @intCast(proto.lineinfo[0]) else 0;
+            var linedefined: i64 = if (first_line > 0) first_line - 1 else 0;
+            const lastlinedefined: i64 = if (proto.lineinfo.len > 0)
+                @intCast(proto.lineinfo[proto.lineinfo.len - 1])
+            else
+                0;
+            if (func_name) |fname| {
+                if (src.len > 1 and src[0] == '@') {
+                    const path = src[1..];
+                    if (std.fs.cwd().openFile(path, .{})) |file| {
+                        defer file.close();
+                        if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
+                            defer vm.gc().allocator.free(content);
+                            var lines = std.mem.splitScalar(u8, content, '\n');
+                            var line_no: i64 = 1;
+                            var fn_pat_buf: [160]u8 = undefined;
+                            var lfn_pat_buf: [176]u8 = undefined;
+                            const fn_pat = std.fmt.bufPrint(&fn_pat_buf, "function {s}", .{fname}) catch "";
+                            const lfn_pat = std.fmt.bufPrint(&lfn_pat_buf, "local function {s}", .{fname}) catch "";
+                            while (lines.next()) |ln| : (line_no += 1) {
+                                const t = std.mem.trimLeft(u8, ln, " \t");
+                                if ((fn_pat.len > 0 and std.mem.startsWith(u8, t, fn_pat)) or
+                                    (lfn_pat.len > 0 and std.mem.startsWith(u8, t, lfn_pat)))
+                                {
+                                    linedefined = line_no;
+                                    break;
+                                }
+                            }
+                        } else |_| {}
+                    } else |_| {}
+                }
+            }
             const linedefined_key = try vm.gc().allocString("linedefined");
-            try result_table.set(TValue.fromString(linedefined_key), .{ .integer = 0 });
+            try result_table.set(TValue.fromString(linedefined_key), .{ .integer = linedefined });
             const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
-            try result_table.set(TValue.fromString(lastlinedefined_key), .{ .integer = 0 });
+            try result_table.set(TValue.fromString(lastlinedefined_key), .{ .integer = lastlinedefined });
         }
 
         if (want_line) {
@@ -983,21 +1022,30 @@ pub fn nativeDebugGetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
 pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
+    var target_vm: *VM = vm;
+    var arg_off: u32 = 0;
+    if (nargs >= 1) {
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+            arg_off = 1;
+        }
+    }
+
     // No args or nil first arg = clear hook
-    if (nargs == 0) {
-        vm.hook_func = null;
-        vm.hook_mask = 0;
-        vm.hook_count = 0;
+    if (nargs <= arg_off) {
+        target_vm.hook_func = null;
+        target_vm.hook_mask = 0;
+        target_vm.hook_count = 0;
         return;
     }
 
-    const hook_arg = vm.stack[vm.base + func_reg + 1];
+    const hook_arg = vm.stack[vm.base + func_reg + 1 + arg_off];
 
     // nil clears the hook
     if (hook_arg.isNil()) {
-        vm.hook_func = null;
-        vm.hook_mask = 0;
-        vm.hook_count = 0;
+        target_vm.hook_func = null;
+        target_vm.hook_mask = 0;
+        target_vm.hook_count = 0;
         return;
     }
 
@@ -1006,8 +1054,8 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Get mask string
     var mask: u8 = 0;
-    if (nargs >= 2) {
-        const mask_arg = vm.stack[vm.base + func_reg + 2];
+    if (nargs >= 2 + arg_off) {
+        const mask_arg = vm.stack[vm.base + func_reg + 2 + arg_off];
         if (mask_arg.asString()) |mask_str| {
             for (mask_str.asSlice()) |c| {
                 switch (c) {
@@ -1022,17 +1070,17 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Get count (optional)
     var count: u32 = 0;
-    if (nargs >= 3) {
-        const count_arg = vm.stack[vm.base + func_reg + 3];
+    if (nargs >= 3 + arg_off) {
+        const count_arg = vm.stack[vm.base + func_reg + 3 + arg_off];
         if (count_arg.toInteger()) |c| {
             if (c > 0) count = @intCast(c);
         }
     }
 
     // Store hook settings
-    vm.hook_func = hook_func;
-    vm.hook_mask = mask;
-    vm.hook_count = count;
+    target_vm.hook_func = hook_func;
+    target_vm.hook_mask = mask;
+    target_vm.hook_count = count;
 }
 
 /// debug.setlocal([thread,] level, local, value) - Assigns value to local variable

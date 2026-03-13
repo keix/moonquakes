@@ -278,7 +278,7 @@ fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
 pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        if (nresults > 1) {
+        if (nresults == 0 or nresults > 1) {
             const err_str = try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
@@ -324,7 +324,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             }
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
-            if (nresults > 1) {
+            if (nresults == 0 or nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
                 var i: u32 = 2;
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
@@ -343,7 +343,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
         vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        if (nresults > 1) {
+        if (nresults == 0 or nresults > 1) {
             const err_str = try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
@@ -401,7 +401,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                     // Lua-compatible behavior: if message handler fails,
                     // xpcall returns "error in error handling".
                     vm.stack[vm.base + func_reg] = .{ .boolean = false };
-                    if (nresults > 1) {
+                    if (nresults == 0 or nresults > 1) {
                         const err_str = try vm.gc().allocString("error in error handling");
                         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                     }
@@ -413,7 +413,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
             // Return (false, handler_result)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
-            if (nresults > 1) {
+            if (nresults == 0 or nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = handler_result;
                 var i: u32 = 2;
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;

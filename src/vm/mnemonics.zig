@@ -41,6 +41,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
         .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
+        .coroutine_yield => 0, // C=0 sentinel: resume values propagate as MULTRET.
         .require => 2, // require returns module value and loader data.
         .next => 2, // next returns key, value
         .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
@@ -67,6 +68,57 @@ fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32
         .io_lines_iterator => @min(native_multret_cap, stack_room),
         else => 1,
     };
+}
+
+// Bootstrap frame used by protected calls (pcall/xpcall):
+// CALL R0, ... ; RETURN R0, ...
+var protected_call_bootstrap_code = [_]Instruction{
+    Instruction.initABC(.CALL, 0, 0, 0),
+    Instruction.initABC(.RETURN, 0, 0, 0),
+};
+var protected_call_bootstrap_lineinfo = [_]u32{ 1, 1 };
+var protected_call_bootstrap_proto = object.ProtoObject{
+    .header = object.GCObject.init(.proto, null),
+    .k = &.{},
+    .code = protected_call_bootstrap_code[0..],
+    .protos = &.{},
+    .numparams = 0,
+    .is_vararg = true,
+    .maxstacksize = 2,
+    .nups = 0,
+    .upvalues = &.{},
+    .allocator = std.heap.page_allocator,
+    .source = "[protected call bootstrap]",
+    .lineinfo = protected_call_bootstrap_lineinfo[0..],
+};
+
+fn dispatchProtectedCall(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_results: u32, handler: ?TValue, ret_base: u32) !ExecuteResult {
+    if (total_args == 0) {
+        vm.stack[vm.base + a] = .{ .boolean = false };
+        vm.stack[vm.base + a + 1] = TValue.fromString(try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)"));
+        vm.top = if (total_results == 0) vm.base + a + 2 else vm.base + ci.func.maxstacksize;
+        return .Continue;
+    }
+
+    const call_base = vm.base + a + 1;
+    const user_nresults: u32 = if (total_results > 0) total_results - 1 else 0;
+    const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
+
+    const new_ci = try pushCallInfoVararg(
+        vm,
+        &protected_call_bootstrap_proto,
+        null,
+        call_base,
+        ret_base,
+        pcall_nresults,
+        0,
+        0,
+    );
+    new_ci.is_protected = true;
+    if (handler) |h| new_ci.error_handler = h;
+
+    vm.top = call_base + total_args;
+    return .LoopContinue;
 }
 
 fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
@@ -1402,18 +1454,15 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 
     // Save current call depth
     const saved_depth = vm.callstack_size;
+    const saved_ci = vm.ci;
     const saved_base = vm.base;
     const saved_top = vm.top;
     const cleanupToSavedDepth = struct {
-        fn run(vm2: *VM, depth: u8, base: u32, top: u32) void {
+        fn run(vm2: *VM, depth: u8, ci_saved: ?*CallInfo, base: u32, top: u32) void {
             while (vm2.callstack_size > depth) {
                 popCallInfo(vm2);
             }
-            if (vm2.callstack_size == 0) {
-                vm2.ci = null;
-            } else {
-                vm2.ci = &vm2.callstack[vm2.callstack_size - 1];
-            }
+            vm2.ci = ci_saved;
             vm2.base = base;
             vm2.top = top;
         }
@@ -1433,15 +1482,79 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
             continue;
         };
         const step = do(vm, inst) catch |err| {
+            if (err == error.HandledException) {
+                continue;
+            }
             if (err == error.LuaException) {
+                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                    if (vm.callstack_size > saved_depth) {
+                        continue;
+                    }
+                    cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
+                    return error.LuaException;
+                }
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
                     closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
                     vm.closeUpvalues(unwind_ci.base);
                     popCallInfo(vm);
                 }
+                vm.ci = saved_ci;
                 vm.base = saved_base;
                 vm.top = saved_top;
+                return error.LuaException;
+            }
+            if (err == error.CallStackOverflow or
+                err == error.ArithmeticError or
+                err == error.DivideByZero or
+                err == error.ModuloByZero or
+                err == error.IntegerRepresentation or
+                err == error.OrderComparisonError or
+                err == error.LengthError or
+                err == error.NotATable or
+                err == error.NotAFunction or
+                err == error.InvalidTableKey or
+                err == error.InvalidTableOperation or
+                err == error.InvalidForLoopInit or
+                err == error.InvalidForLoopLimit or
+                err == error.InvalidForLoopStep or
+                err == error.NoCloseMetamethod or
+                err == error.FormatError)
+            {
+                var msg_buf: [128]u8 = undefined;
+                const msg = switch (err) {
+                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.ArithmeticError => formatArithmeticError(vm, inst, &msg_buf),
+                    error.DivideByZero => "divide by zero",
+                    error.ModuloByZero => "attempt to perform 'n%0'",
+                    error.IntegerRepresentation => formatIntegerRepresentationError(vm, inst, &msg_buf),
+                    error.NotATable => formatIndexOnNonTableError(vm, inst, &msg_buf),
+                    error.NotAFunction => "attempt to call a non-function value",
+                    error.OrderComparisonError => "attempt to compare values",
+                    error.LengthError => "attempt to get length of a value",
+                    error.InvalidTableKey => "table index is nil or NaN",
+                    error.InvalidTableOperation => formatIndexOnNonTableError(vm, inst, &msg_buf),
+                    error.InvalidForLoopInit => formatForLoopError(vm, inst, err, &msg_buf),
+                    error.InvalidForLoopLimit => formatForLoopError(vm, inst, err, &msg_buf),
+                    error.InvalidForLoopStep => formatForLoopError(vm, inst, err, &msg_buf),
+                    error.NoCloseMetamethod => formatNoCloseMetamethodError(vm, inst, &msg_buf),
+                    error.FormatError => "bad argument to string format",
+                    else => "runtime error",
+                };
+                var full_msg_buf: [320]u8 = undefined;
+                const full_msg = runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
+                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                    cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
+                    return err;
+                });
+                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                    if (vm.callstack_size > saved_depth) {
+                        continue;
+                    }
+                    cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
+                    return error.LuaException;
+                }
+                cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                 return error.LuaException;
             }
             if (err == error.NoCloseMetamethod) {
@@ -1453,14 +1566,14 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
                 var msg_buf: [128]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
                 vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
-                cleanupToSavedDepth(vm, saved_depth, saved_base, saved_top);
+                cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                 return error.LuaException;
             }
             if (err == error.Yield) {
                 // Preserve stack/frame state for coroutine resume.
                 return error.Yield;
             }
-            cleanupToSavedDepth(vm, saved_depth, saved_base, saved_top);
+            cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
             return err;
         };
         switch (step) {
@@ -1483,9 +1596,54 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     };
 }
 
+fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
+    if ((vm.hook_mask & 0x01) == 0) return;
+    const hook = vm.hook_func orelse return;
+
+    const event_name = try vm.gc().allocString("call");
+    const saved_name_override = vm.hook_name_override;
+    const saved_mask = vm.hook_mask;
+    const saved_top = vm.top;
+    vm.hook_last_line = -1;
+    vm.hook_name_override = name_override;
+    vm.hook_mask = 0;
+    defer {
+        vm.hook_name_override = saved_name_override;
+        vm.hook_mask = saved_mask;
+        vm.top = saved_top;
+    }
+
+    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
+fn dispatchLineHook(vm: *VM, line: i64) !void {
+    if ((vm.hook_mask & 0x04) == 0) return;
+    const hook = vm.hook_func orelse return;
+    if (line < 0) return;
+
+    const event_name = try vm.gc().allocString("line");
+    const saved_mask = vm.hook_mask;
+    const saved_top = vm.top;
+    vm.hook_mask = 0;
+    defer {
+        vm.hook_mask = saved_mask;
+        vm.top = saved_top;
+    }
+
+    _ = try executeSyncMM(vm, hook, &[_]TValue{
+        TValue.fromString(event_name),
+        .{ .integer = line },
+    });
+}
+
 fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     if ((vm.hook_mask & 0x02) == 0) return;
     const hook = vm.hook_func orelse return;
+    if (name_override == null) {
+        if (vm.ci) |ci| {
+            if (ci.closure == null) return;
+        }
+    }
 
     const event_name = try vm.gc().allocString("return");
     const effective_name: ?[]const u8 = if (name_override) |n|
@@ -1497,6 +1655,7 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     const saved_name_override = vm.hook_name_override;
     const saved_mask = vm.hook_mask;
     const saved_top = vm.top;
+    vm.hook_last_line = -1;
     vm.hook_name_override = effective_name;
     vm.hook_mask = 0;
     defer {
@@ -1506,6 +1665,10 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     }
 
     _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
+pub fn dispatchReturnHookOnYield(vm: *VM) !void {
+    try dispatchReturnHook(vm, null);
 }
 
 /// Close to-be-closed variables from the current frame
@@ -1572,6 +1735,17 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                         reg = ci.getHighestTBC(from_reg);
                         continue;
                     },
+                    error.CallStackOverflow => {
+                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
+                        annotateCloseError(vm, close_tag);
+                        current_err = vm.lua_error_value;
+                        had_error = true;
+                        vm.top = saved_top;
+                        if (r == 0) break;
+                        reg = ci.getHighestTBC(from_reg);
+                        continue;
+                    },
                     else => return err,
                 };
             } else if (mm.isObject() and mm.object.type == .native_closure) {
@@ -1588,6 +1762,17 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                 }
                 vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
                     error.LuaException => {
+                        annotateCloseError(vm, close_tag);
+                        current_err = vm.lua_error_value;
+                        had_error = true;
+                        vm.top = saved_top;
+                        if (r == 0) break;
+                        reg = ci.getHighestTBC(from_reg);
+                        continue;
+                    },
+                    error.CallStackOverflow => {
+                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
                         annotateCloseError(vm, close_tag);
                         current_err = vm.lua_error_value;
                         had_error = true;
@@ -1650,6 +1835,8 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
     while (current) |ci| {
         if (ci.is_protected) {
             const ret_base = ci.ret_base;
+            const protected_nresults = ci.nresults;
+            const protected_error_handler = ci.error_handler;
             const target_ci = ci.previous;
             captureTracebackSnapshot(vm, target_ci);
             while (vm.ci != null and vm.ci != target_ci) {
@@ -1666,11 +1853,66 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 popCallInfo(vm);
             }
 
+            var handled_error = vm.lua_error_value;
+            const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil();
+            // Defensive: avoid clobbering a previously captured non-nil error in the
+            // same protected return slot when a reentrant handler path reports nil.
+            if (handled_error.isNil() and vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil()) {
+                handled_error = vm.stack[ret_base + 1];
+            }
+            if (already_handled) {
+                handled_error = vm.stack[ret_base + 1];
+            } else if (!protected_error_handler.isNil()) {
+                vm.error_handling_depth +|= 1;
+                defer {
+                    if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+                }
+                if (protected_error_handler.asClosure()) |handler_closure| {
+                    handled_error = executeSyncMM(vm, handler_closure, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
+                        error.Yield => return error.Yield,
+                        error.LuaException => blk: {
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            break :blk TValue.fromString(s);
+                        },
+                        else => blk: {
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            break :blk TValue.fromString(s);
+                        },
+                    };
+                } else if (protected_error_handler.asNativeClosure()) |nc| {
+                    const temp = vm.top;
+                    vm.stack[temp] = protected_error_handler;
+                    vm.stack[temp + 1] = handled_error;
+                    vm.top = temp + 2;
+                    var handler_ok = true;
+                    vm.callNative(nc.func.id, @intCast(temp - vm.base), 1, 1) catch |handler_err| switch (handler_err) {
+                        error.Yield => return error.Yield,
+                        error.LuaException => {
+                            handler_ok = false;
+                            const s = vm.gc().allocString("error in error handling") catch null;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                        },
+                        else => {
+                            handler_ok = false;
+                            const s = vm.gc().allocString("error in error handling") catch null;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                        },
+                    };
+                    if (handler_ok) {
+                        handled_error = vm.stack[temp];
+                    }
+                    vm.top = temp;
+                } else {
+                    const s = vm.gc().allocString("error in error handling") catch null;
+                    handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                }
+            }
+
             // Place (false, error_value) in return slots
             vm.stack[ret_base] = .{ .boolean = false };
-            vm.stack[ret_base + 1] = vm.lua_error_value;
-            if (ci.nresults >= 0) {
-                const expected: u32 = @intCast(ci.nresults);
+            vm.stack[ret_base + 1] = handled_error;
+            if (protected_nresults >= 0) {
+                const expected: u32 = @intCast(protected_nresults);
                 if (expected > 1) {
                     var i: u32 = 1;
                     while (i < expected) : (i += 1) {
@@ -1679,10 +1921,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 }
             }
             vm.lua_error_value = .nil; // Clear after use
-            vm.top = if (ci.nresults < 0) ret_base + 2 else vm.base + vm.ci.?.func.maxstacksize;
+            const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
+            vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
             vm.pending_error_unwind = false;
             vm.pending_error_unwind_ci = null;
-
             return true;
         }
         current = ci.previous;
@@ -1787,13 +2029,25 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             if (try handleLuaException(vm)) continue;
             return error.LuaException;
         }
-        const ci = vm.ci.?;
+        const ci = vm.ci orelse return error.LuaException;
+        if (ci.pending_compare_active) {
+            var is_true = vm.stack[ci.pending_compare_result_slot].toBoolean();
+            if (ci.pending_compare_invert) is_true = !is_true;
+            if ((is_true and ci.pending_compare_negate == 0) or (!is_true and ci.pending_compare_negate != 0)) {
+                ci.skip();
+            }
+            ci.pending_compare_active = false;
+        }
+        if (ci.pending_concat_active) {
+            if (try continueConcatFold(vm, ci)) continue;
+        }
         const inst = ci.fetch() catch |err| {
             if (err == error.LuaException and try handleLuaException(vm)) continue;
             return err;
         };
 
         const result = do(vm, inst) catch |err| {
+            if (err == error.HandledException) continue;
             if (err == error.LuaException and try handleLuaException(vm)) continue;
             // Convert VM errors to LuaException for pcall catchability
             if (err == error.CallStackOverflow or
@@ -2154,6 +2408,26 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     vm.exec_tick +%= 1;
     const ci = vm.ci.?;
+    if ((vm.hook_mask & 0x04) != 0 and ci.closure != null) {
+        if (currentInstructionIndex(ci)) |idx| {
+            if (idx < ci.func.lineinfo.len) {
+                var line_u32 = ci.func.lineinfo[idx];
+                if (idx > 0) {
+                    const op = ci.func.code[idx].getOpCode();
+                    if ((op == .CALL or op == .RETURN or op == .RETURN0 or op == .RETURN1) and
+                        line_u32 > ci.func.lineinfo[idx - 1])
+                    {
+                        line_u32 = ci.func.lineinfo[idx - 1];
+                    }
+                }
+                const line: i64 = @intCast(line_u32);
+                if (line != vm.hook_last_line) {
+                    vm.hook_last_line = line;
+                    try dispatchLineHook(vm, line);
+                }
+            }
+        }
+    }
 
     switch (inst.getOpCode()) {
         .MOVE => {
@@ -2810,9 +3084,36 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Slow path: fold concatenation pairwise with metamethod fallback.
             var acc = vm.stack[vm.base + c];
-            var i: i32 = @as(i32, c) - 1;
-            while (i >= @as(i32, b)) : (i -= 1) {
-                acc = try concatTwoSync(vm, vm.stack[vm.base + @as(u32, @intCast(i))], acc);
+            vm.stack[vm.base + a] = acc;
+            var i: i16 = @as(i16, @intCast(c)) - 1;
+            while (i >= @as(i16, @intCast(b))) : (i -= 1) {
+                const left = vm.stack[vm.base + @as(u32, @intCast(i))];
+                if (canConcatPrimitive(left) and canConcatPrimitive(acc)) {
+                    acc = try concatTwoSync(vm, left, acc);
+                    vm.stack[vm.base + a] = acc;
+                    continue;
+                }
+                const mm_res = try dispatchConcatMM(vm, left, acc, a) orelse {
+                    const bad = if (!canConcatPrimitive(left)) left else acc;
+                    const ty = callableValueTypeName(bad);
+                    var msg_buf: [96]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
+                    return vm.raiseString(msg);
+                };
+                switch (mm_res) {
+                    .Continue => {
+                        acc = vm.stack[vm.base + a];
+                        continue;
+                    },
+                    .LoopContinue => {
+                        ci.pending_concat_active = true;
+                        ci.pending_concat_a = a;
+                        ci.pending_concat_b = b;
+                        ci.pending_concat_i = i - 1;
+                        return .LoopContinue;
+                    },
+                    .ReturnVM => unreachable,
+                }
             }
             vm.stack[vm.base + a] = acc;
             return .Continue;
@@ -2854,10 +3155,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 break :blk std.mem.order(u8, left_str, right_str) == .lt;
             }
                 // Slow path: try metamethod
-                else blk: {
-                    if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
+                else switch (try dispatchLtMMForOpcode(vm, ci, left, right, negate)) {
+                    .value => |mm_res| mm_res,
+                    .deferred => return .LoopContinue,
+                    .missing => {
+                        _ = try raiseOrderComparison(vm, left, right);
+                        unreachable;
+                    },
                 };
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
@@ -2884,10 +3188,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 break :blk order == .lt or order == .eq;
             }
                 // Slow path: try metamethod
-                else blk: {
-                    if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
+                else switch (try dispatchLeMMForOpcode(vm, ci, left, right, negate)) {
+                    .value => |mm_res| mm_res,
+                    .deferred => return .LoopContinue,
+                    .missing => {
+                        _ = try raiseOrderComparison(vm, left, right);
+                        unreachable;
+                    },
                 };
 
             if ((is_true and negate == 0) or (!is_true and negate != 0)) {
@@ -3156,6 +3463,35 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const obj = func_val.object;
                 if (obj.type == .native_closure) {
                     const nc = object.getObject(NativeClosureObject, obj);
+                    if (nc.func.id == .pcall or nc.func.id == .xpcall) {
+                        const total_args: u32 = if (b > 0) b - 1 else blk: {
+                            const arg_start = vm.base + a + 1;
+                            break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
+                        };
+                        const total_results: u32 = if (c > 0) c - 1 else 0;
+                        if (nc.func.id == .pcall) {
+                            return try dispatchProtectedCall(vm, ci, a, total_args, total_results, null, vm.base + a);
+                        }
+
+                        // xpcall(func, msgh, ...) => protected call of func(...), with handler
+                        if (total_args < 2) {
+                            vm.stack[vm.base + a] = .{ .boolean = false };
+                            vm.stack[vm.base + a + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
+                            const frame_max = vm.base + ci.func.maxstacksize;
+                            vm.top = if (c == 0) vm.base + a + 2 else frame_max;
+                            return .Continue;
+                        }
+                        const handler = vm.stack[vm.base + a + 2];
+                        const inner_total_args = total_args - 1; // drop handler
+                        if (inner_total_args > 1) {
+                            var i: u32 = 0;
+                            const shift_count = inner_total_args - 1;
+                            while (i < shift_count) : (i += 1) {
+                                vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
+                            }
+                        }
+                        return try dispatchProtectedCall(vm, ci, a, inner_total_args, total_results, handler, vm.base + a);
+                    }
                     const nargs: u32 = if (b > 0) b - 1 else blk: {
                         const arg_start = vm.base + a + 1;
                         break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
@@ -3163,9 +3499,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Remember frame extent before call
                     const frame_max = vm.base + ci.func.maxstacksize;
                     const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
-                    const nresults = nativeDesiredResultsForCall(nc.func.id, c, stack_room);
+                    const nresults: u32 = if (c == 0 and ci.is_protected and ci.func == &protected_call_bootstrap_proto)
+                        (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
+                    else
+                        nativeDesiredResultsForCall(nc.func.id, c, stack_room);
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
+                    try dispatchCallHook(vm, null);
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
                     // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
@@ -3221,6 +3561,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
+                    try dispatchCallHook(vm, null);
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
                 }
@@ -3269,6 +3610,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
+                try dispatchCallHook(vm, null);
 
                 // Extend top to include vararg storage if needed
                 const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -3435,10 +3777,20 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 current_ci.nresults = nresults;
                 current_ci.vararg_base = vararg_base;
                 current_ci.vararg_count = vararg_count;
+                current_ci.is_protected = false;
+                current_ci.error_handler = .nil;
                 current_ci.tbc_bitmap = 0; // Reset TBC tracking
                 current_ci.pending_return_a = null;
                 current_ci.pending_return_count = null;
                 current_ci.pending_return_reexec = false;
+                current_ci.pending_compare_active = false;
+                current_ci.pending_compare_negate = 0;
+                current_ci.pending_compare_invert = false;
+                current_ci.pending_compare_result_slot = 0;
+                current_ci.pending_concat_active = false;
+                current_ci.pending_concat_a = 0;
+                current_ci.pending_concat_b = 0;
+                current_ci.pending_concat_i = -1;
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -3455,6 +3807,60 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For native tail calls, we call normally but adjust return handling
                     const ret_base = current_ci.ret_base;
                     const nresults = current_ci.nresults;
+                    if (nc.func.id == .pcall or nc.func.id == .xpcall) {
+                        const total_args_call: u32 = nargs + 1;
+                        const total_results: u32 = if (nresults < 0) 0 else @intCast(nresults);
+                        var handler: ?TValue = null;
+                        var effective_total_args = total_args_call;
+                        if (nc.func.id == .xpcall) {
+                            if (total_args_call < 2) {
+                                vm.stack[ret_base] = .{ .boolean = false };
+                                vm.stack[ret_base + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
+                                popCallInfo(vm);
+                                vm.top = ret_base + 2;
+                                return .LoopContinue;
+                            }
+                            handler = vm.stack[vm.base + a + 2];
+                            effective_total_args = total_args_call - 1;
+                            if (effective_total_args > 1) {
+                                var i: u32 = 0;
+                                const shift_count = effective_total_args - 1;
+                                while (i < shift_count) : (i += 1) {
+                                    vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
+                                }
+                            }
+                        }
+                        const pcall_nresults: i16 = if (total_results > 0)
+                            @intCast(total_results - 1)
+                        else
+                            -1;
+                        const new_base = vm.base + a + 1;
+                        current_ci.func = &protected_call_bootstrap_proto;
+                        current_ci.closure = null;
+                        current_ci.pc = protected_call_bootstrap_proto.code.ptr;
+                        current_ci.base = new_base;
+                        current_ci.ret_base = ret_base;
+                        current_ci.nresults = pcall_nresults;
+                        current_ci.vararg_base = 0;
+                        current_ci.vararg_count = 0;
+                        current_ci.is_protected = true;
+                        current_ci.error_handler = handler orelse .nil;
+                        current_ci.tbc_bitmap = 0;
+                        current_ci.pending_return_a = null;
+                        current_ci.pending_return_count = null;
+                        current_ci.pending_return_reexec = false;
+                        current_ci.pending_compare_active = false;
+                        current_ci.pending_compare_negate = 0;
+                        current_ci.pending_compare_invert = false;
+                        current_ci.pending_compare_result_slot = 0;
+                        current_ci.pending_concat_active = false;
+                        current_ci.pending_concat_a = 0;
+                        current_ci.pending_concat_b = 0;
+                        current_ci.pending_concat_i = -1;
+                        vm.base = new_base;
+                        vm.top = new_base + effective_total_args;
+                        return .LoopContinue;
+                    }
 
                     vm.top = vm.base + a + 1 + nargs;
 
@@ -4113,10 +4519,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
                 try ltOp(left, right)
-            else blk: {
-                if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
-                _ = try raiseOrderComparison(vm, left, right);
-                unreachable;
+            else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
+                .value => |mm_res| mm_res,
+                .deferred => return .LoopContinue,
+                .missing => {
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                },
             };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
@@ -4136,10 +4545,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: left is a number
             const is_true = if (left.isInteger() or left.isNumber())
                 try leOp(left, right)
-            else blk: {
-                if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
-                _ = try raiseOrderComparison(vm, left, right);
-                unreachable;
+            else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
+                .value => |mm_res| mm_res,
+                .deferred => return .LoopContinue,
+                .missing => {
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                },
             };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
@@ -4159,10 +4571,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: right is a number (GTI is imm < R[B])
             const is_true = if (right.isInteger() or right.isNumber())
                 try ltOp(left, right)
-            else blk: {
-                if (try dispatchLtMM(vm, left, right)) |mm_res| break :blk mm_res;
-                _ = try raiseOrderComparison(vm, left, right);
-                unreachable;
+            else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
+                .value => |mm_res| mm_res,
+                .deferred => return .LoopContinue,
+                .missing => {
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                },
             };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
@@ -4182,10 +4597,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             // Fast path: right is a number (GEI is imm <= R[B])
             const is_true = if (right.isInteger() or right.isNumber())
                 try leOp(left, right)
-            else blk: {
-                if (try dispatchLeMM(vm, left, right)) |mm_res| break :blk mm_res;
-                _ = try raiseOrderComparison(vm, left, right);
-                unreachable;
+            else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
+                .value => |mm_res| mm_res,
+                .deferred => return .LoopContinue,
+                .missing => {
+                    _ = try raiseOrderComparison(vm, left, right);
+                    unreachable;
+                },
             };
 
             if ((is_true and a == 0) or (!is_true and a != 0)) {
@@ -4483,227 +4901,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const a = inst.getA();
             const b = inst.getB();
             const c = inst.getC();
-            // NOTE: PCALL uses direct total counts (function+args, status+values);
-            // CALL uses +1 encoding.
-            const total_args: u32 = b;
-            const total_results: u32 = c;
-            const func_val = vm.stack[vm.base + a + 1];
-            const user_nargs: u32 = if (total_args > 0) total_args - 1 else blk: {
-                const arg_start = vm.base + a + 2;
-                break :blk vm.top - arg_start;
-            };
-            const user_nresults: u32 = if (total_results > 0) total_results - 1 else 0;
-
-            // Handle native closure
-            if (func_val.isObject()) {
-                const obj = func_val.object;
-                if (obj.type == .native_closure) {
-                    const nc = object.getObject(NativeClosureObject, obj);
-                    const frame_max = vm.base + ci.func.maxstacksize;
-
-                    // Set up call at temporary position
-                    const call_reg: u32 = a + 1;
-                    vm.top = vm.base + call_reg + 1 + user_nargs;
-
-                    // Execute with error catching
-                    const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs, user_nresults)) blk: {
-                        const actual_results: u32 = if (total_results == 0)
-                            vm.top - (vm.base + call_reg)
-                        else
-                            user_nresults;
-                        // Success: move results and prepend true
-                        var i: u32 = actual_results;
-                        while (i > 0) : (i -= 1) {
-                            vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
-                        }
-                        vm.stack[vm.base + a] = .{ .boolean = true };
-                        break :blk actual_results + 1; // true + results
-                    } else |err| blk: {
-                        // Only catch LuaException; other errors (OOM) propagate
-                        if (err != error.LuaException) return err;
-
-                        // Failure: set false and error value
-                        vm.stack[vm.base + a] = .{ .boolean = false };
-                        vm.stack[vm.base + a + 1] = vm.lua_error_value;
-                        vm.lua_error_value = .nil;
-                        break :blk 2; // false + error value
-                    };
-                    // GC SAFETY: Clear stale slots and restore top
-                    const result_end = vm.base + a + result_count;
-                    if (result_end < frame_max) {
-                        for (vm.stack[result_end..frame_max]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    vm.top = if (total_results == 0) result_end else frame_max;
-                    return .Continue;
-                }
-            }
-
-            // Handle Lua closure with protected execution
-            if (func_val.asClosure()) |closure| {
-                const func_proto = closure.proto;
-                const call_base = vm.base + a + 1;
-
-                // Match CALL vararg semantics.
-                var vararg_base: u32 = 0;
-                var vararg_count: u32 = 0;
-                if (func_proto.is_vararg and user_nargs > func_proto.numparams) {
-                    vararg_count = user_nargs - func_proto.numparams;
-                    // Store varargs beyond the frame with buffer for nested calls
-                    const min_vararg_base = call_base + func_proto.maxstacksize;
-                    vararg_base = @max(min_vararg_base, vm.top) + 32;
-                    try ensureStackTop(vm, vararg_base + vararg_count);
-                    var i: u32 = vararg_count;
-                    while (i > 0) {
-                        i -= 1;
-                        vm.stack[vararg_base + i] = vm.stack[call_base + 1 + func_proto.numparams + i];
-                    }
-                }
-
-                // Shift fixed parameters down by 1 (overwrite function slot).
-                const params_to_copy = @min(user_nargs, @as(u32, func_proto.numparams));
-                if (params_to_copy > 0) {
-                    for (0..params_to_copy) |i| {
-                        vm.stack[call_base + i] = vm.stack[call_base + 1 + i];
-                    }
-                }
-
-                // Fill remaining params with nil
-                if (user_nargs < func_proto.numparams) {
-                    for (vm.stack[call_base + user_nargs ..][0 .. func_proto.numparams - user_nargs]) |*slot| {
-                        slot.* = .nil;
-                    }
-                }
-
-                // Push a protected call frame
-                const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
-                const new_ci = try pushCallInfoVararg(
-                    vm,
-                    func_proto,
-                    closure,
-                    call_base,
-                    vm.base + a,
-                    pcall_nresults,
-                    vararg_base,
-                    vararg_count,
-                );
-                new_ci.is_protected = true;
-
-                vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + func_proto.maxstacksize;
-                return .LoopContinue;
-            }
-
-            // Handle __call metamethod for tables (same as CALL slow path)
-            if (func_val.asTable()) |table| {
-                if (table.metatable) |mt| {
-                    const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
-                        // No __call - fall through to error
-                        vm.stack[vm.base + a] = .{ .boolean = false };
-                        var msg_buf: [192]u8 = undefined;
-                        const msg = buildCallNotFunctionMessage(vm, ci, @intCast(a + 1), func_val, &msg_buf);
-                        const err_str = try vm.gc().allocString(msg);
-                        vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
-                        return .Continue;
-                    };
-
-                    // __call is a native closure
-                    if (call_mm.isObject() and call_mm.object.type == .native_closure) {
-                        const nc = object.getObject(NativeClosureObject, call_mm.object);
-                        const frame_max = vm.base + ci.func.maxstacksize;
-                        const call_reg: u32 = a + 1;
-
-                        // Stack: [func_reg]=table, [func_reg+1..]=args
-                        // __call expects: (table, args...) so nargs+1
-                        vm.top = vm.base + call_reg + 1 + user_nargs;
-
-                        const result_count: u32 = if (vm.callNative(nc.func.id, @intCast(call_reg), user_nargs + 1, user_nresults)) blk: {
-                            const actual_results: u32 = if (total_results == 0)
-                                vm.top - (vm.base + call_reg)
-                            else
-                                user_nresults;
-                            // Success: move results and prepend true
-                            var i: u32 = actual_results;
-                            while (i > 0) : (i -= 1) {
-                                vm.stack[vm.base + a + i] = vm.stack[vm.base + call_reg + i - 1];
-                            }
-                            vm.stack[vm.base + a] = .{ .boolean = true };
-                            break :blk actual_results + 1;
-                        } else |err| blk: {
-                            if (err != error.LuaException) return err;
-                            vm.stack[vm.base + a] = .{ .boolean = false };
-                            vm.stack[vm.base + a + 1] = vm.lua_error_value;
-                            vm.lua_error_value = .nil;
-                            break :blk 2;
-                        };
-
-                        const result_end = vm.base + a + result_count;
-                        if (result_end < frame_max) {
-                            for (vm.stack[result_end..frame_max]) |*slot| {
-                                slot.* = .nil;
-                            }
-                        }
-                        vm.top = if (total_results == 0) result_end else frame_max;
-                        return .Continue;
-                    }
-
-                    // __call is a Lua closure
-                    if (call_mm.asClosure()) |closure| {
-                        const func_proto = closure.proto;
-                        const call_base = vm.base + a + 1;
-
-                        // Stack already has: [call_base]=table, [call_base+1..]=args
-                        // __call expects (self, args...), so total args = user_nargs + 1
-                        const total_user_args = user_nargs + 1;
-
-                        // Match CALL vararg semantics for __call Lua closure.
-                        var vararg_base: u32 = 0;
-                        var vararg_count: u32 = 0;
-                        if (func_proto.is_vararg and total_user_args > func_proto.numparams) {
-                            vararg_count = total_user_args - func_proto.numparams;
-                            // Store varargs beyond the frame with buffer for nested calls
-                            const min_vararg_base = call_base + func_proto.maxstacksize;
-                            vararg_base = @max(min_vararg_base, vm.top) + 32;
-                            try ensureStackTop(vm, vararg_base + vararg_count);
-                            var i: u32 = vararg_count;
-                            while (i > 0) {
-                                i -= 1;
-                                vm.stack[vararg_base + i] = vm.stack[call_base + func_proto.numparams + i];
-                            }
-                        }
-
-                        // Fill remaining params with nil
-                        var pf: u32 = total_user_args;
-                        while (pf < func_proto.numparams) : (pf += 1) {
-                            vm.stack[call_base + pf] = .nil;
-                        }
-
-                        const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
-                        const new_ci = try pushCallInfoVararg(
-                            vm,
-                            func_proto,
-                            closure,
-                            call_base,
-                            vm.base + a,
-                            pcall_nresults,
-                            vararg_base,
-                            vararg_count,
-                        );
-                        new_ci.is_protected = true;
-
-                        vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + func_proto.maxstacksize;
-                        return .LoopContinue;
-                    }
-                }
-            }
-
-            // Not a function - return error
-            vm.stack[vm.base + a] = .{ .boolean = false };
-            var msg_buf: [192]u8 = undefined;
-            const msg = buildCallNotFunctionMessage(vm, ci, @intCast(a + 1), func_val, &msg_buf);
-            const err_str = try vm.gc().allocString(msg);
-            vm.stack[vm.base + a + 1] = TValue.fromString(err_str);
-            return .Continue;
+            const total_results: u32 = if (c > 0) c - 1 else 0;
+            return try dispatchProtectedCall(vm, ci, a, b, total_results, null, vm.base + a);
         },
         // All opcodes now implemented - no else branch needed
     }
@@ -5395,6 +5594,45 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
     return vm.raiseString("attempt to concatenate a non-string value");
 }
 
+pub fn continueConcatFold(vm: *VM, ci: *CallInfo) !bool {
+    var acc = vm.stack[vm.base + ci.pending_concat_a];
+    var i = ci.pending_concat_i;
+
+    while (i >= @as(i16, @intCast(ci.pending_concat_b))) : (i -= 1) {
+        const left = vm.stack[vm.base + @as(u32, @intCast(i))];
+        if (canConcatPrimitive(left) and canConcatPrimitive(acc)) {
+            acc = try concatTwoSync(vm, left, acc);
+            vm.stack[vm.base + ci.pending_concat_a] = acc;
+            continue;
+        }
+
+        const mm_res = try dispatchConcatMM(vm, left, acc, ci.pending_concat_a) orelse {
+            const bad = if (!canConcatPrimitive(left)) left else acc;
+            const ty = callableValueTypeName(bad);
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
+            return vm.raiseString(msg);
+        };
+
+        switch (mm_res) {
+            .Continue => {
+                acc = vm.stack[vm.base + ci.pending_concat_a];
+                continue;
+            },
+            .LoopContinue => {
+                ci.pending_concat_i = i - 1;
+                ci.pending_concat_active = true;
+                return true;
+            },
+            .ReturnVM => unreachable,
+        }
+    }
+
+    vm.stack[vm.base + ci.pending_concat_a] = acc;
+    ci.pending_concat_active = false;
+    return false;
+}
+
 /// Try to get __concat metamethod from a value
 fn getConcatMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
@@ -5551,6 +5789,127 @@ fn getLeMM(vm: *VM, val: TValue) ?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
     return mt.get(TValue.fromString(vm.gc().mm_keys.get(.le)));
+}
+
+const CompareMMDispatch = union(enum) {
+    value: bool,
+    deferred,
+    missing,
+};
+
+fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_abs: u32) !ExecuteResult {
+    const temp = vm.top;
+
+    if (mm.asClosure()) |closure| {
+        const func_proto = closure.proto;
+        const new_base = temp;
+        const total_args: u32 = 2;
+
+        vm.stack[new_base] = arg1;
+        vm.stack[new_base + 1] = arg2;
+
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+        if (func_proto.is_vararg and total_args > func_proto.numparams) {
+            vararg_count = total_args - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+            }
+        }
+
+        var i: u32 = total_args;
+        while (i < func_proto.numparams) : (i += 1) {
+            vm.stack[new_base + i] = .nil;
+        }
+
+        _ = try pushCallInfoVararg(
+            vm,
+            func_proto,
+            closure,
+            new_base,
+            ret_abs,
+            1,
+            vararg_base,
+            vararg_count,
+        );
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+        return .LoopContinue;
+    }
+
+    if (mm.isObject() and mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.object);
+        vm.stack[temp] = mm;
+        vm.stack[temp + 1] = arg1;
+        vm.stack[temp + 2] = arg2;
+        vm.top = temp + 3;
+
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+        vm.stack[ret_abs] = vm.stack[temp];
+        vm.top = temp;
+        return .Continue;
+    }
+
+    return error.NotAFunction;
+}
+
+fn scheduleCompareMM(
+    vm: *VM,
+    ci: *CallInfo,
+    mm: TValue,
+    left: TValue,
+    right: TValue,
+    negate: u8,
+    invert: bool,
+    mm_name: []const u8,
+) !CompareMMDispatch {
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+        try raiseMetamethodNotCallable(vm, mm, mm_name);
+        unreachable;
+    }
+
+    const result_slot = vm.top;
+    try ensureStackTop(vm, result_slot + 1);
+
+    ci.pending_compare_active = true;
+    ci.pending_compare_negate = negate;
+    ci.pending_compare_invert = invert;
+    ci.pending_compare_result_slot = result_slot;
+
+    const exec_res = try callBinMetamethodToAbs(vm, mm, left, right, result_slot);
+    switch (exec_res) {
+        .LoopContinue => return .deferred,
+        .Continue => {
+            var is_true = vm.stack[result_slot].toBoolean();
+            if (invert) is_true = !is_true;
+            ci.pending_compare_active = false;
+            return .{ .value = is_true };
+        },
+        .ReturnVM => unreachable,
+    }
+}
+
+fn dispatchLeMMForOpcode(vm: *VM, ci: *CallInfo, left: TValue, right: TValue, negate: u8) !CompareMMDispatch {
+    if (getLeMM(vm, left) orelse getLeMM(vm, right)) |le_mm| {
+        return try scheduleCompareMM(vm, ci, le_mm, left, right, negate, false, "le");
+    }
+
+    if (getLtMM(vm, right) orelse getLtMM(vm, left)) |lt_mm| {
+        return try scheduleCompareMM(vm, ci, lt_mm, right, left, negate, true, "lt");
+    }
+
+    return .missing;
+}
+
+fn dispatchLtMMForOpcode(vm: *VM, ci: *CallInfo, left: TValue, right: TValue, negate: u8) !CompareMMDispatch {
+    if (getLtMM(vm, left) orelse getLtMM(vm, right)) |lt_mm| {
+        return try scheduleCompareMM(vm, ci, lt_mm, left, right, negate, false, "lt");
+    }
+    return .missing;
 }
 
 /// Less-or-equal with __le metamethod fallback

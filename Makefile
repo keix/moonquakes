@@ -23,6 +23,7 @@ STATIC  = $(ZIG_LIBDIR)/libmoonquakes.a
 SHARED  = $(ZIG_LIBDIR)/libmoonquakes.so
 
 TARGET  = $(BINDIR)/minimal
+PASSING_TESTS = $(sort $(wildcard passing/*.lua))
 
 all: $(TARGET)
 
@@ -51,4 +52,24 @@ run: $(TARGET)
 	LD_LIBRARY_PATH=$(ZIG_LIBDIR) ./$(TARGET)
 
 test: zig-libs
-	cd passing && for f in *.lua; do ../zig-out/bin/moonquakes "$$f"; done
+	@rc=0; \
+	C_RESET=$$(printf '\033[0m'); \
+	C_CYAN=$$(printf '\033[36m'); \
+	C_GREEN=$$(printf '\033[32m'); \
+	C_RED=$$(printf '\033[31m'); \
+	cd passing && for f in *.lua; do \
+		printf "%s===========================> %s%s\n" "$$C_CYAN" "$$f" "$$C_RESET"; \
+		if ../zig-out/bin/moonquakes "$$f"; then \
+			st=0; \
+		else \
+			st=$$?; \
+			rc=1; \
+		fi; \
+		if [ "$$st" -eq 0 ]; then \
+			printf "%sPASSED (%s)%s passing/%s\n" "$$C_GREEN" "$$st" "$$C_RESET" "$$f"; \
+		else \
+			printf "%sFAILED (%s)%s passing/%s\n" "$$C_RED" "$$st" "$$C_RESET" "$$f"; \
+		fi; \
+		echo; echo; \
+	done; \
+	exit $$rc

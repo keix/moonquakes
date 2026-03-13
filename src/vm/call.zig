@@ -84,7 +84,7 @@ pub fn callValueSafe(vm: *VM, func_val: TValue, args: []const TValue) anyerror!T
     if (vm.top < safe_base) vm.top = safe_base;
 
     const result = callValue(vm, func_val, args) catch |err| {
-        if (err != error.Yield) vm.top = saved_top;
+        if (err != error.Yield and err != error.HandledException) vm.top = saved_top;
         return err;
     };
     vm.top = saved_top;
@@ -100,7 +100,7 @@ pub fn callValueInto(vm: *VM, func_val: TValue, args: []const TValue, out: []TVa
     if (vm.top < safe_base) vm.top = safe_base;
 
     callValueIntoUnsafe(vm, func_val, args, out) catch |err| {
-        if (err != error.Yield) vm.top = saved_top;
+        if (err != error.Yield and err != error.HandledException) vm.top = saved_top;
         return err;
     };
     vm.top = saved_top;
@@ -115,7 +115,7 @@ pub fn callValueIntoAt(vm: *VM, func_val: TValue, args: []const TValue, out: []T
     if (vm.top < safe_base) vm.top = safe_base;
 
     callValueIntoUnsafeAt(vm, func_val, args, out, ret_base) catch |err| {
-        if (err != error.Yield) vm.top = saved_top;
+        if (err != error.Yield and err != error.HandledException) vm.top = saved_top;
         return err;
     };
     vm.top = saved_top;
@@ -433,7 +433,10 @@ fn runUntilReturn(
     var direct_result: ?TValue = null;
     while (vm.callstack_size > saved_depth) {
         if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
-            if (try mnemonics.handleLuaException(vm)) continue;
+            if (try mnemonics.handleLuaException(vm)) {
+                if (vm.callstack_size <= saved_depth) return error.HandledException;
+                continue;
+            }
             cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return error.LuaException;
         }
@@ -456,8 +459,12 @@ fn runUntilReturn(
         const result = mnemonics.do(vm, inst) catch |err| {
             // Preserve call frames on coroutine yield; resume needs intact state.
             if (err == error.Yield) return error.Yield;
+            if (err == error.HandledException) return error.HandledException;
             // Handle LuaException by unwinding to protected frames (pcall)
-            if (err == error.LuaException and try mnemonics.handleLuaException(vm)) continue;
+            if (err == error.LuaException and try mnemonics.handleLuaException(vm)) {
+                if (vm.callstack_size <= saved_depth) return error.HandledException;
+                continue;
+            }
             if (err == error.LuaException) {
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
@@ -514,7 +521,10 @@ fn runUntilReturn(
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err; // OOM: can't convert, propagate original error
                 });
-                if (try mnemonics.handleLuaException(vm)) continue;
+                if (try mnemonics.handleLuaException(vm)) {
+                    if (vm.callstack_size <= saved_depth) return error.HandledException;
+                    continue;
+                }
                 mnemonics.captureCurrentTracebackSnapshot(vm);
                 cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;
@@ -579,7 +589,10 @@ fn runUntilReturnInto(
 
     while (vm.callstack_size > saved_depth) {
         if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
-            if (try mnemonics.handleLuaException(vm)) continue;
+            if (try mnemonics.handleLuaException(vm)) {
+                if (vm.callstack_size <= saved_depth) return error.HandledException;
+                continue;
+            }
             cleanupOnError(vm, saved_depth, saved_base, saved_top);
             return error.LuaException;
         }
@@ -594,7 +607,11 @@ fn runUntilReturnInto(
         };
         const result = mnemonics.do(vm, inst) catch |err| {
             if (err == error.Yield) return error.Yield;
-            if (err == error.LuaException and try mnemonics.handleLuaException(vm)) continue;
+            if (err == error.HandledException) return error.HandledException;
+            if (err == error.LuaException and try mnemonics.handleLuaException(vm)) {
+                if (vm.callstack_size <= saved_depth) return error.HandledException;
+                continue;
+            }
             if (err == error.LuaException) {
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
@@ -650,7 +667,10 @@ fn runUntilReturnInto(
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err;
                 });
-                if (try mnemonics.handleLuaException(vm)) continue;
+                if (try mnemonics.handleLuaException(vm)) {
+                    if (vm.callstack_size <= saved_depth) return error.HandledException;
+                    continue;
+                }
                 mnemonics.captureCurrentTracebackSnapshot(vm);
                 cleanupOnError(vm, saved_depth, saved_base, saved_top);
                 return error.LuaException;

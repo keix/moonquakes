@@ -35,6 +35,7 @@ fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
     } else {
         gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
     }
+    gc_ptr.markValue(vm.base_ci.error_handler);
 
     for (vm.callstack[0..vm.callstack_size]) |frame| {
         if (frame.closure) |closure| {
@@ -42,6 +43,7 @@ fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
         } else {
             gc_ptr.markProtoObject(@constCast(frame.func));
         }
+        gc_ptr.markValue(frame.error_handler);
     }
 }
 
