@@ -591,6 +591,8 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         return;
     }
 
+    try validatePatternOrRaise(vm, pattern);
+
     // Pattern match search
     var matcher = PatternMatcher.init(pattern, str, init);
     var match_start: usize = init;
@@ -621,6 +623,14 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             }
             return;
         }
+        if (matcher.invalid_capture_index) |bad_idx| {
+            var msg_buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
+            return vm.raiseString(msg);
+        }
+        if (matcher.frontier_missing) {
+            return vm.raiseString("missing '[' after '%f' in pattern");
+        }
         if (pattern.len > 0 and pattern[0] == '^') break;
     }
 
@@ -636,6 +646,7 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     }
 
@@ -643,6 +654,7 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     };
     const str = str_obj.asSlice();
@@ -651,9 +663,11 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     const pat_arg = vm.stack[vm.base + func_reg + 2];
     const pat_obj = pat_arg.asString() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        vm.top = vm.base + func_reg + 1;
         return;
     };
     const pattern = pat_obj.asSlice();
+    try validatePatternOrRaise(vm, pattern);
     if (isPatternTooComplex(pattern)) {
         return vm.raiseString("pattern too complex");
     }
@@ -677,10 +691,9 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         if (matcher.match()) {
             // Match found - return captures or whole match
             if (matcher.capture_count > 0) {
-                // Return all captures (Lua returns all captures as multiple values)
-                // Note: Multiple return values may not be fully supported by parser/VM yet
+                const actual_count: u32 = if (nresults > 0) @min(matcher.capture_count, nresults) else matcher.capture_count;
                 var i: u32 = 0;
-                while (i < matcher.capture_count) : (i += 1) {
+                while (i < actual_count) : (i += 1) {
                     const cap = matcher.captures[i];
                     if (cap.is_position) {
                         vm.stack[vm.base + func_reg + i] = .{ .integer = @intCast(cap.start + 1) };
@@ -689,15 +702,33 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                         vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
                     }
                 }
+                if (nresults > 0) {
+                    var fill: u32 = actual_count;
+                    while (fill < nresults) : (fill += 1) {
+                        vm.stack[vm.base + func_reg + fill] = .nil;
+                    }
+                }
+                vm.top = vm.base + func_reg + actual_count;
                 return;
             } else {
                 // Return whole match
-                if (nresults > 0) {
-                    const match_str = try vm.gc().allocString(str[matcher.match_start..matcher.match_end]);
-                    vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
+                const match_str = try vm.gc().allocString(str[matcher.match_start..matcher.match_end]);
+                vm.stack[vm.base + func_reg] = TValue.fromString(match_str);
+                if (nresults > 1) {
+                    var i: u32 = 1;
+                    while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
                 }
+                vm.top = vm.base + func_reg + 1;
                 return;
             }
+        }
+        if (matcher.invalid_capture_index) |bad_idx| {
+            var msg_buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
+            return vm.raiseString(msg);
+        }
+        if (matcher.frontier_missing) {
+            return vm.raiseString("missing '[' after '%f' in pattern");
         }
 
         // If pattern starts with ^, only try at start
@@ -705,7 +736,12 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // No match found
-    if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+    vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
+    }
+    vm.top = vm.base + func_reg + 1;
 }
 
 fn isPatternTooComplex(pattern: []const u8) bool {
@@ -737,6 +773,113 @@ fn isPatternTooComplex(pattern: []const u8) bool {
     return false;
 }
 
+fn validatePatternOrRaise(vm: *VM, pattern: []const u8) !void {
+    var i: usize = 0;
+    var open_captures: u32 = 0;
+    var closed_captures: u32 = 0;
+
+    while (i < pattern.len) {
+        const c = pattern[i];
+        if (c == '%') {
+            if (i + 1 >= pattern.len) return vm.raiseString("malformed pattern");
+            const next = pattern[i + 1];
+
+            if (next == 'f') {
+                if (i + 2 >= pattern.len or pattern[i + 2] != '[') {
+                    return vm.raiseString("missing '[' after '%f' in pattern");
+                }
+                i += 3; // skip %f[
+                if (i >= pattern.len) return vm.raiseString("missing ']' after '%f' in pattern");
+                if (pattern[i] == '^') {
+                    i += 1;
+                }
+                if (i < pattern.len and pattern[i] == ']') i += 1; // first ']' literal
+                var closed = false;
+                while (i < pattern.len) : (i += 1) {
+                    if (pattern[i] == '%' and i + 1 < pattern.len) {
+                        i += 1;
+                        continue;
+                    }
+                    if (pattern[i] == ']') {
+                        closed = true;
+                        i += 1;
+                        break;
+                    }
+                }
+                if (!closed) return vm.raiseString("missing ']' after '%f' in pattern");
+                continue;
+            }
+
+            if (next == 'b') {
+                if (i + 3 >= pattern.len) return vm.raiseString("malformed pattern");
+                i += 4; // %bxy
+                continue;
+            }
+
+            if (next == '0') return vm.raiseString("invalid capture index %0");
+            if (next >= '1' and next <= '9') {
+                const idx: u32 = next - '0';
+                if (idx == 0 or idx > closed_captures) {
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{next}) catch "invalid capture index";
+                    return vm.raiseString(msg);
+                }
+                i += 2;
+                continue;
+            }
+
+            i += 2;
+            continue;
+        }
+
+        if (c == '[') {
+            i += 1;
+            if (i >= pattern.len) return vm.raiseString("malformed pattern");
+            if (pattern[i] == '^') {
+                i += 1;
+            }
+            if (i < pattern.len and pattern[i] == ']') i += 1; // first ']' literal
+            var closed = false;
+            while (i < pattern.len) : (i += 1) {
+                if (pattern[i] == '%' and i + 1 < pattern.len) {
+                    i += 1;
+                    continue;
+                }
+                if (pattern[i] == ']') {
+                    closed = true;
+                    i += 1;
+                    break;
+                }
+            }
+            if (!closed) return vm.raiseString("malformed pattern");
+            continue;
+        }
+
+        if (c == '(') {
+            if (i + 1 < pattern.len and pattern[i + 1] == ')') {
+                closed_captures += 1;
+                i += 2;
+            } else {
+                open_captures += 1;
+                i += 1;
+            }
+            continue;
+        }
+
+        if (c == ')') {
+            if (open_captures == 0) return vm.raiseString("invalid pattern capture");
+            open_captures -= 1;
+            closed_captures += 1;
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if (open_captures != 0) return vm.raiseString("unfinished capture");
+}
+
 /// Lua pattern matcher
 const PatternMatcher = struct {
     pattern: []const u8,
@@ -747,13 +890,16 @@ const PatternMatcher = struct {
     match_end: usize,
     captures: [32]Capture,
     capture_count: u32,
-    capture_stack: [32]usize, // For tracking open captures
+    capture_stack: [32]u8, // Capture indices for open captures
     capture_stack_top: u32,
+    invalid_capture_index: ?u8,
+    frontier_missing: bool,
 
     const Capture = struct {
         start: usize,
         end: usize,
         is_position: bool,
+        is_open: bool,
     };
 
     const Snapshot = struct {
@@ -762,8 +908,10 @@ const PatternMatcher = struct {
         match_end: usize,
         captures: [32]Capture,
         capture_count: u32,
-        capture_stack: [32]usize,
+        capture_stack: [32]u8,
         capture_stack_top: u32,
+        invalid_capture_index: ?u8,
+        frontier_missing: bool,
     };
 
     fn snapshot(self: *const PatternMatcher) Snapshot {
@@ -775,6 +923,8 @@ const PatternMatcher = struct {
             .capture_count = self.capture_count,
             .capture_stack = self.capture_stack,
             .capture_stack_top = self.capture_stack_top,
+            .invalid_capture_index = self.invalid_capture_index,
+            .frontier_missing = self.frontier_missing,
         };
     }
 
@@ -786,6 +936,8 @@ const PatternMatcher = struct {
         self.capture_count = snap.capture_count;
         self.capture_stack = snap.capture_stack;
         self.capture_stack_top = snap.capture_stack_top;
+        self.invalid_capture_index = snap.invalid_capture_index;
+        self.frontier_missing = snap.frontier_missing;
     }
 
     fn init(pattern: []const u8, str: []const u8, start: usize) PatternMatcher {
@@ -800,6 +952,8 @@ const PatternMatcher = struct {
             .capture_count = 0,
             .capture_stack = undefined,
             .capture_stack_top = 0,
+            .invalid_capture_index = null,
+            .frontier_missing = false,
         };
     }
 
@@ -810,6 +964,8 @@ const PatternMatcher = struct {
         self.match_end = start;
         self.capture_count = 0;
         self.capture_stack_top = 0;
+        self.invalid_capture_index = null;
+        self.frontier_missing = false;
     }
 
     fn match(self: *PatternMatcher) bool {
@@ -841,14 +997,23 @@ const PatternMatcher = struct {
                             .start = self.str_pos,
                             .end = self.str_pos,
                             .is_position = true,
+                            .is_open = false,
                         };
                         self.capture_count += 1;
                     }
                     continue;
                 }
                 self.pat_pos += 1;
-                if (self.capture_stack_top < 32) {
-                    self.capture_stack[self.capture_stack_top] = self.str_pos;
+                if (self.capture_count < 32 and self.capture_stack_top < 32) {
+                    const cap_index: u8 = @intCast(self.capture_count);
+                    self.captures[self.capture_count] = .{
+                        .start = self.str_pos,
+                        .end = self.str_pos,
+                        .is_position = false,
+                        .is_open = true,
+                    };
+                    self.capture_count += 1;
+                    self.capture_stack[self.capture_stack_top] = cap_index;
                     self.capture_stack_top += 1;
                 }
                 continue;
@@ -857,14 +1022,11 @@ const PatternMatcher = struct {
             // Capture end
             if (c == ')') {
                 self.pat_pos += 1;
-                if (self.capture_stack_top > 0 and self.capture_count < 32) {
+                if (self.capture_stack_top > 0) {
                     self.capture_stack_top -= 1;
-                    self.captures[self.capture_count] = .{
-                        .start = self.capture_stack[self.capture_stack_top],
-                        .end = self.str_pos,
-                        .is_position = false,
-                    };
-                    self.capture_count += 1;
+                    const cap_index = self.capture_stack[self.capture_stack_top];
+                    self.captures[cap_index].end = self.str_pos;
+                    self.captures[cap_index].is_open = false;
                 }
                 continue;
             }
@@ -873,6 +1035,11 @@ const PatternMatcher = struct {
             const item = self.getPatternItem();
             const quantifier = self.getQuantifier();
             if (quantifier != .none and item == .backref) return false;
+            if (item == .frontier) {
+                if (quantifier != .none) return false;
+                if (!self.matchFrontier(item.frontier)) return false;
+                continue;
+            }
 
             // Match based on quantifier
             switch (quantifier) {
@@ -956,6 +1123,8 @@ const PatternMatcher = struct {
         lua_class: u8, // %a, %d, etc.
         lua_class_neg: u8, // %A, %D, etc.
         backref: u8, // %1 .. %9
+        balanced: struct { open: u8, close: u8 }, // %bxy
+        frontier: []const u8, // %f[set] (zero-width)
     };
 
     const Quantifier = enum { none, star, plus, question, minus };
@@ -971,6 +1140,41 @@ const PatternMatcher = struct {
         if (c == '%' and self.pat_pos < self.pattern.len) {
             const next = self.pattern[self.pat_pos];
             self.pat_pos += 1;
+            if (next == 'f') {
+                if (self.pat_pos >= self.pattern.len or self.pattern[self.pat_pos] != '[') {
+                    self.frontier_missing = true;
+                    return .{ .literal = next };
+                }
+                self.pat_pos += 1; // skip '['
+                const start = self.pat_pos;
+                if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == ']') {
+                    self.pat_pos += 1; // first ']' literal in class
+                }
+                while (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] != ']') {
+                    if (self.pattern[self.pat_pos] == '%' and self.pat_pos + 1 < self.pattern.len) {
+                        self.pat_pos += 2;
+                    } else {
+                        self.pat_pos += 1;
+                    }
+                }
+                if (self.pat_pos >= self.pattern.len) {
+                    self.frontier_missing = true;
+                    return .{ .literal = next };
+                }
+                const class_end = self.pat_pos;
+                self.pat_pos += 1; // skip ']'
+                return .{ .frontier = self.pattern[start..class_end] };
+            }
+            if (next == 'b' and self.pat_pos + 1 < self.pattern.len) {
+                const open = self.pattern[self.pat_pos];
+                const close = self.pattern[self.pat_pos + 1];
+                self.pat_pos += 2;
+                return .{ .balanced = .{ .open = open, .close = close } };
+            }
+            if (next == '0') {
+                self.invalid_capture_index = '0';
+                return .{ .literal = next };
+            }
             if (next >= '1' and next <= '9') {
                 return .{ .backref = next - '0' };
             }
@@ -1042,9 +1246,15 @@ const PatternMatcher = struct {
         if (self.str_pos >= self.str.len) return false;
         if (item == .backref) {
             const idx = item.backref;
-            if (idx == 0 or idx > self.capture_count) return false;
+            if (idx == 0 or idx > self.capture_count) {
+                self.invalid_capture_index = @as(u8, '0') + idx;
+                return false;
+            }
             const cap = self.captures[idx - 1];
-            if (cap.is_position) return false;
+            if (cap.is_position or cap.is_open) {
+                self.invalid_capture_index = @as(u8, '0') + idx;
+                return false;
+            }
             const cap_len = cap.end - cap.start;
             if (self.str_pos + cap_len > self.str.len) return false;
             if (!std.mem.eql(u8, self.str[cap.start..cap.end], self.str[self.str_pos .. self.str_pos + cap_len])) return false;
@@ -1059,6 +1269,25 @@ const PatternMatcher = struct {
             .lua_class => |class| matchLuaClass(c, class),
             .lua_class_neg => |class| !matchLuaClass(c, std.ascii.toLower(class)),
             .backref => unreachable,
+            .frontier => unreachable,
+            .balanced => |b| blk: {
+                if (c != b.open) break :blk false;
+                var level: usize = 1;
+                var i: usize = self.str_pos + 1;
+                while (i < self.str.len) : (i += 1) {
+                    const cc = self.str[i];
+                    if (cc == b.close) {
+                        level -= 1;
+                        if (level == 0) {
+                            self.str_pos = i + 1;
+                            return true;
+                        }
+                    } else if (cc == b.open and b.open != b.close) {
+                        level += 1;
+                    }
+                }
+                break :blk false;
+            },
             .char_class => |cc| blk: {
                 const in_class = matchCharClass(c, cc.pattern);
                 break :blk if (cc.negated) !in_class else in_class;
@@ -1070,6 +1299,18 @@ const PatternMatcher = struct {
             return true;
         }
         return false;
+    }
+
+    fn matchFrontier(self: *PatternMatcher, pattern: []const u8) bool {
+        const negated = pattern.len > 0 and pattern[0] == '^';
+        const class_pat = if (negated) pattern[1..] else pattern;
+        const prev: u8 = if (self.str_pos == 0) 0 else self.str[self.str_pos - 1];
+        const curr: u8 = if (self.str_pos < self.str.len) self.str[self.str_pos] else 0;
+        const prev_in_raw = matchCharClass(prev, class_pat);
+        const curr_in_raw = matchCharClass(curr, class_pat);
+        const prev_in = if (negated) !prev_in_raw else prev_in_raw;
+        const curr_in = if (negated) !curr_in_raw else curr_in_raw;
+        return !prev_in and curr_in;
     }
 
     fn matchLuaClass(c: u8, class: u8) bool {
@@ -1163,15 +1404,35 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         vm.stack[vm.base + func_reg] = .nil;
         return;
     }
+    try validatePatternOrRaise(vm, pat_arg.asString().?.asSlice());
+
+    // Optional init position (1-based; negative from end), converted to 0-based.
+    var init_pos: usize = 0;
+    if (nargs >= 3) {
+        const init_arg = vm.stack[vm.base + func_reg + 3];
+        if (init_arg.toInteger()) |i| {
+            const str_len: i64 = @intCast(str_arg.asString().?.asSlice().len);
+            var idx = i;
+            if (idx < 0) idx = str_len + idx + 1;
+            if (idx < 1) idx = 1;
+            if (idx > str_len + 1) {
+                init_pos = @intCast(str_len + 1); // strictly past end => no matches
+            } else {
+                init_pos = @intCast(idx - 1);
+            }
+        }
+    }
 
     // Create state table with string, pattern, and position
     const state_table = try vm.gc().allocTable();
     const key_s = try vm.gc().allocString("s");
     const key_p = try vm.gc().allocString("p");
     const key_pos = try vm.gc().allocString("pos");
+    const key_last_end = try vm.gc().allocString("last_end");
     try state_table.set(TValue.fromString(key_s), str_arg);
     try state_table.set(TValue.fromString(key_p), pat_arg);
-    try state_table.set(TValue.fromString(key_pos), .{ .integer = 0 });
+    try state_table.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(init_pos)) });
+    try state_table.set(TValue.fromString(key_last_end), .{ .integer = -1 });
 
     // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .string_gmatch_iterator });
@@ -1179,12 +1440,12 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     try state_map.set(TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
-    // Generic-for still accepts (f, s, var), but gmatch keeps state privately.
+    // Generic-for still accepts (f, s, var, toclose), but gmatch keeps state privately.
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .nil;
-    }
-    if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .nil;
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
 }
 
@@ -1238,6 +1499,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
         return;
     };
     const pattern = pat_obj.asSlice();
+    try validatePatternOrRaise(vm, pattern);
 
     // Get current position from state table
     const key_pos = try vm.gc().allocString("pos");
@@ -1256,6 +1518,12 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     }
     const start_pos: usize = @intCast(pos_i64);
 
+    const key_last_end = try vm.gc().allocString("last_end");
+    const last_end_i64: i64 = blk: {
+        const v = state.get(TValue.fromString(key_last_end)) orelse break :blk -1;
+        break :blk v.toInteger() orelse -1;
+    };
+
     // Check if we're past the end
     if (start_pos > str.len) {
         vm.stack[vm.base + func_reg] = .nil;
@@ -1269,6 +1537,9 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     while (match_start <= str.len) : (match_start += 1) {
         matcher.reset(match_start);
         if (matcher.match()) {
+            if (matcher.match_end == match_start and last_end_i64 >= 0 and @as(usize, @intCast(last_end_i64)) == match_start) {
+                continue;
+            }
             // Match found - calculate next position
             // For empty matches, advance by 1 to avoid infinite loop
             var next_pos = matcher.match_end;
@@ -1278,6 +1549,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 
             // Update position in state table for next iteration
             try state.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
+            try state.set(TValue.fromString(key_last_end), .{ .integer = @as(i64, @intCast(matcher.match_end)) });
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {
@@ -1298,6 +1570,14 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
             return;
         }
+        if (matcher.invalid_capture_index) |bad_idx| {
+            var msg_buf: [64]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
+            return vm.raiseString(msg);
+        }
+        if (matcher.frontier_missing) {
+            return vm.raiseString("missing '[' after '%f' in pattern");
+        }
 
         // If pattern starts with ^, only try at start
         if (pattern.len > 0 and pattern[0] == '^') break;
@@ -1312,8 +1592,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
 /// Returns: new string, number of substitutions made
 pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 3) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        return;
+        return vm.raiseString("bad argument #3 to 'gsub' (value expected)");
     }
 
     // Get string
@@ -1331,9 +1610,13 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         return;
     };
     const pattern = pat_obj.asSlice();
+    try validatePatternOrRaise(vm, pattern);
 
     // Get replacement (string, table, or function)
     const repl_arg = vm.stack[vm.base + func_reg + 3];
+    if (!(repl_arg.asString() != null or repl_arg.asTable() != null or repl_arg.asClosure() != null or repl_arg.asNativeClosure() != null)) {
+        return vm.raiseString("bad argument #3 to 'gsub' (string/function/table expected)");
+    }
 
     // Get max replacements (optional, default unlimited)
     var max_replacements: usize = std.math.maxInt(usize);
@@ -1351,12 +1634,25 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
     var pos: usize = 0;
     var replacement_count: i64 = 0;
+    var any_substitution = false;
     var matcher = PatternMatcher.init(pattern, str, 0);
+    var last_match_end: ?usize = null;
 
     while (pos <= str.len and replacement_count < max_replacements) {
         matcher.reset(pos);
 
         if (matcher.match()) {
+            const is_empty_match = matcher.match_end == matcher.match_start;
+            // Lua 5.3.3+ semantics: avoid replacing an empty match that starts
+            // exactly where the previous match ended.
+            if (is_empty_match and last_match_end != null and last_match_end.? == pos) {
+                if (pos < str.len) {
+                    try result.append(allocator, str[pos]);
+                }
+                pos += 1;
+                continue;
+            }
+
             // Append text before match
             try result.appendSlice(allocator, str[pos..matcher.match_start]);
 
@@ -1370,12 +1666,13 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
             if (replacement) |repl_str| {
                 try result.appendSlice(allocator, repl_str);
+                any_substitution = true;
             } else {
                 // If replacement is nil/false, keep original match
                 try result.appendSlice(allocator, str[matcher.match_start..matcher.match_end]);
             }
-
             replacement_count += 1;
+            last_match_end = matcher.match_end;
 
             // Move position forward
             if (matcher.match_end > pos) {
@@ -1388,6 +1685,14 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                 pos += 1;
             }
         } else {
+            if (matcher.invalid_capture_index) |bad_idx| {
+                var msg_buf: [64]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
+                return vm.raiseString(msg);
+            }
+            if (matcher.frontier_missing) {
+                return vm.raiseString("missing '[' after '%f' in pattern");
+            }
             // No match at this position
             if (pattern.len > 0 and pattern[0] == '^') {
                 // Anchored pattern - no more matches possible
@@ -1406,9 +1711,13 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         try result.appendSlice(allocator, str[pos..]);
     }
 
-    // Return result string
-    const result_str = try vm.gc().allocString(result.items);
-    vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+    // Return result string (reuse original object if nothing was substituted)
+    if (!any_substitution) {
+        vm.stack[vm.base + func_reg] = str_arg;
+    } else {
+        const result_str = try vm.gc().allocString(result.items);
+        vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
+    }
 
     // Return replacement count as second value
     if (nresults > 1) {
@@ -1447,12 +1756,17 @@ fn getGsubReplacement(
             if (val.asString()) |s| {
                 return s.asSlice();
             }
-            // Convert to string if not nil/false
-            if (!val.isNil() and !(val.isBoolean() and !val.boolean)) {
-                // For simplicity, only handle string values
-                // Full implementation would call tostring
-                return null;
+            if (val.isNil() or (val.isBoolean() and !val.boolean)) return null;
+            if (val.toNumber()) |num| {
+                var buf: [64]u8 = undefined;
+                const num_str = if (val.isInteger())
+                    std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return null
+                else
+                    std.fmt.bufPrint(&buf, "{d}", .{num}) catch return null;
+                const str_obj = try vm.gc().allocString(num_str);
+                return str_obj.asSlice();
             }
+            return raiseInvalidReplacementValue(vm, val);
         }
         return null;
     }
@@ -1512,11 +1826,32 @@ fn getGsubReplacement(
             return str_obj.asSlice();
         }
 
-        // Other types: error (for now, return nil to keep original)
-        return null;
+        return raiseInvalidReplacementValue(vm, result);
     }
 
     return null;
+}
+
+fn replacementTypeName(v: TValue) []const u8 {
+    return switch (v) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .thread => "thread",
+            .userdata, .file => "userdata",
+            .upvalue, .proto => "userdata",
+        },
+    };
+}
+
+fn raiseInvalidReplacementValue(vm: *VM, v: TValue) !?[]const u8 {
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "invalid replacement value (a {s})", .{replacementTypeName(v)}) catch "invalid replacement value";
+    return vm.raiseString(msg);
 }
 
 fn lookupTableReplacement(vm: *VM, table: *object.TableObject, key_val: TValue, depth: u16) !?TValue {
@@ -1576,6 +1911,9 @@ fn expandGsubCaptures(
                 if (cap_idx == 0) {
                     // %0 = whole match
                     try result.appendSlice(allocator, str[matcher.match_start..matcher.match_end]);
+                } else if (matcher.capture_count == 0 and cap_idx == 1) {
+                    // Lua compatibility: when there are no captures, %1 is whole match.
+                    try result.appendSlice(allocator, str[matcher.match_start..matcher.match_end]);
                 } else if (cap_idx <= matcher.capture_count) {
                     // %1-%9 = capture
                     const cap = matcher.captures[cap_idx - 1];
@@ -1586,12 +1924,14 @@ fn expandGsubCaptures(
                     } else {
                         try result.appendSlice(allocator, str[cap.start..cap.end]);
                     }
+                } else {
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{next}) catch "invalid capture index";
+                    return vm.raiseString(msg);
                 }
                 i += 2;
             } else {
-                // Invalid escape - keep as is
-                try result.append(allocator, repl[i]);
-                i += 1;
+                return vm.raiseString("invalid use of '%'");
             }
         } else {
             try result.append(allocator, repl[i]);

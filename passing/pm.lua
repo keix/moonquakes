@@ -104,13 +104,6 @@ assert(f("0alo alo", "%x*") == "0a")
 assert(f("alo alo", "%C+") == "alo alo")
 print('+')
 
-if #{string.match("abc", "()(.)()")} < 3 then
-  print("skipping advanced pattern tests (multi-return captures unsupported)")
-  goto done_pm
-end
-
-do
-
 
 local function f1 (s, p)
   p = string.gsub(p, "%%([0-9])", function (s)
@@ -443,7 +436,5 @@ do   -- test reuse of original string in gsub
   assert(r == s and string.format("%p", s) ~= string.format("%p", r))
 end
 
-end
-
-::done_pm::
 print('OK')
+
