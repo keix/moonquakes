@@ -756,6 +756,38 @@ const PatternMatcher = struct {
         is_position: bool,
     };
 
+    const Snapshot = struct {
+        pat_pos: usize,
+        str_pos: usize,
+        match_end: usize,
+        captures: [32]Capture,
+        capture_count: u32,
+        capture_stack: [32]usize,
+        capture_stack_top: u32,
+    };
+
+    fn snapshot(self: *const PatternMatcher) Snapshot {
+        return .{
+            .pat_pos = self.pat_pos,
+            .str_pos = self.str_pos,
+            .match_end = self.match_end,
+            .captures = self.captures,
+            .capture_count = self.capture_count,
+            .capture_stack = self.capture_stack,
+            .capture_stack_top = self.capture_stack_top,
+        };
+    }
+
+    fn restore(self: *PatternMatcher, snap: Snapshot) void {
+        self.pat_pos = snap.pat_pos;
+        self.str_pos = snap.str_pos;
+        self.match_end = snap.match_end;
+        self.captures = snap.captures;
+        self.capture_count = snap.capture_count;
+        self.capture_stack = snap.capture_stack;
+        self.capture_stack_top = snap.capture_stack_top;
+    }
+
     fn init(pattern: []const u8, str: []const u8, start: usize) PatternMatcher {
         return .{
             .pattern = pattern,
@@ -840,6 +872,7 @@ const PatternMatcher = struct {
             // Get pattern item (char class + optional quantifier)
             const item = self.getPatternItem();
             const quantifier = self.getQuantifier();
+            if (quantifier != .none and item == .backref) return false;
 
             // Match based on quantifier
             switch (quantifier) {
@@ -853,14 +886,16 @@ const PatternMatcher = struct {
                     while (self.matchItem(item)) : (count += 1) {}
                     // Backtrack until rest of pattern matches
                     while (count > 0) : (count -= 1) {
-                        const saved_pat = self.pat_pos;
+                        const snap = self.snapshot();
                         if (self.matchPattern()) return true;
-                        self.pat_pos = saved_pat;
+                        self.restore(snap);
                         self.str_pos -= 1;
                     }
                     self.str_pos = saved_str_pos;
                     // Try with zero matches
+                    const snap = self.snapshot();
                     if (self.matchPattern()) return true;
+                    self.restore(snap);
                     return false;
                 },
                 .plus => {
@@ -871,38 +906,39 @@ const PatternMatcher = struct {
                     while (self.matchItem(item)) : (count += 1) {}
                     // Backtrack
                     while (count > 1) : (count -= 1) {
-                        const saved_pat = self.pat_pos;
+                        const snap = self.snapshot();
                         if (self.matchPattern()) return true;
-                        self.pat_pos = saved_pat;
+                        self.restore(snap);
                         self.str_pos -= 1;
                     }
-                    return self.matchPattern();
+                    const snap = self.snapshot();
+                    if (self.matchPattern()) return true;
+                    self.restore(snap);
+                    return false;
                 },
                 .question => {
                     // Try with one match first
                     if (self.matchItem(item)) {
-                        const saved_pat = self.pat_pos;
-                        const saved_str = self.str_pos;
+                        const snap = self.snapshot();
                         if (self.matchPattern()) return true;
-                        self.pat_pos = saved_pat;
-                        self.str_pos = saved_str - 1;
+                        self.restore(snap);
+                        self.str_pos -= 1;
                     }
-                    return self.matchPattern();
+                    const snap = self.snapshot();
+                    if (self.matchPattern()) return true;
+                    self.restore(snap);
+                    return false;
                 },
                 .minus => {
                     // Non-greedy: try zero matches first
-                    const saved_pat = self.pat_pos;
-                    const saved_str = self.str_pos;
+                    const zero_snap = self.snapshot();
                     if (self.matchPattern()) return true;
-                    self.pat_pos = saved_pat;
-                    self.str_pos = saved_str;
+                    self.restore(zero_snap);
                     // Then try one match and recurse
                     while (self.matchItem(item)) {
-                        const sp = self.pat_pos;
-                        const ss = self.str_pos;
+                        const snap = self.snapshot();
                         if (self.matchPattern()) return true;
-                        self.pat_pos = sp;
-                        self.str_pos = ss;
+                        self.restore(snap);
                     }
                     return false;
                 },
@@ -919,6 +955,7 @@ const PatternMatcher = struct {
         char_class: struct { pattern: []const u8, negated: bool },
         lua_class: u8, // %a, %d, etc.
         lua_class_neg: u8, // %A, %D, etc.
+        backref: u8, // %1 .. %9
     };
 
     const Quantifier = enum { none, star, plus, question, minus };
@@ -934,6 +971,9 @@ const PatternMatcher = struct {
         if (c == '%' and self.pat_pos < self.pattern.len) {
             const next = self.pattern[self.pat_pos];
             self.pat_pos += 1;
+            if (next >= '1' and next <= '9') {
+                return .{ .backref = next - '0' };
+            }
             if (next >= 'A' and next <= 'Z') {
                 return .{ .lua_class_neg = next };
             } else if (next >= 'a' and next <= 'z') {
@@ -949,6 +989,10 @@ const PatternMatcher = struct {
             var negated = false;
             if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == '^') {
                 negated = true;
+                self.pat_pos += 1;
+            }
+            // In Lua patterns, ']' as the first character inside a class is literal.
+            if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == ']') {
                 self.pat_pos += 1;
             }
             // Find closing ]
@@ -996,6 +1040,17 @@ const PatternMatcher = struct {
 
     fn matchItem(self: *PatternMatcher, item: PatternItem) bool {
         if (self.str_pos >= self.str.len) return false;
+        if (item == .backref) {
+            const idx = item.backref;
+            if (idx == 0 or idx > self.capture_count) return false;
+            const cap = self.captures[idx - 1];
+            if (cap.is_position) return false;
+            const cap_len = cap.end - cap.start;
+            if (self.str_pos + cap_len > self.str.len) return false;
+            if (!std.mem.eql(u8, self.str[cap.start..cap.end], self.str[self.str_pos .. self.str_pos + cap_len])) return false;
+            self.str_pos += cap_len;
+            return true;
+        }
         const c = self.str[self.str_pos];
 
         const matches = switch (item) {
@@ -1003,6 +1058,7 @@ const PatternMatcher = struct {
             .any => true,
             .lua_class => |class| matchLuaClass(c, class),
             .lua_class_neg => |class| !matchLuaClass(c, std.ascii.toLower(class)),
+            .backref => unreachable,
             .char_class => |cc| blk: {
                 const in_class = matchCharClass(c, cc.pattern);
                 break :blk if (cc.negated) !in_class else in_class;
@@ -1020,6 +1076,7 @@ const PatternMatcher = struct {
         return switch (class) {
             'a' => std.ascii.isAlphabetic(c),
             'd' => std.ascii.isDigit(c),
+            'g' => std.ascii.isPrint(c) and !std.ascii.isWhitespace(c),
             's' => std.ascii.isWhitespace(c),
             'w' => std.ascii.isAlphanumeric(c),
             'l' => std.ascii.isLower(c),
