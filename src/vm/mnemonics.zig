@@ -38,6 +38,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
     return switch (id) {
         .table_unpack => 0, // C=0 sentinel: callee decides actual result count.
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
+        .string_match => 0, // C=0 sentinel: captures can return variable results.
         .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
         .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
@@ -53,7 +54,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
 fn nativeKeepsTopForCall(id: NativeFnId, c: u8) bool {
     if (c > 0) return false;
     return switch (id) {
-        .table_unpack, .string_byte, .select => true,
+        .table_unpack, .string_byte, .string_match, .select => true,
         else => false,
     };
 }
