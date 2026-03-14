@@ -2,10 +2,12 @@ const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
+const NativeClosureObject = object.NativeClosureObject;
 const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 const VM = @import("../vm/vm.zig").VM;
+const CallInfo = @import("../vm/execution.zig").CallInfo;
 
 fn inferEnvUpvalueIndex(closure: *ClosureObject) ?usize {
     for (closure.proto.upvalues, 0..) |upv, i| {
@@ -218,6 +220,36 @@ fn syntheticUpvalueName(idx: usize, buf: *[32]u8) []const u8 {
         return buf[0..1];
     }
     return std.fmt.bufPrint(buf, "up{d}", .{idx + 1}) catch "(no name)";
+}
+
+fn getCallInfoAtLevel(vm: *VM, level: i64) ?*const CallInfo {
+    if (level < 1) return null;
+    var ci_opt = vm.ci;
+    var remaining: i64 = level - 1;
+    while (remaining > 0) : (remaining -= 1) {
+        ci_opt = if (ci_opt) |ci| ci.previous else null;
+    }
+    return ci_opt;
+}
+
+fn inferFieldNameAtLevel(vm: *VM, level: i64, target: *ClosureObject) ?[]const u8 {
+    const caller = getCallInfoAtLevel(vm, level + 1) orelse return null;
+    var r: usize = 0;
+    while (r < caller.func.maxstacksize) : (r += 1) {
+        const stack_pos = caller.base + @as(u32, @intCast(r));
+        if (stack_pos >= vm.stack.len) break;
+        const tbl = vm.stack[stack_pos].asTable() orelse continue;
+        var it = tbl.hash_part.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            const clo = value.asClosure() orelse continue;
+            if (clo != target) continue;
+            const key_str = key.asString() orelse continue;
+            return key_str.asSlice();
+        }
+    }
+    return null;
 }
 
 /// Lua 5.4 Debug Library
@@ -449,6 +481,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     var want_tailcall = true;
     var want_upvalue = true;
     var want_func = true;
+    var want_activelines = false;
 
     if (nargs >= 2) {
         const what_arg = vm.stack[vm.base + func_reg + 2];
@@ -459,6 +492,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             want_tailcall = false;
             want_upvalue = false;
             want_func = false;
+            want_activelines = false;
             for (what_str.asSlice()) |c| {
                 switch (c) {
                     'n' => want_name = true,
@@ -467,7 +501,15 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                     't' => want_tailcall = true,
                     'u' => want_upvalue = true,
                     'f' => want_func = true,
+                    'L' => want_activelines = true,
+                    'r' => {},
                     else => {},
+                }
+            }
+            for (what_str.asSlice()) |c| {
+                switch (c) {
+                    'n', 'S', 'l', 't', 'u', 'f', 'L', 'r' => {},
+                    else => return vm.raiseString("invalid option"),
                 }
             }
         }
@@ -475,8 +517,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Determine target closure
     var target_closure: ?*ClosureObject = null;
+    var target_native: ?*NativeClosureObject = null;
     var current_line: i64 = -1;
     var func_name: ?[]const u8 = null;
+    var func_namewhat: ?[]const u8 = null;
     var inferred_name_storage: [96]u8 = undefined;
     var level_arg: ?i64 = null;
 
@@ -517,6 +561,8 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     } else if (f_arg.asClosure()) |closure| {
         // f is a function
         target_closure = closure;
+    } else if (f_arg.asNativeClosure()) |nc| {
+        target_native = nc;
     } else {
         vm.stack[vm.base + func_reg] = TValue.nil;
         return;
@@ -525,6 +571,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (want_name and func_name == null and level_arg != null and level_arg.? == 2) {
         if (vm.hook_name_override) |override| {
             func_name = override;
+            func_namewhat = "global";
         }
     }
 
@@ -533,10 +580,14 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     if (want_name and func_name == null and target_closure != null and level_arg != null and level_arg.? >= 1) {
         if (vm.debugInferFunctionNameAtLevel(level_arg.?, target_closure.?)) |n| {
             func_name = n;
+            func_namewhat = "local";
+        } else if (inferFieldNameAtLevel(vm, level_arg.?, target_closure.?)) |n| {
+            func_name = n;
+            func_namewhat = "field";
         }
     }
 
-    if (want_name and target_closure != null) {
+    if (want_name and func_name == null and target_closure != null) {
         var it = vm.globals().hash_part.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -545,6 +596,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             if (value_closure != target_closure.?) continue;
             const key_str = key.asString() orelse continue;
             func_name = key_str.asSlice();
+            func_namewhat = "global";
             break;
         }
     }
@@ -591,10 +643,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // source-name or local-name metadata.
     if (want_name and level_arg != null and level_arg.? == 2 and vm.error_handling_depth > 0) {
         func_name = "pcall";
-    }
-
-    if (want_name and func_name == null and level_arg != null and level_arg.? == 1) {
-        func_name = "F";
+        func_namewhat = "global";
     }
 
     const force_c_what = level_arg != null and
@@ -613,7 +662,8 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const name_key = try vm.gc().allocString("name");
                 try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
                 const namewhat_key = try vm.gc().allocString("namewhat");
-                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString("global")));
+                const nw = func_namewhat orelse "global";
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
             }
         }
 
@@ -625,10 +675,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             const source_key = try vm.gc().allocString("source");
             try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));
             const short_src_key = try vm.gc().allocString("short_src");
-            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString(src)));
+            const short_src = try allocShortSource(vm, src);
+            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(short_src));
             const first_line: i64 = if (proto.lineinfo.len > 0) @intCast(proto.lineinfo[0]) else 0;
             var linedefined: i64 = if (first_line > 0) first_line - 1 else 0;
-            const lastlinedefined: i64 = if (proto.lineinfo.len > 0)
+            var lastlinedefined: i64 = if (proto.lineinfo.len > 0)
                 @intCast(proto.lineinfo[proto.lineinfo.len - 1])
             else
                 0;
@@ -641,6 +692,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                             defer vm.gc().allocator.free(content);
                             var lines = std.mem.splitScalar(u8, content, '\n');
                             var line_no: i64 = 1;
+                            var found_decl_line: ?i64 = null;
                             var fn_pat_buf: [160]u8 = undefined;
                             var lfn_pat_buf: [176]u8 = undefined;
                             const fn_pat = std.fmt.bufPrint(&fn_pat_buf, "function {s}", .{fname}) catch "";
@@ -651,12 +703,30 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                                     (lfn_pat.len > 0 and std.mem.startsWith(u8, t, lfn_pat)))
                                 {
                                     linedefined = line_no;
+                                    found_decl_line = line_no;
                                     break;
+                                }
+                            }
+                            if (found_decl_line) |decl| {
+                                if (findFunctionEndLine(content, decl)) |end_line| {
+                                    lastlinedefined = end_line;
                                 }
                             }
                         } else |_| {}
                     } else |_| {}
                 }
+            }
+            if (src.len > 1 and src[0] == '@' and linedefined > 0) {
+                const path = src[1..];
+                if (std.fs.cwd().openFile(path, .{})) |file| {
+                    defer file.close();
+                    if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
+                        defer vm.gc().allocator.free(content);
+                        if (findFunctionEndLine(content, linedefined)) |end_line| {
+                            lastlinedefined = end_line;
+                        }
+                    } else |_| {}
+                } else |_| {}
             }
             const linedefined_key = try vm.gc().allocString("linedefined");
             try result_table.set(TValue.fromString(linedefined_key), .{ .integer = linedefined });
@@ -686,6 +756,80 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         if (want_func) {
             const func_key = try vm.gc().allocString("func");
             try result_table.set(TValue.fromString(func_key), TValue.fromClosure(closure));
+        }
+
+        if (want_activelines) {
+            const act_tbl = try vm.gc().allocTable();
+            if (proto.lineinfo.len > 0) {
+                for (proto.lineinfo) |ln| {
+                    if (ln > 0) {
+                        try act_tbl.set(.{ .integer = @intCast(ln) }, .{ .boolean = true });
+                    }
+                }
+            }
+            const act_key = try vm.gc().allocString("activelines");
+            try result_table.set(TValue.fromString(act_key), TValue.fromTable(act_tbl));
+        }
+    } else if (target_native) |nc| {
+        if (want_name and func_name == null) {
+            var it = vm.globals().hash_part.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const value = entry.value_ptr.*;
+                const value_nc = value.asNativeClosure() orelse continue;
+                if (value_nc != nc) continue;
+                const key_str = key.asString() orelse continue;
+                func_name = key_str.asSlice();
+                break;
+            }
+            if (func_name) |name| {
+                const name_key = try vm.gc().allocString("name");
+                try result_table.set(TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
+                const namewhat_key = try vm.gc().allocString("namewhat");
+                const nw = func_namewhat orelse "global";
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
+            }
+        }
+
+        if (want_source) {
+            const what_key = try vm.gc().allocString("what");
+            try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("C")));
+            const source_key = try vm.gc().allocString("source");
+            try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString("[C]")));
+            const short_src_key = try vm.gc().allocString("short_src");
+            try result_table.set(TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString("[C]")));
+            const linedefined_key = try vm.gc().allocString("linedefined");
+            try result_table.set(TValue.fromString(linedefined_key), .{ .integer = -1 });
+            const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
+            try result_table.set(TValue.fromString(lastlinedefined_key), .{ .integer = -1 });
+        }
+
+        if (want_line) {
+            const currentline_key = try vm.gc().allocString("currentline");
+            try result_table.set(TValue.fromString(currentline_key), .{ .integer = -1 });
+        }
+
+        if (want_tailcall) {
+            const istailcall_key = try vm.gc().allocString("istailcall");
+            try result_table.set(TValue.fromString(istailcall_key), .{ .boolean = false });
+        }
+
+        if (want_upvalue) {
+            const nups_key = try vm.gc().allocString("nups");
+            const nups_val: i64 = switch (nc.func.id) {
+                .string_gmatch_iterator => 1,
+                else => 0,
+            };
+            try result_table.set(TValue.fromString(nups_key), .{ .integer = nups_val });
+            const nparams_key = try vm.gc().allocString("nparams");
+            try result_table.set(TValue.fromString(nparams_key), .{ .integer = 0 });
+            const isvararg_key = try vm.gc().allocString("isvararg");
+            try result_table.set(TValue.fromString(isvararg_key), .{ .boolean = true });
+        }
+
+        if (want_func) {
+            const func_key = try vm.gc().allocString("func");
+            try result_table.set(TValue.fromString(func_key), TValue.fromNativeClosure(nc));
         }
     }
 
@@ -743,6 +887,82 @@ fn extractDeclaredFunctionName(line: []const u8) ?[]const u8 {
     const name = full[start..];
     if (name.len == 0 or !isIdentStart(name[0])) return null;
     return name;
+}
+
+fn findFunctionEndLine(source: []const u8, decl_line: i64) ?i64 {
+    if (decl_line <= 0) return null;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_no: i64 = 1;
+    var depth: i64 = 0;
+    while (lines.next()) |line| : (line_no += 1) {
+        if (line_no < decl_line) continue;
+
+        const comment_idx = std.mem.indexOf(u8, line, "--") orelse line.len;
+        const code = line[0..comment_idx];
+
+        var i: usize = 0;
+        while (i < code.len) {
+            if (!isIdentStart(code[i])) {
+                i += 1;
+                continue;
+            }
+            const start = i;
+            i += 1;
+            while (i < code.len and isIdentPart(code[i])) : (i += 1) {}
+            const tok = code[start..i];
+
+            if (std.mem.eql(u8, tok, "function") or
+                std.mem.eql(u8, tok, "if") or
+                std.mem.eql(u8, tok, "for") or
+                std.mem.eql(u8, tok, "while") or
+                std.mem.eql(u8, tok, "do") or
+                std.mem.eql(u8, tok, "repeat"))
+            {
+                depth += 1;
+            } else if (std.mem.eql(u8, tok, "end") or std.mem.eql(u8, tok, "until")) {
+                depth -= 1;
+                if (depth == 0) return line_no;
+            }
+        }
+    }
+    return null;
+}
+
+fn allocShortSource(vm: *VM, src: []const u8) !*object.StringObject {
+    if (src.len > 0 and src[0] == '@') {
+        const path = src[1..];
+        if (path.len <= 60) return vm.gc().allocString(path);
+        const tail_len: usize = 57;
+        const start = path.len - @min(path.len, tail_len);
+        const out = try std.fmt.allocPrint(vm.gc().allocator, "...{s}", .{path[start..]});
+        defer vm.gc().allocator.free(out);
+        return vm.gc().allocString(out);
+    }
+
+    if (src.len > 0 and src[0] == '=') {
+        const name = src[1..];
+        if (name.len <= 60) return vm.gc().allocString(name);
+        return vm.gc().allocString(name[0..60]);
+    }
+
+    const body0: []const u8 = if (std.mem.eql(u8, src, "?")) "" else src;
+    const nl_idx = std.mem.indexOfScalar(u8, body0, '\n');
+    const has_nl = nl_idx != null;
+    const first_line = if (nl_idx) |idx| body0[0..idx] else body0;
+    var content = first_line;
+    var ellipsis = false;
+    if (content.len > 60) {
+        content = content[0..60];
+        ellipsis = true;
+    }
+    if (has_nl) ellipsis = true;
+
+    const out = if (ellipsis)
+        try std.fmt.allocPrint(vm.gc().allocator, "[string \"{s}...\"]", .{content})
+    else
+        try std.fmt.allocPrint(vm.gc().allocator, "[string \"{s}\"]", .{content});
+    defer vm.gc().allocator.free(out);
+    return vm.gc().allocString(out);
 }
 
 /// debug.getlocal([thread,] f, local) - Returns name and value of local variable
