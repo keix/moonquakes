@@ -1811,14 +1811,8 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
         n
     else if (vm.close_metamethod_depth > 0)
         "close"
-    else blk: {
-        if (vm.ci) |ci| {
-            if (ci.closure) |clo| {
-                if (vm.debugInferFunctionNameAtLevel(1, clo)) |n| break :blk n;
-            }
-        }
-        break :blk null;
-    };
+    else
+        null;
     const saved_name_override = vm.hook_name_override;
     const saved_top = vm.top;
     const saved_in_hook = vm.in_hook;

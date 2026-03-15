@@ -20,10 +20,29 @@ pub const CLI = struct {
 
     pub fn run(self: *CLI, args: []const [:0]const u8) !void {
         if (args.len < 2) {
-            // No arguments - start REPL
-            var repl = try REPL.init(self.allocator);
-            defer repl.deinit();
-            try repl.run();
+            // No arguments:
+            // - interactive stdin => REPL
+            // - redirected stdin  => run stdin as a chunk
+            if (std.posix.isatty(std.posix.STDIN_FILENO)) {
+                var repl = try REPL.init(self.allocator);
+                defer repl.deinit();
+                try repl.run();
+            } else {
+                const stdin = std.fs.File.stdin();
+                const source = try stdin.readToEndAlloc(self.allocator, std.math.maxInt(usize));
+                defer self.allocator.free(source);
+
+                var result = launcher.run(self.allocator, source, .{
+                    .exec_name = args[0],
+                    .script_name = "=stdin",
+                    .args = &.{},
+                }) catch |err| switch (err) {
+                    error.LuaException => std.process.exit(1),
+                    error.CompileFailed => std.process.exit(1),
+                    else => return err,
+                };
+                result.deinit(self.allocator);
+            }
             return;
         }
 
@@ -53,6 +72,29 @@ pub const CLI = struct {
             var result = launcher.run(self.allocator, chunk, .{
                 .exec_name = args[0],
                 .script_name = "(command line)",
+                .args = script_args,
+            }) catch |err| switch (err) {
+                error.LuaException => std.process.exit(1),
+                error.CompileFailed => std.process.exit(1),
+                else => return err,
+            };
+            result.deinit(self.allocator);
+            return;
+        }
+
+        if (std.mem.eql(u8, arg, "-")) {
+            const stdin = std.fs.File.stdin();
+            const source = try stdin.readToEndAlloc(self.allocator, std.math.maxInt(usize));
+            defer self.allocator.free(source);
+
+            const script_args: []const []const u8 = if (args.len > 2)
+                @as([]const []const u8, @ptrCast(args[2..]))
+            else
+                &.{};
+
+            var result = launcher.run(self.allocator, source, .{
+                .exec_name = args[0],
+                .script_name = "=stdin",
                 .args = script_args,
             }) catch |err| switch (err) {
                 error.LuaException => std.process.exit(1),

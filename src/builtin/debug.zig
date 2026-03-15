@@ -435,6 +435,41 @@ fn inferNameFromCallerSource(vm: *VM, level: i64, storage: *[96]u8) ?InferredCal
     return null;
 }
 
+fn callerBindsNameToClosure(vm: *VM, level: i64, target: *ClosureObject, name: []const u8) bool {
+    const caller = getCallInfoAtLevel(vm, level + 1) orelse return false;
+
+    var r: usize = 0;
+    while (r < caller.func.local_reg_names.len) : (r += 1) {
+        const local_name = caller.func.local_reg_names[r] orelse continue;
+        if (!std.mem.eql(u8, local_name, name)) continue;
+        const stack_pos = caller.base + @as(u32, @intCast(r));
+        if (stack_pos >= vm.stack.len) continue;
+        const clo = vm.stack[stack_pos].asClosure() orelse continue;
+        if (clo == target) return true;
+    }
+    return false;
+}
+
+fn isConsistentLevelName(vm: *VM, level: i64, target: *ClosureObject, name: []const u8, namewhat: []const u8) bool {
+    if (std.mem.eql(u8, namewhat, "local")) {
+        return callerBindsNameToClosure(vm, level, target, name);
+    }
+    if (std.mem.eql(u8, namewhat, "global")) {
+        const key_obj = vm.gc().allocString(name) catch return false;
+        if (vm.globals().get(TValue.fromString(key_obj))) |val| {
+            if (val.asClosure()) |clo| return clo == target;
+        }
+        return false;
+    }
+    if (std.mem.eql(u8, namewhat, "field") or std.mem.eql(u8, namewhat, "method")) {
+        return if (inferFieldNameAtLevel(vm, level, target)) |n|
+            std.mem.eql(u8, n, name)
+        else
+            false;
+    }
+    return true;
+}
+
 /// Lua 5.4 Debug Library
 /// Corresponds to Lua manual chapter "The Debug Library"
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.10
@@ -758,6 +793,12 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         is_main_chunk = frame_info.is_main;
         if (frame_info.debug_name) |n| func_name = n;
         if (frame_info.debug_namewhat) |nw| func_namewhat = nw;
+        if (func_name != null and func_namewhat != null and target_closure != null and level_arg != null and !(vm.in_hook and vm.hook_name_override != null)) {
+            if (!isConsistentLevelName(vm, level_arg.?, target_closure.?, func_name.?, func_namewhat.?)) {
+                func_name = null;
+                func_namewhat = null;
+            }
+        }
 
         // Try to get function name from the caller's call site
         // This is complex - would require analyzing the calling code's bytecode
@@ -777,7 +818,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         func_namewhat = "hook";
     }
 
-    if (want_name and func_name == null and level_arg != null and level_arg.? == 2) {
+    if (want_name and level_arg != null and level_arg.? >= 2) {
         if (vm.hook_name_override) |override| {
             func_name = override;
             func_namewhat = "global";
@@ -798,13 +839,15 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             if (func_name == null) {
                 func_name = info.name;
                 func_namewhat = info.namewhat;
-            } else if (func_namewhat != null and std.mem.eql(u8, func_namewhat.?, "local") and !std.mem.eql(u8, func_name.?, info.name)) {
+            } else if (target_closure != null and
+                func_namewhat != null and
+                std.mem.eql(u8, func_namewhat.?, "local") and
+                !std.mem.eql(u8, func_name.?, info.name) and
+                std.mem.eql(u8, info.namewhat, "local") and
+                callerBindsNameToClosure(vm, level_arg.?, target_closure.?, info.name))
+            {
                 // Register-name metadata can be stale after scope/register reuse.
-                // Prefer caller-source callsite when both disagree.
-                func_name = info.name;
-                func_namewhat = info.namewhat;
-            } else if (func_namewhat != null and !std.mem.eql(u8, func_namewhat.?, "local") and std.mem.eql(u8, info.namewhat, "local")) {
-                // If source indicates a plain call, prefer it over table-key heuristics.
+                // Prefer caller-source callsite only when it resolves to the same closure.
                 func_name = info.name;
                 func_namewhat = info.namewhat;
             }
@@ -825,7 +868,18 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         }
     }
 
-    if (want_name and level_arg != null and level_arg.? == 2 and vm.in_hook and target_closure != null) {
+    if (want_name and target_closure != null and func_name != null and
+        (std.mem.eql(u8, func_name.?, "assert") or
+            std.mem.eql(u8, func_name.?, "getinfo") or
+            std.mem.eql(u8, func_name.?, "co")))
+    {
+        if (inferDeclaredNameForClosure(vm, target_closure.?, &inferred_name_storage)) |decl_name| {
+            func_name = decl_name;
+            func_namewhat = "local";
+        }
+    }
+
+    if (want_name and level_arg != null and level_arg.? == 2 and vm.in_hook and vm.hook_name_override == null and target_closure != null) {
         if (inferDeclaredNameForClosure(vm, target_closure.?, &inferred_name_storage)) |decl_name| {
             func_name = decl_name;
             func_namewhat = "local";
@@ -1458,12 +1512,13 @@ fn shouldSkipUnnamedDuplicateSlot(target_vm: *VM, ci: *const CallInfo, reg: u32)
 fn mapLocalOrdinalToRegister(target_vm: *VM, ci: *const CallInfo, local_idx: u32, restrict_outer_temporaries: bool) ?u32 {
     var ordinal: u32 = 0;
     var unnamed_after_params: u32 = 0;
+    const has_tbc_state = ci.getHighestTBC(0) != null;
     var reg: u32 = 0;
     while (reg < ci.func.maxstacksize) : (reg += 1) {
         if (shouldSkipUnnamedDuplicateSlot(target_vm, ci, reg)) continue;
         const reg_idx: usize = @intCast(reg);
         const has_name = reg_idx < ci.func.local_reg_names.len and ci.func.local_reg_names[reg_idx] != null;
-        if (restrict_outer_temporaries and !has_name and reg >= ci.func.numparams) {
+        if (restrict_outer_temporaries and !has_name and reg >= ci.func.numparams and !has_tbc_state) {
             if (unnamed_after_params >= 1) continue;
             unnamed_after_params += 1;
         }
@@ -1544,14 +1599,6 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             }
         }
 
-        if (@as(u64, @intCast(level)) > target_vm.callstack_size) {
-            if (vm.in_hook) {
-                writeGetlocalNilResult(vm, func_reg, nresults);
-                return;
-            }
-            return vm.raiseString("bad argument to 'getlocal' (level out of range)");
-        }
-
         // Lua compatibility: level 0 inspects debug.getlocal's own C args.
         if (level == 0) {
             if (local_int < 1 or @as(u32, @intCast(local_int)) > nargs - arg_off) {
@@ -1564,9 +1611,15 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             return;
         }
 
+        const ci = getCallInfoAtLevel(target_vm, level) orelse {
+            if (vm.in_hook) {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
+            }
+            return vm.raiseString("bad argument to 'getlocal' (level out of range)");
+        };
+
         const ulevel: usize = @intCast(level);
-        const stack_idx = target_vm.callstack_size - ulevel;
-        const ci = &target_vm.callstack[stack_idx];
 
         if (local_int > 0) {
             const local_idx: usize = @intCast(local_int - 1);
@@ -2039,20 +2092,16 @@ pub fn nativeDebugSetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         return vm.raiseString("bad argument to 'setlocal' (level out of range)");
     }
 
-    const ulevel: usize = @intCast(level);
-    if (ulevel > target_vm.callstack_size) {
-        return vm.raiseString("bad argument to 'setlocal' (level out of range)");
-    }
-
     // Get local index (1-based, negative for vararg)
     const local_int = local_arg.toInteger() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     };
 
-    // Get the call frame at that level
-    const stack_idx = target_vm.callstack_size - ulevel;
-    const ci = &target_vm.callstack[stack_idx];
+    const ci = getCallInfoAtLevel(target_vm, level) orelse {
+        return vm.raiseString("bad argument to 'setlocal' (level out of range)");
+    };
+    const ulevel: usize = @intCast(level);
 
     if (local_int > 0) {
         const local_idx: usize = @intCast(local_int - 1);

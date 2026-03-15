@@ -18,6 +18,24 @@ const pipeline = @import("compiler/pipeline.zig");
 const owned = @import("runtime/owned.zig");
 pub const OwnedReturnValue = owned.OwnedReturnValue;
 
+fn stripUtf8Bom(bytes: []const u8) []const u8 {
+    if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
+        return bytes[3..];
+    }
+    return bytes;
+}
+
+fn stripInitialHashLine(bytes: []const u8, preserve_newline: bool) []const u8 {
+    if (bytes.len == 0 or bytes[0] != '#') return bytes;
+    var i: usize = 0;
+    while (i < bytes.len and bytes[i] != '\n' and bytes[i] != '\r') : (i += 1) {}
+    if (i >= bytes.len) return "";
+    if (bytes[i] == '\r' and i + 1 < bytes.len and bytes[i + 1] == '\n') {
+        return if (preserve_newline) bytes[i + 1 ..] else bytes[i + 2 ..];
+    }
+    return if (preserve_newline) bytes[i..] else bytes[i + 1 ..];
+}
+
 /// Execution options for script launch
 pub const RunOptions = struct {
     /// Executable name/path (becomes arg[-1] in CLI convention)
@@ -64,6 +82,9 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     defer if (source_name_buf) |buf| allocator.free(buf);
 
     const source_name: []const u8 = if (options.script_name.len > 0) blk: {
+        if (options.script_name[0] == '@' or options.script_name[0] == '=') {
+            break :blk options.script_name;
+        }
         source_name_buf = try std.fmt.allocPrint(allocator, "@{s}", .{options.script_name});
         break :blk source_name_buf.?;
     } else "[string]";
@@ -129,5 +150,6 @@ pub fn runFile(allocator: std.mem.Allocator, file_path: []const u8, options: Run
         opts.script_name = file_path;
     }
 
-    return run(allocator, source, opts);
+    const chunk_source = stripInitialHashLine(stripUtf8Bom(source), true);
+    return run(allocator, chunk_source, opts);
 }
