@@ -19,7 +19,14 @@ pub const CLI = struct {
     }
 
     pub fn run(self: *CLI, args: []const [:0]const u8) !void {
-        if (args.len < 2) {
+        var arg_index: usize = 1;
+        var ignore_environment = false;
+        if (args.len > 1 and std.mem.eql(u8, args[1], "-E")) {
+            ignore_environment = true;
+            arg_index = 2;
+        }
+
+        if (args.len <= arg_index) {
             // No arguments:
             // - interactive stdin => REPL
             // - redirected stdin  => run stdin as a chunk
@@ -36,6 +43,7 @@ pub const CLI = struct {
                     .exec_name = args[0],
                     .script_name = "=stdin",
                     .args = &.{},
+                    .ignore_environment = ignore_environment,
                 }) catch |err| switch (err) {
                     error.LuaException => std.process.exit(1),
                     error.CompileFailed => std.process.exit(1),
@@ -46,7 +54,7 @@ pub const CLI = struct {
             return;
         }
 
-        const arg = args[1];
+        const arg = args[arg_index];
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             try self.printVersion();
             return;
@@ -57,15 +65,15 @@ pub const CLI = struct {
         }
 
         if (std.mem.eql(u8, arg, "-e")) {
-            if (args.len < 3) {
+            if (args.len <= arg_index + 1) {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
                 try stderr.print("Error: '-e' expects a chunk argument\n", .{});
                 std.process.exit(1);
             }
-            const chunk = args[2];
-            const script_args: []const []const u8 = if (args.len > 3)
-                @as([]const []const u8, @ptrCast(args[3..]))
+            const chunk = args[arg_index + 1];
+            const script_args: []const []const u8 = if (args.len > arg_index + 2)
+                @as([]const []const u8, @ptrCast(args[arg_index + 2 ..]))
             else
                 &.{};
 
@@ -73,6 +81,7 @@ pub const CLI = struct {
                 .exec_name = args[0],
                 .script_name = "(command line)",
                 .args = script_args,
+                .ignore_environment = ignore_environment,
             }) catch |err| switch (err) {
                 error.LuaException => std.process.exit(1),
                 error.CompileFailed => std.process.exit(1),
@@ -87,8 +96,8 @@ pub const CLI = struct {
             const source = try stdin.readToEndAlloc(self.allocator, std.math.maxInt(usize));
             defer self.allocator.free(source);
 
-            const script_args: []const []const u8 = if (args.len > 2)
-                @as([]const []const u8, @ptrCast(args[2..]))
+            const script_args: []const []const u8 = if (args.len > arg_index + 1)
+                @as([]const []const u8, @ptrCast(args[arg_index + 1 ..]))
             else
                 &.{};
 
@@ -96,6 +105,7 @@ pub const CLI = struct {
                 .exec_name = args[0],
                 .script_name = "=stdin",
                 .args = script_args,
+                .ignore_environment = ignore_environment,
             }) catch |err| switch (err) {
                 error.LuaException => std.process.exit(1),
                 error.CompileFailed => std.process.exit(1),
@@ -105,12 +115,44 @@ pub const CLI = struct {
             return;
         }
 
-        const file_path = arg;
+        var preload_modules = std.ArrayList([]const u8){};
+        defer preload_modules.deinit(self.allocator);
+
+        var script_index = arg_index;
+        while (script_index < args.len) {
+            const opt = args[script_index];
+            if (std.mem.eql(u8, opt, "-l")) {
+                if (script_index + 1 >= args.len) {
+                    var stderr_writer = std.fs.File.stderr().writer(&.{});
+                    const stderr = &stderr_writer.interface;
+                    try stderr.print("Error: '-l' expects a module name\n", .{});
+                    std.process.exit(1);
+                }
+                try preload_modules.append(self.allocator, args[script_index + 1]);
+                script_index += 2;
+                continue;
+            }
+            if (opt.len > 2 and opt[0] == '-' and opt[1] == 'l') {
+                try preload_modules.append(self.allocator, opt[2..]);
+                script_index += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (script_index >= args.len) {
+            var stderr_writer = std.fs.File.stderr().writer(&.{});
+            const stderr = &stderr_writer.interface;
+            try stderr.print("Error: no script provided\n", .{});
+            std.process.exit(1);
+        }
+
+        const file_path = args[script_index];
 
         // Collect script arguments (args after the script file)
         // args[0] = interpreter, args[1] = script, args[2..] = script args
-        const script_args: []const []const u8 = if (args.len > 2)
-            @as([]const []const u8, @ptrCast(args[2..]))
+        const script_args: []const []const u8 = if (args.len > script_index + 1)
+            @as([]const []const u8, @ptrCast(args[script_index + 1 ..]))
         else
             &.{};
 
@@ -119,6 +161,8 @@ pub const CLI = struct {
             .exec_name = args[0],
             .script_name = file_path,
             .args = script_args,
+            .ignore_environment = ignore_environment,
+            .preload_modules = preload_modules.items,
         }) catch |err| switch (err) {
             error.FileNotFound => {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
