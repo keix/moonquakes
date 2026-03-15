@@ -232,23 +232,206 @@ fn getCallInfoAtLevel(vm: *VM, level: i64) ?*const CallInfo {
     return ci_opt;
 }
 
+fn inferFieldNameInTable(tbl: *object.TableObject, target: *ClosureObject) ?[]const u8 {
+    var it = tbl.hash_part.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        const clo = value.asClosure() orelse continue;
+        if (clo != target) continue;
+        const key_str = key.asString() orelse continue;
+        return key_str.asSlice();
+    }
+    return null;
+}
+
 fn inferFieldNameAtLevel(vm: *VM, level: i64, target: *ClosureObject) ?[]const u8 {
     const caller = getCallInfoAtLevel(vm, level + 1) orelse return null;
+
     var r: usize = 0;
     while (r < caller.func.maxstacksize) : (r += 1) {
         const stack_pos = caller.base + @as(u32, @intCast(r));
         if (stack_pos >= vm.stack.len) break;
         const tbl = vm.stack[stack_pos].asTable() orelse continue;
-        var it = tbl.hash_part.iterator();
-        while (it.next()) |entry| {
-            const key = entry.key_ptr.*;
-            const value = entry.value_ptr.*;
-            const clo = value.asClosure() orelse continue;
-            if (clo != target) continue;
-            const key_str = key.asString() orelse continue;
-            return key_str.asSlice();
+        if (inferFieldNameInTable(tbl, target)) |name| return name;
+    }
+
+    if (caller.closure) |caller_closure| {
+        for (caller_closure.upvalues, 0..) |upv, i| {
+            if (i < caller_closure.proto.upvalues.len) {
+                if (caller_closure.proto.upvalues[i].name) |upname| {
+                    if (std.mem.eql(u8, upname, "_ENV")) continue;
+                }
+            }
+            const tbl = upv.location.*.asTable() orelse continue;
+            if (inferFieldNameInTable(tbl, target)) |name| return name;
         }
     }
+
+    return null;
+}
+
+fn isKeyword(ident: []const u8) bool {
+    return std.mem.eql(u8, ident, "and") or
+        std.mem.eql(u8, ident, "break") or
+        std.mem.eql(u8, ident, "do") or
+        std.mem.eql(u8, ident, "else") or
+        std.mem.eql(u8, ident, "elseif") or
+        std.mem.eql(u8, ident, "end") or
+        std.mem.eql(u8, ident, "false") or
+        std.mem.eql(u8, ident, "for") or
+        std.mem.eql(u8, ident, "function") or
+        std.mem.eql(u8, ident, "goto") or
+        std.mem.eql(u8, ident, "if") or
+        std.mem.eql(u8, ident, "in") or
+        std.mem.eql(u8, ident, "local") or
+        std.mem.eql(u8, ident, "nil") or
+        std.mem.eql(u8, ident, "not") or
+        std.mem.eql(u8, ident, "or") or
+        std.mem.eql(u8, ident, "repeat") or
+        std.mem.eql(u8, ident, "return") or
+        std.mem.eql(u8, ident, "then") or
+        std.mem.eql(u8, ident, "true") or
+        std.mem.eql(u8, ident, "until") or
+        std.mem.eql(u8, ident, "while");
+}
+
+fn currentLineForCallInfo(ci: *const CallInfo) i64 {
+    const proto = ci.func;
+    if (proto.code.len == 0 or proto.lineinfo.len == 0) return -1;
+
+    const pc_ptr = @intFromPtr(ci.pc);
+    const code_ptr = @intFromPtr(proto.code.ptr);
+    if (pc_ptr < code_ptr) return -1;
+
+    const pc_off_bytes = pc_ptr - code_ptr;
+    const pc_off_instr: usize = @intCast(pc_off_bytes / @sizeOf(@TypeOf(proto.code[0])));
+    const idx = if (pc_off_instr > 0) pc_off_instr - 1 else pc_off_instr;
+    const safe_idx = @min(idx, proto.lineinfo.len - 1);
+    return @intCast(proto.lineinfo[safe_idx]);
+}
+
+fn currentPcIndexForCallInfo(ci: *const CallInfo) i32 {
+    const proto = ci.func;
+    if (proto.code.len == 0) return -1;
+
+    const pc_ptr = @intFromPtr(ci.pc);
+    const code_ptr = @intFromPtr(proto.code.ptr);
+    if (pc_ptr < code_ptr) return -1;
+
+    const pc_off_bytes = pc_ptr - code_ptr;
+    const pc_off_instr: usize = @intCast(pc_off_bytes / @sizeOf(@TypeOf(proto.code[0])));
+    const idx: usize = if (pc_off_instr > 0) pc_off_instr - 1 else pc_off_instr;
+    return @intCast(idx);
+}
+
+const InferredCallName = struct {
+    name: []const u8,
+    namewhat: []const u8,
+};
+
+fn inferNameFromCallLine(call_line: []const u8) ?InferredCallName {
+    var last_field: ?[]const u8 = null;
+    var last_field_kind: []const u8 = "field";
+    var i: usize = 0;
+    while (i < call_line.len) : (i += 1) {
+        const sep = call_line[i];
+        if (sep != '.' and sep != ':') continue;
+        var j = i + 1;
+        while (j < call_line.len and (call_line[j] == ' ' or call_line[j] == '\t')) : (j += 1) {}
+        if (j >= call_line.len or !isIdentStart(call_line[j])) continue;
+        var k = j + 1;
+        while (k < call_line.len and isIdentPart(call_line[k])) : (k += 1) {}
+        var h = k;
+        while (h < call_line.len and (call_line[h] == ' ' or call_line[h] == '\t')) : (h += 1) {}
+        if (h < call_line.len and call_line[h] == '(') {
+            last_field = call_line[j..k];
+            last_field_kind = if (sep == ':') "method" else "field";
+        }
+        i = k;
+    }
+
+    if (last_field) |name| {
+        return .{ .name = name, .namewhat = last_field_kind };
+    }
+
+    var last_plain: ?[]const u8 = null;
+    i = 0;
+    while (i < call_line.len) {
+        if (!isIdentStart(call_line[i])) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < call_line.len and isIdentPart(call_line[i])) : (i += 1) {}
+        const ident = call_line[start..i];
+        if (isKeyword(ident)) continue;
+
+        var h = i;
+        while (h < call_line.len and (call_line[h] == ' ' or call_line[h] == '\t')) : (h += 1) {}
+        if (h >= call_line.len or call_line[h] != '(') continue;
+
+        var p = start;
+        while (p > 0) {
+            const c = call_line[p - 1];
+            if (c == ' ' or c == '\t') {
+                p -= 1;
+                continue;
+            }
+            if (c == '.' or c == ':') break;
+            last_plain = ident;
+            break;
+        } else {
+            last_plain = ident;
+        }
+    }
+
+    if (last_plain) |name| {
+        return .{ .name = name, .namewhat = "local" };
+    }
+
+    return null;
+}
+
+fn inferNameFromCallerSource(vm: *VM, level: i64, storage: *[96]u8) ?InferredCallName {
+    const caller = getCallInfoAtLevel(vm, level + 1) orelse return null;
+    const source = caller.func.source;
+    if (!(source.len > 1 and source[0] == '@')) return null;
+
+    const line_no = currentLineForCallInfo(caller);
+    if (line_no <= 0) return null;
+
+    const path = source[1..];
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+
+    const content = file.readToEndAlloc(vm.gc().allocator, 256 * 1024) catch return null;
+    defer vm.gc().allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var n: i64 = 1;
+    var recent: [6][]const u8 = [_][]const u8{""} ** 6;
+    var recent_len: usize = 0;
+    while (lines.next()) |ln| : (n += 1) {
+        recent[recent_len % recent.len] = ln;
+        recent_len += 1;
+        if (n >= line_no) break;
+    }
+
+    const lookback = @min(recent_len, recent.len);
+    var back: usize = 0;
+    while (back < lookback) : (back += 1) {
+        const idx = (recent_len - 1 - back) % recent.len;
+        const ln = recent[idx];
+        if (inferNameFromCallLine(ln)) |info| {
+            if (info.name.len > 0 and info.name.len <= storage.len) {
+                @memcpy(storage[0..info.name.len], info.name);
+                return .{ .name = storage[0..info.name.len], .namewhat = info.namewhat };
+            }
+        }
+    }
+
     return null;
 }
 
@@ -410,30 +593,32 @@ fn printValue(writer: anytype, val: TValue) !void {
 /// debug.gethook([thread]) - Returns current hook settings
 /// Returns: hook function, mask string, count
 pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nargs;
+    var target_vm: *VM = vm;
+    if (nargs >= 1) {
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+        }
+    }
+    const want_all = (nresults == 0);
 
     // Return hook function (or nil)
-    if (nresults > 0) {
-        if (vm.hook_func) |hook| {
-            vm.stack[vm.base + func_reg] = TValue.fromClosure(hook);
-        } else {
-            vm.stack[vm.base + func_reg] = TValue.nil;
-        }
+    if (nresults > 0 or want_all) {
+        vm.stack[vm.base + func_reg] = target_vm.hook_func_value;
     }
 
     // Return mask string
-    if (nresults > 1) {
+    if (nresults > 1 or want_all) {
         var mask_buf: [4]u8 = undefined;
         var pos: usize = 0;
-        if (vm.hook_mask & 1 != 0) {
+        if (target_vm.hook_mask & 1 != 0) {
             mask_buf[pos] = 'c';
             pos += 1;
         }
-        if (vm.hook_mask & 2 != 0) {
+        if (target_vm.hook_mask & 2 != 0) {
             mask_buf[pos] = 'r';
             pos += 1;
         }
-        if (vm.hook_mask & 4 != 0) {
+        if (target_vm.hook_mask & 4 != 0) {
             mask_buf[pos] = 'l';
             pos += 1;
         }
@@ -441,8 +626,11 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     // Return count
-    if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(vm.hook_count) };
+    if (nresults > 2 or want_all) {
+        vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(target_vm.hook_count) };
+    }
+    if (want_all) {
+        vm.top = vm.base + func_reg + 3;
     }
 }
 
@@ -466,13 +654,22 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nresults == 0) return;
 
+    var target_vm: *VM = vm;
+    var arg_off: u32 = 0;
+    if (nargs >= 1) {
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+            arg_off = 1;
+        }
+    }
+
     // Parse first argument (f)
-    if (nargs < 1) {
+    if (nargs < 1 + arg_off) {
         vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
 
-    const f_arg = vm.stack[vm.base + func_reg + 1];
+    const f_arg = vm.stack[vm.base + func_reg + 1 + arg_off];
 
     // Parse what argument (optional, default to "flnStu")
     var want_name = true;
@@ -482,9 +679,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     var want_upvalue = true;
     var want_func = true;
     var want_activelines = false;
+    var want_transfer = false;
 
-    if (nargs >= 2) {
-        const what_arg = vm.stack[vm.base + func_reg + 2];
+    if (nargs >= 2 + arg_off) {
+        const what_arg = vm.stack[vm.base + func_reg + 2 + arg_off];
         if (what_arg.asString()) |what_str| {
             want_name = false;
             want_source = false;
@@ -493,6 +691,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             want_upvalue = false;
             want_func = false;
             want_activelines = false;
+            want_transfer = false;
             for (what_str.asSlice()) |c| {
                 switch (c) {
                     'n' => want_name = true,
@@ -502,7 +701,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                     'u' => want_upvalue = true,
                     'f' => want_func = true,
                     'L' => want_activelines = true,
-                    'r' => {},
+                    'r' => want_transfer = true,
                     else => {},
                 }
             }
@@ -523,6 +722,8 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     var func_namewhat: ?[]const u8 = null;
     var inferred_name_storage: [96]u8 = undefined;
     var level_arg: ?i64 = null;
+    var is_tailcall: bool = false;
+    var is_main_chunk: bool = false;
 
     if (f_arg.toInteger()) |level| {
         level_arg = level;
@@ -547,12 +748,16 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             return;
         }
 
-        const frame_info = vm.debugGetFrameInfoAtLevel(level) orelse {
+        const frame_info = target_vm.debugGetFrameInfoAtLevel(level) orelse {
             vm.stack[vm.base + func_reg] = TValue.nil;
             return;
         };
         target_closure = frame_info.closure;
         current_line = frame_info.current_line;
+        is_tailcall = frame_info.istailcall;
+        is_main_chunk = frame_info.is_main;
+        if (frame_info.debug_name) |n| func_name = n;
+        if (frame_info.debug_namewhat) |nw| func_namewhat = nw;
 
         // Try to get function name from the caller's call site
         // This is complex - would require analyzing the calling code's bytecode
@@ -566,6 +771,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     } else {
         vm.stack[vm.base + func_reg] = TValue.nil;
         return;
+    }
+
+    if (want_name and level_arg != null and level_arg.? == 1 and target_closure != null and vm.hook_func != null and target_closure.? == vm.hook_func.? and vm.in_hook) {
+        func_namewhat = "hook";
     }
 
     if (want_name and func_name == null and level_arg != null and level_arg.? == 2) {
@@ -585,9 +794,24 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             func_name = n;
             func_namewhat = "field";
         }
+        if (inferNameFromCallerSource(vm, level_arg.?, &inferred_name_storage)) |info| {
+            if (func_name == null) {
+                func_name = info.name;
+                func_namewhat = info.namewhat;
+            } else if (func_namewhat != null and std.mem.eql(u8, func_namewhat.?, "local") and !std.mem.eql(u8, func_name.?, info.name)) {
+                // Register-name metadata can be stale after scope/register reuse.
+                // Prefer caller-source callsite when both disagree.
+                func_name = info.name;
+                func_namewhat = info.namewhat;
+            } else if (func_namewhat != null and !std.mem.eql(u8, func_namewhat.?, "local") and std.mem.eql(u8, info.namewhat, "local")) {
+                // If source indicates a plain call, prefer it over table-key heuristics.
+                func_name = info.name;
+                func_namewhat = info.namewhat;
+            }
+        }
     }
 
-    if (want_name and func_name == null and target_closure != null) {
+    if (want_name and func_name == null and target_closure != null and level_arg != null) {
         var it = vm.globals().hash_part.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -601,8 +825,15 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         }
     }
 
+    if (want_name and level_arg != null and level_arg.? == 2 and vm.in_hook and target_closure != null) {
+        if (inferDeclaredNameForClosure(vm, target_closure.?, &inferred_name_storage)) |decl_name| {
+            func_name = decl_name;
+            func_namewhat = "local";
+        }
+    }
+
     // Secondary fallback: infer "local function NAME" / "function NAME" from source.
-    if (want_name and func_name == null and target_closure != null and current_line > 0) {
+    if (want_name and func_name == null and target_closure != null and current_line > 0 and level_arg == null) {
         const src = target_closure.?.proto.source;
         if (src.len > 1 and src[0] == '@') {
             const path = src[1..];
@@ -646,6 +877,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         func_namewhat = "global";
     }
 
+    if (want_name and level_arg != null and level_arg.? == 1 and vm.hook_func != null and vm.in_hook) {
+        func_name = null;
+        func_namewhat = "hook";
+    }
+
     const force_c_what = level_arg != null and
         level_arg.? == 2 and
         vm.error_handling_depth > 0 and
@@ -664,25 +900,37 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const namewhat_key = try vm.gc().allocString("namewhat");
                 const nw = func_namewhat orelse "global";
                 try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
+            } else {
+                const namewhat_key = try vm.gc().allocString("namewhat");
+                const nw = func_namewhat orelse "";
+                try result_table.set(TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
             }
         }
 
         if (want_source) {
             const what_key = try vm.gc().allocString("what");
-            const what_val = if (force_c_what) "C" else "Lua";
+            const what_val = if (force_c_what) "C" else if (is_main_chunk) "main" else "Lua";
             try result_table.set(TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString(what_val)));
-            const src = if (proto.source.len > 0) proto.source else "?";
+            const src = if (proto.source.len > 0)
+                (if (std.mem.eql(u8, proto.source, "?")) "=?" else proto.source)
+            else if (proto.lineinfo.len == 0)
+                "=?"
+            else
+                "";
             const source_key = try vm.gc().allocString("source");
             try result_table.set(TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));
             const short_src_key = try vm.gc().allocString("short_src");
             const short_src = try allocShortSource(vm, src);
             try result_table.set(TValue.fromString(short_src_key), TValue.fromString(short_src));
-            const first_line: i64 = if (proto.lineinfo.len > 0) @intCast(proto.lineinfo[0]) else 0;
-            var linedefined: i64 = if (first_line > 0) first_line - 1 else 0;
             var lastlinedefined: i64 = if (proto.lineinfo.len > 0)
                 @intCast(proto.lineinfo[proto.lineinfo.len - 1])
             else
                 0;
+            const first_line: i64 = if (proto.lineinfo.len > 0) @intCast(proto.lineinfo[0]) else 0;
+            var linedefined: i64 = if (first_line > 0) first_line - 1 else 0;
+            if (proto.is_vararg and first_line > 0 and first_line == lastlinedefined) {
+                linedefined = first_line;
+            }
             if (func_name) |fname| {
                 if (src.len > 1 and src[0] == '@') {
                     const path = src[1..];
@@ -716,6 +964,33 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                     } else |_| {}
                 }
             }
+            if (func_name == null) {
+                if (src.len > 1 and src[0] == '@') {
+                    const path = src[1..];
+                    if (std.fs.cwd().openFile(path, .{})) |file| {
+                        defer file.close();
+                        if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
+                            defer vm.gc().allocator.free(content);
+                            if (findAnonymousFunctionDeclLine(content, first_line)) |decl| {
+                                linedefined = decl;
+                            }
+                        } else |_| {}
+                    } else |_| {}
+                } else if (findAnonymousFunctionDeclLine(src, first_line)) |decl| {
+                    linedefined = decl;
+                } else {
+                    // Stripped chunks have no source/line data, but Lua still
+                    // reports a positive line interval for functions.
+                    if (std.mem.eql(u8, src, "?") or std.mem.eql(u8, src, "=?")) {
+                        linedefined = 1;
+                        lastlinedefined = 1;
+                    } else {
+                        // Main chunk loaded from string source.
+                        linedefined = 0;
+                        lastlinedefined = 0;
+                    }
+                }
+            }
             if (src.len > 1 and src[0] == '@' and linedefined > 0) {
                 const path = src[1..];
                 if (std.fs.cwd().openFile(path, .{})) |file| {
@@ -741,12 +1016,14 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_tailcall) {
             const istailcall_key = try vm.gc().allocString("istailcall");
-            try result_table.set(TValue.fromString(istailcall_key), .{ .boolean = false });
+            try result_table.set(TValue.fromString(istailcall_key), .{ .boolean = is_tailcall });
         }
 
         if (want_upvalue) {
             const nups_key = try vm.gc().allocString("nups");
-            try result_table.set(TValue.fromString(nups_key), .{ .integer = @intCast(proto.upvalues.len) });
+            var reps: [256]usize = undefined;
+            const visible_nups = collectVisibleUpvalueReps(closure, &reps);
+            try result_table.set(TValue.fromString(nups_key), .{ .integer = @intCast(visible_nups) });
             const nparams_key = try vm.gc().allocString("nparams");
             try result_table.set(TValue.fromString(nparams_key), .{ .integer = @intCast(proto.numparams) });
             const isvararg_key = try vm.gc().allocString("isvararg");
@@ -758,11 +1035,19 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             try result_table.set(TValue.fromString(func_key), TValue.fromClosure(closure));
         }
 
+        if (want_transfer) {
+            const ftransfer_key = try vm.gc().allocString("ftransfer");
+            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hook_transfer_start) });
+            const ntransfer_key = try vm.gc().allocString("ntransfer");
+            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hook_transfer_count) });
+        }
+
         if (want_activelines) {
             const act_tbl = try vm.gc().allocTable();
             if (proto.lineinfo.len > 0) {
-                for (proto.lineinfo) |ln| {
+                for (proto.lineinfo, 0..) |ln, pc| {
                     if (ln > 0) {
+                        if (pc < proto.code.len and proto.code[pc].getOpCode() == .VARARGPREP) continue;
                         try act_tbl.set(.{ .integer = @intCast(ln) }, .{ .boolean = true });
                     }
                 }
@@ -830,6 +1115,13 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         if (want_func) {
             const func_key = try vm.gc().allocString("func");
             try result_table.set(TValue.fromString(func_key), TValue.fromNativeClosure(nc));
+        }
+
+        if (want_transfer) {
+            const ftransfer_key = try vm.gc().allocString("ftransfer");
+            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hook_transfer_start) });
+            const ntransfer_key = try vm.gc().allocString("ntransfer");
+            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hook_transfer_count) });
         }
     }
 
@@ -928,7 +1220,176 @@ fn findFunctionEndLine(source: []const u8, decl_line: i64) ?i64 {
     return null;
 }
 
+fn lineSliceAt(source: []const u8, target_line: i64) ?[]const u8 {
+    if (target_line <= 0) return null;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_no: i64 = 1;
+    while (lines.next()) |line| : (line_no += 1) {
+        if (line_no == target_line) return line;
+    }
+    return null;
+}
+
+fn findAnonymousFunctionDeclLine(source: []const u8, first_line: i64) ?i64 {
+    if (first_line <= 0) return null;
+    var line_no = first_line;
+    var budget: i64 = 200;
+    while (line_no > 0 and budget > 0) : ({
+        line_no -= 1;
+        budget -= 1;
+    }) {
+        const line = lineSliceAt(source, line_no) orelse continue;
+        const comment_idx = std.mem.indexOf(u8, line, "--") orelse line.len;
+        const code = std.mem.trim(u8, line[0..comment_idx], " \t\r");
+        if (code.len == 0) continue;
+        if (std.mem.indexOf(u8, code, "function") != null) {
+            return line_no;
+        }
+    }
+    return null;
+}
+
+fn inferDeclaredNameForClosure(vm: *VM, closure: *ClosureObject, storage: []u8) ?[]const u8 {
+    const src = closure.proto.source;
+    if (src.len == 0) return null;
+
+    var first_line: i64 = -1;
+    for (closure.proto.lineinfo) |ln| {
+        if (ln > 0) {
+            first_line = @intCast(ln);
+            break;
+        }
+    }
+    if (first_line <= 0) return null;
+
+    const decl_guess: i64 = if (first_line > 0) first_line - 1 else first_line;
+    const content: []const u8 = blk: {
+        if (src[0] == '@' and src.len > 1) {
+            const path = src[1..];
+            if (std.fs.cwd().openFile(path, .{})) |file| {
+                defer file.close();
+                const max_read: usize = 256 * 1024;
+                if (file.readToEndAlloc(vm.gc().allocator, max_read)) |buf| {
+                    break :blk buf;
+                } else |_| return null;
+            } else |_| return null;
+        }
+        break :blk src;
+    };
+    defer if (src[0] == '@' and src.len > 1) vm.gc().allocator.free(content);
+
+    const decl_line = findAnonymousFunctionDeclLine(content, first_line) orelse decl_guess;
+    if (lineSliceAt(content, decl_line)) |ln| {
+        if (extractDeclaredFunctionName(ln)) |name| {
+            if (name.len > 0 and name.len <= storage.len) {
+                @memcpy(storage[0..name.len], name);
+                return storage[0..name.len];
+            }
+        }
+    }
+    if (lineSliceAt(content, decl_line - 1)) |prev| {
+        if (extractDeclaredFunctionName(prev)) |name| {
+            if (name.len > 0 and name.len <= storage.len) {
+                @memcpy(storage[0..name.len], name);
+                return storage[0..name.len];
+            }
+        }
+    }
+
+    return null;
+}
+
+fn inferDeclaredNameFromSourceLine(vm: *VM, source_raw: []const u8, def_line: u32, storage: []u8) ?[]const u8 {
+    if (source_raw.len <= 1 or source_raw[0] != '@' or def_line == 0) return null;
+    const path = source_raw[1..];
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const content = file.readToEndAlloc(vm.gc().allocator, 256 * 1024) catch return null;
+    defer vm.gc().allocator.free(content);
+    const line = lineSliceAt(content, def_line) orelse return null;
+    const name = extractDeclaredFunctionName(line) orelse return null;
+    if (name.len == 0 or name.len > storage.len) return null;
+    @memcpy(storage[0..name.len], name);
+    return storage[0..name.len];
+}
+
+fn inferEnclosingFunctionName(vm: *VM, source_raw: []const u8, target_line: u32, storage: []u8) ?[]const u8 {
+    if (target_line == 0) return null;
+    const content: []const u8 = blk: {
+        if (source_raw.len > 1 and source_raw[0] == '@') {
+            const path = source_raw[1..];
+            if (std.fs.cwd().openFile(path, .{})) |file| {
+                defer file.close();
+                if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024) catch null) |buf| break :blk buf;
+            } else |_| {}
+            return null;
+        }
+        if (source_raw.len > 0 and (source_raw[0] == '=' or source_raw[0] == '?')) return null;
+        break :blk source_raw;
+    };
+    defer if (source_raw.len > 1 and source_raw[0] == '@') vm.gc().allocator.free(content);
+
+    const Block = struct { is_function: bool, name: ?[]const u8 };
+    var stack: [256]Block = undefined;
+    var top: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var line_no: u32 = 1;
+    while (lines.next()) |line| : (line_no += 1) {
+        if (line_no > target_line) break;
+        const comment_idx = std.mem.indexOf(u8, line, "--") orelse line.len;
+        const code = line[0..comment_idx];
+        const declared_name = extractDeclaredFunctionName(code);
+
+        var i: usize = 0;
+        while (i < code.len) {
+            if (!isIdentStart(code[i])) {
+                i += 1;
+                continue;
+            }
+            const start = i;
+            i += 1;
+            while (i < code.len and isIdentPart(code[i])) : (i += 1) {}
+            const tok = code[start..i];
+
+            if (std.mem.eql(u8, tok, "function")) {
+                if (top < stack.len) {
+                    stack[top] = .{ .is_function = true, .name = declared_name };
+                    top += 1;
+                }
+            } else if (std.mem.eql(u8, tok, "if") or
+                std.mem.eql(u8, tok, "for") or
+                std.mem.eql(u8, tok, "while") or
+                std.mem.eql(u8, tok, "do") or
+                std.mem.eql(u8, tok, "repeat"))
+            {
+                if (top < stack.len) {
+                    stack[top] = .{ .is_function = false, .name = null };
+                    top += 1;
+                }
+            } else if (std.mem.eql(u8, tok, "end") or std.mem.eql(u8, tok, "until")) {
+                if (top > 0) top -= 1;
+            }
+        }
+    }
+
+    var j = top;
+    while (j > 0) {
+        j -= 1;
+        if (!stack[j].is_function) continue;
+        const name = stack[j].name orelse continue;
+        if (name.len == 0 or name.len > storage.len) continue;
+        @memcpy(storage[0..name.len], name);
+        return storage[0..name.len];
+    }
+    return null;
+}
+
 fn allocShortSource(vm: *VM, src: []const u8) !*object.StringObject {
+    if (std.mem.eql(u8, src, "?")) {
+        return vm.gc().allocString("?");
+    }
+
     if (src.len > 0 and src[0] == '@') {
         const path = src[1..];
         if (path.len <= 60) return vm.gc().allocString(path);
@@ -945,7 +1406,7 @@ fn allocShortSource(vm: *VM, src: []const u8) !*object.StringObject {
         return vm.gc().allocString(name[0..60]);
     }
 
-    const body0: []const u8 = if (std.mem.eql(u8, src, "?")) "" else src;
+    const body0: []const u8 = src;
     const nl_idx = std.mem.indexOfScalar(u8, body0, '\n');
     const has_nl = nl_idx != null;
     const first_line = if (nl_idx) |idx| body0[0..idx] else body0;
@@ -965,58 +1426,218 @@ fn allocShortSource(vm: *VM, src: []const u8) !*object.StringObject {
     return vm.gc().allocString(out);
 }
 
+fn ensureHookRegistry(vm: *VM) !void {
+    const registry = vm.registry();
+    const hook_key = try vm.gc().allocString("_HOOKKEY");
+    if (registry.get(TValue.fromString(hook_key)) != null) return;
+
+    const hook_table = try vm.gc().allocTable();
+    const hook_mt = try vm.gc().allocTable();
+    const mode_key = try vm.gc().allocString("__mode");
+    const mode_val = try vm.gc().allocString("k");
+    try hook_mt.set(TValue.fromString(mode_key), TValue.fromString(mode_val));
+    hook_table.metatable = hook_mt;
+    vm.gc().barrierBack(&hook_table.header, &hook_mt.header);
+
+    try registry.set(TValue.fromString(hook_key), TValue.fromTable(hook_table));
+}
+
+fn shouldSkipUnnamedDuplicateSlot(target_vm: *VM, ci: *const CallInfo, reg: u32) bool {
+    if (reg == 0) return false;
+    const reg_idx: usize = @intCast(reg);
+    if (reg_idx >= ci.func.local_reg_names.len) return false;
+    if (ci.func.local_reg_names[reg_idx] != null) return false;
+    const prev_idx = reg_idx - 1;
+    if (prev_idx >= ci.func.local_reg_names.len) return false;
+
+    const cur = target_vm.stack[ci.base + reg];
+    const prev = target_vm.stack[ci.base + reg - 1];
+    return std.meta.eql(cur, prev);
+}
+
+fn mapLocalOrdinalToRegister(target_vm: *VM, ci: *const CallInfo, local_idx: u32, restrict_outer_temporaries: bool) ?u32 {
+    var ordinal: u32 = 0;
+    var unnamed_after_params: u32 = 0;
+    var reg: u32 = 0;
+    while (reg < ci.func.maxstacksize) : (reg += 1) {
+        if (shouldSkipUnnamedDuplicateSlot(target_vm, ci, reg)) continue;
+        const reg_idx: usize = @intCast(reg);
+        const has_name = reg_idx < ci.func.local_reg_names.len and ci.func.local_reg_names[reg_idx] != null;
+        if (restrict_outer_temporaries and !has_name and reg >= ci.func.numparams) {
+            if (unnamed_after_params >= 1) continue;
+            unnamed_after_params += 1;
+        }
+        if (ordinal == local_idx) return reg;
+        ordinal += 1;
+    }
+    return null;
+}
+
+fn writeGetlocalNilResult(vm: *VM, func_reg: u32, nresults: u32) void {
+    vm.stack[vm.base + func_reg] = TValue.nil;
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = TValue.nil;
+    }
+    if (nresults == 0) {
+        vm.top = vm.base + func_reg + 1;
+    }
+}
+
+fn writeGetlocalPairResult(vm: *VM, func_reg: u32, nresults: u32, name: []const u8, value: TValue) !void {
+    const name_val = TValue.fromString(try vm.gc().allocString(name));
+    vm.stack[vm.base + func_reg] = name_val;
+    if (nresults == 0) {
+        vm.stack[vm.base + func_reg + 1] = value;
+        vm.top = vm.base + func_reg + 2;
+        return;
+    }
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = value;
+    }
+}
+
 /// debug.getlocal([thread,] f, local) - Returns name and value of local variable
 /// f can be stack level (number) or function
-/// local is 1-based index
+/// local is 1-based index (negative indexes access varargs for active Lua frames)
 /// Returns: name, value (or nil if local doesn't exist)
-/// Note: Names are not available (we don't store locvar debug info), returns "(local N)"
 pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 2) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+    var target_vm: *VM = vm;
+    var arg_off: u32 = 0;
+    if (nargs >= 1) {
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+            arg_off = 1;
+        }
+    }
+
+    if (nargs < 2 + arg_off) {
+        writeGetlocalNilResult(vm, func_reg, nresults);
         return;
     }
 
-    const f_arg = vm.stack[vm.base + func_reg + 1];
-    const local_arg = vm.stack[vm.base + func_reg + 2];
+    const f_arg = vm.stack[vm.base + func_reg + 1 + arg_off];
+    const local_arg = vm.stack[vm.base + func_reg + 2 + arg_off];
 
-    // Get local index (1-based)
+    // Get local index (1-based, negative for vararg)
     const local_int = local_arg.toInteger() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        writeGetlocalNilResult(vm, func_reg, nresults);
         return;
     };
 
-    if (local_int < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
-    }
-    const local_idx: usize = @intCast(local_int - 1);
-
     // Handle f as stack level
     if (f_arg.toInteger()) |level| {
-        if (level < 1) {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-            return;
-        }
-
-        const local_meta = vm.debugWriteLocalAtLevel(level, @intCast(local_idx), func_reg + 1) orelse {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-            return;
-        };
-
-        // Heuristic for Lua 5.4 generic-for internals: the iterator state
-        // locals are reported as "(for state)". We do not store locvar names,
-        // so infer from TBC marker range [r-3, r] when available.
-        var name_buf: [32]u8 = undefined;
-        const name = blk: {
-            if (local_meta.is_for_state) {
-                break :blk "(for state)";
+        if (level < 0) {
+            if (vm.in_hook) {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
             }
-            break :blk std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
-        };
-
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
+            return vm.raiseString("bad argument to 'getlocal' (level out of range)");
         }
+        if (vm.in_hook and level == 2 and local_int >= @as(i64, @intCast(vm.hook_transfer_start))) {
+            const start_i: i64 = @intCast(vm.hook_transfer_start);
+            const count_i: i64 = @intCast(vm.hook_transfer_count);
+            const rel = local_int - start_i;
+            if (rel >= 0 and rel < count_i and @as(u64, @intCast(rel)) < vm.hook_transfer_values.len) {
+                const idx: usize = @intCast(rel);
+                try writeGetlocalPairResult(vm, func_reg, nresults, "(temporary)", vm.hook_transfer_values[idx]);
+                return;
+            }
+        }
+
+        if (@as(u64, @intCast(level)) > target_vm.callstack_size) {
+            if (vm.in_hook) {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
+            }
+            return vm.raiseString("bad argument to 'getlocal' (level out of range)");
+        }
+
+        // Lua compatibility: level 0 inspects debug.getlocal's own C args.
+        if (level == 0) {
+            if (local_int < 1 or @as(u32, @intCast(local_int)) > nargs - arg_off) {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
+            }
+            const idx: u32 = @intCast(local_int);
+            const value = vm.stack[vm.base + func_reg + arg_off + idx];
+            try writeGetlocalPairResult(vm, func_reg, nresults, "(C temporary)", value);
+            return;
+        }
+
+        const ulevel: usize = @intCast(level);
+        const stack_idx = target_vm.callstack_size - ulevel;
+        const ci = &target_vm.callstack[stack_idx];
+
+        if (local_int > 0) {
+            const local_idx: usize = @intCast(local_int - 1);
+            const reg = mapLocalOrdinalToRegister(target_vm, ci, @intCast(local_idx), ulevel >= 2 or target_vm != vm) orelse {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
+            };
+            const reg_idx: usize = @intCast(reg);
+            const stack_pos = ci.base + reg;
+            const value = target_vm.stack[stack_pos];
+            var visible_value = value;
+            if (ulevel >= 2 and reg >= ci.func.numparams and ci.vararg_count > 0) {
+                var vi: u32 = 0;
+                while (vi < ci.vararg_count) : (vi += 1) {
+                    if (std.meta.eql(value, target_vm.stack[ci.vararg_base + vi])) {
+                        visible_value = TValue.nil;
+                        break;
+                    }
+                }
+            }
+
+            var name: []const u8 = "(temporary)";
+            if (reg_idx < ci.func.local_reg_names.len) {
+                if (ci.func.local_reg_names[reg_idx]) |local_name| {
+                    name = local_name;
+                }
+            }
+            if (vm.in_hook and level == 2 and local_int == 1 and reg == 0) {
+                const pc_ptr = @intFromPtr(ci.pc);
+                const code_ptr = @intFromPtr(ci.func.code.ptr);
+                if (pc_ptr > code_ptr and ci.func.code.len > 0) {
+                    const off_bytes = pc_ptr - code_ptr;
+                    const off_inst: usize = @intCast(off_bytes / @sizeOf(@TypeOf(ci.func.code[0])));
+                    const idx = if (off_inst > 0) off_inst - 1 else 0;
+                    if (idx < ci.func.code.len) {
+                        const op = ci.func.code[idx].getOpCode();
+                        if (op == .CLOSURE) {
+                            name = "(temporary)";
+                        }
+                    }
+                }
+            }
+            if (ulevel == 1 and std.mem.eql(u8, name, "(temporary)") and reg_idx > 0 and reg_idx - 1 < ci.func.local_reg_names.len) {
+                if (ci.func.local_reg_names[reg_idx - 1]) |prev_name| {
+                    if (prev_name.len > 0) name = prev_name;
+                }
+            }
+            if (name.len == 0) name = "(temporary)";
+
+            if (ci.getHighestTBC(0)) |tbc_reg| {
+                const reg_u8: u8 = @intCast(reg);
+                const start = tbc_reg -| 3;
+                if (reg_u8 >= start and reg_u8 <= tbc_reg) {
+                    name = "(for state)";
+                }
+            }
+
+            try writeGetlocalPairResult(vm, func_reg, nresults, name, visible_value);
+            return;
+        } else if (local_int < 0) {
+            const vararg_idx: u32 = @intCast(-local_int);
+            if (vararg_idx < 1 or vararg_idx > ci.vararg_count) {
+                writeGetlocalNilResult(vm, func_reg, nresults);
+                return;
+            }
+            const value = target_vm.stack[ci.vararg_base + vararg_idx - 1];
+
+            try writeGetlocalPairResult(vm, func_reg, nresults, "(vararg)", value);
+            return;
+        }
+        writeGetlocalNilResult(vm, func_reg, nresults);
         return;
     }
 
@@ -1025,27 +1646,30 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         const proto = closure.proto;
 
         // For functions, we can only report info about parameters
+        if (local_int < 1) {
+            writeGetlocalNilResult(vm, func_reg, nresults);
+            return;
+        }
+        const local_idx: usize = @intCast(local_int - 1);
         if (local_idx >= proto.numparams) {
-            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+            writeGetlocalNilResult(vm, func_reg, nresults);
             return;
         }
 
-        // Generate parameter name
-        var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "(param {d})", .{local_int}) catch "(param)";
+        var name: []const u8 = "(temporary)";
+        if (local_idx < proto.local_reg_names.len) {
+            if (proto.local_reg_names[local_idx]) |param_name| {
+                name = param_name;
+            }
+        }
+        if (name.len == 0) name = "(temporary)";
 
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
-        }
-        // For function objects (not active frames), we can't get the value
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = TValue.nil;
-        }
+        try writeGetlocalPairResult(vm, func_reg, nresults, name, TValue.nil);
         return;
     }
 
     // Invalid argument
-    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+    writeGetlocalNilResult(vm, func_reg, nresults);
 }
 
 /// debug.getmetatable(value) - Returns metatable of given value
@@ -1123,6 +1747,7 @@ pub fn nativeDebugSetmetatable(vm: anytype, func_reg: u32, nargs: u32, nresults:
 /// The registry is a global table used to store internal data
 pub fn nativeDebugGetregistry(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nargs;
+    try ensureHookRegistry(vm);
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = TValue.fromTable(vm.registry());
@@ -1138,39 +1763,79 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     const func_arg = vm.stack[vm.base + func_reg + 1];
     const up_arg = vm.stack[vm.base + func_reg + 2];
 
-    // Get function closure
-    const closure = func_arg.asClosure() orelse {
-        // Not a Lua function - return nil
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
-    };
-
     // Get upvalue index (1-based in Lua)
     const up_int = up_arg.toInteger() orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
         return;
     };
 
     // Invalid index (< 1) returns nil
     if (up_int < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
         return;
     }
+
+    // Native closures: expose C-function upvalue names as empty strings.
+    // This runtime stores gmatch iterator state out-of-band. Detect iterators
+    // via the hidden state map and emulate Lua's C upvalue name ("").
+    if (func_arg.asNativeClosure()) |nc| {
+        _ = nc;
+        if (up_int == 1) {
+            const key = try vm.gc().allocString("__gmatch_states");
+            if (vm.globals().get(TValue.fromString(key))) |map_val| {
+                if (map_val.asTable()) |state_map| {
+                    if (state_map.get(func_arg) != null) {
+                        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(""));
+                        if (nresults == 0) {
+                            vm.stack[vm.base + func_reg + 1] = TValue.nil;
+                            vm.top = vm.base + func_reg + 2;
+                        } else if (nresults > 1) {
+                            vm.stack[vm.base + func_reg + 1] = TValue.nil;
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
+        return;
+    }
+
+    // Get function closure
+    const closure = func_arg.asClosure() orelse {
+        // Not a Lua function - return nil
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
+        return;
+    };
     const up_idx = debugMapUpvalueIndex(closure, up_int) orelse {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
         return;
     };
 
     // Check bounds
     if (up_idx >= closure.upvalues.len) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+        vm.stack[vm.base + func_reg] = TValue.nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = TValue.nil;
+        if (nresults == 0) vm.top = vm.base + func_reg + 1;
         return;
     }
 
     // Get upvalue name from proto
     const env_idx = inferEnvUpvalueIndex(closure);
     var name_buf: [32]u8 = undefined;
-    const name = if (up_idx < closure.proto.upvalues.len) blk: {
+    const stripped = std.mem.eql(u8, closure.proto.source, "?") or
+        (closure.proto.source.len == 0 and closure.proto.lineinfo.len == 0);
+    const name = if (stripped) "(no name)" else if (up_idx < closure.proto.upvalues.len) blk: {
         if (closure.proto.upvalues[up_idx].name) |n| break :blk n;
         if (env_idx != null and env_idx.? == up_idx) break :blk "_ENV";
         break :blk syntheticUpvalueName(@intCast(up_int - 1), &name_buf);
@@ -1181,8 +1846,11 @@ pub fn nativeDebugGetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     const value = upval.get();
 
     // Return name and value
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
+    vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
+    if (nresults == 0) {
+        vm.stack[vm.base + func_reg + 1] = value;
+        vm.top = vm.base + func_reg + 2;
+        return;
     }
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = value;
@@ -1254,8 +1922,16 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // No args or nil first arg = clear hook
     if (nargs <= arg_off) {
         target_vm.hook_func = null;
+        target_vm.hook_func_value = TValue.nil;
         target_vm.hook_mask = 0;
         target_vm.hook_count = 0;
+        target_vm.hook_countdown = 0;
+        target_vm.hook_name_override = null;
+        target_vm.in_hook = false;
+        target_vm.hook_skip_next_line = false;
+        target_vm.hook_transfer_start = 1;
+        target_vm.hook_transfer_count = 0;
+        for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
         return;
     }
 
@@ -1264,13 +1940,22 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // nil clears the hook
     if (hook_arg.isNil()) {
         target_vm.hook_func = null;
+        target_vm.hook_func_value = TValue.nil;
         target_vm.hook_mask = 0;
         target_vm.hook_count = 0;
+        target_vm.hook_countdown = 0;
+        target_vm.hook_name_override = null;
+        target_vm.in_hook = false;
+        target_vm.hook_skip_next_line = false;
+        target_vm.hook_transfer_start = 1;
+        target_vm.hook_transfer_count = 0;
+        for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
         return;
     }
 
-    // Get hook function
-    const hook_func = hook_arg.asClosure() orelse return;
+    // Hooks are callable values. Runtime dispatch currently executes only Lua closures,
+    // but gethook must preserve native functions (e.g. print) too.
+    const hook_func = hook_arg.asClosure();
 
     // Get mask string
     var mask: u8 = 0;
@@ -1299,24 +1984,50 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Store hook settings
     target_vm.hook_func = hook_func;
+    target_vm.hook_func_value = hook_arg;
     target_vm.hook_mask = mask;
     target_vm.hook_count = count;
+    target_vm.hook_countdown = if (count == 0) 0 else count * 2;
+    target_vm.hook_name_override = null;
+    target_vm.in_hook = false;
+    target_vm.hook_skip_next_line = false;
+    target_vm.hook_transfer_start = 1;
+    target_vm.hook_transfer_count = 0;
+    for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
+    if (target_vm.ci) |ci| {
+        if ((mask & 0x04) != 0) {
+            ci.hook_last_line = currentLineForCallInfo(ci);
+            ci.hook_last_pc = currentPcIndexForCallInfo(ci);
+        } else {
+            ci.hook_last_line = -1;
+            ci.hook_last_pc = -1;
+        }
+    }
 }
 
 /// debug.setlocal([thread,] level, local, value) - Assigns value to local variable
 /// level is the stack level (1 = caller of setlocal)
-/// local is 1-based index
+/// local is 1-based index (negative indexes access varargs)
 /// value is the new value to assign
 /// Returns: name of local variable (or nil if doesn't exist)
 pub fn nativeDebugSetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 3) {
+    var target_vm: *VM = vm;
+    var arg_off: u32 = 0;
+    if (nargs >= 1) {
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+            arg_off = 1;
+        }
+    }
+
+    if (nargs < 3 + arg_off) {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     }
 
-    const level_arg = vm.stack[vm.base + func_reg + 1];
-    const local_arg = vm.stack[vm.base + func_reg + 2];
-    const value = vm.stack[vm.base + func_reg + 3];
+    const level_arg = vm.stack[vm.base + func_reg + 1 + arg_off];
+    const local_arg = vm.stack[vm.base + func_reg + 2 + arg_off];
+    const value = vm.stack[vm.base + func_reg + 3 + arg_off];
 
     // Get level
     const level = level_arg.toInteger() orelse {
@@ -1325,50 +2036,86 @@ pub fn nativeDebugSetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     };
 
     if (level < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
+        return vm.raiseString("bad argument to 'setlocal' (level out of range)");
     }
 
     const ulevel: usize = @intCast(level);
-    if (ulevel > vm.callstack_size) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
+    if (ulevel > target_vm.callstack_size) {
+        return vm.raiseString("bad argument to 'setlocal' (level out of range)");
     }
 
-    // Get local index (1-based)
+    // Get local index (1-based, negative for vararg)
     const local_int = local_arg.toInteger() orelse {
         if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
         return;
     };
 
-    if (local_int < 1) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
-        return;
-    }
-    const local_idx: usize = @intCast(local_int - 1);
-
     // Get the call frame at that level
-    const stack_idx = vm.callstack_size - ulevel;
-    const ci = &vm.callstack[stack_idx];
+    const stack_idx = target_vm.callstack_size - ulevel;
+    const ci = &target_vm.callstack[stack_idx];
 
-    // Check if local index is within the frame's stack range
-    const max_locals = ci.func.maxstacksize;
-    if (local_idx >= max_locals) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+    if (local_int > 0) {
+        const local_idx: usize = @intCast(local_int - 1);
+        const reg = mapLocalOrdinalToRegister(target_vm, ci, @intCast(local_idx), ulevel >= 2 or target_vm != vm) orelse {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+            return;
+        };
+        const reg_idx: usize = @intCast(reg);
+
+        const stack_pos = ci.base + reg;
+        target_vm.stack[stack_pos] = value;
+        const primary_named = reg_idx < ci.func.local_reg_names.len and ci.func.local_reg_names[reg_idx] != null;
+        if (ulevel >= 2 and !primary_named) {
+            var r: u32 = reg + 1;
+            while (r < ci.func.maxstacksize) : (r += 1) {
+                const r_idx: usize = @intCast(r);
+                if (r_idx < ci.func.local_reg_names.len and ci.func.local_reg_names[r_idx] != null) break;
+                target_vm.stack[ci.base + r] = value;
+            }
+        }
+
+        var name: []const u8 = "(temporary)";
+        if (reg_idx < ci.func.local_reg_names.len) {
+            if (ci.func.local_reg_names[reg_idx]) |local_name| {
+                name = local_name;
+            }
+        }
+        if (ulevel == 1 and std.mem.eql(u8, name, "(temporary)") and reg_idx > 0 and reg_idx - 1 < ci.func.local_reg_names.len) {
+            if (ci.func.local_reg_names[reg_idx - 1]) |prev_name| {
+                if (prev_name.len > 0) name = prev_name;
+            }
+        }
+        if (name.len == 0) name = "(temporary)";
+
+        if (ci.getHighestTBC(0)) |tbc_reg| {
+            const reg_u8: u8 = @intCast(reg);
+            const start = tbc_reg -| 3;
+            if (reg_u8 >= start and reg_u8 <= tbc_reg) {
+                name = "(for state)";
+            }
+        }
+
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
+        }
         return;
     }
 
-    // Set the value on the stack
-    const stack_pos = ci.base + @as(u32, @intCast(local_idx));
-    vm.stack[stack_pos] = value;
+    if (local_int < 0) {
+        const vararg_idx: u32 = @intCast(-local_int);
+        if (vararg_idx < 1 or vararg_idx > ci.vararg_count) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
+            return;
+        }
 
-    // Generate a name since we don't have locvar info
-    var name_buf: [32]u8 = undefined;
-    const name = std.fmt.bufPrint(&name_buf, "(local {d})", .{local_int}) catch "(local)";
-
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString(name));
+        target_vm.stack[ci.vararg_base + vararg_idx - 1] = value;
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = TValue.fromString(try vm.gc().allocString("(vararg)"));
+        }
+        return;
     }
+
+    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.nil;
 }
 
 /// debug.setupvalue(f, up, value) - Assigns value to upvalue up of function f
@@ -1413,7 +2160,9 @@ pub fn nativeDebugSetupvalue(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     // Get upvalue name from proto
     const env_idx = inferEnvUpvalueIndex(closure);
     var name_buf: [32]u8 = undefined;
-    const name = if (up_idx < closure.proto.upvalues.len) blk: {
+    const stripped = std.mem.eql(u8, closure.proto.source, "?") or
+        (closure.proto.source.len == 0 and closure.proto.lineinfo.len == 0);
+    const name = if (stripped) "(no name)" else if (up_idx < closure.proto.upvalues.len) blk: {
         if (closure.proto.upvalues[up_idx].name) |n| break :blk n;
         if (env_idx != null and env_idx.? == up_idx) break :blk "_ENV";
         break :blk syntheticUpvalueName(@intCast(up_int - 1), &name_buf);
@@ -1521,17 +2270,29 @@ pub fn nativeDebugNewuserdata(vm: anytype, func_reg: u32, nargs: u32, nresults: 
 /// so the stack may appear shallower than the logical call depth.
 pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Parse arguments
-    var message: ?[]const u8 = null;
-    var level: i64 = 1;
-
+    var target_vm: *VM = vm;
+    var arg_off: u32 = 0;
     if (nargs >= 1) {
-        const arg1 = vm.stack[vm.base + func_reg + 1];
-        if (arg1.asString()) |str| {
-            message = str.asSlice();
+        if (vm.stack[vm.base + func_reg + 1].asThread()) |thread| {
+            target_vm = @as(*VM, @ptrCast(@alignCast(thread.vm)));
+            arg_off = 1;
         }
     }
-    if (nargs >= 2) {
-        const arg2 = vm.stack[vm.base + func_reg + 2];
+
+    var message: ?[]const u8 = null;
+    var level: i64 = if (arg_off == 1) 0 else 1;
+
+    if (nargs >= 1 + arg_off) {
+        const arg1 = vm.stack[vm.base + func_reg + 1 + arg_off];
+        if (arg1.asString()) |str| {
+            message = str.asSlice();
+        } else if (!arg1.isNil()) {
+            if (nresults > 0) vm.stack[vm.base + func_reg] = arg1;
+            return;
+        }
+    }
+    if (nargs >= 2 + arg_off) {
+        const arg2 = vm.stack[vm.base + func_reg + 2 + arg_off];
         if (arg2.toInteger()) |l| {
             level = l;
         }
@@ -1561,10 +2322,39 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     var frame_num: i64 = 0;
 
-    // For xpcall/debug.traceback handlers, use the captured unwind-time snapshot.
-    if (message != null and vm.traceback_snapshot_count > 0) {
+    if (level <= 0 and target_vm == vm) {
+        const self_frame = "\n\t[C]: in function 'debug.traceback'";
+        const copy_len = @min(self_frame.len, buf.len - pos);
+        @memcpy(buf[pos..][0..copy_len], self_frame[0..copy_len]);
+        pos += copy_len;
+        frame_num += 1;
+    } else if (level <= 0 and target_vm != vm and target_vm.thread.status == .suspended) {
+        const yield_frame = "\n\t[C]: in function 'coroutine.yield'";
+        const copy_len = @min(yield_frame.len, buf.len - pos);
+        @memcpy(buf[pos..][0..copy_len], yield_frame[0..copy_len]);
+        pos += copy_len;
+        frame_num += 1;
+    }
+
+    // For xpcall/debug.traceback handlers and dead coroutines, use the
+    // captured unwind-time snapshot when available.
+    if (target_vm.traceback_snapshot_count > 0 and (message != null or target_vm != vm)) {
+        if (target_vm.traceback_snapshot_has_error_frame) {
+            frame_num += 1;
+            if (frame_num >= level) {
+                if (pos + 2 < buf.len) {
+                    buf[pos] = '\n';
+                    buf[pos + 1] = '\t';
+                    pos += 2;
+                }
+                const error_frame = "[C]: in function 'error'";
+                const copy_len = @min(error_frame.len, buf.len - pos);
+                @memcpy(buf[pos..][0..copy_len], error_frame[0..copy_len]);
+                pos += copy_len;
+            }
+        }
         var i: usize = 0;
-        while (i < vm.traceback_snapshot_count) : (i += 1) {
+        while (i < target_vm.traceback_snapshot_count) : (i += 1) {
             frame_num += 1;
             if (frame_num < level) continue;
             if (pos + 2 < buf.len) {
@@ -1573,14 +2363,46 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 pos += 2;
             }
             var frame_buf: [128]u8 = undefined;
-            const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{vm.traceback_snapshot_lines[i]}) catch "[Lua function]";
+            var snapshot_name: ?[]const u8 = null;
+            if (target_vm.traceback_snapshot_names[i].asString()) |name| {
+                snapshot_name = name.asSlice();
+            }
+            if (snapshot_name == null) {
+                if (target_vm.traceback_snapshot_closures[i]) |cl| {
+                    if (inferGlobalFunctionName(target_vm, cl)) |name| {
+                        snapshot_name = name;
+                    }
+                }
+            }
+            if (snapshot_name == null) {
+                var decl_buf: [128]u8 = undefined;
+                if (inferDeclaredNameFromSourceLine(
+                    vm,
+                    target_vm.traceback_snapshot_sources[i],
+                    target_vm.traceback_snapshot_def_lines[i],
+                    &decl_buf,
+                )) |name| {
+                    snapshot_name = name;
+                } else if (inferEnclosingFunctionName(
+                    vm,
+                    target_vm.traceback_snapshot_sources[i],
+                    target_vm.traceback_snapshot_lines[i],
+                    &decl_buf,
+                )) |name2| {
+                    snapshot_name = name2;
+                }
+            }
+            const frame_info = if (snapshot_name) |name|
+                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function '{s}'", .{ target_vm.traceback_snapshot_lines[i], name }) catch "[Lua function]")
+            else
+                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function <[string]:{d}>", .{ target_vm.traceback_snapshot_lines[i], target_vm.traceback_snapshot_def_lines[i] }) catch "[Lua function]");
             const copy_len = @min(frame_info.len, buf.len - pos);
             @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
             pos += copy_len;
         }
         if (message) |msg| {
-            if (std.mem.indexOf(u8, msg, "stack overflow") != null and vm.traceback_snapshot_count > 0) {
-                const last = vm.traceback_snapshot_lines[vm.traceback_snapshot_count - 1];
+            if (std.mem.indexOf(u8, msg, "stack overflow") != null and target_vm.traceback_snapshot_count > 0) {
+                const last = target_vm.traceback_snapshot_lines[target_vm.traceback_snapshot_count - 1];
                 const tail_line = last + 25;
                 frame_num += 1;
                 if (frame_num >= level) {
@@ -1597,9 +2419,9 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 }
             }
         }
-        if (vm.ci) |ci| {
+        if (target_vm.ci) |ci| {
             if (frameCurrentLine(ci)) |line| {
-                const last = vm.traceback_snapshot_lines[vm.traceback_snapshot_count - 1];
+                const last = target_vm.traceback_snapshot_lines[target_vm.traceback_snapshot_count - 1];
                 var tail_line = line;
                 if (tail_line == last) {
                     if (message) |msg| {
@@ -1626,30 +2448,77 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             }
         }
     } else {
-        // Walk the active CallInfo linked list.
-        var ci_opt = vm.ci;
+        // Walk active CallInfo frames and apply Lua-like truncation for deep stacks:
+        // first 10 frames, "... (skip N levels)", last 11 frames.
+        var frames: [512]*const CallInfo = undefined;
+        var total: usize = 0;
+        var ci_opt = target_vm.ci;
         while (ci_opt) |ci| : (ci_opt = ci.previous) {
-            frame_num += 1;
-            if (frame_num < level) continue;
-
-            // Add newline and tab
-            if (pos + 2 < buf.len) {
-                buf[pos] = '\n';
-                buf[pos + 1] = '\t';
-                pos += 2;
+            if (std.mem.eql(u8, ci.func.source, "[coroutine bootstrap]")) continue;
+            if (total < frames.len) {
+                frames[total] = ci;
+                total += 1;
             }
+        }
 
-            // Format frame info
-            var frame_buf: [256]u8 = undefined;
-            const frame_info = formatFrame(ci, &frame_buf);
-            const copy_len = @min(frame_info.len, buf.len - pos);
-            @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
-            pos += copy_len;
+        const start: usize = if (level > 1) @intCast(level - 1) else 0;
+        if (start < total) {
+            const levels1: usize = 10;
+            const levels2: usize = 11;
+            const avail = total - start;
+
+            const appendFrame = struct {
+                fn run(vm2: *VM, ci2: *const CallInfo, buf2: []u8, pos2: *usize) void {
+                    if (pos2.* + 2 < buf2.len) {
+                        buf2[pos2.*] = '\n';
+                        buf2[pos2.* + 1] = '\t';
+                        pos2.* += 2;
+                    }
+                    var frame_buf: [256]u8 = undefined;
+                    const frame_info = formatFrame(vm2, ci2, &frame_buf);
+                    const copy_len = @min(frame_info.len, buf2.len - pos2.*);
+                    @memcpy(buf2[pos2.*..][0..copy_len], frame_info[0..copy_len]);
+                    pos2.* += copy_len;
+                }
+            }.run;
+
+            if (avail > levels1 + levels2) {
+                var i: usize = 0;
+                while (i < levels1) : (i += 1) {
+                    appendFrame(target_vm, frames[start + i], &buf, &pos);
+                    frame_num += 1;
+                }
+
+                if (pos + 2 < buf.len) {
+                    buf[pos] = '\n';
+                    buf[pos + 1] = '\t';
+                    pos += 2;
+                }
+                var skip_buf: [64]u8 = undefined;
+                const skipped = avail - (levels1 + levels2);
+                const skip_info = std.fmt.bufPrint(&skip_buf, "...\t(skip {d} levels)", .{skipped}) catch "...";
+                const skip_len = @min(skip_info.len, buf.len - pos);
+                @memcpy(buf[pos..][0..skip_len], skip_info[0..skip_len]);
+                pos += skip_len;
+                frame_num += 1;
+
+                var j: usize = total - levels2;
+                while (j < total) : (j += 1) {
+                    appendFrame(target_vm, frames[j], &buf, &pos);
+                    frame_num += 1;
+                }
+            } else {
+                var i: usize = start;
+                while (i < total) : (i += 1) {
+                    appendFrame(target_vm, frames[i], &buf, &pos);
+                    frame_num += 1;
+                }
+            }
         }
     }
 
     // Fallback if there were no call frames.
-    if (frame_num == 0 and level <= 1) {
+    if (frame_num == 0 and level <= 1 and target_vm == vm) {
         if (pos + 2 < buf.len) {
             buf[pos] = '\n';
             buf[pos + 1] = '\t';
@@ -1687,8 +2556,39 @@ fn frameCurrentLine(ci: anytype) ?u32 {
     return line;
 }
 
+fn inferGlobalFunctionName(vm: *VM, closure: *ClosureObject) ?[]const u8 {
+    var it = vm.globals().hash_part.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        const c = value.asClosure() orelse continue;
+        if (c != closure) continue;
+        const k = key.asString() orelse continue;
+        return k.asSlice();
+    }
+    return null;
+}
+
+fn inferFrameFunctionName(vm: *VM, target_ci: *const CallInfo, closure: *ClosureObject) ?[]const u8 {
+    var level: i64 = 1;
+    var cur = vm.ci;
+    while (cur) |ci| : (cur = ci.previous) {
+        if (std.mem.eql(u8, ci.func.source, "[coroutine bootstrap]")) continue;
+        if (ci == target_ci) {
+            return vm.debugInferFunctionNameAtLevel(level, closure);
+        }
+        level += 1;
+    }
+    return null;
+}
+
 /// Format a single stack frame for traceback as "source:line: in function".
-fn formatFrame(ci: anytype, out_buf: []u8) []const u8 {
+fn formatFrame(vm: *VM, ci: anytype, out_buf: []u8) []const u8 {
+    if (ci.is_protected) {
+        const pname = if (!ci.error_handler.isNil()) "xpcall" else "pcall";
+        return std.fmt.bufPrint(out_buf, "[C]: in function '{s}'", .{pname}) catch "[Lua function]";
+    }
+
     const source_raw = ci.func.source;
     const source = if (source_raw.len == 0)
         "?"
@@ -1697,10 +2597,29 @@ fn formatFrame(ci: anytype, out_buf: []u8) []const u8 {
     else
         source_raw;
 
+    const is_hook_frame = vm.in_hook and vm.hook_func != null and ci.closure != null and ci.closure.? == vm.hook_func.?;
+    const where = if (is_hook_frame) "in hook" else "in function";
+
     if (frameCurrentLine(ci)) |line| {
-        return std.fmt.bufPrint(out_buf, "{s}:{d}: in function", .{ source, line }) catch "[Lua function]";
+        if (!is_hook_frame) {
+            if (ci.closure) |cl| {
+                if (inferGlobalFunctionName(vm, cl)) |name| {
+                    return std.fmt.bufPrint(out_buf, "{s}:{d}: in function '{s}'", .{ source, line, name }) catch "[Lua function]";
+                }
+                if (inferFrameFunctionName(vm, ci, cl)) |name| {
+                    return std.fmt.bufPrint(out_buf, "{s}:{d}: in function '{s}'", .{ source, line, name }) catch "[Lua function]";
+                }
+                var decl_name_buf: [128]u8 = undefined;
+                if (inferDeclaredNameForClosure(vm, cl, &decl_name_buf)) |name| {
+                    return std.fmt.bufPrint(out_buf, "{s}:{d}: in function '{s}'", .{ source, line, name }) catch "[Lua function]";
+                }
+                const def_line: u32 = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else @intCast(line);
+                return std.fmt.bufPrint(out_buf, "{s}:{d}: in function <{s}:{d}>", .{ source, line, source, def_line }) catch "[Lua function]";
+            }
+        }
+        return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line, where }) catch "[Lua function]";
     }
-    return std.fmt.bufPrint(out_buf, "{s}: in function", .{source}) catch "[Lua function]";
+    return std.fmt.bufPrint(out_buf, "{s}: {s}", .{ source, where }) catch "[Lua function]";
 }
 
 /// debug.upvalueid(f, n) - Returns unique identifier for upvalue n of function f

@@ -90,6 +90,7 @@ fn formatAssertFailure(vm: *VM, msg: []const u8, out_buf: *[320]u8) []const u8 {
 /// Raises an error with the given message (can be any value)
 pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults; // error() never returns
+    vm.pending_error_from_error_builtin = true;
 
     // Lua's error() can throw any value, not just strings
     const error_value = if (nargs > 0)

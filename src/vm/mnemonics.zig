@@ -38,9 +38,13 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
     return switch (id) {
         .table_unpack => 0, // C=0 sentinel: callee decides actual result count.
         .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
+        .string_gsub => 2, // gsub always returns (string, count).
         .string_match => 0, // C=0 sentinel: captures can return variable results.
         .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
         .select => 0, // C=0 sentinel: callee decides based on index and arg count.
+        .debug_getlocal => 0, // C=0 sentinel: allow returning both (name, value).
+        .debug_getupvalue => 0, // C=0 sentinel: allow returning (name, value).
+        .debug_gethook => 0, // C=0 sentinel: allow returning (func, mask, count).
         .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
         .coroutine_yield => 0, // C=0 sentinel: resume values propagate as MULTRET.
         .require => 2, // require returns module value and loader data.
@@ -54,7 +58,7 @@ fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
 fn nativeKeepsTopForCall(id: NativeFnId, c: u8) bool {
     if (c > 0) return false;
     return switch (id) {
-        .table_unpack, .string_byte, .string_match, .select => true,
+        .table_unpack, .string_byte, .string_match, .select, .debug_getlocal => true,
         else => false,
     };
 }
@@ -1228,6 +1232,45 @@ fn metamethodEventName(comptime event: MetaEvent) []const u8 {
     };
 }
 
+fn metamethodEventNameRuntime(event: MetaEvent) []const u8 {
+    return switch (event) {
+        .add => "add",
+        .sub => "sub",
+        .mul => "mul",
+        .div => "div",
+        .mod => "mod",
+        .pow => "pow",
+        .idiv => "idiv",
+        .band => "band",
+        .bor => "bor",
+        .bxor => "bxor",
+        .shl => "shl",
+        .shr => "shr",
+        .unm => "unm",
+        .bnot => "bnot",
+        .eq => "eq",
+        .lt => "lt",
+        .le => "le",
+        .index => "index",
+        .newindex => "newindex",
+        .call => "call",
+        .concat => "concat",
+        .len => "len",
+        .close => "close",
+        .gc => "gc",
+        .tostring => "tostring",
+        .metatable => "metatable",
+        .name => "name",
+        .pairs => "pairs",
+        .mode => "mode",
+    };
+}
+
+fn markMetamethodFrame(ci: *CallInfo, name: []const u8) void {
+    ci.debug_name = name;
+    ci.debug_namewhat = "metamethod";
+}
+
 fn raiseMetamethodNotCallable(vm: *VM, mm: TValue, metamethod_name: []const u8) !void {
     const ty = callableValueTypeName(mm);
     var msg_buf: [160]u8 = undefined;
@@ -1374,6 +1417,12 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
         .nresults = nresults,
         .previous = vm.ci,
     };
+    if (vm.next_call_debug_name) |name| {
+        new_ci.debug_name = name;
+        new_ci.debug_namewhat = vm.next_call_debug_namewhat orelse "";
+        vm.next_call_debug_name = null;
+        vm.next_call_debug_namewhat = null;
+    }
 
     vm.callstack_size += 1;
     vm.ci = new_ci;
@@ -1414,6 +1463,16 @@ fn ensureStackTop(vm: *VM, needed_top: u32) !void {
 /// Execute a metamethod synchronously and return its first result.
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
 pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
+    return executeSyncMMWithDebug(vm, closure, args, null, null);
+}
+
+fn executeSyncMMWithDebug(
+    vm: *VM,
+    closure: *ClosureObject,
+    args: []const TValue,
+    debug_name: ?[]const u8,
+    debug_namewhat: ?[]const u8,
+) anyerror!TValue {
     const proto = closure.proto;
     // Use a safe stack location that doesn't overlap with the caller's active stack.
     // The caller's base + maxstacksize should be safe.
@@ -1470,7 +1529,11 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
     }.run;
 
     // Push call info for metamethod
-    _ = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
+    const new_ci = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
+    if (debug_name) |name| {
+        new_ci.debug_name = name;
+        new_ci.debug_namewhat = debug_namewhat orelse "metamethod";
+    }
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
     // Execute until we return to saved depth
@@ -1592,25 +1655,80 @@ pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) any
 
 fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     return switch (id) {
+        .math_sin => "sin",
+        .select => "select",
         .debug_sethook => "sethook",
         else => null,
     };
 }
 
+fn clearHookTransfer(vm: *VM) void {
+    if (vm.in_hook) return;
+    vm.hook_transfer_start = 1;
+    vm.hook_transfer_count = 0;
+    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+}
+
+fn setHookTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
+    if (vm.in_hook) return;
+    vm.hook_transfer_start = start;
+    const cap: usize = vm.hook_transfer_values.len;
+    const n: usize = @min(@as(usize, @intCast(count)), cap);
+    vm.hook_transfer_count = @intCast(n);
+    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        vm.hook_transfer_values[i] = vm.stack[src_base + @as(u32, @intCast(i))];
+    }
+}
+
+fn setHookTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
+    if (vm.in_hook) return;
+    vm.hook_transfer_start = start;
+    const n: usize = @min(values.len, vm.hook_transfer_values.len);
+    vm.hook_transfer_count = @intCast(n);
+    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+    for (values[0..n], 0..) |v, i| {
+        vm.hook_transfer_values[i] = v;
+    }
+}
+
 fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
+    if (vm.in_hook) return;
     if ((vm.hook_mask & 0x01) == 0) return;
     const hook = vm.hook_func orelse return;
 
     const event_name = try vm.gc().allocString("call");
     const saved_name_override = vm.hook_name_override;
-    const saved_mask = vm.hook_mask;
     const saved_top = vm.top;
+    const saved_in_hook = vm.in_hook;
     vm.hook_last_line = -1;
     vm.hook_name_override = name_override;
-    vm.hook_mask = 0;
+    vm.in_hook = true;
     defer {
         vm.hook_name_override = saved_name_override;
-        vm.hook_mask = saved_mask;
+        vm.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
+fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
+    if (vm.in_hook) return;
+    if ((vm.hook_mask & 0x01) == 0) return;
+    const hook = vm.hook_func orelse return;
+
+    const event_name = try vm.gc().allocString("tail call");
+    const saved_name_override = vm.hook_name_override;
+    const saved_top = vm.top;
+    const saved_in_hook = vm.in_hook;
+    vm.hook_last_line = -1;
+    vm.hook_name_override = name_override;
+    vm.in_hook = true;
+    defer {
+        vm.hook_name_override = saved_name_override;
+        vm.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1618,16 +1736,19 @@ fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
 }
 
 fn dispatchLineHook(vm: *VM, line: i64) !void {
+    if (vm.in_hook) return;
     if ((vm.hook_mask & 0x04) == 0) return;
     const hook = vm.hook_func orelse return;
-    if (line < 0) return;
-
+    if (line <= 0) return;
+    if (line > 0 and vm.hook_skip_next_line) {
+        return;
+    }
     const event_name = try vm.gc().allocString("line");
-    const saved_mask = vm.hook_mask;
     const saved_top = vm.top;
-    vm.hook_mask = 0;
+    const saved_in_hook = vm.in_hook;
+    vm.in_hook = true;
     defer {
-        vm.hook_mask = saved_mask;
+        vm.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1637,7 +1758,46 @@ fn dispatchLineHook(vm: *VM, line: i64) !void {
     });
 }
 
+fn dispatchLineHookNil(vm: *VM) !void {
+    if (vm.in_hook) return;
+    if ((vm.hook_mask & 0x04) == 0) return;
+    const hook = vm.hook_func orelse return;
+
+    const event_name = try vm.gc().allocString("line");
+    const saved_top = vm.top;
+    const saved_in_hook = vm.in_hook;
+    vm.in_hook = true;
+    defer {
+        vm.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    vm.hook_skip_next_line = true;
+    _ = try executeSyncMM(vm, hook, &[_]TValue{
+        TValue.fromString(event_name),
+        .nil,
+    });
+}
+
+fn dispatchCountHook(vm: *VM) !void {
+    if (vm.in_hook) return;
+    if (vm.hook_count == 0) return;
+    const hook = vm.hook_func orelse return;
+
+    const event_name = try vm.gc().allocString("count");
+    const saved_top = vm.top;
+    const saved_in_hook = vm.in_hook;
+    vm.in_hook = true;
+    defer {
+        vm.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
 fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
+    if (vm.in_hook) return;
     if ((vm.hook_mask & 0x02) == 0) return;
     const hook = vm.hook_func orelse return;
     if (name_override == null) {
@@ -1651,17 +1811,23 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
         n
     else if (vm.close_metamethod_depth > 0)
         "close"
-    else
-        null;
+    else blk: {
+        if (vm.ci) |ci| {
+            if (ci.closure) |clo| {
+                if (vm.debugInferFunctionNameAtLevel(1, clo)) |n| break :blk n;
+            }
+        }
+        break :blk null;
+    };
     const saved_name_override = vm.hook_name_override;
-    const saved_mask = vm.hook_mask;
     const saved_top = vm.top;
+    const saved_in_hook = vm.in_hook;
     vm.hook_last_line = -1;
     vm.hook_name_override = effective_name;
-    vm.hook_mask = 0;
+    vm.in_hook = true;
     defer {
         vm.hook_name_override = saved_name_override;
-        vm.hook_mask = saved_mask;
+        vm.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1832,6 +1998,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
         if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
     }
     vm.traceback_snapshot_count = 0;
+    vm.traceback_snapshot_has_error_frame = false;
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
@@ -1931,12 +2098,29 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
         current = ci.previous;
     }
 
+    // No protected frame handled this error. Preserve current stack lines so
+    // debug.traceback(thread) can report frames after coroutine becomes dead.
+    captureTracebackSnapshot(vm, null);
     vm.pending_error_unwind = false;
     vm.pending_error_unwind_ci = null;
     return false;
 }
 
 fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
+    const inferGlobalName = struct {
+        fn get(state: *VM, closure: *ClosureObject) ?TValue {
+            var it = state.globals().hash_part.iterator();
+            while (it.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const value = entry.value_ptr.*;
+                const c = value.asClosure() orelse continue;
+                if (c != closure) continue;
+                const k = key.asString() orelse continue;
+                return TValue.fromString(k);
+            }
+            return null;
+        }
+    }.get;
     const frameLine = struct {
         fn get(ci: *const CallInfo) ?u32 {
             const idx_opt = currentInstructionIndex(ci);
@@ -1950,7 +2134,7 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             var line = ci.func.lineinfo[idx];
             if (idx > 0) {
                 const op = ci.func.code[idx].getOpCode();
-                if ((op == .CALL or op == .RETURN or op == .RETURN0 or op == .RETURN1) and line > ci.func.lineinfo[idx - 1]) {
+                if (op == .CALL and line > ci.func.lineinfo[idx - 1]) {
                     line = ci.func.lineinfo[idx - 1];
                 }
             }
@@ -1970,6 +2154,15 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             if (count >= vm.traceback_snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
                 vm.traceback_snapshot_lines[count] = line;
+                vm.traceback_snapshot_names[count] = .nil;
+                vm.traceback_snapshot_closures[count] = ci.closure;
+                vm.traceback_snapshot_sources[count] = ci.func.source;
+                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                if (ci.closure) |cl| {
+                    if (inferGlobalName(vm, cl)) |name| {
+                        vm.traceback_snapshot_names[count] = name;
+                    }
+                }
                 count += 1;
             }
         }
@@ -1983,11 +2176,22 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             if (count >= vm.traceback_snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
                 vm.traceback_snapshot_lines[count] = line;
+                vm.traceback_snapshot_names[count] = .nil;
+                vm.traceback_snapshot_closures[count] = ci.closure;
+                vm.traceback_snapshot_sources[count] = ci.func.source;
+                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                if (ci.closure) |cl| {
+                    if (inferGlobalName(vm, cl)) |name| {
+                        vm.traceback_snapshot_names[count] = name;
+                    }
+                }
                 count += 1;
             }
         }
     }
     vm.traceback_snapshot_count = @intCast(count);
+    vm.traceback_snapshot_has_error_frame = vm.pending_error_from_error_builtin;
+    vm.pending_error_from_error_builtin = false;
 }
 
 pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
@@ -2409,23 +2613,96 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     vm.exec_tick +%= 1;
     const ci = vm.ci.?;
-    if ((vm.hook_mask & 0x04) != 0 and ci.closure != null) {
+    if (vm.hook_count > 0 and !vm.in_hook) {
+        if (vm.hook_countdown == 0) vm.hook_countdown = vm.hook_count * 2;
+        vm.hook_countdown -|= 1;
+        if (vm.hook_countdown == 0) {
+            vm.hook_countdown = vm.hook_count * 2;
+            try dispatchCountHook(vm);
+        }
+    }
+    if ((vm.hook_mask & 0x04) != 0 and !vm.in_hook and ci.closure != null) {
         if (currentInstructionIndex(ci)) |idx| {
             if (idx < ci.func.lineinfo.len) {
                 var line_u32 = ci.func.lineinfo[idx];
                 if (idx > 0) {
                     const op = ci.func.code[idx].getOpCode();
-                    if ((op == .CALL or op == .RETURN or op == .RETURN0 or op == .RETURN1) and
+                    var suppress_call_line_adjust = false;
+                    if (op == .CALL and ci.previous == null) {
+                        const call_reg = inst.getA();
+                        if (vm.stack[vm.base + call_reg].asNativeClosure()) |nc| {
+                            suppress_call_line_adjust = (nc.func.id == .debug_sethook);
+                        } else if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
+                            // For stripped closures, keep caller line stable around CALL.
+                            suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
+                        }
+                    }
+                    if (op == .CALL and
+                        !suppress_call_line_adjust and
                         line_u32 > ci.func.lineinfo[idx - 1])
                     {
                         line_u32 = ci.func.lineinfo[idx - 1];
                     }
                 }
                 const line: i64 = @intCast(line_u32);
-                if (line != vm.hook_last_line) {
-                    vm.hook_last_line = line;
+                const idx_i32: i32 = @intCast(idx);
+                var first_line: i64 = -1;
+                var multi_line = false;
+                var li: usize = 0;
+                while (li < ci.func.lineinfo.len) : (li += 1) {
+                    const ln: i64 = @intCast(ci.func.lineinfo[li]);
+                    if (ln <= 0) continue;
+                    if (first_line < 0) {
+                        first_line = ln;
+                    } else if (ln != first_line) {
+                        multi_line = true;
+                        break;
+                    }
+                }
+                var has_for_loop = false;
+                if (!multi_line) {
+                    var oi: usize = 0;
+                    while (oi < ci.func.code.len) : (oi += 1) {
+                        const lop = ci.func.code[oi].getOpCode();
+                        if (lop == .FORLOOP or lop == .TFORLOOP) {
+                            has_for_loop = true;
+                            break;
+                        }
+                    }
+                }
+                const should_dispatch = if (ci.hook_last_pc < 0) blk: {
+                    if (!multi_line) {
+                        if (has_for_loop) break :blk false;
+                    }
+                    break :blk line != ci.hook_last_line;
+                } else if (idx_i32 <= ci.hook_last_pc) blk: {
+                    if (line != ci.hook_last_line) break :blk true;
+                    // Lua reports same-line backward jumps for single-line chunks
+                    // (e.g. one-line numeric for), but not for multi-line chunks.
+                    break :blk !multi_line;
+                } else blk: {
+                    if (has_for_loop and ci.hook_last_line < 0) break :blk false;
+                    break :blk line != ci.hook_last_line;
+                };
+                ci.hook_last_pc = idx_i32;
+                if (should_dispatch) {
+                    ci.hook_last_line = line;
                     try dispatchLineHook(vm, line);
                 }
+            } else if (ci.hook_last_pc < 0) {
+                // Stripped chunk: no lineinfo. Lua still triggers one line hook
+                // callback with nil line for the first instruction.
+                if (ci.previous) |caller| {
+                    if (currentInstructionIndex(caller)) |caller_idx| {
+                        if (caller_idx < caller.func.lineinfo.len) {
+                            caller.hook_last_pc = @intCast(caller_idx);
+                            caller.hook_last_line = @intCast(caller.func.lineinfo[caller_idx]);
+                        }
+                    }
+                }
+                ci.hook_last_pc = @intCast(idx);
+                ci.hook_last_line = -1;
+                try dispatchLineHookNil(vm);
             }
         }
     }
@@ -2960,7 +3237,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const mm = metamethod.getMetamethod(vb, .unm, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
                     return error.ArithmeticError;
                 };
-                return try callUnaryMetamethod(vm, mm, vb, a);
+                return try callUnaryMetamethod(vm, mm, vb, a, "unm");
             }
             return .Continue;
         },
@@ -3009,7 +3286,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.stack[vm.base + a] = .{ .integer = table.rawLen() };
             } else {
                 if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
-                    return try callUnaryMetamethod(vm, mm, vb.*, a);
+                    return try callUnaryMetamethod(vm, mm, vb.*, a, "len");
                 }
                 const ty = callableValueTypeName(vb.*);
                 var msg_buf: [96]u8 = undefined;
@@ -3423,7 +3700,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 const nres: i16 = @intCast(nresults);
-                _ = try pushCallInfo(vm, func_proto, closure, new_base, new_base, nres);
+                const iter_ci = try pushCallInfo(vm, func_proto, closure, new_base, new_base, nres);
+                iter_ci.debug_name = "for iterator";
+                iter_ci.debug_namewhat = "for iterator";
                 vm.top = new_base + func_proto.maxstacksize;
                 return .LoopContinue;
             }
@@ -3504,8 +3783,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
                     else
                         nativeDesiredResultsForCall(nc.func.id, c, stack_room);
+                    var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
+                    const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                    for (0..native_call_arg_count) |i| {
+                        native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                    }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
+                    const call_transfer_count: u32 = nargs;
+                    setHookTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
                     try dispatchCallHook(vm, null);
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
@@ -3532,6 +3818,31 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
+                    switch (nc.func.id) {
+                        .select => {
+                            var idx_u: u32 = 1;
+                            if (native_call_arg_count > 0) {
+                                const idx_val = native_call_args[0].toInteger() orelse 1;
+                                if (idx_val >= 1) idx_u = @intCast(idx_val);
+                            }
+                            const arg_count: u32 = @intCast(native_call_arg_count);
+                            const native_transfer_start: u32 = idx_u + 1;
+                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                            setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                        },
+                        .math_sin => {
+                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                            const out = TValue{ .number = std.math.sin(arg) };
+                            setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                        },
+                        else => {
+                            const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
+                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                            setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                        },
+                    }
                     try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
                     return .LoopContinue;
                 }
@@ -3562,6 +3873,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
+                    setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
                     try dispatchCallHook(vm, null);
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
@@ -3611,6 +3923,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
+                setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
                 try dispatchCallHook(vm, null);
 
                 // Extend top to include vararg storage if needed
@@ -3776,6 +4089,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 current_ci.base = new_base;
                 current_ci.ret_base = ret_base;
                 current_ci.nresults = nresults;
+                current_ci.was_tail_called = true;
                 current_ci.vararg_base = vararg_base;
                 current_ci.vararg_count = vararg_count;
                 current_ci.is_protected = false;
@@ -3795,6 +4109,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+                setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                try dispatchTailCallHook(vm, null);
 
                 return .LoopContinue;
             }
@@ -3842,6 +4158,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         current_ci.base = new_base;
                         current_ci.ret_base = ret_base;
                         current_ci.nresults = pcall_nresults;
+                        current_ci.was_tail_called = true;
                         current_ci.vararg_base = 0;
                         current_ci.vararg_count = 0;
                         current_ci.is_protected = true;
@@ -3870,7 +4187,37 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
                     const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
                     const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
+                    var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
+                    const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                    for (0..native_call_arg_count) |i| {
+                        native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                    }
                     try vm.callNative(nc.func.id, a, nargs, native_nresults);
+                    switch (nc.func.id) {
+                        .select => {
+                            var idx_u: u32 = 1;
+                            if (native_call_arg_count > 0) {
+                                const idx_val = native_call_args[0].toInteger() orelse 1;
+                                if (idx_val >= 1) idx_u = @intCast(idx_val);
+                            }
+                            const arg_count: u32 = @intCast(native_call_arg_count);
+                            const native_transfer_start: u32 = idx_u + 1;
+                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                            setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                        },
+                        .math_sin => {
+                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                            const out = TValue{ .number = std.math.sin(arg) };
+                            setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                        },
+                        else => {
+                            const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
+                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                            setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                        },
+                    }
                     try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
 
                     // Pop current frame and copy results
@@ -3937,6 +4284,14 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                const ret_count: u32 = if (b == 0)
+                    returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
+                else if (b == 1)
+                    0
+                else
+                    b - 1;
+                const transfer_src = returning_ci.base + a;
+                setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
                 try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
@@ -3947,12 +4302,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Calculate actual return count
                 // B=0 means variable returns (from R[A] to top)
                 // B>0 means B-1 fixed returns
-                const ret_count: u32 = if (b == 0)
-                    returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
-                else if (b == 1)
-                    0
-                else
-                    b - 1;
 
                 // Protected frame: prepend true and shift results by 1
                 if (is_protected) {
@@ -4035,6 +4384,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
+            const transfer_src = vm.base + a;
+            setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
             try dispatchReturnHook(vm, null);
 
             if (ret_count == 0) {
@@ -4065,6 +4416,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                clearHookTransfer(vm);
                 try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
@@ -4103,6 +4455,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
+            clearHookTransfer(vm);
             try dispatchReturnHook(vm, null);
             return .{ .ReturnVM = .none };
         },
@@ -4127,6 +4480,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
+                setHookTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
                 try dispatchReturnHook(vm, null);
                 popCallInfo(vm);
 
@@ -4173,6 +4527,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
+            setHookTransferFromStack(vm, a + 1, vm.base + a, 1);
             try dispatchReturnHook(vm, null);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
@@ -4747,7 +5102,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // If metamethod is a closure, push call frame
             if (mm.asClosure()) |closure| {
-                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
                 return .LoopContinue;
             }
 
@@ -4795,7 +5151,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.top = temp + 3;
 
             if (mm.asClosure()) |closure| {
-                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
                 return .LoopContinue;
             }
 
@@ -4841,7 +5198,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             vm.top = temp + 3;
 
             if (mm.asClosure()) |closure| {
-                _ = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
+                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
                 return .LoopContinue;
             }
 
@@ -4963,14 +5321,14 @@ fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, compt
     }
 
     // Call the metamethod
-    return try callBinMetamethod(vm, mm, vb, vc, a);
+    return try callBinMetamethod(vm, mm, vb, vc, a, metamethodEventName(event));
 }
 
 fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime event: MetaEvent) !?ExecuteResult {
     const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
         return null;
     };
-    return try callBinMetamethod(vm, mm, vb, vc, result_reg);
+    return try callBinMetamethod(vm, mm, vb, vc, result_reg, metamethodEventName(event));
 }
 
 /// Check if both values can be used for arithmetic (fast path)
@@ -4981,7 +5339,7 @@ fn canDoArith(a: TValue, b: TValue) bool {
 }
 
 /// Call a binary metamethod and store result
-fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg: u8) !ExecuteResult {
+fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg: u8, mm_name: []const u8) !ExecuteResult {
     // Set up call: like CALL instruction
     // func at temp, args at temp+1, temp+2
     // But for call frame, we copy args to start at new_base
@@ -5017,7 +5375,7 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
             vm.stack[new_base + i] = .nil;
         }
 
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -5027,6 +5385,7 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, mm_name);
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
@@ -5051,7 +5410,7 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
 }
 
 /// Call a unary metamethod and store result
-fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !ExecuteResult {
+fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8, mm_name: []const u8) !ExecuteResult {
     const temp = vm.top;
 
     // If metamethod is a closure, push call frame
@@ -5084,7 +5443,7 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
             vm.stack[new_base + i] = .nil;
         }
 
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -5094,6 +5453,7 @@ fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8) !Execut
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, mm_name);
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
@@ -5175,7 +5535,8 @@ fn dispatchIndexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValu
 
         vm.top = new_base + proto.maxstacksize;
 
-        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        const ci = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        markMetamethodFrame(ci, "index");
         return .LoopContinue;
     }
 
@@ -5256,7 +5617,8 @@ fn dispatchSharedIndexMMValue(vm: *VM, value: TValue, key_val: TValue, result_re
 
         vm.top = new_base + proto.maxstacksize;
 
-        _ = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        const ci = try pushCallInfo(vm, proto, closure, new_base, @intCast(vm.base + result_reg), 1);
+        markMetamethodFrame(ci, "index");
         return .LoopContinue;
     }
 
@@ -5333,7 +5695,8 @@ fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TV
         }
 
         vm.top = new_base + proto.maxstacksize;
-        _ = try pushCallInfo(vm, proto, closure, new_base, new_base, 0);
+        const ci = try pushCallInfo(vm, proto, closure, new_base, new_base, 0);
+        markMetamethodFrame(ci, "newindex");
         return .LoopContinue;
     }
 
@@ -5396,7 +5759,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
                 vm.stack[new_base + i] = .nil;
             }
 
-            _ = try pushCallInfoVararg(
+            const ci = try pushCallInfoVararg(
                 vm,
                 func_proto,
                 closure,
@@ -5406,6 +5769,7 @@ fn dispatchCallMM(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32, nresults
                 vararg_base,
                 vararg_count,
             );
+            markMetamethodFrame(ci, "call");
             vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
             return .LoopContinue;
         }
@@ -5498,7 +5862,7 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
         while (i < func_proto.numparams) : (i += 1) {
             vm.stack[new_base + i] = .nil;
         }
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -5508,6 +5872,7 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, "len");
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
@@ -5578,7 +5943,7 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
         return vm.raiseString(msg);
     };
     if (concat_mm.asClosure()) |closure| {
-        return try executeSyncMM(vm, closure, &[_]TValue{ left, right });
+        return try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "concat", "metamethod");
     }
     if (concat_mm.isObject() and concat_mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, concat_mm.object);
@@ -5666,7 +6031,8 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
         vm.top = new_base + proto.maxstacksize;
 
         // Push call info, result goes to result_reg
-        _ = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
+        const ci = try pushCallInfo(vm, proto, closure, new_base, vm.base + result_reg, 1);
+        markMetamethodFrame(ci, "concat");
         return .LoopContinue;
     }
 
@@ -5730,10 +6096,10 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __eq is a Lua function - call synchronously using VM's executeSync
     if (eq_mm.asClosure()) |closure| {
-        const result = try executeSyncMM(vm, closure, &[_]TValue{
+        const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{
             TValue.fromTable(left_table),
             TValue.fromTable(right_table),
-        });
+        }, "eq", "metamethod");
         return result.toBoolean();
     }
 
@@ -5777,7 +6143,7 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __lt is a Lua function - call synchronously
     if (lt_mm.asClosure()) |closure| {
-        const result = try executeSyncMM(vm, closure, &[_]TValue{ left, right });
+        const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "lt", "metamethod");
         return result.toBoolean();
     }
 
@@ -5798,7 +6164,7 @@ const CompareMMDispatch = union(enum) {
     missing,
 };
 
-fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_abs: u32) !ExecuteResult {
+fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_abs: u32, mm_name: []const u8) !ExecuteResult {
     const temp = vm.top;
 
     if (mm.asClosure()) |closure| {
@@ -5828,7 +6194,7 @@ fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_a
             vm.stack[new_base + i] = .nil;
         }
 
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -5838,6 +6204,7 @@ fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_a
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, mm_name);
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
@@ -5881,7 +6248,7 @@ fn scheduleCompareMM(
     ci.pending_compare_invert = invert;
     ci.pending_compare_result_slot = result_slot;
 
-    const exec_res = try callBinMetamethodToAbs(vm, mm, left, right, result_slot);
+    const exec_res = try callBinMetamethodToAbs(vm, mm, left, right, result_slot, mm_name);
     switch (exec_res) {
         .LoopContinue => return .deferred,
         .Continue => {
@@ -5941,7 +6308,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __le is a Lua function
         if (le_mm.asClosure()) |closure| {
-            const result = try executeSyncMM(vm, closure, &[_]TValue{ left, right });
+            const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "le", "metamethod");
             return result.toBoolean();
         }
 
@@ -5969,7 +6336,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __lt is a Lua function
         if (lt_mm.asClosure()) |closure| {
-            const result = try executeSyncMM(vm, closure, &[_]TValue{ right, left });
+            const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ right, left }, "lt", "metamethod");
             return !result.toBoolean();
         }
 
@@ -6045,7 +6412,7 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
             vm.stack[new_base + i] = .nil;
         }
 
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -6055,6 +6422,7 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, event.toKey()[2..]);
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
@@ -6108,7 +6476,7 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
             vm.stack[new_base + i] = .nil;
         }
 
-        _ = try pushCallInfoVararg(
+        const ci = try pushCallInfoVararg(
             vm,
             func_proto,
             closure,
@@ -6118,6 +6486,7 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
             vararg_base,
             vararg_count,
         );
+        markMetamethodFrame(ci, "bnot");
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
         return .LoopContinue;
     }
