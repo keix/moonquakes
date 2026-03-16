@@ -23,6 +23,7 @@ pub const CLI = struct {
         var ignore_environment = false;
         var interactive = false;
         var warnings_enabled = false;
+        var print_version = false;
 
         if (args.len == 2 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-v"))) {
             try self.printVersion();
@@ -48,6 +49,12 @@ pub const CLI = struct {
                 try pre_script_tokens.append(self.allocator, opt);
                 arg_index += 1;
                 break;
+            }
+            if (std.mem.eql(u8, opt, "-v")) {
+                print_version = true;
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                continue;
             }
             if (std.mem.eql(u8, opt, "-E")) {
                 ignore_environment = true;
@@ -134,6 +141,10 @@ pub const CLI = struct {
         try pre_script_args.append(self.allocator, args[0]);
         for (pre_script_tokens.items) |tok| {
             try pre_script_args.append(self.allocator, tok);
+        }
+
+        if (print_version) {
+            try self.printVersion();
         }
 
         if (script_name) |script| {

@@ -3,6 +3,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const object = @import("../runtime/gc/object.zig");
+const interrupt = @import("../interrupt.zig");
 const StringObject = object.StringObject;
 const VM = @import("../vm/vm.zig").VM;
 
@@ -629,6 +630,10 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             }
             return;
         }
+        if (matcher.interrupted) {
+            _ = interrupt.consume();
+            return vm.raiseString("interrupted!");
+        }
         if (matcher.invalid_capture_index) |bad_idx| {
             var msg_buf: [64]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
@@ -727,6 +732,10 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                 vm.top = vm.base + func_reg + 1;
                 return;
             }
+        }
+        if (matcher.interrupted) {
+            _ = interrupt.consume();
+            return vm.raiseString("interrupted!");
         }
         if (matcher.invalid_capture_index) |bad_idx| {
             var msg_buf: [64]u8 = undefined;
@@ -900,6 +909,7 @@ const PatternMatcher = struct {
     capture_stack_top: u32,
     invalid_capture_index: ?u8,
     frontier_missing: bool,
+    interrupted: bool,
 
     const Capture = struct {
         start: usize,
@@ -960,6 +970,7 @@ const PatternMatcher = struct {
             .capture_stack_top = 0,
             .invalid_capture_index = null,
             .frontier_missing = false,
+            .interrupted = false,
         };
     }
 
@@ -972,9 +983,11 @@ const PatternMatcher = struct {
         self.capture_stack_top = 0;
         self.invalid_capture_index = null;
         self.frontier_missing = false;
+        self.interrupted = false;
     }
 
     fn match(self: *PatternMatcher) bool {
+        if (self.shouldInterrupt()) return false;
         // Skip ^ anchor if present
         if (self.pat_pos < self.pattern.len and self.pattern[self.pat_pos] == '^') {
             self.pat_pos += 1;
@@ -985,6 +998,7 @@ const PatternMatcher = struct {
 
     fn matchPattern(self: *PatternMatcher) bool {
         while (self.pat_pos < self.pattern.len) {
+            if (self.shouldInterrupt()) return false;
             const c = self.pattern[self.pat_pos];
 
             // End anchor
@@ -1059,6 +1073,7 @@ const PatternMatcher = struct {
                     while (self.matchItem(item)) : (count += 1) {}
                     // Backtrack until rest of pattern matches
                     while (count > 0) : (count -= 1) {
+                        if (self.shouldInterrupt()) return false;
                         const snap = self.snapshot();
                         if (self.matchPattern()) return true;
                         self.restore(snap);
@@ -1079,6 +1094,7 @@ const PatternMatcher = struct {
                     while (self.matchItem(item)) : (count += 1) {}
                     // Backtrack
                     while (count > 1) : (count -= 1) {
+                        if (self.shouldInterrupt()) return false;
                         const snap = self.snapshot();
                         if (self.matchPattern()) return true;
                         self.restore(snap);
@@ -1109,6 +1125,7 @@ const PatternMatcher = struct {
                     self.restore(zero_snap);
                     // Then try one match and recurse
                     while (self.matchItem(item)) {
+                        if (self.shouldInterrupt()) return false;
                         const snap = self.snapshot();
                         if (self.matchPattern()) return true;
                         self.restore(snap);
@@ -1249,6 +1266,7 @@ const PatternMatcher = struct {
     }
 
     fn matchItem(self: *PatternMatcher, item: PatternItem) bool {
+        if (self.shouldInterrupt()) return false;
         if (self.str_pos >= self.str.len) return false;
         if (item == .backref) {
             const idx = item.backref;
@@ -1281,6 +1299,7 @@ const PatternMatcher = struct {
                 var level: usize = 1;
                 var i: usize = self.str_pos + 1;
                 while (i < self.str.len) : (i += 1) {
+                    if (self.shouldInterrupt()) return false;
                     const cc = self.str[i];
                     if (cc == b.close) {
                         level -= 1;
@@ -1317,6 +1336,15 @@ const PatternMatcher = struct {
         const prev_in = if (negated) !prev_in_raw else prev_in_raw;
         const curr_in = if (negated) !curr_in_raw else curr_in_raw;
         return !prev_in and curr_in;
+    }
+
+    fn shouldInterrupt(self: *PatternMatcher) bool {
+        if (self.interrupted) return true;
+        if (interrupt.isPending()) {
+            self.interrupted = true;
+            return true;
+        }
+        return false;
     }
 
     fn matchLuaClass(c: u8, class: u8) bool {
@@ -1576,6 +1604,10 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
             return;
         }
+        if (matcher.interrupted) {
+            _ = interrupt.consume();
+            return vm.raiseString("interrupted!");
+        }
         if (matcher.invalid_capture_index) |bad_idx| {
             var msg_buf: [64]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";
@@ -1691,6 +1723,10 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                 pos += 1;
             }
         } else {
+            if (matcher.interrupted) {
+                _ = interrupt.consume();
+                return vm.raiseString("interrupted!");
+            }
             if (matcher.invalid_capture_index) |bad_idx| {
                 var msg_buf: [64]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "invalid capture index %{c}", .{bad_idx}) catch "invalid capture index";

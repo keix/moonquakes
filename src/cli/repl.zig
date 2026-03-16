@@ -11,6 +11,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const RawProto = @import("../compiler/proto.zig").RawProto;
+const ReturnValue = @import("../vm/execution.zig").ReturnValue;
 const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const ver = @import("../version.zig");
@@ -177,7 +178,7 @@ pub const REPL = struct {
             switch (attempt.*) {
                 .ok => |raw_proto| {
                     const result = self.executeRawProto(raw_proto, stderr) orelse return .handled;
-                    self.printResultWithGlobalPrint(result, stderr);
+                    self.printReturnValue(result, stderr);
                     return .handled;
                 },
                 .incomplete => return .incomplete,
@@ -187,7 +188,8 @@ pub const REPL = struct {
 
         switch (stmt_attempt) {
             .ok => |raw_proto| {
-                _ = self.executeRawProto(raw_proto, stderr);
+                const result = self.executeRawProto(raw_proto, stderr) orelse return .handled;
+                self.printReturnValue(result, stderr);
                 return .handled;
             },
             .incomplete => return .incomplete,
@@ -221,36 +223,12 @@ pub const REPL = struct {
         }
     }
 
-    fn executeRawProto(self: *Self, raw_proto: RawProto, stderr: anytype) ?TValue {
-        const gc = self.vm.gc();
-        gc.inhibitGC();
-        const proto = pipeline.materialize(&raw_proto, gc, self.allocator) catch {
-            gc.allowGC();
+    fn executeRawProto(self: *Self, raw_proto: RawProto, stderr: anytype) ?ReturnValue {
+        const proto = pipeline.materialize(&raw_proto, self.vm.gc(), self.allocator) catch {
             stderr.writeAll("error: failed to materialize chunk\n") catch {};
             return null;
         };
-
-        const closure = gc.allocClosure(proto) catch {
-            gc.allowGC();
-            stderr.writeAll("error: failed to create closure\n") catch {};
-            return null;
-        };
-
-        if (proto.nups > 0) {
-            const env_upval = gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals())) catch {
-                gc.allowGC();
-                stderr.writeAll("error: failed to create _ENV upvalue\n") catch {};
-                return null;
-            };
-            closure.upvalues[0] = env_upval;
-        }
-
-        const func_val = TValue.fromClosure(closure);
-        _ = self.vm.pushTempRoot(func_val);
-        gc.allowGC();
-
-        const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
-            self.vm.popTempRoots(1);
+        const result = @import("../vm/mnemonics.zig").execute(self.vm, proto) catch {
             if (self.vm.lua_error_value.asString()) |err_str| {
                 stderr.print("[string]:?: {s}\n", .{err_str.asSlice()}) catch {};
             } else {
@@ -258,7 +236,6 @@ pub const REPL = struct {
             }
             return null;
         };
-        self.vm.popTempRoots(1);
 
         return result;
     }
@@ -391,6 +368,34 @@ pub const REPL = struct {
         };
 
         _ = call.callValue(self.vm, print_val, &[_]TValue{val}) catch {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
+    }
+
+    fn printReturnValue(self: *Self, result: ReturnValue, stderr: anytype) void {
+        switch (result) {
+            .none => {},
+            .single => |val| self.printResultWithGlobalPrint(val, stderr),
+            .multiple => |vals| {
+                self.printResultsWithGlobalPrint(vals, stderr);
+            },
+        }
+    }
+
+    fn printResultsWithGlobalPrint(self: *Self, vals: []TValue, stderr: anytype) void {
+        if (vals.len == 0) return;
+
+        const print_key = self.vm.gc().allocString("print") catch {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
+        const print_val = self.vm.globals().get(TValue.fromString(print_key)) orelse {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
+
+        _ = call.callValue(self.vm, print_val, vals) catch {
             stderr.writeAll("error calling 'print'\n") catch {};
             return;
         };

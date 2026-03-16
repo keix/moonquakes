@@ -15,6 +15,7 @@ const TValue = @import("runtime/value.zig").TValue;
 const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
 const pipeline = @import("compiler/pipeline.zig");
+const serializer = @import("compiler/serializer.zig");
 const call = @import("vm/call.zig");
 const metamethod = @import("vm/metamethod.zig");
 const owned = @import("runtime/owned.zig");
@@ -87,6 +88,14 @@ fn stripInitialHashLine(bytes: []const u8, preserve_newline: bool) []const u8 {
         return if (preserve_newline) bytes[i + 1 ..] else bytes[i + 2 ..];
     }
     return if (preserve_newline) bytes[i..] else bytes[i + 1 ..];
+}
+
+fn preprocessChunkSource(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), true);
+}
+
+fn sourceForBytecodeProbe(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), false);
 }
 
 /// Execution options for script launch
@@ -371,6 +380,38 @@ pub fn runFile(allocator: std.mem.Allocator, file_path: []const u8, options: Run
         opts.script_name = file_path;
     }
 
-    const chunk_source = stripInitialHashLine(stripUtf8Bom(source), true);
-    return run(allocator, chunk_source, opts);
+    const bytecode_probe = sourceForBytecodeProbe(source);
+    if (bytecode_probe.len > 0 and bytecode_probe[0] == 0x1B) {
+        const rt = try Runtime.init(allocator);
+        defer rt.deinit();
+
+        const vm = try VM.init(rt);
+        defer vm.deinit();
+        vm.rt.warnings_enabled = opts.warnings_enabled;
+
+        try injectArg(vm.globals(), vm.gc(), opts);
+        try applyEnvironment(vm, allocator, opts.ignore_environment);
+        for (opts.preload_modules) |module_spec| {
+            try runPreloadModule(vm, module_spec);
+        }
+        for (opts.exec_chunks) |chunk| {
+            try executeInitChunk(vm, allocator, chunk, "=(command line)");
+        }
+
+        const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
+            std.debug.print("{s}: truncated bytecode\n", .{opts.exec_name});
+            return error.CompileFailed;
+        };
+
+        const result = Mnemonics.executeWithArgs(vm, proto, &.{}) catch |err| {
+            if (err == error.LuaException) {
+                printUnhandledLuaError(vm, opts.exec_name);
+            }
+            return err;
+        };
+
+        return owned.toOwnedReturnValue(allocator, result);
+    }
+
+    return run(allocator, preprocessChunkSource(source), opts);
 }

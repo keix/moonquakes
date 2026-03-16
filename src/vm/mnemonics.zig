@@ -26,6 +26,7 @@ const ExecuteResult = execution.ExecuteResult;
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 const vm_gc = @import("gc.zig");
+const interrupt = @import("../interrupt.zig");
 
 pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
 pub const BitwiseOp = enum { band, bor, bxor };
@@ -2676,6 +2677,9 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
+    if (interrupt.consume()) {
+        return vm.raiseString("interrupted!");
+    }
     vm.exec_tick +%= 1;
     const ci = vm.ci.?;
     if (vm.hook_count > 0 and !vm.in_hook) {

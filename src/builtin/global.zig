@@ -1569,6 +1569,10 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
+    if (nargs == 0) {
+        return vm.raiseString("bad argument #1 to 'warn' (string expected)");
+    }
+
     if (nargs == 1) {
         const control_arg = vm.stack[vm.base + func_reg + 1];
         if (control_arg.asString()) |str_obj| {
@@ -1587,13 +1591,20 @@ pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
     }
 
+    var i: u32 = 0;
+    while (i < nargs) : (i += 1) {
+        const arg = vm.stack[vm.base + func_reg + 1 + i];
+        if (arg.asString() != null or arg == .integer or arg == .number) continue;
+        return vm.raiseString("bad argument to 'warn' (string expected)");
+    }
+
     if (!vm.rt.warnings_enabled) return;
 
     const stderr_file = std.fs.File.stderr();
 
     try stderr_file.writeAll("Lua warning: ");
 
-    var i: u32 = 0;
+    i = 0;
     while (i < nargs) : (i += 1) {
         const arg = vm.stack[vm.base + func_reg + 1 + i];
 
