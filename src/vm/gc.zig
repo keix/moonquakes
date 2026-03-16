@@ -110,8 +110,41 @@ fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyer
     return call.callValue(vm, func.*, args);
 }
 
+fn writeFinalizerWarningValue(stderr_file: std.fs.File, value: TValue) void {
+    if (value.asString()) |s| {
+        stderr_file.writeAll(s.asSlice()) catch {};
+        return;
+    }
+
+    var buf: [64]u8 = undefined;
+    switch (value) {
+        .nil => stderr_file.writeAll("nil") catch {},
+        .boolean => |b| stderr_file.writeAll(if (b) "true" else "false") catch {},
+        .integer => |i| {
+            const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return;
+            stderr_file.writeAll(s) catch {};
+        },
+        .number => |n| {
+            const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
+            stderr_file.writeAll(s) catch {};
+        },
+        else => stderr_file.writeAll("(error object is not a string)") catch {},
+    }
+}
+
+fn vmReportFinalizerError(ctx: *anyopaque) void {
+    const vm: *VM = @ptrCast(@alignCast(ctx));
+    if (!vm.rt.warnings_enabled) return;
+
+    const stderr_file = std.fs.File.stderr();
+    stderr_file.writeAll("Lua warning: error in __gc metamethod (") catch return;
+    writeFinalizerWarningValue(stderr_file, vm.lua_error_value);
+    stderr_file.writeAll(")\n") catch {};
+    vm.lua_error_value = .nil;
+}
+
 pub fn finalizerExecutor(self: *VM) FinalizerExecutor {
-    return FinalizerExecutor.init(@ptrCast(self), vmCallValue);
+    return FinalizerExecutor.init(@ptrCast(self), vmCallValue, vmReportFinalizerError);
 }
 
 /// Coroutine VM cleanup (called by GC during sweep)

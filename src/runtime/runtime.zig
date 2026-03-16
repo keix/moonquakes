@@ -49,6 +49,9 @@ pub const Runtime = struct {
     /// Shared across all VMs in this Runtime to match Lua's C-stack guard behavior.
     resume_c_depth: u32 = 0,
 
+    /// Lua 5.4 warnings are disabled by default and enabled by CLI `-W` or `warn("@on")`.
+    warnings_enabled: bool = false,
+
     /// Initialize a new Runtime.
     /// Creates GC, globals, registry, and initializes builtin environment.
     pub fn init(allocator: std.mem.Allocator) !*Runtime {

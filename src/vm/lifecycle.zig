@@ -61,6 +61,8 @@ pub fn init(rt: *Runtime) !*VM {
 pub fn deinit(self: *VM) void {
     const is_main = self.rt.main_thread == self.thread;
     if (is_main) {
+        self.rt.gc.enqueueAllFinalizers();
+        self.rt.gc.drainFinalizers();
         self.rt.gc.setFinalizerExecutor(null);
         self.rt.gc.removeRootProvider(vm_gc.rootProvider(self));
     }

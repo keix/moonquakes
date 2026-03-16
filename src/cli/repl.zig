@@ -12,6 +12,7 @@ const object = @import("../runtime/gc/object.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 const ver = @import("../version.zig");
+const launcher = @import("../launcher.zig");
 
 pub const REPL = struct {
     allocator: std.mem.Allocator,
@@ -45,6 +46,18 @@ pub const REPL = struct {
     pub fn deinit(self: *Self) void {
         self.vm.deinit();
         self.rt.deinit();
+    }
+
+    pub fn applyStartup(self: *Self, options: launcher.RunOptions) !void {
+        self.vm.rt.warnings_enabled = options.warnings_enabled;
+        try launcher.injectArg(self.vm.globals(), self.vm.gc(), options);
+        try launcher.applyEnvironment(self.vm, self.allocator, options.ignore_environment);
+        for (options.preload_modules) |module_spec| {
+            try launcher.runPreloadModule(self.vm, module_spec);
+        }
+        for (options.exec_chunks) |chunk| {
+            try launcher.executeInitChunk(self.vm, self.allocator, chunk, "=(command line)");
+        }
     }
 
     /// Run the REPL loop

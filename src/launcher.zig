@@ -49,6 +49,8 @@ pub const RunOptions = struct {
     args: []const []const u8 = &.{},
     /// Ignore LUA_* environment variables (Lua -E semantics)
     ignore_environment: bool = false,
+    /// Enable warnings from startup (CLI -W semantics)
+    warnings_enabled: bool = false,
     /// Modules to require before running main chunk (CLI -l)
     preload_modules: []const []const u8 = &.{},
     /// Chunks to execute before main chunk (CLI -e, in parse order)
@@ -103,7 +105,7 @@ fn setPackageStringField(vm: *VM, field: []const u8, value: []const u8) !void {
     try package_table.set(TValue.fromString(field_key), TValue.fromString(field_val));
 }
 
-fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
+pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
     const compile_result = pipeline.compile(allocator, source, .{ .source_name = source_name });
     switch (compile_result) {
         .err => |e| {
@@ -129,7 +131,7 @@ fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, s
     };
 }
 
-fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: bool) !void {
+pub fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: bool) !void {
     if (ignore_environment) return;
 
     const path_env = getPreferredEnv(allocator, "LUA_PATH_5_4", "LUA_PATH");
@@ -170,7 +172,7 @@ fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: b
     }
 }
 
-fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
+pub fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
     var module_name = module_spec;
     var global_name = module_spec;
     if (std.mem.indexOfScalar(u8, module_spec, '=')) |eq| {
@@ -258,6 +260,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
 
     const vm = try VM.init(rt);
     defer vm.deinit();
+    vm.rt.warnings_enabled = options.warnings_enabled;
 
     // Phase 3: Inject execution context (arg table, etc.)
     try injectArg(vm.globals(), vm.gc(), options);

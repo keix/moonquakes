@@ -513,16 +513,15 @@ pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     _ = nresults;
 
     const stdin_file = std.fs.File.stdin();
-    var stdout_writer = std.fs.File.stdout().writer(&.{});
-    const stdout = &stdout_writer.interface;
-    var stderr_writer = std.fs.File.stderr().writer(&.{});
+    const stderr_file = std.fs.File.stderr();
+    var stderr_writer = stderr_file.writer(&.{});
     const stderr = &stderr_writer.interface;
 
     var buf: [32768]u8 = undefined;
 
     while (true) {
         // Print prompt
-        stdout.writeAll("lua_debug> ") catch return;
+        stderr_file.writeAll("lua_debug> ") catch return;
 
         // Read line from stdin (character by character until newline)
         var pos: usize = 0;
@@ -586,8 +585,8 @@ pub fn nativeDebugDebug(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
         // Print non-nil result
         if (!result.isNil()) {
-            printValue(stdout, result) catch {};
-            stdout.writeAll("\n") catch {};
+            printValue(stderr, result) catch {};
+            stderr.writeAll("\n") catch {};
         }
     }
 }

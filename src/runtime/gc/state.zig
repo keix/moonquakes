@@ -131,11 +131,17 @@ pub const RootProvider = struct {
 pub const FinalizerExecutor = struct {
     ptr: *anyopaque,
     callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+    reportError: *const fn (ctx: *anyopaque) void,
 
-    pub fn init(ptr: *anyopaque, callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue) FinalizerExecutor {
+    pub fn init(
+        ptr: *anyopaque,
+        callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+        reportError: *const fn (ctx: *anyopaque) void,
+    ) FinalizerExecutor {
         return .{
             .ptr = ptr,
             .callValue = callValue,
+            .reportError = reportError,
         };
     }
 };
@@ -390,7 +396,9 @@ pub const GC = struct {
                 .userdata => TValue.fromUserdata(@fieldParentPtr("header", item.obj)),
                 else => continue,
             };
-            _ = executor.callValue(executor.ptr, &item.func, &[_]TValue{obj_val}) catch {};
+            _ = executor.callValue(executor.ptr, &item.func, &[_]TValue{obj_val}) catch {
+                executor.reportError(executor.ptr);
+            };
             // Note: finalizer_queued stays true to prevent re-finalization.
             // Lua semantics: once finalized, object is not finalized again
             // (unless setmetatable is called to set a new __gc).
@@ -494,6 +502,7 @@ pub const GC = struct {
 
     pub const markFinalizerQueue = finalizer_mod.markFinalizerQueue;
     pub const enqueueFinalizers = finalizer_mod.enqueueFinalizers;
+    pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
 
     pub const sweep = sweep_mod.sweep;
     pub const freeObjectFinal = sweep_mod.freeObjectFinal;

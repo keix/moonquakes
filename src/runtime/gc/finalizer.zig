@@ -22,10 +22,21 @@ pub fn markFinalizerQueue(self: anytype) void {
 /// The objects and their finalizer functions are marked to keep them alive
 /// until execution.
 pub fn enqueueFinalizers(self: anytype) void {
+    enqueueMatchingFinalizers(self, true);
+}
+
+/// Enqueue all __gc finalizers regardless of current mark color.
+/// Used when closing the state so finalizable objects referenced from globals
+/// still receive their finalizer.
+pub fn enqueueAllFinalizers(self: anytype) void {
+    enqueueMatchingFinalizers(self, false);
+}
+
+fn enqueueMatchingFinalizers(self: anytype, only_white: bool) void {
     if (!self.mm_keys_initialized) return;
     var current = self.objects;
     while (current) |obj| {
-        if (self.isWhite(obj) and !obj.finalizer_queued) {
+        if ((!only_white or self.isWhite(obj)) and !obj.finalizer_queued) {
             const maybe_metatable: ?*TableObject = switch (obj.type) {
                 .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
                 .userdata => @as(*UserdataObject, @fieldParentPtr("header", obj)).metatable,

@@ -1569,29 +1569,48 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
 
-    var stderr_writer = std.fs.File.stderr().writer(&.{});
-    const stderr = &stderr_writer.interface;
+    if (nargs == 1) {
+        const control_arg = vm.stack[vm.base + func_reg + 1];
+        if (control_arg.asString()) |str_obj| {
+            const control = str_obj.asSlice();
+            if (std.mem.eql(u8, control, "@on")) {
+                vm.rt.warnings_enabled = true;
+                return;
+            }
+            if (std.mem.eql(u8, control, "@off")) {
+                vm.rt.warnings_enabled = false;
+                return;
+            }
+            if (control.len > 0 and control[0] == '@') {
+                return;
+            }
+        }
+    }
 
-    try stderr.writeAll("Lua warning: ");
+    if (!vm.rt.warnings_enabled) return;
+
+    const stderr_file = std.fs.File.stderr();
+
+    try stderr_file.writeAll("Lua warning: ");
 
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         const arg = vm.stack[vm.base + func_reg + 1 + i];
 
         if (arg.asString()) |str_obj| {
-            try stderr.writeAll(str_obj.asSlice());
+            try stderr_file.writeAll(str_obj.asSlice());
         } else if (arg == .integer) {
             var buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{arg.integer}) catch "";
-            try stderr.writeAll(s);
+            try stderr_file.writeAll(s);
         } else if (arg == .number) {
             var buf: [32]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "{d}", .{arg.number}) catch "";
-            try stderr.writeAll(s);
+            try stderr_file.writeAll(s);
         }
     }
 
-    try stderr.writeAll("\n");
+    try stderr_file.writeAll("\n");
 }
 
 /// _G - A global variable holding the global environment
