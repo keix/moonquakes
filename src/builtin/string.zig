@@ -11,14 +11,20 @@ const VM = @import("../vm/vm.zig").VM;
 /// Reference: https://www.lua.org/manual/5.4/manual.html#6.4
 /// Format number to string using stack buffer (no allocation)
 fn formatNumber(buf: []u8, n: f64) []const u8 {
-    // Handle integers that have no fractional part and round-trip to i64
-    if (n == @floor(n)) {
-        if (floatToIntExact(n)) |int_val| {
-            return std.fmt.bufPrint(buf, "{d}", .{int_val}) catch buf[0..0];
-        }
+    const rendered = std.fmt.bufPrint(buf, "{d}", .{n}) catch return buf[0..0];
+
+    // Keep floating-point identity for integral-looking finite numbers (e.g. 0.0 -> "0.0").
+    if (std.math.isFinite(n) and
+        std.mem.indexOfScalar(u8, rendered, '.') == null and
+        std.mem.indexOfAny(u8, rendered, "eE") == null and
+        rendered.len + 2 <= buf.len)
+    {
+        buf[rendered.len] = '.';
+        buf[rendered.len + 1] = '0';
+        return buf[0 .. rendered.len + 2];
     }
-    // Handle floating point numbers
-    return std.fmt.bufPrint(buf, "{}", .{n}) catch buf[0..0];
+
+    return rendered;
 }
 
 fn floatToIntExact(n: f64) ?i64 {

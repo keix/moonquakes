@@ -702,7 +702,6 @@ fn findCallOpenParenLineInSource(source: []const u8, from_line: u32) ?i64 {
 fn runtimeErrorLine(ci: *const CallInfo, inst: Instruction, err: anyerror) i64 {
     const idx = currentInstructionIndex(ci) orelse return -1;
     var line_idx = idx;
-    var arithmetic_from_mmbin = false;
     var arithmetic_line_override: ?i64 = null;
     var call_line_override: ?i64 = null;
 
@@ -732,7 +731,6 @@ fn runtimeErrorLine(ci: *const CallInfo, inst: Instruction, err: anyerror) i64 {
                 prev_op == .UNM or prev_op == .BNOT)
             {
                 line_idx = idx - 1;
-                arithmetic_from_mmbin = true;
             }
         }
         if (op == .ADD or op == .SUB or op == .MUL or op == .DIV or op == .MOD or op == .POW or op == .IDIV or
@@ -762,23 +760,13 @@ fn runtimeErrorLine(ci: *const CallInfo, inst: Instruction, err: anyerror) i64 {
     }
 
     if (ci.func.lineinfo.len == 0 or line_idx >= ci.func.lineinfo.len) return -1;
-    var line_i: i64 = @intCast(ci.func.lineinfo[line_idx]);
+    const line_i: i64 = @intCast(ci.func.lineinfo[line_idx]);
     if (arithmetic_line_override) |line_override| return line_override;
     if (call_line_override) |line_override| return line_override;
-
-    if (err == error.InvalidForLoopInit or err == error.InvalidForLoopLimit or err == error.InvalidForLoopStep) {
-        if (line_i > 1) line_i -= 1;
-    } else if (err == error.NotAFunction and inst.getOpCode() == .TFORCALL) {
-        if (line_i > 2) line_i -= 2;
-    } else if (err == error.NotATable or err == error.InvalidTableOperation) {
-        const src = ci.func.source;
-        const skip_sub = src.len > 0 and src[0] == '\n';
-        if (!skip_sub and line_i > 1) line_i -= 1;
-    } else if (err == error.DivideByZero or err == error.ModuloByZero) {
-        if (line_i > 1) line_i -= 1;
-    } else if (err == error.ArithmeticError and !arithmetic_from_mmbin) {
-        if (line_i > 1) line_i -= 1;
+    if (err == error.NotAFunction and inst.getOpCode() == .TFORCALL and line_i > 1) {
+        return line_i - 1;
     }
+
     return line_i;
 }
 
@@ -1967,7 +1955,28 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
     }
 }
 
-fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObject) void {
+fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObject, main_args: []const TValue) void {
+    const argc: u32 = @intCast(main_args.len);
+    const params_to_copy: u32 = @min(argc, @as(u32, proto.numparams));
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        vm.stack[i] = main_args[i];
+    }
+    while (i < proto.numparams) : (i += 1) {
+        vm.stack[i] = .nil;
+    }
+
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (proto.is_vararg and argc > proto.numparams) {
+        vararg_count = argc - proto.numparams;
+        vararg_base = proto.maxstacksize + 32;
+        var vi: u32 = 0;
+        while (vi < vararg_count) : (vi += 1) {
+            vm.stack[vararg_base + vi] = main_args[proto.numparams + vi];
+        }
+    }
+
     vm.base_ci = CallInfo{
         .func = proto,
         .closure = main_closure,
@@ -1976,11 +1985,13 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
         .base = 0,
         .ret_base = 0,
         .nresults = -1,
+        .vararg_base = vararg_base,
+        .vararg_count = vararg_count,
         .previous = null,
     };
     vm.ci = &vm.base_ci;
     vm.base = 0;
-    vm.top = proto.maxstacksize;
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else proto.maxstacksize;
 }
 
 /// Handle a LuaException by unwinding to the nearest protected frame.
@@ -2194,7 +2205,7 @@ pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
 
 /// Main VM execution loop.
 /// Executes instructions until RETURN from main chunk.
-pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
+pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TValue) !ReturnValue {
     // Create main closure with _ENV upvalue pointing to globals
     // Inhibit GC during allocation sequence to prevent collection of
     // intermediate objects (main_closure) before they're fully rooted
@@ -2214,7 +2225,7 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     }
     vm.gc().allowGC();
 
-    setupMainFrame(vm, proto, main_closure);
+    setupMainFrame(vm, proto, main_closure, main_args);
 
     // Finalizers are executed by the currently running VM.
     vm.gc().setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
@@ -2600,6 +2611,10 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
             .ReturnVM => |ret| return ret,
         }
     }
+}
+
+pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
+    return executeWithArgs(vm, proto, &.{});
 }
 
 /// Execute a single instruction.

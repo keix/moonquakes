@@ -51,6 +51,10 @@ pub const RunOptions = struct {
     ignore_environment: bool = false,
     /// Modules to require before running main chunk (CLI -l)
     preload_modules: []const []const u8 = &.{},
+    /// Chunks to execute before main chunk (CLI -e, in parse order)
+    exec_chunks: []const []const u8 = &.{},
+    /// Values placed at arg[-n]..arg[-1] (CLI tokens before script)
+    pre_script_args: []const []const u8 = &.{},
     // Future extensions:
     // env: ?*TableObject = null,
     // preload: []const PreloadModule = &.{},
@@ -172,6 +176,9 @@ fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
     if (std.mem.indexOfScalar(u8, module_spec, '=')) |eq| {
         global_name = module_spec[0..eq];
         module_name = module_spec[eq + 1 ..];
+    } else if (std.mem.indexOfScalar(u8, module_spec, '-')) |dash| {
+        // Lua CLI compatibility: "-l mod-v2" stores module in global "mod".
+        global_name = module_spec[0..dash];
     }
 
     const require_key = try vm.gc().allocString("require");
@@ -190,8 +197,15 @@ fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
 pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
     const arg_table = try gc.allocTable();
 
-    // arg[-1] = executable name/path (when available)
-    if (options.exec_name.len > 0) {
+    // arg[-n]..arg[-1] = CLI tokens before script
+    if (options.pre_script_args.len > 0) {
+        const n: i64 = @intCast(options.pre_script_args.len);
+        for (options.pre_script_args, 0..) |tok, i| {
+            const s = try gc.allocString(tok);
+            try arg_table.set(.{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
+        }
+    } else if (options.exec_name.len > 0) {
+        // Compatibility fallback
         const exec_str = try gc.allocString(options.exec_name);
         try arg_table.set(.{ .integer = -1 }, TValue.fromString(exec_str));
     }
@@ -251,13 +265,32 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
     for (options.preload_modules) |module_spec| {
         try runPreloadModule(vm, module_spec);
     }
+    for (options.exec_chunks) |chunk| {
+        try executeInitChunk(vm, allocator, chunk, "=(command line)");
+    }
 
     // Phase 4: Materialize constants (returns GC-managed ProtoObject)
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     // No defer needed - ProtoObject is GC-managed
 
     // Phase 5: Execute
-    const result = Mnemonics.execute(vm, proto) catch |err| {
+    var main_args = std.ArrayList(TValue){};
+    defer main_args.deinit(allocator);
+    const arg_key = try vm.gc().allocString("arg");
+    if (vm.globals().get(TValue.fromString(arg_key))) |arg_val| {
+        const arg_tbl = arg_val.asTable() orelse {
+            std.debug.print("[string]:?: 'arg' is not a table\n", .{});
+            return error.LuaException;
+        };
+        var i: i64 = 1;
+        while (true) : (i += 1) {
+            const v = arg_tbl.get(.{ .integer = i }) orelse break;
+            if (v.isNil()) break;
+            try main_args.append(allocator, v);
+        }
+    }
+
+    const result = Mnemonics.executeWithArgs(vm, proto, main_args.items) catch |err| {
         if (err == error.LuaException) {
             // Print Lua error message before VM is destroyed
             if (vm.lua_error_value.asString()) |err_str| {

@@ -1970,7 +1970,8 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
 
     var child = std.process.Child.init(&argv, allocator);
     child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // Lua io.popen() captures stdout only.
+    child.stderr_behavior = .Ignore;
 
     try child.spawn();
 
@@ -1983,15 +1984,6 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
     while (true) {
         var buf: [4096]u8 = undefined;
         const bytes_read = try stdout_reader.read(&buf);
-        if (bytes_read == 0) break;
-        try stdout_list.appendSlice(allocator, buf[0..bytes_read]);
-    }
-
-    // Also read stderr and append (for 2>&1 behavior)
-    var stderr_reader = child.stderr.?;
-    while (true) {
-        var buf: [4096]u8 = undefined;
-        const bytes_read = try stderr_reader.read(&buf);
         if (bytes_read == 0) break;
         try stdout_list.appendSlice(allocator, buf[0..bytes_read]);
     }
@@ -2021,29 +2013,16 @@ fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []c
     const argv = [_][]const u8{ "/bin/sh", "-c", script };
     var child = std.process.Child.init(&argv, allocator);
     child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    // For popen(..., "w"), caller only needs process exit status.
+    // Ignore child output streams to avoid pipe backpressure deadlocks.
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
     try child.spawn();
 
     if (child.stdin) |stdin_file| {
         try stdin_file.writeAll(input);
         stdin_file.close();
         child.stdin = null; // prevent double-close in Child.cleanupStreams()
-    }
-
-    if (child.stdout) |*stdout_file| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = try stdout_file.read(&buf);
-            if (n == 0) break;
-        }
-    }
-    if (child.stderr) |*stderr_file| {
-        var buf: [4096]u8 = undefined;
-        while (true) {
-            const n = try stderr_file.read(&buf);
-            if (n == 0) break;
-        }
     }
 
     const term = try child.wait();

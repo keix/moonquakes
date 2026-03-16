@@ -5714,7 +5714,7 @@ pub const Parser = struct {
         self.advance(); // consume 'end'
 
         // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = if (self.current.line > 1) @intCast(self.current.line - 1) else @intCast(self.current.line);
+        var return_line: u32 = @intCast(self.current.line);
         if (func_builder.lineinfo.items.len > 0) {
             const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
             if (last_line > 0) return_line = last_line;
@@ -5735,6 +5735,7 @@ pub const Parser = struct {
         // Now emit CLOSURE to create the function
         const closure_reg = old_proto.allocTemp();
         const proto_idx = try old_proto.addProto(proto_ptr);
+        old_proto.current_line = fn_line;
         try old_proto.emitClosure(closure_reg, proto_idx);
 
         // Store the closure based on how the function was defined
@@ -5902,7 +5903,7 @@ pub const Parser = struct {
         self.advance(); // consume 'end'
 
         // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = if (self.current.line > 1) @intCast(self.current.line - 1) else @intCast(self.current.line);
+        var return_line: u32 = @intCast(self.current.line);
         if (func_builder.lineinfo.items.len > 0) {
             const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
             if (last_line > 0) return_line = last_line;
@@ -6019,7 +6020,7 @@ pub const Parser = struct {
         self.advance(); // consume 'end'
 
         // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = if (self.current.line > 1) @intCast(self.current.line - 1) else @intCast(self.current.line);
+        var return_line: u32 = @intCast(self.current.line);
         if (func_builder.lineinfo.items.len > 0) {
             const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
             if (last_line > 0) return_line = last_line;
