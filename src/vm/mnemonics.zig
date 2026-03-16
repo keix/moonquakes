@@ -1,6 +1,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const opcodes = @import("../compiler/opcodes.zig");
+const pipeline = @import("../compiler/pipeline.zig");
 const OpCode = opcodes.OpCode;
 const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
@@ -2119,12 +2120,51 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
         current = ci.previous;
     }
 
+    normalizeUnhandledErrorValue(vm);
+
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
     captureTracebackSnapshot(vm, null);
     vm.pending_error_unwind = false;
     vm.pending_error_unwind_ci = null;
     return false;
+}
+
+fn normalizeUnhandledErrorValue(vm: *VM) void {
+    if (vm.lua_error_value.asString() != null) return;
+
+    const mm = metamethod.getMetamethod(vm.lua_error_value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse return;
+    const closure = mm.asClosure() orelse return;
+    const result = executeTostringForUnhandledError(vm, closure, vm.lua_error_value) catch return;
+    if (result.asString()) |s| {
+        vm.lua_error_value = TValue.fromString(s);
+    }
+}
+
+fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TValue) !TValue {
+    const allocator = vm.rt.allocator;
+    const compile_result = pipeline.compile(allocator, "local f, x = ...; return f(x)", .{ .source_name = "=(error handler)" });
+    switch (compile_result) {
+        .err => |e| {
+            e.deinit(allocator);
+            return executeSyncMM(vm, closure, &[_]TValue{value});
+        },
+        .ok => {},
+    }
+    const raw_proto = compile_result.ok;
+    defer pipeline.freeRawProto(allocator, raw_proto);
+
+    const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
+    const wrapper = try vm.gc().allocClosure(proto);
+    if (proto.nups > 0) {
+        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
+        wrapper.upvalues[0] = env_upval;
+    }
+
+    _ = vm.pushTempRoot(TValue.fromClosure(wrapper));
+    defer vm.popTempRoots(1);
+
+    return executeSyncMM(vm, wrapper, &[_]TValue{ TValue.fromClosure(closure), value });
 }
 
 fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {

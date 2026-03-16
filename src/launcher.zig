@@ -16,10 +16,60 @@ const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
 const pipeline = @import("compiler/pipeline.zig");
 const call = @import("vm/call.zig");
+const metamethod = @import("vm/metamethod.zig");
 const owned = @import("runtime/owned.zig");
 pub const OwnedReturnValue = owned.OwnedReturnValue;
 const DEFAULT_LUA_PATH = "./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
 const DEFAULT_LUA_CPATH = "./?.so;/usr/local/lib/lua/5.4/?.so";
+
+fn errorValueTypeName(value: TValue) []const u8 {
+    return switch (value) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .thread => "thread",
+            .userdata, .file => "userdata",
+            .proto => "proto",
+            .upvalue => "userdata",
+        },
+    };
+}
+
+fn formatErrorValue(vm: *VM, value: TValue) ?[]const u8 {
+    if (value.asString()) |s| return s.asSlice();
+
+    if (metamethod.getMetamethod(value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
+        if (!vm.pushTempRoot(mm)) return null;
+        if (!vm.pushTempRoot(value)) {
+            vm.popTempRoots(1);
+            return null;
+        }
+        defer vm.popTempRoots(2);
+
+        const result = call.callValue(vm, mm, &[_]TValue{value}) catch return null;
+        if (result.asString()) |s| return s.asSlice();
+        return null;
+    }
+
+    return null;
+}
+
+fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
+    if (formatErrorValue(vm, vm.lua_error_value)) |msg| {
+        if (vm.lua_error_value.asString() != null) {
+            std.debug.print("{s}\n", .{msg});
+        } else {
+            std.debug.print("{s}: {s}\n", .{ exec_name, msg });
+        }
+        return;
+    }
+
+    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(vm.lua_error_value) });
+}
 
 fn stripUtf8Bom(bytes: []const u8) []const u8 {
     if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
@@ -295,12 +345,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
 
     const result = Mnemonics.executeWithArgs(vm, proto, main_args.items) catch |err| {
         if (err == error.LuaException) {
-            // Print Lua error message before VM is destroyed
-            if (vm.lua_error_value.asString()) |err_str| {
-                std.debug.print("[string]:?: {s}\n", .{err_str.asSlice()});
-            } else {
-                std.debug.print("[string]:?: (error object is not a string)\n", .{});
-            }
+            printUnhandledLuaError(vm, options.exec_name);
         }
         return err;
     };

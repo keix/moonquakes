@@ -463,6 +463,7 @@ pub fn nativeOsExit(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     _ = nresults;
 
     var exit_code: u8 = 0;
+    var close_state = false;
 
     if (nargs >= 1) {
         const code_arg = vm.stack[vm.base + func_reg + 1];
@@ -472,6 +473,14 @@ pub fn nativeOsExit(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         } else if (code_arg.toInteger()) |code| {
             exit_code = @intCast(@mod(code, 256));
         }
+    }
+
+    if (nargs >= 2) {
+        close_state = vm.stack[vm.base + func_reg + 2].toBoolean();
+    }
+
+    if (close_state and vm.rt.closing_state) {
+        return;
     }
 
     // Note: In a real implementation, we would clean up VM state here

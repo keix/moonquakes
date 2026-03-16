@@ -183,6 +183,9 @@ pub const GC = struct {
     /// Active executor for running finalizers (typically current VM)
     finalizer_executor: ?FinalizerExecutor = null,
 
+    /// Prevent re-entering finalizer drain (e.g. collectgarbage() inside __gc).
+    finalizer_draining: bool = false,
+
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
     gc_min_threshold: usize = GC_THRESHOLD,
@@ -250,6 +253,7 @@ pub const GC = struct {
             .root_providers = .{},
             .finalizer_queue = .{},
             .finalizer_executor = null,
+            .finalizer_draining = false,
             .gc_inhibit = 0,
             .weak_tables = .{},
         };
@@ -385,8 +389,11 @@ pub const GC = struct {
     pub fn drainFinalizers(self: *GC) void {
         const executor = self.finalizer_executor orelse return;
         if (self.finalizer_queue.items.len == 0) return;
+        if (self.finalizer_draining) return;
 
         // Inhibit GC during finalizer execution to prevent recursive collection.
+        self.finalizer_draining = true;
+        defer self.finalizer_draining = false;
         self.gc_inhibit += 1;
         defer self.gc_inhibit -= 1;
 

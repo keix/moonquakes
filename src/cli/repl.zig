@@ -10,7 +10,9 @@ const GC = @import("../runtime/gc/gc.zig").GC;
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const pipeline = @import("../compiler/pipeline.zig");
+const RawProto = @import("../compiler/proto.zig").RawProto;
 const call = @import("../vm/call.zig");
+const metamethod = @import("../vm/metamethod.zig");
 const ver = @import("../version.zig");
 const launcher = @import("../launcher.zig");
 
@@ -72,44 +74,53 @@ pub const REPL = struct {
         try ver.printIdentity(stdout);
 
         var buf: [8192]u8 = undefined;
+        var chunk = std.ArrayList(u8){};
+        defer chunk.deinit(self.allocator);
+        var continuation = false;
+        const stdin_is_tty = std.posix.isatty(std.posix.STDIN_FILENO);
 
         while (true) {
-            // Get prompt (check _PROMPT global, default "> ")
-            const prompt = self.getPrompt() orelse "> ";
-            stdout.writeAll(prompt) catch break;
+            self.writePrompt(stdout, if (continuation) "_PROMPT2" else "_PROMPT", if (continuation) ">> " else "> ") catch break;
 
-            // Read line from stdin
-            const line = readLine(stdin, &buf) orelse break;
-
-            // Skip empty lines
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            if (trimmed.len == 0) continue;
-
-            // Determine if input looks like an assignment or statement
-            // Assignments and certain statements should not try as expression
-            if (looksLikeStatement(trimmed)) {
-                // Execute as statement directly
-                _ = self.tryStatement(trimmed);
-            } else {
-                // Try as expression first (to print return values)
-                if (self.tryExpression(trimmed)) |result| {
-                    self.printResultWithGlobalPrint(result, stderr);
-                } else {
-                    // Not a valid expression, try as statement
-                    _ = self.tryStatement(trimmed);
+            const line = readLine(stdin, &buf) orelse {
+                if (!stdin_is_tty) stdout.writeAll("\n") catch {};
+                if (continuation) {
+                    self.reportIncompleteChunk(chunk.items, stderr);
                 }
+                break;
+            };
+
+            if (!stdin_is_tty) {
+                stdout.writeAll(line) catch break;
+                stdout.writeAll("\n") catch break;
+            }
+
+            if (chunk.items.len == 0) {
+                const trimmed = std.mem.trim(u8, line, " \t\r");
+                if (trimmed.len == 0) continue;
+            }
+
+            try chunk.appendSlice(self.allocator, line);
+            try chunk.append(self.allocator, '\n');
+
+            const status = self.evalChunk(chunk.items, stderr);
+            switch (status) {
+                .incomplete => continuation = true,
+                .handled => {
+                    continuation = false;
+                    chunk.clearRetainingCapacity();
+                },
             }
         }
     }
 
-    /// Get prompt from _PROMPT global or return null for default
-    fn getPrompt(self: *Self) ?[]const u8 {
-        // Use pre-interned key (rooted in registry) to avoid GC issues
-        const prompt_val = self.vm.globals().get(TValue.fromString(self.prompt_key)) orelse return null;
-        if (prompt_val.asString()) |str| {
-            return str.asSlice();
-        }
-        return null;
+    fn writePrompt(self: *Self, stdout: anytype, key_name: []const u8, default: []const u8) !void {
+        const key_obj = if (std.mem.eql(u8, key_name, "_PROMPT")) self.prompt_key else try self.vm.gc().allocString(key_name);
+        const prompt_val = self.vm.globals().get(TValue.fromString(key_obj)) orelse {
+            try stdout.writeAll(default);
+            return;
+        };
+        self.writePromptValue(stdout, prompt_val) catch try stdout.writeAll(default);
     }
 
     /// Read a line from stdin, returns null on EOF
@@ -130,81 +141,87 @@ pub const REPL = struct {
         return buf[0..pos];
     }
 
-    /// Try to evaluate input as expression (prepend "return ")
-    fn tryExpression(self: *Self, input: []const u8) ?TValue {
-        // Build "return <input>"
-        var expr_buf: [8192]u8 = undefined;
-        const expr = std.fmt.bufPrint(&expr_buf, "return {s}", .{input}) catch return null;
+    const EvalStatus = enum { incomplete, handled };
 
-        // Try to compile
-        const compile_result = pipeline.compile(self.allocator, expr, .{});
-        switch (compile_result) {
-            .err => |e| {
-                e.deinit(self.allocator);
-                return null;
+    const CompileAttempt = union(enum) {
+        ok: RawProto,
+        incomplete,
+        err: pipeline.CompileError,
+
+        fn deinit(self: *CompileAttempt, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .ok => |raw| pipeline.freeRawProto(allocator, raw),
+                .err => |*e| e.deinit(allocator),
+                .incomplete => {},
+            }
+        }
+    };
+
+    fn evalChunk(self: *Self, input: []const u8, stderr: anytype) EvalStatus {
+        const trimmed = std.mem.trim(u8, input, " \t\r\n");
+        if (trimmed.len == 0) return .handled;
+
+        const expr_source = self.buildExpressionSource(trimmed) catch null;
+        defer if (expr_source) |source| self.allocator.free(source);
+        var expr_attempt: ?CompileAttempt = null;
+        defer if (expr_attempt) |*attempt| attempt.deinit(self.allocator);
+
+        if (expr_source) |source| {
+            expr_attempt = self.compileAttempt(source);
+        }
+
+        var stmt_attempt = self.compileAttempt(trimmed);
+        defer stmt_attempt.deinit(self.allocator);
+
+        if (expr_attempt) |*attempt| {
+            switch (attempt.*) {
+                .ok => |raw_proto| {
+                    const result = self.executeRawProto(raw_proto, stderr) orelse return .handled;
+                    self.printResultWithGlobalPrint(result, stderr);
+                    return .handled;
+                },
+                .incomplete => return .incomplete,
+                .err => {},
+            }
+        }
+
+        switch (stmt_attempt) {
+            .ok => |raw_proto| {
+                _ = self.executeRawProto(raw_proto, stderr);
+                return .handled;
             },
-            .ok => {},
+            .incomplete => return .incomplete,
+            .err => |e| {
+                stderr.print("[string]:{d}: {s}\n", .{ e.line, e.message }) catch {};
+                return .handled;
+            },
         }
-        const raw_proto = compile_result.ok;
-        defer pipeline.freeRawProto(self.allocator, raw_proto);
-
-        // Materialize and execute
-        const gc = self.vm.gc();
-        gc.inhibitGC();
-        const proto = pipeline.materialize(&raw_proto, gc, self.allocator) catch {
-            gc.allowGC();
-            return null;
-        };
-
-        const closure = gc.allocClosure(proto) catch {
-            gc.allowGC();
-            return null;
-        };
-
-        // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
-        if (proto.nups > 0) {
-            const env_upval = gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals())) catch {
-                gc.allowGC();
-                return null;
-            };
-            closure.upvalues[0] = env_upval;
-        }
-
-        // Root the closure before allowing GC
-        const func_val = TValue.fromClosure(closure);
-        _ = self.vm.pushTempRoot(func_val);
-        gc.allowGC();
-
-        // Execute (closure protected by temp root)
-        const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
-            self.vm.popTempRoots(1);
-            return null;
-        };
-        self.vm.popTempRoots(1);
-
-        return result;
     }
 
-    /// Try to execute input as statement.
-    /// Returns true if executed, false if compile failed (should try as expression).
-    /// Returns null on runtime error.
-    fn tryStatement(self: *Self, input: []const u8) ?bool {
-        var stderr_writer = std.fs.File.stderr().writer(&.{});
-        const stderr = &stderr_writer.interface;
-
-        // Compile
-        const compile_result = pipeline.compile(self.allocator, input, .{});
-        switch (compile_result) {
-            .err => |e| {
-                e.deinit(self.allocator);
-                return false; // Compile failed, caller should try as expression
-            },
-            .ok => {},
+    fn buildExpressionSource(self: *Self, input: []const u8) !?[]u8 {
+        if (input.len == 0) return null;
+        if (input[0] == '=') {
+            return try std.fmt.allocPrint(self.allocator, "return {s}", .{input[1..]});
         }
-        const raw_proto = compile_result.ok;
-        defer pipeline.freeRawProto(self.allocator, raw_proto);
+        if (looksLikeStatement(input)) return null;
+        return try std.fmt.allocPrint(self.allocator, "return {s}", .{input});
+    }
 
-        // Materialize and execute
+    fn compileAttempt(self: *Self, source: []const u8) CompileAttempt {
+        const compile_result = pipeline.compile(self.allocator, source, .{});
+        switch (compile_result) {
+            .ok => |raw_proto| return .{ .ok = raw_proto },
+            .err => |e| {
+                if (isIncompleteCompileError(e.message)) {
+                    e.deinit(self.allocator);
+                    return .incomplete;
+                }
+                return .{ .err = e };
+            },
+        }
+    }
+
+    fn executeRawProto(self: *Self, raw_proto: RawProto, stderr: anytype) ?TValue {
         const gc = self.vm.gc();
         gc.inhibitGC();
         const proto = pipeline.materialize(&raw_proto, gc, self.allocator) catch {
@@ -219,7 +236,6 @@ pub const REPL = struct {
             return null;
         };
 
-        // Set up _ENV upvalue (upvalue[0] = globals) - same as Mnemonics.execute
         if (proto.nups > 0) {
             const env_upval = gc.allocClosedUpvalue(TValue.fromTable(self.vm.globals())) catch {
                 gc.allowGC();
@@ -229,20 +245,49 @@ pub const REPL = struct {
             closure.upvalues[0] = env_upval;
         }
 
-        // Root the closure before allowing GC
         const func_val = TValue.fromClosure(closure);
         _ = self.vm.pushTempRoot(func_val);
         gc.allowGC();
 
-        // Execute (closure protected by temp root)
-        _ = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
+        const result = call.callValue(self.vm, func_val, &[_]TValue{}) catch {
             self.vm.popTempRoots(1);
-            stderr.writeAll("error: runtime error\n") catch {};
+            if (self.vm.lua_error_value.asString()) |err_str| {
+                stderr.print("[string]:?: {s}\n", .{err_str.asSlice()}) catch {};
+            } else {
+                stderr.writeAll("error: runtime error\n") catch {};
+            }
             return null;
         };
         self.vm.popTempRoots(1);
 
-        return true;
+        return result;
+    }
+
+    fn reportIncompleteChunk(self: *Self, input: []const u8, stderr: anytype) void {
+        const trimmed = std.mem.trim(u8, input, " \t\r\n");
+        if (trimmed.len == 0) return;
+
+        if (self.buildExpressionSource(trimmed) catch null) |expr_source| {
+            defer self.allocator.free(expr_source);
+            var expr_result = pipeline.compile(self.allocator, expr_source, .{});
+            defer expr_result.deinit(self.allocator);
+            if (expr_result == .err and !isIncompleteCompileError(expr_result.err.message)) {
+                const e = expr_result.err;
+                stderr.print("[string]:{d}: {s}\n", .{ e.line, e.message }) catch {};
+                return;
+            }
+        }
+
+        var stmt_result = pipeline.compile(self.allocator, trimmed, .{});
+        defer stmt_result.deinit(self.allocator);
+        if (stmt_result == .err) {
+            const e = stmt_result.err;
+            stderr.print("[string]:{d}: {s}\n", .{ e.line, e.message }) catch {};
+        }
+    }
+
+    fn isIncompleteCompileError(message: []const u8) bool {
+        return std.mem.indexOf(u8, message, "near <eof>") != null;
     }
 
     /// Check if input looks like a statement (not an expression)
@@ -349,5 +394,29 @@ pub const REPL = struct {
             stderr.writeAll("error calling 'print'\n") catch {};
             return;
         };
+    }
+
+    fn writePromptValue(self: *Self, stdout: anytype, val: TValue) !void {
+        switch (val) {
+            .nil => try stdout.writeAll("nil"),
+            .boolean => |b| try stdout.writeAll(if (b) "true" else "false"),
+            .integer => |i| try stdout.print("{d}", .{i}),
+            .number => |n| try stdout.print("{d}", .{n}),
+            else => {
+                if (metamethod.getMetamethod(val, .tostring, &self.vm.gc().mm_keys, &self.vm.gc().shared_mt)) |mm| {
+                    if (!self.vm.pushTempRoot(mm)) return error.OutOfMemory;
+                    if (!self.vm.pushTempRoot(val)) {
+                        self.vm.popTempRoots(1);
+                        return error.OutOfMemory;
+                    }
+                    defer self.vm.popTempRoots(2);
+
+                    const result = try call.callValue(self.vm, mm, &[_]TValue{val});
+                    return self.writePromptValue(stdout, result);
+                }
+
+                try printValue(stdout, val);
+            },
+        }
     }
 };

@@ -52,6 +52,9 @@ pub const Runtime = struct {
     /// Lua 5.4 warnings are disabled by default and enabled by CLI `-W` or `warn("@on")`.
     warnings_enabled: bool = false,
 
+    /// True while the main VM is closing and draining close-time finalizers.
+    closing_state: bool = false,
+
     /// Initialize a new Runtime.
     /// Creates GC, globals, registry, and initializes builtin environment.
     pub fn init(allocator: std.mem.Allocator) !*Runtime {

@@ -28,7 +28,7 @@ pub const CLI = struct {
             try self.printVersion();
             return;
         }
-        if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
+        if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
             try self.printUsage();
             return;
         }
@@ -71,7 +71,7 @@ pub const CLI = struct {
                 if (arg_index + 1 >= args.len) {
                     var stderr_writer = std.fs.File.stderr().writer(&.{});
                     const stderr = &stderr_writer.interface;
-                    try stderr.print("Error: '-e' expects a chunk argument\n", .{});
+                    try stderr.print("'-e' needs argument\n", .{});
                     std.process.exit(1);
                 }
                 try pre_script_tokens.append(self.allocator, opt);
@@ -89,7 +89,7 @@ pub const CLI = struct {
                 if (arg_index + 1 >= args.len) {
                     var stderr_writer = std.fs.File.stderr().writer(&.{});
                     const stderr = &stderr_writer.interface;
-                    try stderr.print("Error: '-l' expects a module name\n", .{});
+                    try stderr.print("'-l' needs argument\n", .{});
                     std.process.exit(1);
                 }
                 try pre_script_tokens.append(self.allocator, opt);
@@ -111,7 +111,7 @@ pub const CLI = struct {
             if (opt.len > 0 and opt[0] == '-') {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
-                try stderr.print("Error: unrecognized option: {s}\n", .{opt});
+                try stderr.print("unrecognized option '{s}'\n", .{opt});
                 std.process.exit(1);
             }
             script_name = opt;
