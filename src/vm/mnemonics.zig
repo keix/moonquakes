@@ -31,6 +31,22 @@ pub const BitwiseOp = enum { band, bor, bxor };
 
 const native_multret_cap: u32 = 256;
 
+fn formatConcatNumber(buf: []u8, n: f64) []const u8 {
+    const rendered = std.fmt.bufPrint(buf, "{d}", .{n}) catch return buf[0..0];
+
+    if (std.math.isFinite(n) and
+        std.mem.indexOfScalar(u8, rendered, '.') == null and
+        std.mem.indexOfAny(u8, rendered, "eE") == null and
+        rendered.len + 2 <= buf.len)
+    {
+        buf[rendered.len] = '.';
+        buf[rendered.len + 1] = '0';
+        return buf[0 .. rendered.len + 2];
+    }
+
+    return rendered;
+}
+
 fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
     if (c > 0) return c - 1;
     // COMPAT HACK: allow MULTRET only for specific natives that are required
@@ -3334,9 +3350,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         total_len += str.len;
                     } else if (val.isNumber()) {
                         var buf: [32]u8 = undefined;
-                        const str = std.fmt.bufPrint(&buf, "{d}", .{val.number}) catch {
-                            return error.ArithmeticError;
-                        };
+                        const str = formatConcatNumber(&buf, val.number);
                         total_len += str.len;
                     }
                 }
@@ -3357,9 +3371,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         };
                         offset += str.len;
                     } else if (val.isNumber()) {
-                        const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.number}) catch {
-                            return error.ArithmeticError;
-                        };
+                        const str = formatConcatNumber(result_buf[offset..], val.number);
                         offset += str.len;
                     }
                 }
@@ -5925,7 +5937,7 @@ fn appendConcatValue(out: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
     }
     if (val.isNumber()) {
         var buf: [32]u8 = undefined;
-        const str = std.fmt.bufPrint(&buf, "{d}", .{val.number}) catch return error.ArithmeticError;
+        const str = formatConcatNumber(&buf, val.number);
         try out.appendSlice(allocator, str);
         return;
     }
