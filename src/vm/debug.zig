@@ -12,16 +12,26 @@ const std = @import("std");
 fn getCallInfoAtLevel(self: *VM, level: i64) ?*const CallInfo {
     if (level < 1) return null;
     var ci_opt = self.ci;
-    var remaining: i64 = level - 1;
-    while (remaining > 0) : (remaining -= 1) {
-        ci_opt = if (ci_opt) |ci| ci.previous else null;
+    var seen: i64 = 0;
+    while (ci_opt) |ci| {
+        if (std.mem.eql(u8, ci.func.source, "[coroutine bootstrap]")) {
+            ci_opt = ci.previous;
+            continue;
+        }
+        seen += 1;
+        if (seen == level) return ci;
+        ci_opt = ci.previous;
     }
-    return ci_opt;
+    return null;
 }
 
 pub const DebugFrameInfo = struct {
     closure: ?*ClosureObject,
     current_line: i64,
+    istailcall: bool,
+    is_main: bool,
+    debug_name: ?[]const u8,
+    debug_namewhat: ?[]const u8,
 };
 
 pub fn debugGetFrameInfoAtLevel(self: *VM, level: i64) ?DebugFrameInfo {
@@ -34,7 +44,12 @@ pub fn debugGetFrameInfoAtLevel(self: *VM, level: i64) ?DebugFrameInfo {
         if (pc_ptr >= code_ptr) {
             const pc_off_bytes = pc_ptr - code_ptr;
             const pc_off_instr: usize = @intCast(pc_off_bytes / @sizeOf(@TypeOf(proto.code[0])));
-            const idx = if (pc_off_instr > 0) pc_off_instr - 1 else pc_off_instr;
+            var idx = if (pc_off_instr > 0) pc_off_instr - 1 else pc_off_instr;
+            // For suspended coroutines, top frame pc points past YIELD/return boundary.
+            // Report line of the yielding instruction (Lua-compatible currentline).
+            if (self.thread.status == .suspended and self.ci != null and ci == self.ci.? and idx > 0) {
+                idx -= 1;
+            }
             const safe_idx = @min(idx, proto.lineinfo.len - 1);
             current_line = @intCast(proto.lineinfo[safe_idx]);
         }
@@ -42,6 +57,10 @@ pub fn debugGetFrameInfoAtLevel(self: *VM, level: i64) ?DebugFrameInfo {
     return .{
         .closure = ci.closure,
         .current_line = current_line,
+        .istailcall = ci.was_tail_called,
+        .is_main = (ci.previous == null),
+        .debug_name = ci.debug_name,
+        .debug_namewhat = ci.debug_namewhat,
     };
 }
 

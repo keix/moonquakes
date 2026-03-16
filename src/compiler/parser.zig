@@ -1334,6 +1334,13 @@ pub const Parser = struct {
     }
 
     fn autoReturnNil(self: *Parser) ParseError!void {
+        var emit_line: u32 = if (self.current.line > 1) @intCast(self.current.line - 1) else @intCast(self.current.line);
+        if (self.proto.lineinfo.items.len > 0) {
+            const last_line = self.proto.lineinfo.items[self.proto.lineinfo.items.len - 1];
+            if (last_line > 0 and last_line > emit_line) emit_line = last_line;
+        }
+        self.proto.current_line = emit_line;
+
         // Add nil constant and emit return nil
         const reg = self.proto.allocTemp();
         try self.proto.emitLOADNIL(reg, 1);
@@ -1687,6 +1694,7 @@ pub const Parser = struct {
             }
         }.run;
 
+        const return_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'return'
 
         // Check for bare return (no values)
@@ -1696,15 +1704,18 @@ pub const Parser = struct {
                 std.mem.eql(u8, self.current.lexeme, "elseif") or
                 std.mem.eql(u8, self.current.lexeme, "until")))
         {
+            self.proto.current_line = return_line;
             try self.proto.emitReturn(0, 0);
             return;
         }
         if (self.current.kind == .Eof) {
+            self.proto.current_line = return_line;
             try self.proto.emitReturn(0, 0);
             return;
         }
         // Check for return followed by semicolon (bare return)
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ";")) {
+            self.proto.current_line = return_line;
             try self.proto.emitReturn(0, 0);
             return;
         }
@@ -1717,8 +1728,10 @@ pub const Parser = struct {
             self.advance(); // consume '...'
             const reg = self.proto.allocTemp();
             // VARARG with C=0 loads all varargs and sets top
+            self.proto.current_line = return_line;
             try self.proto.emit(.VARARG, reg, 0, 0);
             // RETURN with B=0 returns values from reg to top
+            self.proto.current_line = return_line;
             try self.proto.emit(.RETURN, reg, 0, 0);
             return;
         }
@@ -1765,11 +1778,15 @@ pub const Parser = struct {
                             // CALL A B C -> TAILCALL A B 0
                             const b = call_inst.getB();
                             self.proto.code.items[call_idx] = Instruction.initABC(.TAILCALL, a, b, 0);
+                            if (call_idx < self.proto.lineinfo.items.len) {
+                                self.proto.lineinfo.items[call_idx] = return_line;
+                            }
                             return; // TAILCALL handles the return
                         } else {
                             // Not tail-callable due active TBC in scope.
                             // Keep CALL and return all its values.
                             self.proto.code.items[call_idx].c = 0;
+                            self.proto.current_line = return_line;
                             try self.proto.emit(.RETURN, a, 0, 0);
                             return;
                         }
@@ -1790,8 +1807,10 @@ pub const Parser = struct {
                 self.advance(); // consume '...'
                 // Load varargs starting at next register
                 const vararg_reg = first_reg + count;
+                self.proto.current_line = return_line;
                 try self.proto.emit(.VARARG, vararg_reg, 0, 0);
                 // RETURN with B=0 returns from first_reg to top
+                self.proto.current_line = return_line;
                 try self.proto.emit(.RETURN, first_reg, 0, 0);
                 return;
             }
@@ -1865,6 +1884,7 @@ pub const Parser = struct {
                             }
 
                             // RETURN with B=0 returns from return_base to top
+                            self.proto.current_line = return_line;
                             try self.proto.emit(.RETURN, return_base, 0, 0);
                             return;
                         }
@@ -1873,6 +1893,7 @@ pub const Parser = struct {
             }
         }
 
+        self.proto.current_line = return_line;
         try self.proto.emitReturn(first_reg, count);
     }
 
@@ -1899,6 +1920,7 @@ pub const Parser = struct {
 
     // Assignment: x = expr, t.field = expr, t.a.b = expr, t[key] = expr, t[1][2] = expr
     fn parseAssignment(self: *Parser) ParseError!void {
+        const assign_line: u32 = @intCast(self.current.line);
         const name = self.current.lexeme;
         self.advance(); // consume identifier
 
@@ -1986,12 +2008,45 @@ pub const Parser = struct {
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
                 self.advance(); // consume '='
 
+                const expr_start = self.proto.code.items.len;
                 const value_reg = try self.parseExpr();
+                const expr_end = self.proto.code.items.len;
+                if (self.current.kind != .Eof and self.current.line > 1) {
+                    const max_expr_line: u32 = @intCast(self.current.line - 1);
+                    var pc = expr_start;
+                    while (pc < expr_end and pc < self.proto.lineinfo.items.len) : (pc += 1) {
+                        if (self.proto.lineinfo.items[pc] > max_expr_line) {
+                            self.proto.lineinfo.items[pc] = max_expr_line;
+                        }
+                    }
+                }
+                const clamp_expr_line = self.current.kind == .Keyword and
+                    (std.mem.eql(u8, self.current.lexeme, "end") or
+                        std.mem.eql(u8, self.current.lexeme, "else") or
+                        std.mem.eql(u8, self.current.lexeme, "elseif") or
+                        std.mem.eql(u8, self.current.lexeme, "until"));
+                if (clamp_expr_line and self.current.line > assign_line) {
+                    var expr_pc = expr_start;
+                    while (expr_pc < expr_end and expr_pc < self.proto.lineinfo.items.len) : (expr_pc += 1) {
+                        self.proto.lineinfo.items[expr_pc] = assign_line;
+                    }
+                }
+                var store_line = assign_line;
+                if (expr_end > expr_start and expr_end - 1 < self.proto.lineinfo.items.len) {
+                    const expr_last_line = self.proto.lineinfo.items[expr_end - 1];
+                    if (expr_last_line > 0) store_line = expr_last_line;
+                }
+                if (self.current.line > store_line and self.current.line > 1) {
+                    const prev_token_line: u32 = @intCast(self.current.line - 1);
+                    if (prev_token_line > store_line) store_line = prev_token_line;
+                }
 
                 // Emit SET instruction for the final key
                 if (last_key_const) |kc| {
+                    self.proto.current_line = store_line;
                     try self.proto.emitSETFIELD(table_reg, kc, value_reg);
                 } else if (last_key_reg) |kr| {
+                    self.proto.current_line = store_line;
                     try self.proto.emitSETTABLE(table_reg, kr, value_reg);
                 }
             } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
@@ -2080,21 +2135,60 @@ pub const Parser = struct {
                 return error.AssignToConst;
             }
 
+            const expr_start = self.proto.code.items.len;
             const value_reg = try self.parseExpr();
+            const expr_end = self.proto.code.items.len;
+            if (self.current.kind != .Eof and self.current.line > 1) {
+                const max_expr_line: u32 = @intCast(self.current.line - 1);
+                var pc = expr_start;
+                while (pc < expr_end and pc < self.proto.lineinfo.items.len) : (pc += 1) {
+                    if (self.proto.lineinfo.items[pc] > max_expr_line) {
+                        self.proto.lineinfo.items[pc] = max_expr_line;
+                    }
+                }
+            }
+            const clamp_expr_line = self.current.kind == .Keyword and
+                (std.mem.eql(u8, self.current.lexeme, "end") or
+                    std.mem.eql(u8, self.current.lexeme, "else") or
+                    std.mem.eql(u8, self.current.lexeme, "elseif") or
+                    std.mem.eql(u8, self.current.lexeme, "until"));
+            if (clamp_expr_line and self.current.line > assign_line) {
+                var expr_pc = expr_start;
+                while (expr_pc < expr_end and expr_pc < self.proto.lineinfo.items.len) : (expr_pc += 1) {
+                    self.proto.lineinfo.items[expr_pc] = assign_line;
+                }
+            }
+            var store_line = assign_line;
+            if (expr_end > 0 and expr_end - 1 < self.proto.lineinfo.items.len) {
+                const expr_last_line = self.proto.lineinfo.items[expr_end - 1];
+                if (expr_last_line > 0) store_line = expr_last_line;
+            }
+            if (self.current.line > store_line and self.current.line > 1) {
+                const prev_token_line: u32 = @intCast(self.current.line - 1);
+                if (prev_token_line > store_line) store_line = prev_token_line;
+            }
 
             if (std.mem.eql(u8, name, "_ENV")) {
                 // _ENV is the environment upvalue itself.
+                self.proto.current_line = store_line;
                 try self.proto.emitSETUPVAL(value_reg, 0);
                 return;
             }
 
             if (try self.proto.resolveVariable(name)) |loc| {
                 switch (loc) {
-                    .local => |local_reg| try self.proto.emitMOVE(local_reg, value_reg),
-                    .upvalue => |idx| try self.proto.emitSETUPVAL(value_reg, idx),
+                    .local => |local_reg| {
+                        self.proto.current_line = store_line;
+                        try self.proto.emitMOVE(local_reg, value_reg);
+                    },
+                    .upvalue => |idx| {
+                        self.proto.current_line = store_line;
+                        try self.proto.emitSETUPVAL(value_reg, idx);
+                    },
                 }
             } else {
                 const name_const = try self.proto.addConstString(name);
+                self.proto.current_line = store_line;
                 try self.emitSetGlobal(name_const, value_reg);
             }
         }
@@ -2857,6 +2951,26 @@ pub const Parser = struct {
                 }
                 self.advance(); // consume ']'
 
+                const access_line: u32 = @intCast(self.current.line);
+                const code_len_before_get = self.proto.code.items.len;
+                // Align helper instructions for simple indexing with the access line.
+                if (code_len_before_get > 0 and code_len_before_get - 1 < self.proto.lineinfo.items.len) {
+                    const prev_idx = code_len_before_get - 1;
+                    const prev = self.proto.code.items[prev_idx];
+                    const pop = prev.getOpCode();
+                    if (prev.getA() == key_reg and (pop == .LOADK or pop == .LOADI or pop == .MOVE)) {
+                        self.proto.lineinfo.items[prev_idx] = access_line;
+                    }
+                }
+                if (code_len_before_get > 1 and code_len_before_get - 2 < self.proto.lineinfo.items.len) {
+                    const prev2_idx = code_len_before_get - 2;
+                    const prev2 = self.proto.code.items[prev2_idx];
+                    if (prev2.getA() == reg and prev2.getOpCode() == .MOVE) {
+                        self.proto.lineinfo.items[prev2_idx] = access_line;
+                    }
+                }
+                self.proto.current_line = access_line;
+
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
                 try self.proto.emitGETTABLE(reg, reg, key_reg);
@@ -3280,10 +3394,12 @@ pub const Parser = struct {
                 std.mem.eql(u8, self.current.lexeme, "%")))
         {
             const op = self.current.lexeme;
+            const op_line: u32 = @intCast(self.current.line);
             self.advance(); // consume operator
             const right = try self.parsePrimary();
 
             const dst = self.proto.allocTemp();
+            self.proto.current_line = op_line;
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
             } else if (std.mem.eql(u8, op, "//")) {
@@ -3322,9 +3438,11 @@ pub const Parser = struct {
                 std.mem.eql(u8, self.current.lexeme, "-")))
         {
             const op = self.current.lexeme;
+            const op_line: u32 = @intCast(self.current.line);
             self.advance(); // consume operator
             const right = try self.parseMul();
 
+            self.proto.current_line = op_line;
             if (std.mem.eql(u8, op, "+")) {
                 try self.proto.emitAdd(acc, acc, right);
             } else if (std.mem.eql(u8, op, "-")) {
@@ -3597,9 +3715,11 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "then"))) {
             return error.ExpectedThen;
         }
+        const then_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'then'
 
         // TEST condition, skip if false
+        self.proto.current_line = then_line;
         try self.proto.emitTEST(condition_reg, false);
         const false_jmp = try self.proto.emitPatchableJMP();
 
@@ -3623,6 +3743,12 @@ pub const Parser = struct {
         self.leaveScope();
         self.proto.resetTemps(then_mark);
 
+        // Keep the branch-skip jump on the last emitted line in the then body.
+        var then_end_line = then_line;
+        if (self.proto.lineinfo.items.len > 0) {
+            then_end_line = self.proto.lineinfo.items[self.proto.lineinfo.items.len - 1];
+        }
+        self.proto.current_line = then_end_line;
         // Always emit jump to skip else branch after then branch
         const else_jmp = try self.proto.emitPatchableJMP();
 
@@ -3649,9 +3775,11 @@ pub const Parser = struct {
             if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "then"))) {
                 return error.ExpectedThen;
             }
+            const elseif_then_line: u32 = @intCast(self.current.line);
             self.advance(); // consume 'then'
 
             // TEST elseif condition, skip if false
+            self.proto.current_line = elseif_then_line;
             try self.proto.emitTEST(elseif_condition_reg, false);
             current_false_jmp = try self.proto.emitPatchableJMP();
 
@@ -3669,6 +3797,12 @@ pub const Parser = struct {
             self.leaveScope();
             self.proto.resetTemps(elseif_body_mark);
 
+            // Keep the chain-skip jump on the last emitted line in the elseif body.
+            var elseif_end_line = elseif_then_line;
+            if (self.proto.lineinfo.items.len > 0) {
+                elseif_end_line = self.proto.lineinfo.items[self.proto.lineinfo.items.len - 1];
+            }
+            self.proto.current_line = elseif_end_line;
             // Jump over remaining elseif/else when this condition was true
             const jump_to_end = try self.proto.emitPatchableJMP();
             try else_jumps.append(self.proto.allocator, jump_to_end);
@@ -3780,6 +3914,7 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
             return error.ExpectedDo;
         }
+        const do_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'do'
 
         // Set up for loop registers: base, base+1=limit, base+2=step
@@ -3793,6 +3928,7 @@ pub const Parser = struct {
         }
 
         // FORPREP: decrement counter by step, then jump to FORLOOP
+        self.proto.current_line = do_line;
         const forprep_addr = try self.proto.emitPatchableFORPREP(base_reg);
         const loop_start = @as(u32, @intCast(self.proto.code.items.len));
 
@@ -3828,13 +3964,16 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
         }
+        const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
         // Close upvalues for the loop variable before FORLOOP
         // This ensures closures capture the value, not the register
+        self.proto.current_line = do_line;
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // FORLOOP: increment and check, jump back if continuing
+        self.proto.current_line = do_line;
         const forloop_addr = try self.proto.emitPatchableFORLOOP(base_reg);
 
         // Patch FORPREP to jump to FORLOOP if initial condition fails
@@ -3844,6 +3983,7 @@ pub const Parser = struct {
         self.proto.patchFORInstr(forloop_addr, loop_start);
 
         // Close upvalues when loop exits (after FORLOOP falls through)
+        self.proto.current_line = end_line;
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // Patch break jumps to the final CLOSE so to-be-closed state is finalized.
@@ -3972,10 +4112,12 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
             return error.ExpectedDo;
         }
+        const do_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'do'
 
         // Mark to-be-closed state before loop dispatch.
         // Must run before TFORPREP, otherwise empty iterators skip TBC.
+        self.proto.current_line = do_line;
         try self.proto.emit(.TBC, base_reg + 3, 0, 0);
         self.active_tbc_count += 1;
         defer self.active_tbc_count -= 1;
@@ -3983,6 +4125,7 @@ pub const Parser = struct {
         defer _ = self.loop_close_regs.pop();
 
         // TFORPREP: jump to TFORCALL
+        self.proto.current_line = do_line;
         const tforprep_addr = try self.proto.emitPatchableTFORPREP(base_reg);
 
         // Loop body starts here
@@ -4020,16 +4163,20 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
         }
+        const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
         // Close upvalues and TBC state before TFORCALL (end of iteration)
+        self.proto.current_line = do_line;
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
+        self.proto.current_line = do_line;
         try self.proto.emitTFORCALL(base_reg, var_count);
 
         // TFORLOOP: check first result and loop back
+        self.proto.current_line = do_line;
         const tforloop_addr = try self.proto.emitPatchableTFORLOOP(base_reg);
 
         // Patch TFORPREP to jump to TFORCALL
@@ -4039,6 +4186,7 @@ pub const Parser = struct {
         self.proto.patchFORInstr(tforloop_addr, loop_start);
 
         // Close upvalues and TBC state when loop exits (after TFORLOOP falls through)
+        self.proto.current_line = end_line;
         try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
 
         // Patch all break jumps to after the loop
@@ -4069,9 +4217,11 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
             return error.ExpectedDo;
         }
+        const do_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'do'
 
         // TEST condition, skip if false
+        self.proto.current_line = do_line;
         try self.proto.emitTEST(condition_reg, false);
         const exit_jmp = try self.proto.emitPatchableJMP();
 
@@ -4105,10 +4255,12 @@ pub const Parser = struct {
 
         // Close loop-scope locals/upvalues at end of each iteration before
         // jumping back to reevaluate the condition.
+        self.proto.current_line = do_line;
         try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
 
         // Jump back to loop start
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
+        self.proto.current_line = do_line;
         try self.proto.emitJMP(@intCast(back_offset));
 
         // Patch exit jump and all break jumps to after the loop
@@ -4148,15 +4300,25 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "until"))) {
             return error.ExpectedUntil;
         }
+        const until_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'until'
 
         // Parse condition (still inside scope so body locals are visible)
         const cond_mark = self.proto.markTemps();
+        const cond_start = self.proto.code.items.len;
         const condition_reg = try self.parseExpr();
+        const cond_end = self.proto.code.items.len;
+        var cond_pc = cond_start;
+        while (cond_pc < cond_end and cond_pc < self.proto.lineinfo.items.len) : (cond_pc += 1) {
+            if (self.proto.lineinfo.items[cond_pc] > until_line) {
+                self.proto.lineinfo.items[cond_pc] = until_line;
+            }
+        }
 
         // Branch on condition:
         // cond true  -> skip first JMP, close locals, jump to end.
         // cond false -> take first JMP to continue path, close locals, jump back.
+        self.proto.current_line = until_line;
         try self.proto.emitTEST(condition_reg, false);
         const continue_jmp = try self.proto.emitPatchableJMP();
 
@@ -4189,6 +4351,7 @@ pub const Parser = struct {
     }
 
     fn parseBreak(self: *Parser) ParseError!void {
+        const break_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'break'
 
         if (self.loop_depth == 0) {
@@ -4198,9 +4361,11 @@ pub const Parser = struct {
         // Close only variables that belong to the current loop scope.
         // Using CLOSE 0 would also close unrelated outer upvalues.
         const close_reg = self.loop_close_regs.items[self.loop_close_regs.items.len - 1];
+        self.proto.current_line = break_line;
         try self.proto.emit(.CLOSE, close_reg, 0, 0);
 
         // Emit JMP to be patched later at end of loop
+        self.proto.current_line = break_line;
         const jmp_addr = try self.proto.emitPatchableJMP();
         try self.break_jumps.append(self.proto.allocator, jmp_addr);
     }
@@ -4456,6 +4621,7 @@ pub const Parser = struct {
         if (self.current.kind != .Identifier) {
             return error.ExpectedIdentifier;
         }
+        const local_decl_line: u32 = @intCast(self.current.line);
         if (var_count >= local_var_limit) {
             const fn_line = if (self.current.line > 0) self.current.line - 1 else self.current.line;
             self.setError("too many local variables (line {d})", .{fn_line});
@@ -4551,9 +4717,15 @@ pub const Parser = struct {
             var expr_count: u8 = 0;
             var expr_mark = self.proto.markTemps();
             var expr_reg = try self.parseExpr();
+            var first_expr_line = local_decl_line;
+            if (self.proto.code.items.len > 0 and self.proto.code.items.len - 1 < self.proto.lineinfo.items.len) {
+                const ln = self.proto.lineinfo.items[self.proto.code.items.len - 1];
+                if (ln > 0) first_expr_line = ln;
+            }
 
             // Move first expression to first variable register
             if (expr_reg != first_reg) {
+                self.proto.current_line = first_expr_line;
                 try self.proto.emitMOVE(first_reg, expr_reg);
             }
             expr_count += 1;
@@ -4566,10 +4738,16 @@ pub const Parser = struct {
                 self.advance(); // consume ','
                 expr_mark = self.proto.markTemps();
                 expr_reg = try self.parseExpr();
+                var expr_line = local_decl_line;
+                if (self.proto.code.items.len > 0 and self.proto.code.items.len - 1 < self.proto.lineinfo.items.len) {
+                    const ln = self.proto.lineinfo.items[self.proto.code.items.len - 1];
+                    if (ln > 0) expr_line = ln;
+                }
 
                 if (expr_count < var_count) {
                     const target_reg = first_reg + expr_count;
                     if (expr_reg != target_reg) {
+                        self.proto.current_line = expr_line;
                         try self.proto.emitMOVE(target_reg, expr_reg);
                     }
                 }
@@ -4643,10 +4821,12 @@ pub const Parser = struct {
             if (expr_count < var_count and !handled_multi_return) {
                 const nil_start = first_reg + expr_count;
                 const nil_count = var_count - expr_count;
+                self.proto.current_line = local_decl_line;
                 try self.proto.emitLOADNIL(nil_start, nil_count);
             }
         } else {
             // No initializer - initialize all to nil
+            self.proto.current_line = local_decl_line;
             try self.proto.emitLOADNIL(first_reg, var_count);
         }
 
@@ -5386,6 +5566,7 @@ pub const Parser = struct {
         // function name(param) return param end
         // function t.field(param) ... end  -- equivalent to t.field = function(param) ... end
         // function t:method(param) ... end -- equivalent to t.method = function(self, param) ... end
+        const fn_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'function'
 
         // Parse function name (possibly with . or : chain)
@@ -5514,6 +5695,7 @@ pub const Parser = struct {
 
         // Emit VARARGPREP for vararg functions
         if (func_builder.is_vararg) {
+            func_builder.current_line = fn_line;
             try func_builder.emit(.VARARGPREP, param_count, 0, 0);
         }
 
@@ -5528,8 +5710,18 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
         }
+        const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
+        // Keep synthetic fallthrough return on the function body's last line.
+        var return_line: u32 = @intCast(self.current.line);
+        if (func_builder.lineinfo.items.len > 0) {
+            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
+            if (last_line > 0) return_line = last_line;
+        } else {
+            return_line = end_line;
+        }
+        func_builder.current_line = return_line;
         // Always add a fallthrough return for paths that do not explicitly return.
         try func_builder.emit(.RETURN, 0, 1, 0);
 
@@ -5543,6 +5735,7 @@ pub const Parser = struct {
         // Now emit CLOSURE to create the function
         const closure_reg = old_proto.allocTemp();
         const proto_idx = try old_proto.addProto(proto_ptr);
+        old_proto.current_line = fn_line;
         try old_proto.emitClosure(closure_reg, proto_idx);
 
         // Store the closure based on how the function was defined
@@ -5604,6 +5797,7 @@ pub const Parser = struct {
     /// Parse 'local function name(...) ... end'
     /// Equivalent to: local name; name = function(...) ... end
     fn parseLocalFunction(self: *Parser) ParseError!void {
+        const fn_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'function'
 
         // Parse function name
@@ -5690,6 +5884,7 @@ pub const Parser = struct {
 
         // Emit VARARGPREP for vararg functions
         if (func_builder.is_vararg) {
+            func_builder.current_line = fn_line;
             try func_builder.emit(.VARARGPREP, param_count, 0, 0);
         }
 
@@ -5704,8 +5899,18 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
         }
+        const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
+        // Keep synthetic fallthrough return on the function body's last line.
+        var return_line: u32 = @intCast(self.current.line);
+        if (func_builder.lineinfo.items.len > 0) {
+            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
+            if (last_line > 0) return_line = last_line;
+        } else {
+            return_line = end_line;
+        }
+        func_builder.current_line = return_line;
         // Always add a fallthrough return for paths that do not explicitly return.
         try func_builder.emit(.RETURN, 0, 1, 0);
 
@@ -5721,6 +5926,7 @@ pub const Parser = struct {
     /// Parse anonymous function: function(params) body end
     /// Returns register containing the closure
     fn parseAnonymousFunction(self: *Parser) ParseError!u8 {
+        const fn_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'function'
 
         // Allocate register for the closure result
@@ -5795,6 +6001,7 @@ pub const Parser = struct {
 
         // Emit VARARGPREP for vararg functions
         if (func_builder.is_vararg) {
+            func_builder.current_line = fn_line;
             try func_builder.emit(.VARARGPREP, param_count, 0, 0);
         }
 
@@ -5809,8 +6016,18 @@ pub const Parser = struct {
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
         }
+        const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
+        // Keep synthetic fallthrough return on the function body's last line.
+        var return_line: u32 = @intCast(self.current.line);
+        if (func_builder.lineinfo.items.len > 0) {
+            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
+            if (last_line > 0) return_line = last_line;
+        } else {
+            return_line = end_line;
+        }
+        func_builder.current_line = return_line;
         // Always add a fallthrough return for paths that do not explicitly return.
         try func_builder.emit(.RETURN, 0, 1, 0);
 
@@ -5820,6 +6037,7 @@ pub const Parser = struct {
 
         // Emit CLOSURE instruction
         const proto_idx = try old_proto.addProto(proto_ptr);
+        old_proto.current_line = end_line;
         try old_proto.emitClosure(func_reg, proto_idx);
 
         return func_reg;

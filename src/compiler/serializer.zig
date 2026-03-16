@@ -40,12 +40,18 @@ pub fn dumpProto(proto: *const ProtoObject, allocator: std.mem.Allocator, strip:
     try writeF64(&result, allocator, LUAC_NUM);
 
     // Write proto recursively
-    try writeProto(&result, allocator, proto, strip);
+    try writeProto(&result, allocator, proto, strip, null);
 
     return result.toOwnedSlice(allocator);
 }
 
-fn writeProto(result: *std.ArrayList(u8), allocator: std.mem.Allocator, proto: *const ProtoObject, strip: bool) !void {
+fn writeProto(
+    result: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    proto: *const ProtoObject,
+    strip: bool,
+    parent_source: ?[]const u8,
+) !void {
     // Write function header
     try result.append(allocator, proto.numparams);
     try result.append(allocator, if (proto.is_vararg) @as(u8, 1) else @as(u8, 0));
@@ -74,7 +80,7 @@ fn writeProto(result: *std.ArrayList(u8), allocator: std.mem.Allocator, proto: *
     // Write nested protos
     try writeU32(result, allocator, @intCast(proto.protos.len));
     for (proto.protos) |nested| {
-        try writeProto(result, allocator, nested, strip);
+        try writeProto(result, allocator, nested, strip, proto.source);
     }
 
     // Write debug info (unless stripped)
@@ -83,8 +89,16 @@ fn writeProto(result: *std.ArrayList(u8), allocator: std.mem.Allocator, proto: *
         try writeU32(result, allocator, 0); // lineinfo_count
     } else {
         // Source name
-        try writeU32(result, allocator, @intCast(proto.source.len));
-        try result.appendSlice(allocator, proto.source);
+        const same_as_parent = if (parent_source) |ps|
+            std.mem.eql(u8, ps, proto.source)
+        else
+            false;
+        if (same_as_parent) {
+            try writeU32(result, allocator, 0);
+        } else {
+            try writeU32(result, allocator, @intCast(proto.source.len));
+            try result.appendSlice(allocator, proto.source);
+        }
 
         // Line info
         try writeU32(result, allocator, @intCast(proto.lineinfo.len));
@@ -235,7 +249,24 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
     } else &[_]u32{};
 
     // Allocate ProtoObject through GC
-    return gc.allocProto(k, code, protos, numparams, is_vararg, maxstacksize, nups, upvalues, &[_]?[]const u8{}, source, lineinfo);
+    const proto_obj = try gc.allocProto(k, code, protos, numparams, is_vararg, maxstacksize, nups, upvalues, &[_]?[]const u8{}, source, lineinfo);
+
+    // Fix up nested protos that omitted source (same as this proto).
+    if (proto_obj.source.len > 0) {
+        try propagateSourceToChildren(proto_obj, allocator);
+    }
+    return proto_obj;
+}
+
+fn propagateSourceToChildren(proto_obj: *ProtoObject, allocator: std.mem.Allocator) !void {
+    for (proto_obj.protos) |child| {
+        if (child.source.len == 0 and child.lineinfo.len > 0 and proto_obj.source.len > 0) {
+            child.source = try allocator.dupe(u8, proto_obj.source);
+        }
+        if (child.source.len > 0) {
+            try propagateSourceToChildren(child, allocator);
+        }
+    }
 }
 
 fn readConstant(reader: *ByteReader, gc: anytype) !TValue {

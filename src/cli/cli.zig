@@ -19,41 +19,176 @@ pub const CLI = struct {
     }
 
     pub fn run(self: *CLI, args: []const [:0]const u8) !void {
-        if (args.len < 2) {
-            // No arguments - start REPL
-            var repl = try REPL.init(self.allocator);
-            defer repl.deinit();
-            try repl.run();
-            return;
-        }
+        var arg_index: usize = 1;
+        var ignore_environment = false;
+        var interactive = false;
 
-        const arg = args[1];
-        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
+        if (args.len == 2 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-v"))) {
             try self.printVersion();
             return;
         }
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+        if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
             try self.printUsage();
             return;
         }
 
-        if (std.mem.eql(u8, arg, "-e")) {
-            if (args.len < 3) {
+        var pre_script_tokens = std.ArrayList([]const u8){};
+        defer pre_script_tokens.deinit(self.allocator);
+        var preload_modules = std.ArrayList([]const u8){};
+        defer preload_modules.deinit(self.allocator);
+        var exec_chunks = std.ArrayList([]const u8){};
+        defer exec_chunks.deinit(self.allocator);
+
+        var script_name: ?[]const u8 = null;
+
+        while (arg_index < args.len) {
+            const opt = args[arg_index];
+            if (std.mem.eql(u8, opt, "--")) {
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                break;
+            }
+            if (std.mem.eql(u8, opt, "-E")) {
+                ignore_environment = true;
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, opt, "-i")) {
+                interactive = true;
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, opt, "-W") or (opt.len > 2 and opt[0] == '-' and opt[1] == 'W')) {
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, opt, "-e")) {
+                if (arg_index + 1 >= args.len) {
+                    var stderr_writer = std.fs.File.stderr().writer(&.{});
+                    const stderr = &stderr_writer.interface;
+                    try stderr.print("Error: '-e' expects a chunk argument\n", .{});
+                    std.process.exit(1);
+                }
+                try pre_script_tokens.append(self.allocator, opt);
+                try exec_chunks.append(self.allocator, args[arg_index + 1]);
+                arg_index += 2;
+                continue;
+            }
+            if (opt.len > 2 and opt[0] == '-' and opt[1] == 'e') {
+                try pre_script_tokens.append(self.allocator, opt);
+                try exec_chunks.append(self.allocator, opt[2..]);
+                arg_index += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, opt, "-l")) {
+                if (arg_index + 1 >= args.len) {
+                    var stderr_writer = std.fs.File.stderr().writer(&.{});
+                    const stderr = &stderr_writer.interface;
+                    try stderr.print("Error: '-l' expects a module name\n", .{});
+                    std.process.exit(1);
+                }
+                try pre_script_tokens.append(self.allocator, opt);
+                try preload_modules.append(self.allocator, args[arg_index + 1]);
+                arg_index += 2;
+                continue;
+            }
+            if (opt.len > 2 and opt[0] == '-' and opt[1] == 'l') {
+                try pre_script_tokens.append(self.allocator, opt);
+                try preload_modules.append(self.allocator, opt[2..]);
+                arg_index += 1;
+                continue;
+            }
+            if (std.mem.eql(u8, opt, "-")) {
+                script_name = "-";
+                arg_index += 1;
+                break;
+            }
+            if (opt.len > 0 and opt[0] == '-') {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
-                try stderr.print("Error: '-e' expects a chunk argument\n", .{});
+                try stderr.print("Error: unrecognized option: {s}\n", .{opt});
                 std.process.exit(1);
             }
-            const chunk = args[2];
-            const script_args: []const []const u8 = if (args.len > 3)
-                @as([]const []const u8, @ptrCast(args[3..]))
-            else
-                &.{};
+            script_name = opt;
+            arg_index += 1;
+            break;
+        }
 
-            var result = launcher.run(self.allocator, chunk, .{
+        if (script_name == null and arg_index < args.len) {
+            script_name = args[arg_index];
+            arg_index += 1;
+        }
+
+        const script_args: []const []const u8 = if (args.len > arg_index)
+            @as([]const []const u8, @ptrCast(args[arg_index..]))
+        else
+            &.{};
+
+        var pre_script_args = std.ArrayList([]const u8){};
+        defer pre_script_args.deinit(self.allocator);
+        try pre_script_args.append(self.allocator, args[0]);
+        for (pre_script_tokens.items) |tok| {
+            try pre_script_args.append(self.allocator, tok);
+        }
+
+        if (script_name) |script| {
+            if (std.mem.eql(u8, script, "-")) {
+                const stdin = std.fs.File.stdin();
+                const source = try stdin.readToEndAlloc(self.allocator, std.math.maxInt(usize));
+                defer self.allocator.free(source);
+                var result = launcher.run(self.allocator, source, .{
+                    .exec_name = args[0],
+                    .script_name = "-",
+                    .args = script_args,
+                    .ignore_environment = ignore_environment,
+                    .preload_modules = preload_modules.items,
+                    .exec_chunks = exec_chunks.items,
+                    .pre_script_args = pre_script_args.items,
+                }) catch |err| switch (err) {
+                    error.LuaException => std.process.exit(1),
+                    error.CompileFailed => std.process.exit(1),
+                    else => return err,
+                };
+                result.deinit(self.allocator);
+                return;
+            }
+
+            var result = launcher.runFile(self.allocator, script, .{
                 .exec_name = args[0],
-                .script_name = "(command line)",
+                .script_name = script,
                 .args = script_args,
+                .ignore_environment = ignore_environment,
+                .preload_modules = preload_modules.items,
+                .exec_chunks = exec_chunks.items,
+                .pre_script_args = pre_script_args.items,
+            }) catch |err| switch (err) {
+                error.FileNotFound => {
+                    var stderr_writer = std.fs.File.stderr().writer(&.{});
+                    const stderr = &stderr_writer.interface;
+                    try stderr.print("Error: file not found: {s}\n", .{script});
+                    std.process.exit(1);
+                },
+                error.LuaException => std.process.exit(1),
+                error.CompileFailed => std.process.exit(1),
+                else => return err,
+            };
+            result.deinit(self.allocator);
+            return;
+        }
+
+        // No script: `-e`/`-l` alone should execute and exit, not block on stdin.
+        if (!interactive and (exec_chunks.items.len > 0 or preload_modules.items.len > 0)) {
+            var result = launcher.run(self.allocator, "", .{
+                .exec_name = args[0],
+                .script_name = "=(command line)",
+                .args = &.{},
+                .ignore_environment = ignore_environment,
+                .preload_modules = preload_modules.items,
+                .exec_chunks = exec_chunks.items,
+                .pre_script_args = pre_script_args.items,
             }) catch |err| switch (err) {
                 error.LuaException => std.process.exit(1),
                 error.CompileFailed => std.process.exit(1),
@@ -63,39 +198,31 @@ pub const CLI = struct {
             return;
         }
 
-        const file_path = arg;
+        // No script: REPL or stdin chunk.
+        if (interactive or std.posix.isatty(std.posix.STDIN_FILENO)) {
+            var repl = try REPL.init(self.allocator);
+            defer repl.deinit();
+            try repl.run();
+            return;
+        }
 
-        // Collect script arguments (args after the script file)
-        // args[0] = interpreter, args[1] = script, args[2..] = script args
-        const script_args: []const []const u8 = if (args.len > 2)
-            @as([]const []const u8, @ptrCast(args[2..]))
-        else
-            &.{};
-
-        // Use launcher for execution with arg support
-        var result = launcher.runFile(self.allocator, file_path, .{
+        const stdin = std.fs.File.stdin();
+        const source = try stdin.readToEndAlloc(self.allocator, std.math.maxInt(usize));
+        defer self.allocator.free(source);
+        var result = launcher.run(self.allocator, source, .{
             .exec_name = args[0],
-            .script_name = file_path,
-            .args = script_args,
+            .script_name = "=stdin",
+            .args = &.{},
+            .ignore_environment = ignore_environment,
+            .preload_modules = preload_modules.items,
+            .exec_chunks = exec_chunks.items,
+            .pre_script_args = pre_script_args.items,
         }) catch |err| switch (err) {
-            error.FileNotFound => {
-                var stderr_writer = std.fs.File.stderr().writer(&.{});
-                const stderr = &stderr_writer.interface;
-                try stderr.print("Error: file not found: {s}\n", .{file_path});
-                std.process.exit(1);
-            },
-            error.LuaException => {
-                // Error message already printed by launcher
-                std.process.exit(1);
-            },
-            error.CompileFailed => {
-                // Error message already printed by launcher
-                std.process.exit(1);
-            },
+            error.LuaException => std.process.exit(1),
+            error.CompileFailed => std.process.exit(1),
             else => return err,
         };
         result.deinit(self.allocator);
-        // Lua 5.4 spec: return values are not printed unless explicitly via print()
     }
 
     fn printVersion(_: *CLI) !void {

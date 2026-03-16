@@ -42,6 +42,8 @@ pub const CallInfo = struct {
     // Stack frame
     base: u32,
     ret_base: u32, // Where to place return values in caller's frame
+    hook_last_line: i64 = -1,
+    hook_last_pc: i32 = -1,
 
     // Vararg support
     vararg_base: u32 = 0, // Stack position where varargs are stored
@@ -50,6 +52,9 @@ pub const CallInfo = struct {
     // Call control
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
+    was_tail_called: bool = false,
+    debug_name: ?[]const u8 = null,
+    debug_namewhat: ?[]const u8 = null,
 
     // Protected call support (for pcall)
     is_protected: bool = false, // true if this is a pcall frame

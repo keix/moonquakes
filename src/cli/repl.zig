@@ -52,6 +52,8 @@ pub const REPL = struct {
         const stdin = std.fs.File.stdin();
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         const stdout = &stdout_writer.interface;
+        var stderr_writer = std.fs.File.stderr().writer(&.{});
+        const stderr = &stderr_writer.interface;
 
         // Print welcome banner
         try ver.printIdentity(stdout);
@@ -78,7 +80,7 @@ pub const REPL = struct {
             } else {
                 // Try as expression first (to print return values)
                 if (self.tryExpression(trimmed)) |result| {
-                    printResult(stdout, result);
+                    self.printResultWithGlobalPrint(result, stderr);
                 } else {
                     // Not a valid expression, try as statement
                     _ = self.tryStatement(trimmed);
@@ -316,5 +318,23 @@ pub const REPL = struct {
                 }
             },
         }
+    }
+
+    fn printResultWithGlobalPrint(self: *Self, val: TValue, stderr: anytype) void {
+        if (val.isNil()) return;
+
+        const print_key = self.vm.gc().allocString("print") catch {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
+        const print_val = self.vm.globals().get(TValue.fromString(print_key)) orelse {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
+
+        _ = call.callValue(self.vm, print_val, &[_]TValue{val}) catch {
+            stderr.writeAll("error calling 'print'\n") catch {};
+            return;
+        };
     }
 };
