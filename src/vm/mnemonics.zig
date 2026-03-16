@@ -3812,7 +3812,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const c = inst.getC();
 
             const func_val = vm.stack[vm.base + a];
-
             // Fast path: native closure
             if (func_val.isObject()) {
                 const obj = func_val.object;
