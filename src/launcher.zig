@@ -15,11 +15,62 @@ const TValue = @import("runtime/value.zig").TValue;
 const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
 const pipeline = @import("compiler/pipeline.zig");
+const serializer = @import("compiler/serializer.zig");
 const call = @import("vm/call.zig");
+const metamethod = @import("vm/metamethod.zig");
 const owned = @import("runtime/owned.zig");
 pub const OwnedReturnValue = owned.OwnedReturnValue;
 const DEFAULT_LUA_PATH = "./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
 const DEFAULT_LUA_CPATH = "./?.so;/usr/local/lib/lua/5.4/?.so";
+
+fn errorValueTypeName(value: TValue) []const u8 {
+    return switch (value) {
+        .nil => "nil",
+        .boolean => "boolean",
+        .integer, .number => "number",
+        .object => |obj| switch (obj.type) {
+            .string => "string",
+            .table => "table",
+            .closure, .native_closure => "function",
+            .thread => "thread",
+            .userdata, .file => "userdata",
+            .proto => "proto",
+            .upvalue => "userdata",
+        },
+    };
+}
+
+fn formatErrorValue(vm: *VM, value: TValue) ?[]const u8 {
+    if (value.asString()) |s| return s.asSlice();
+
+    if (metamethod.getMetamethod(value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
+        if (!vm.pushTempRoot(mm)) return null;
+        if (!vm.pushTempRoot(value)) {
+            vm.popTempRoots(1);
+            return null;
+        }
+        defer vm.popTempRoots(2);
+
+        const result = call.callValue(vm, mm, &[_]TValue{value}) catch return null;
+        if (result.asString()) |s| return s.asSlice();
+        return null;
+    }
+
+    return null;
+}
+
+fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
+    if (formatErrorValue(vm, vm.lua_error_value)) |msg| {
+        if (vm.lua_error_value.asString() != null) {
+            std.debug.print("{s}\n", .{msg});
+        } else {
+            std.debug.print("{s}: {s}\n", .{ exec_name, msg });
+        }
+        return;
+    }
+
+    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(vm.lua_error_value) });
+}
 
 fn stripUtf8Bom(bytes: []const u8) []const u8 {
     if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
@@ -39,6 +90,14 @@ fn stripInitialHashLine(bytes: []const u8, preserve_newline: bool) []const u8 {
     return if (preserve_newline) bytes[i..] else bytes[i + 1 ..];
 }
 
+fn preprocessChunkSource(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), true);
+}
+
+fn sourceForBytecodeProbe(bytes: []const u8) []const u8 {
+    return stripInitialHashLine(stripUtf8Bom(bytes), false);
+}
+
 /// Execution options for script launch
 pub const RunOptions = struct {
     /// Executable name/path (becomes arg[-1] in CLI convention)
@@ -49,6 +108,8 @@ pub const RunOptions = struct {
     args: []const []const u8 = &.{},
     /// Ignore LUA_* environment variables (Lua -E semantics)
     ignore_environment: bool = false,
+    /// Enable warnings from startup (CLI -W semantics)
+    warnings_enabled: bool = false,
     /// Modules to require before running main chunk (CLI -l)
     preload_modules: []const []const u8 = &.{},
     /// Chunks to execute before main chunk (CLI -e, in parse order)
@@ -103,7 +164,7 @@ fn setPackageStringField(vm: *VM, field: []const u8, value: []const u8) !void {
     try package_table.set(TValue.fromString(field_key), TValue.fromString(field_val));
 }
 
-fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
+pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
     const compile_result = pipeline.compile(allocator, source, .{ .source_name = source_name });
     switch (compile_result) {
         .err => |e| {
@@ -129,7 +190,7 @@ fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, s
     };
 }
 
-fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: bool) !void {
+pub fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: bool) !void {
     if (ignore_environment) return;
 
     const path_env = getPreferredEnv(allocator, "LUA_PATH_5_4", "LUA_PATH");
@@ -170,7 +231,7 @@ fn applyEnvironment(vm: *VM, allocator: std.mem.Allocator, ignore_environment: b
     }
 }
 
-fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
+pub fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
     var module_name = module_spec;
     var global_name = module_spec;
     if (std.mem.indexOfScalar(u8, module_spec, '=')) |eq| {
@@ -258,6 +319,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
 
     const vm = try VM.init(rt);
     defer vm.deinit();
+    vm.rt.warnings_enabled = options.warnings_enabled;
 
     // Phase 3: Inject execution context (arg table, etc.)
     try injectArg(vm.globals(), vm.gc(), options);
@@ -292,12 +354,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
 
     const result = Mnemonics.executeWithArgs(vm, proto, main_args.items) catch |err| {
         if (err == error.LuaException) {
-            // Print Lua error message before VM is destroyed
-            if (vm.lua_error_value.asString()) |err_str| {
-                std.debug.print("[string]:?: {s}\n", .{err_str.asSlice()});
-            } else {
-                std.debug.print("[string]:?: (error object is not a string)\n", .{});
-            }
+            printUnhandledLuaError(vm, options.exec_name);
         }
         return err;
     };
@@ -323,6 +380,38 @@ pub fn runFile(allocator: std.mem.Allocator, file_path: []const u8, options: Run
         opts.script_name = file_path;
     }
 
-    const chunk_source = stripInitialHashLine(stripUtf8Bom(source), true);
-    return run(allocator, chunk_source, opts);
+    const bytecode_probe = sourceForBytecodeProbe(source);
+    if (bytecode_probe.len > 0 and bytecode_probe[0] == 0x1B) {
+        const rt = try Runtime.init(allocator);
+        defer rt.deinit();
+
+        const vm = try VM.init(rt);
+        defer vm.deinit();
+        vm.rt.warnings_enabled = opts.warnings_enabled;
+
+        try injectArg(vm.globals(), vm.gc(), opts);
+        try applyEnvironment(vm, allocator, opts.ignore_environment);
+        for (opts.preload_modules) |module_spec| {
+            try runPreloadModule(vm, module_spec);
+        }
+        for (opts.exec_chunks) |chunk| {
+            try executeInitChunk(vm, allocator, chunk, "=(command line)");
+        }
+
+        const proto = serializer.loadProto(bytecode_probe, vm.gc(), vm.gc().allocator) catch {
+            std.debug.print("{s}: truncated bytecode\n", .{opts.exec_name});
+            return error.CompileFailed;
+        };
+
+        const result = Mnemonics.executeWithArgs(vm, proto, &.{}) catch |err| {
+            if (err == error.LuaException) {
+                printUnhandledLuaError(vm, opts.exec_name);
+            }
+            return err;
+        };
+
+        return owned.toOwnedReturnValue(allocator, result);
+    }
+
+    return run(allocator, preprocessChunkSource(source), opts);
 }

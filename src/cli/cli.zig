@@ -22,12 +22,14 @@ pub const CLI = struct {
         var arg_index: usize = 1;
         var ignore_environment = false;
         var interactive = false;
+        var warnings_enabled = false;
+        var print_version = false;
 
         if (args.len == 2 and (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-v"))) {
             try self.printVersion();
             return;
         }
-        if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
+        if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
             try self.printUsage();
             return;
         }
@@ -48,6 +50,12 @@ pub const CLI = struct {
                 arg_index += 1;
                 break;
             }
+            if (std.mem.eql(u8, opt, "-v")) {
+                print_version = true;
+                try pre_script_tokens.append(self.allocator, opt);
+                arg_index += 1;
+                continue;
+            }
             if (std.mem.eql(u8, opt, "-E")) {
                 ignore_environment = true;
                 try pre_script_tokens.append(self.allocator, opt);
@@ -61,6 +69,7 @@ pub const CLI = struct {
                 continue;
             }
             if (std.mem.eql(u8, opt, "-W") or (opt.len > 2 and opt[0] == '-' and opt[1] == 'W')) {
+                warnings_enabled = true;
                 try pre_script_tokens.append(self.allocator, opt);
                 arg_index += 1;
                 continue;
@@ -69,7 +78,7 @@ pub const CLI = struct {
                 if (arg_index + 1 >= args.len) {
                     var stderr_writer = std.fs.File.stderr().writer(&.{});
                     const stderr = &stderr_writer.interface;
-                    try stderr.print("Error: '-e' expects a chunk argument\n", .{});
+                    try stderr.print("'-e' needs argument\n", .{});
                     std.process.exit(1);
                 }
                 try pre_script_tokens.append(self.allocator, opt);
@@ -87,7 +96,7 @@ pub const CLI = struct {
                 if (arg_index + 1 >= args.len) {
                     var stderr_writer = std.fs.File.stderr().writer(&.{});
                     const stderr = &stderr_writer.interface;
-                    try stderr.print("Error: '-l' expects a module name\n", .{});
+                    try stderr.print("'-l' needs argument\n", .{});
                     std.process.exit(1);
                 }
                 try pre_script_tokens.append(self.allocator, opt);
@@ -109,7 +118,7 @@ pub const CLI = struct {
             if (opt.len > 0 and opt[0] == '-') {
                 var stderr_writer = std.fs.File.stderr().writer(&.{});
                 const stderr = &stderr_writer.interface;
-                try stderr.print("Error: unrecognized option: {s}\n", .{opt});
+                try stderr.print("unrecognized option '{s}'\n", .{opt});
                 std.process.exit(1);
             }
             script_name = opt;
@@ -134,6 +143,10 @@ pub const CLI = struct {
             try pre_script_args.append(self.allocator, tok);
         }
 
+        if (print_version) {
+            try self.printVersion();
+        }
+
         if (script_name) |script| {
             if (std.mem.eql(u8, script, "-")) {
                 const stdin = std.fs.File.stdin();
@@ -144,6 +157,7 @@ pub const CLI = struct {
                     .script_name = "-",
                     .args = script_args,
                     .ignore_environment = ignore_environment,
+                    .warnings_enabled = warnings_enabled,
                     .preload_modules = preload_modules.items,
                     .exec_chunks = exec_chunks.items,
                     .pre_script_args = pre_script_args.items,
@@ -161,6 +175,7 @@ pub const CLI = struct {
                 .script_name = script,
                 .args = script_args,
                 .ignore_environment = ignore_environment,
+                .warnings_enabled = warnings_enabled,
                 .preload_modules = preload_modules.items,
                 .exec_chunks = exec_chunks.items,
                 .pre_script_args = pre_script_args.items,
@@ -186,6 +201,7 @@ pub const CLI = struct {
                 .script_name = "=(command line)",
                 .args = &.{},
                 .ignore_environment = ignore_environment,
+                .warnings_enabled = warnings_enabled,
                 .preload_modules = preload_modules.items,
                 .exec_chunks = exec_chunks.items,
                 .pre_script_args = pre_script_args.items,
@@ -202,6 +218,16 @@ pub const CLI = struct {
         if (interactive or std.posix.isatty(std.posix.STDIN_FILENO)) {
             var repl = try REPL.init(self.allocator);
             defer repl.deinit();
+            try repl.applyStartup(.{
+                .exec_name = args[0],
+                .script_name = "=stdin",
+                .args = &.{},
+                .ignore_environment = ignore_environment,
+                .warnings_enabled = warnings_enabled,
+                .preload_modules = preload_modules.items,
+                .exec_chunks = exec_chunks.items,
+                .pre_script_args = pre_script_args.items,
+            });
             try repl.run();
             return;
         }
@@ -214,6 +240,7 @@ pub const CLI = struct {
             .script_name = "=stdin",
             .args = &.{},
             .ignore_environment = ignore_environment,
+            .warnings_enabled = warnings_enabled,
             .preload_modules = preload_modules.items,
             .exec_chunks = exec_chunks.items,
             .pre_script_args = pre_script_args.items,

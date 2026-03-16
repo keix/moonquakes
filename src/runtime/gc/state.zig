@@ -131,11 +131,17 @@ pub const RootProvider = struct {
 pub const FinalizerExecutor = struct {
     ptr: *anyopaque,
     callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+    reportError: *const fn (ctx: *anyopaque) void,
 
-    pub fn init(ptr: *anyopaque, callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue) FinalizerExecutor {
+    pub fn init(
+        ptr: *anyopaque,
+        callValue: *const fn (ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue,
+        reportError: *const fn (ctx: *anyopaque) void,
+    ) FinalizerExecutor {
         return .{
             .ptr = ptr,
             .callValue = callValue,
+            .reportError = reportError,
         };
     }
 };
@@ -176,6 +182,9 @@ pub const GC = struct {
 
     /// Active executor for running finalizers (typically current VM)
     finalizer_executor: ?FinalizerExecutor = null,
+
+    /// Prevent re-entering finalizer drain (e.g. collectgarbage() inside __gc).
+    finalizer_draining: bool = false,
 
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
@@ -244,6 +253,7 @@ pub const GC = struct {
             .root_providers = .{},
             .finalizer_queue = .{},
             .finalizer_executor = null,
+            .finalizer_draining = false,
             .gc_inhibit = 0,
             .weak_tables = .{},
         };
@@ -379,8 +389,11 @@ pub const GC = struct {
     pub fn drainFinalizers(self: *GC) void {
         const executor = self.finalizer_executor orelse return;
         if (self.finalizer_queue.items.len == 0) return;
+        if (self.finalizer_draining) return;
 
         // Inhibit GC during finalizer execution to prevent recursive collection.
+        self.finalizer_draining = true;
+        defer self.finalizer_draining = false;
         self.gc_inhibit += 1;
         defer self.gc_inhibit -= 1;
 
@@ -390,7 +403,9 @@ pub const GC = struct {
                 .userdata => TValue.fromUserdata(@fieldParentPtr("header", item.obj)),
                 else => continue,
             };
-            _ = executor.callValue(executor.ptr, &item.func, &[_]TValue{obj_val}) catch {};
+            _ = executor.callValue(executor.ptr, &item.func, &[_]TValue{obj_val}) catch {
+                executor.reportError(executor.ptr);
+            };
             // Note: finalizer_queued stays true to prevent re-finalization.
             // Lua semantics: once finalized, object is not finalized again
             // (unless setmetatable is called to set a new __gc).
@@ -494,6 +509,7 @@ pub const GC = struct {
 
     pub const markFinalizerQueue = finalizer_mod.markFinalizerQueue;
     pub const enqueueFinalizers = finalizer_mod.enqueueFinalizers;
+    pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
 
     pub const sweep = sweep_mod.sweep;
     pub const freeObjectFinal = sweep_mod.freeObjectFinal;
