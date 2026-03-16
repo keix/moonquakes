@@ -63,6 +63,7 @@ pub fn createTestProto(
         &[_]*ProtoObject{}, // no nested protos
         numparams,
         is_vararg,
+        false,
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{}, // no upvalues
@@ -95,6 +96,7 @@ pub fn createTestProtoWithUpvalues(
         &[_]*ProtoObject{}, // no nested protos
         numparams,
         is_vararg,
+        false,
         maxstacksize,
         nups,
         upvalues_copy,
@@ -126,6 +128,7 @@ pub fn createTestProtoWithChildProtos(
         protos_copy,
         numparams,
         is_vararg,
+        false,
         maxstacksize,
         0, // nups
         &[_]Upvaldesc{},
@@ -160,6 +163,7 @@ pub fn createTestProtoFull(
         protos_copy,
         numparams,
         is_vararg,
+        false,
         maxstacksize,
         nups,
         upvalues_copy,

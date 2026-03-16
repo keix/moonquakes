@@ -604,6 +604,8 @@ pub const ProtoObject = struct {
     numparams: u8,
     /// Whether function accepts varargs
     is_vararg: bool,
+    /// Whether this proto is a main chunk, even if called from another frame
+    is_main_chunk: bool = false,
     /// Maximum stack size needed
     maxstacksize: u8,
     /// Number of upvalues

@@ -107,51 +107,9 @@ fn collectVisibleUpvalueReps(closure: *ClosureObject, reps: *[256]usize) usize {
             continue;
         }
 
-        const has_name = i < closure.proto.upvalues.len and closure.proto.upvalues[i].name != null;
-        if (has_name) {
-            // For named upvalues, follow first reference order in bytecode.
-            const pos_i = upvalueFirstRefPos(closure, i);
-            var insert_at = count;
-            var p: usize = 0;
-            while (p < count) : (p += 1) {
-                const rp = reps[p];
-                if (rp < closure.proto.upvalues.len and closure.proto.upvalues[rp].name != null) {
-                    const pos_p = upvalueFirstRefPos(closure, rp);
-                    if (pos_i < pos_p or (pos_i == pos_p and i < rp)) {
-                        insert_at = p;
-                        break;
-                    }
-                }
-            }
-            if (insert_at < count) {
-                var s = count;
-                while (s > insert_at) : (s -= 1) {
-                    reps[s] = reps[s - 1];
-                }
-            }
-            reps[insert_at] = i;
-            count += 1;
-        } else {
-            // For unnamed/synthetic descriptors (common after dump/undump),
-            // keep a stable lexical-like order by descriptor idx.
-            var insert_at = count;
-            var p: usize = 0;
-            while (p < count) : (p += 1) {
-                const kp = keyFor(closure, reps[p], env_idx);
-                if (k.idx < kp.idx) {
-                    insert_at = p;
-                    break;
-                }
-            }
-            if (insert_at < count) {
-                var s = count;
-                while (s > insert_at) : (s -= 1) {
-                    reps[s] = reps[s - 1];
-                }
-            }
-            reps[insert_at] = i;
-            count += 1;
-        }
+        // Preserve proto descriptor order for visible upvalues.
+        reps[count] = i;
+        count += 1;
     }
 
     if (env_rep) |e| {
@@ -836,6 +794,13 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         }
         if (inferNameFromCallerSource(vm, level_arg.?, &inferred_name_storage)) |info| {
             if (func_name == null) {
+                func_name = info.name;
+                func_namewhat = info.namewhat;
+            } else if (func_namewhat == null or
+                (!std.mem.eql(u8, func_namewhat.?, "local") and std.mem.eql(u8, info.namewhat, "local")))
+            {
+                // Prefer a local name inferred from the caller source over
+                // broader field/global heuristics.
                 func_name = info.name;
                 func_namewhat = info.namewhat;
             } else if (target_closure != null and
@@ -2048,7 +2013,7 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
     if (target_vm.ci) |ci| {
         if ((mask & 0x04) != 0) {
-            ci.hook_last_line = currentLineForCallInfo(ci);
+            ci.hook_last_line = if (ci.func.numparams == 0 and ci.func.is_vararg) -1 else currentLineForCallInfo(ci);
             ci.hook_last_pc = currentPcIndexForCallInfo(ci);
         } else {
             ci.hook_last_line = -1;

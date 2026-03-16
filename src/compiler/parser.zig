@@ -1235,6 +1235,7 @@ pub const ProtoBuilder = struct {
             .protos = protos_slice,
             .numparams = num_params,
             .is_vararg = self.is_vararg,
+            .is_main_chunk = self.parent == null,
             .maxstacksize = self.maxstacksize,
             .nups = @intCast(self.upvalues.items.len),
             .upvalues = upvalues_slice,
@@ -2135,6 +2136,10 @@ pub const Parser = struct {
                 return error.AssignToConst;
             }
 
+            // Resolve the assignment target before parsing the RHS so
+            // captured upvalues follow source order for `x = expr`.
+            const target_loc = try self.proto.resolveVariable(name);
+
             const expr_start = self.proto.code.items.len;
             const value_reg = try self.parseExpr();
             const expr_end = self.proto.code.items.len;
@@ -2175,7 +2180,7 @@ pub const Parser = struct {
                 return;
             }
 
-            if (try self.proto.resolveVariable(name)) |loc| {
+            if (target_loc) |loc| {
                 switch (loc) {
                     .local => |local_reg| {
                         self.proto.current_line = store_line;

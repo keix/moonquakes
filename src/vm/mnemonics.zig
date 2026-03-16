@@ -2697,13 +2697,23 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (idx > 0) {
                     const op = ci.func.code[idx].getOpCode();
                     var suppress_call_line_adjust = false;
-                    if (op == .CALL and ci.previous == null) {
+                    if (op == .CALL) {
                         const call_reg = inst.getA();
                         if (vm.stack[vm.base + call_reg].asNativeClosure()) |nc| {
-                            suppress_call_line_adjust = (nc.func.id == .debug_sethook);
-                        } else if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
-                            // For stripped closures, keep caller line stable around CALL.
-                            suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
+                            // Preserve the clear-hook source line before native
+                            // debug.sethook() disables further line callbacks,
+                            // but only chunk frames expect a line event on the
+                            // clear call itself.
+                            suppress_call_line_adjust =
+                                (nc.func.id == .debug_sethook and
+                                    inst.getB() == 1 and
+                                    ci.func.numparams == 0 and
+                                    ci.func.is_vararg);
+                        } else if (ci.previous == null) {
+                            if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
+                                // For stripped closures, keep caller line stable around CALL.
+                                suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
+                            }
                         }
                     }
                     if (op == .CALL and
