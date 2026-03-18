@@ -1,3 +1,5 @@
 lua-5.4.*
 zig-out/
+build/
+testes/
 .zig-cache/

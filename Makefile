@@ -23,7 +23,9 @@ STATIC  = $(ZIG_LIBDIR)/libmoonquakes.a
 SHARED  = $(ZIG_LIBDIR)/libmoonquakes.so
 
 TARGET  = $(BINDIR)/minimal
-PASSING_TESTS = $(sort $(wildcard passing/*.lua))
+# Exclude all.lua (test suite entry point that dofile's other tests) and
+# big.lua (requires coroutine wrapper from all.lua)
+PASSING_TESTS = $(sort $(filter-out all.lua big.lua heavy.lua,$(notdir $(wildcard passing/*.lua))))
 
 all: $(TARGET)
 
@@ -57,7 +59,7 @@ test: zig-libs
 	C_CYAN=$$(printf '\033[36m'); \
 	C_GREEN=$$(printf '\033[32m'); \
 	C_RED=$$(printf '\033[31m'); \
-	cd passing && for f in *.lua; do \
+	cd passing && for f in $(PASSING_TESTS); do \
 		printf "%s===========================> %s%s\n" "$$C_CYAN" "$$f" "$$C_RESET"; \
 		if ../zig-out/bin/moonquakes "$$f"; then \
 			st=0; \
