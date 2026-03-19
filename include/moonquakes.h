@@ -10,7 +10,7 @@
  * 
  * Handwritten at the boundary.
  *
- * Moonquakes 0.1.1 - An interpretation of Lua.
+ * Moonquakes 0.2.1 - An interpretation of Lua.
  * Copyright (c) 2025 KEI SAWAMURA. Licensed under the MIT License.
  */
 

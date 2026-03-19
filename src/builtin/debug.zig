@@ -444,7 +444,7 @@ fn isConsistentLevelName(vm: *VM, level: i64, target: *ClosureObject, name: []co
 /// | PC-to-line mapping     | Unavailable | traceback shows [Lua function]|
 /// | Hook invocation        | Stored only | sethook saves but VM ignores  |
 ///
-/// ## Required for Full Support (v0.2.0)
+/// ## Required for Full Support (v0.2.1)
 ///
 /// ProtoObject needs these fields:
 /// ```
