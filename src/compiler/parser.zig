@@ -3740,10 +3740,14 @@ pub const Parser = struct {
         // Mark for then branch
         const then_mark = self.proto.markTemps();
         try self.enterScope();
+        const then_scope_base = self.proto.locals_top;
 
         // Parse then branch
         try self.parseStatements();
 
+        if (self.proto.locals_top > then_scope_base) {
+            try self.proto.emit(.CLOSE, then_scope_base, 0, 0);
+        }
         // Release then branch scope and temporaries
         self.leaveScope();
         self.proto.resetTemps(then_mark);
@@ -3794,10 +3798,14 @@ pub const Parser = struct {
             // Mark for elseif body
             const elseif_body_mark = self.proto.markTemps();
             try self.enterScope();
+            const elseif_scope_base = self.proto.locals_top;
 
             // Parse elseif body
             try self.parseStatements();
 
+            if (self.proto.locals_top > elseif_scope_base) {
+                try self.proto.emit(.CLOSE, elseif_scope_base, 0, 0);
+            }
             // Release elseif body scope and temporaries
             self.leaveScope();
             self.proto.resetTemps(elseif_body_mark);
@@ -3826,10 +3834,14 @@ pub const Parser = struct {
             // Mark for else body
             const else_body_mark = self.proto.markTemps();
             try self.enterScope();
+            const else_scope_base = self.proto.locals_top;
 
             // Parse else branch
             try self.parseStatements();
 
+            if (self.proto.locals_top > else_scope_base) {
+                try self.proto.emit(.CLOSE, else_scope_base, 0, 0);
+            }
             // Release else body scope and temporaries
             self.leaveScope();
             self.proto.resetTemps(else_body_mark);

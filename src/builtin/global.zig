@@ -1646,7 +1646,7 @@ pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     _ = nargs;
     if (nresults == 0) return;
 
-    const version_str = try vm.gc().allocString("Lua 5.4");
+    const version_str = try vm.gc().allocString(@import("../version.zig").lua_version);
     vm.stack[vm.base + func_reg] = TValue.fromString(version_str);
 }
 

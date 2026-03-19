@@ -21,6 +21,7 @@ const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const ReturnValue = execution.ReturnValue;
 const ExecuteResult = execution.ExecuteResult;
+const call = @import("call.zig");
 
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
@@ -2144,8 +2145,8 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 defer {
                     if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
                 }
-                if (protected_error_handler.asClosure()) |handler_closure| {
-                    handled_error = executeSyncMM(vm, handler_closure, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
+                if (protected_error_handler.asClosure()) |_| {
+                    handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
                         error.Yield => return error.Yield,
                         error.LuaException => blk: {
                             const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
