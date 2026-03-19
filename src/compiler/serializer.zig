@@ -55,6 +55,7 @@ fn writeProto(
     // Write function header
     try result.append(allocator, proto.numparams);
     try result.append(allocator, if (proto.is_vararg) @as(u8, 1) else @as(u8, 0));
+    try result.append(allocator, if (proto.is_main_chunk) @as(u8, 1) else @as(u8, 0));
     try result.append(allocator, proto.maxstacksize);
     try result.append(allocator, proto.nups);
 
@@ -87,6 +88,8 @@ fn writeProto(
     if (strip) {
         try writeU32(result, allocator, 0); // source_len
         try writeU32(result, allocator, 0); // lineinfo_count
+        try writeU32(result, allocator, 0); // local_reg_names_count
+        try writeU32(result, allocator, 0); // upvalue_name_count
     } else {
         // Source name
         const same_as_parent = if (parent_source) |ps|
@@ -104,6 +107,28 @@ fn writeProto(
         try writeU32(result, allocator, @intCast(proto.lineinfo.len));
         for (proto.lineinfo) |line| {
             try writeU32(result, allocator, line);
+        }
+
+        // Local register names (needed by debug library after undump)
+        try writeU32(result, allocator, @intCast(proto.local_reg_names.len));
+        for (proto.local_reg_names) |name_opt| {
+            if (name_opt) |name| {
+                try writeU32(result, allocator, @intCast(name.len));
+                try result.appendSlice(allocator, name);
+            } else {
+                try writeU32(result, allocator, std.math.maxInt(u32));
+            }
+        }
+
+        // Upvalue names (needed by debug.getupvalue/setupvalue after undump)
+        try writeU32(result, allocator, @intCast(proto.upvalues.len));
+        for (proto.upvalues) |upv| {
+            if (upv.name) |name| {
+                try writeU32(result, allocator, @intCast(name.len));
+                try result.appendSlice(allocator, name);
+            } else {
+                try writeU32(result, allocator, std.math.maxInt(u32));
+            }
         }
     }
 }
@@ -192,6 +217,7 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
     // Read function header
     const numparams = reader.readU8() orelse return error.InvalidBytecode;
     const is_vararg = (reader.readU8() orelse return error.InvalidBytecode) != 0;
+    const is_main_chunk = (reader.readU8() orelse return error.InvalidBytecode) != 0;
     const maxstacksize = reader.readU8() orelse return error.InvalidBytecode;
     const nups = reader.readU8() orelse return error.InvalidBytecode;
 
@@ -248,8 +274,53 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
         break :blk lines;
     } else &[_]u32{};
 
+    const local_name_count = reader.readU32() orelse return error.InvalidBytecode;
+    const local_reg_names = if (local_name_count > 0) blk: {
+        const names = try allocator.alloc(?[]const u8, local_name_count);
+        errdefer allocator.free(names);
+        for (names) |*name_opt| {
+            const len = reader.readU32() orelse return error.InvalidBytecode;
+            if (len == std.math.maxInt(u32)) {
+                name_opt.* = null;
+            } else {
+                const raw = reader.readBytes(len) orelse return error.InvalidBytecode;
+                const name = try allocator.alloc(u8, len);
+                @memcpy(name, raw);
+                name_opt.* = name;
+            }
+        }
+        break :blk names;
+    } else &[_]?[]const u8{};
+
+    const upvalue_name_count = reader.readU32() orelse return error.InvalidBytecode;
+    if (upvalue_name_count > upvalues.len) return error.InvalidBytecode;
+    var upvalue_name_bufs = std.ArrayList([]u8).empty;
+    defer {
+        if (@errorReturnTrace() != null) {
+            for (upvalue_name_bufs.items) |buf| allocator.free(buf);
+        }
+        upvalue_name_bufs.deinit(allocator);
+    }
+    var upvalue_idx: usize = 0;
+    while (upvalue_idx < upvalue_name_count) : (upvalue_idx += 1) {
+        const len = reader.readU32() orelse return error.InvalidBytecode;
+        if (len == std.math.maxInt(u32)) {
+            upvalues[upvalue_idx].name = null;
+            continue;
+        }
+        const raw = reader.readBytes(len) orelse return error.InvalidBytecode;
+        const name = try allocator.alloc(u8, len);
+        errdefer allocator.free(name);
+        @memcpy(name, raw);
+        try upvalue_name_bufs.append(allocator, name);
+        upvalues[upvalue_idx].name = name;
+    }
+    while (upvalue_idx < upvalues.len) : (upvalue_idx += 1) {
+        upvalues[upvalue_idx].name = null;
+    }
+
     // Allocate ProtoObject through GC
-    const proto_obj = try gc.allocProto(k, code, protos, numparams, is_vararg, maxstacksize, nups, upvalues, &[_]?[]const u8{}, source, lineinfo);
+    const proto_obj = try gc.allocProto(k, code, protos, numparams, is_vararg, is_main_chunk, maxstacksize, nups, upvalues, local_reg_names, source, lineinfo);
 
     // Fix up nested protos that omitted source (same as this proto).
     if (proto_obj.source.len > 0) {

@@ -21,6 +21,7 @@ const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const ReturnValue = execution.ReturnValue;
 const ExecuteResult = execution.ExecuteResult;
+const call = @import("call.zig");
 
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
@@ -610,6 +611,78 @@ fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
     return null;
 }
 
+fn traceNonMethodObjectContext(vm: *VM, ci: *const CallInfo, reg: u8) ?CallNameContext {
+    const cur_idx = currentInstructionIndex(ci) orelse return null;
+    if (cur_idx > ci.func.code.len) return null;
+
+    var target_reg = reg;
+    var i = cur_idx;
+    var budget: u16 = 64;
+    while (i > 0 and budget > 0) {
+        i -= 1;
+        budget -= 1;
+        const inst = ci.func.code[i];
+        if (inst.getOpCode() == .SELF and inst.getA() + 1 == target_reg) {
+            target_reg = inst.getB();
+            continue;
+        }
+        if (inst.getA() != target_reg) continue;
+
+        switch (inst.getOpCode()) {
+            .MOVE => {
+                target_reg = inst.getB();
+                continue;
+            },
+            .GETFIELD => {
+                const key_val = ci.func.k[inst.getC()];
+                if (key_val.asString()) |key| {
+                    const table_reg = inst.getB();
+                    const target_nil = vm.base + target_reg < vm.stack.len and vm.stack[vm.base + target_reg].isNil();
+                    if (!target_nil and vm.base + table_reg < vm.stack.len and vm.stack[vm.base + table_reg].asTable() != null) {
+                        return .{ .kind = .field_name, .name = key.asSlice() };
+                    }
+                    target_reg = table_reg;
+                    continue;
+                }
+                continue;
+            },
+            .GETTABUP => {
+                if (inst.getB() != 0) return null;
+                const key_val = ci.func.k[inst.getC()];
+                if (key_val.asString()) |key| {
+                    return .{ .kind = .global_name, .name = key.asSlice() };
+                }
+                continue;
+            },
+            .GETUPVAL => {
+                const uv_idx = inst.getB();
+                if (uv_idx >= ci.func.upvalues.len) return null;
+                const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
+                return .{ .kind = .upvalue_name, .name = uv_name };
+            },
+            .SELF => {
+                const obj_reg = inst.getB();
+                if (vm.base + obj_reg < vm.stack.len and vm.stack[vm.base + obj_reg].asTable() != null) {
+                    const key_val = ci.func.k[inst.getC()];
+                    if (key_val.asString()) |key| {
+                        return .{ .kind = .method_name, .name = key.asSlice() };
+                    }
+                }
+                target_reg = obj_reg;
+                continue;
+            },
+            else => continue,
+        }
+    }
+
+    if (target_reg < ci.func.local_reg_names.len) {
+        if (ci.func.local_reg_names[target_reg]) |name| {
+            return .{ .kind = .local_name, .name = name };
+        }
+    }
+    return null;
+}
+
 fn currentInstructionIndex(ci: *const CallInfo) ?usize {
     if (ci.func.code.len == 0) return null;
     const code_start = @intFromPtr(ci.func.code.ptr);
@@ -1173,7 +1246,18 @@ fn findUniqueLocalNameByValue(ci: *const CallInfo, vm: *VM, value: TValue) ?[]co
 
 fn buildCallNotFunctionMessage(vm: *VM, ci: *const CallInfo, call_reg: u8, called: TValue, out_buf: []u8) []const u8 {
     const ty = callableValueTypeName(called);
-    if (callNameContext(ci, call_reg)) |ctx| {
+    var ctx_opt = callNameContext(ci, call_reg);
+    if (ctx_opt != null and ctx_opt.?.kind == .method_name and vm.base + call_reg + 1 < vm.stack.len) {
+        const self_obj = vm.stack[vm.base + call_reg + 1];
+        if (self_obj.asTable() == null) {
+            if (traceNonMethodObjectContext(vm, ci, call_reg + 1)) |obj_ctx| {
+                if (obj_ctx.kind != .method_name) {
+                    ctx_opt = obj_ctx;
+                }
+            }
+        }
+    }
+    if (ctx_opt) |ctx| {
         if (ctx.kind == .upvalue_name and std.mem.eql(u8, ctx.name, "_ENV")) {
             // Prefer explicit field/method/global hints over synthetic _ENV names.
         } else if ((ctx.kind == .global_name or ctx.kind == .field_name) and std.mem.eql(u8, ty, "table")) {
@@ -1445,19 +1529,21 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
 
 pub fn popCallInfo(vm: *VM) void {
     if (vm.ci) |ci| {
+        if (vm.callstack_size > 0) {
+            vm.callstack_size -= 1;
+        }
         if (ci.previous) |prev| {
             vm.ci = prev;
             vm.base = prev.base;
-            if (vm.callstack_size > 0) {
-                vm.callstack_size -= 1;
-            }
-            vm.last_field_reg = null;
-            vm.last_field_key = null;
-            vm.last_field_is_global = false;
-            vm.last_field_is_method = false;
-            vm.last_field_tick = 0;
-            vm.int_repr_field_key = null;
+        } else {
+            vm.ci = null;
         }
+        vm.last_field_reg = null;
+        vm.last_field_key = null;
+        vm.last_field_is_global = false;
+        vm.last_field_is_method = false;
+        vm.last_field_tick = 0;
+        vm.int_repr_field_key = null;
     }
 }
 
@@ -1654,6 +1740,7 @@ fn executeSyncMMWithDebug(
     }
 
     const result = vm.stack[result_slot];
+    vm.ci = saved_ci;
     vm.base = saved_base;
     vm.top = saved_top;
     return result;
@@ -2058,8 +2145,8 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 defer {
                     if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
                 }
-                if (protected_error_handler.asClosure()) |handler_closure| {
-                    handled_error = executeSyncMM(vm, handler_closure, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
+                if (protected_error_handler.asClosure()) |_| {
+                    handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
                         error.Yield => return error.Yield,
                         error.LuaException => blk: {
                             const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
@@ -2309,6 +2396,17 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             if (try continueConcatFold(vm, ci)) continue;
         }
         const inst = ci.fetch() catch |err| {
+            if (err == error.PcOutOfRange) {
+                if (ci.previous != null) {
+                    popCallInfo(vm);
+                    if (vm.ci) |prev_ci| {
+                        vm.base = prev_ci.ret_base;
+                        vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
+                        continue;
+                    }
+                }
+                return .none;
+            }
             if (err == error.LuaException and try handleLuaException(vm)) continue;
             return err;
         };
@@ -2697,13 +2795,23 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (idx > 0) {
                     const op = ci.func.code[idx].getOpCode();
                     var suppress_call_line_adjust = false;
-                    if (op == .CALL and ci.previous == null) {
+                    if (op == .CALL) {
                         const call_reg = inst.getA();
                         if (vm.stack[vm.base + call_reg].asNativeClosure()) |nc| {
-                            suppress_call_line_adjust = (nc.func.id == .debug_sethook);
-                        } else if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
-                            // For stripped closures, keep caller line stable around CALL.
-                            suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
+                            // Preserve the clear-hook source line before native
+                            // debug.sethook() disables further line callbacks,
+                            // but only chunk frames expect a line event on the
+                            // clear call itself.
+                            suppress_call_line_adjust =
+                                (nc.func.id == .debug_sethook and
+                                    inst.getB() == 1 and
+                                    ci.func.numparams == 0 and
+                                    ci.func.is_vararg);
+                        } else if (ci.previous == null) {
+                            if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
+                                // For stripped closures, keep caller line stable around CALL.
+                                suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
+                            }
                         }
                     }
                     if (op == .CALL and
@@ -3802,7 +3910,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const c = inst.getC();
 
             const func_val = vm.stack[vm.base + a];
-
             // Fast path: native closure
             if (func_val.isObject()) {
                 const obj = func_val.object;
@@ -5650,8 +5757,7 @@ fn dispatchSharedIndexMMValue(vm: *VM, value: TValue, key_val: TValue, result_re
 
     // Look up __index in the metatable
     const index_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.index))) orelse {
-        vm.stack[vm.base + result_reg] = .nil;
-        return null;
+        return error.NotATable;
     };
 
     // __index is a table: look up the key

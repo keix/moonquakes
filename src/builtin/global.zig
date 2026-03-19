@@ -1440,8 +1440,15 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     }
 
-    // Compile the source with filename as source name
-    const compile_result = vm.rt.compile_ctx.compile(preprocessChunkSource(source), .{ .source_name = filename });
+    // Match Lua's file-chunk source convention ("@file.lua") so debug info
+    // and error formatting treat loadfile chunks as files instead of strings.
+    const source_name = if (filename.len > 0 and (filename[0] == '@' or filename[0] == '='))
+        filename
+    else
+        try std.fmt.allocPrint(vm.gc().allocator, "@{s}", .{filename});
+    defer if (source_name.ptr != filename.ptr) vm.gc().allocator.free(source_name);
+
+    const compile_result = vm.rt.compile_ctx.compile(preprocessChunkSource(source), .{ .source_name = source_name });
     switch (compile_result) {
         .err => |e| {
             defer e.deinit(vm.gc().allocator);
@@ -1639,7 +1646,7 @@ pub fn nativeVersion(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     _ = nargs;
     if (nresults == 0) return;
 
-    const version_str = try vm.gc().allocString("Lua 5.4");
+    const version_str = try vm.gc().allocString(@import("../version.zig").lua_version);
     vm.stack[vm.base + func_reg] = TValue.fromString(version_str);
 }
 

@@ -64,6 +64,7 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
         nested_protos,
         raw.numparams,
         raw.is_vararg,
+        raw.is_main_chunk,
         raw.maxstacksize,
         raw.nups,
         upvalues,

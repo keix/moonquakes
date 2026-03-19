@@ -170,6 +170,7 @@ pub fn allocProto(
     protos: []const *ProtoObject,
     numparams: u8,
     is_vararg: bool,
+    is_main_chunk: bool,
     maxstacksize: u8,
     nups: u8,
     upvalues: []const Upvaldesc,
@@ -186,6 +187,7 @@ pub fn allocProto(
     obj.protos = protos;
     obj.numparams = numparams;
     obj.is_vararg = is_vararg;
+    obj.is_main_chunk = is_main_chunk;
     obj.maxstacksize = maxstacksize;
     obj.nups = nups;
     obj.upvalues = upvalues;
@@ -199,6 +201,9 @@ pub fn allocProto(
     self.bytes_allocated += code.len * @sizeOf(Instruction);
     self.bytes_allocated += protos.len * @sizeOf(*ProtoObject);
     self.bytes_allocated += upvalues.len * @sizeOf(Upvaldesc);
+    for (upvalues) |upv| {
+        if (upv.name) |name| self.bytes_allocated += name.len;
+    }
     self.bytes_allocated += local_reg_names.len * @sizeOf(?[]const u8);
     for (local_reg_names) |name_opt| {
         if (name_opt) |name| self.bytes_allocated += name.len;

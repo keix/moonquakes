@@ -22,6 +22,7 @@ pub const Proto = struct {
     protos: []const *const Proto = &.{}, // Nested function prototypes
     numparams: u8,
     is_vararg: bool,
+    is_main_chunk: bool = false,
     maxstacksize: u8,
     nups: u8 = 0, // Number of upvalues
     upvalues: []const Upvaldesc = &.{}, // Upvalue descriptors
@@ -66,6 +67,7 @@ pub const RawProto = struct {
 
     numparams: u8,
     is_vararg: bool,
+    is_main_chunk: bool = false,
     maxstacksize: u8,
     nups: u8 = 0,
     upvalues: []const Upvaldesc = &.{},

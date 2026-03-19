@@ -399,10 +399,54 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                 return .{ .errored = co_vm.lua_error_value };
             }
 
-            // Other errors - create error message
-            const err_str = co_vm.gc().allocString(@errorName(err)) catch {
-                return .{ .errored = .nil };
-            };
+            // Convert ordinary VM runtime errors into catchable Lua exceptions,
+            // matching the main execution and call paths.
+            if (err == error.ArithmeticError or
+                err == error.DivideByZero or
+                err == error.ModuloByZero or
+                err == error.IntegerRepresentation or
+                err == error.OrderComparisonError or
+                err == error.LengthError or
+                err == error.NotATable or
+                err == error.NotAFunction or
+                err == error.InvalidTableKey or
+                err == error.InvalidTableOperation or
+                err == error.InvalidForLoopInit or
+                err == error.InvalidForLoopLimit or
+                err == error.InvalidForLoopStep or
+                err == error.NoCloseMetamethod or
+                err == error.FormatError)
+            {
+                var msg_buf: [128]u8 = undefined;
+                const msg = switch (err) {
+                    error.ArithmeticError => mnemonics.formatArithmeticError(co_vm, inst, &msg_buf),
+                    error.DivideByZero => "divide by zero",
+                    error.ModuloByZero => "attempt to perform 'n%0'",
+                    error.IntegerRepresentation => mnemonics.formatIntegerRepresentationError(co_vm, inst, &msg_buf),
+                    error.NotATable => mnemonics.formatIndexOnNonTableError(co_vm, inst, &msg_buf),
+                    error.NotAFunction => "attempt to call a non-function value",
+                    error.OrderComparisonError => "attempt to compare values",
+                    error.LengthError => "attempt to get length of a value",
+                    error.InvalidTableKey => "table index is nil or NaN",
+                    error.InvalidTableOperation => mnemonics.formatIndexOnNonTableError(co_vm, inst, &msg_buf),
+                    error.InvalidForLoopInit => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
+                    error.InvalidForLoopLimit => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
+                    error.InvalidForLoopStep => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
+                    error.NoCloseMetamethod => mnemonics.formatNoCloseMetamethodError(co_vm, inst, &msg_buf),
+                    error.FormatError => "bad argument to string format",
+                    else => "runtime error",
+                };
+                var full_msg_buf: [320]u8 = undefined;
+                const full_msg = mnemonics.runtimeErrorWithCurrentLocation(co_vm, inst, err, msg, &full_msg_buf);
+                const msg_obj = co_vm.gc().allocString(full_msg) catch return .{ .errored = .nil };
+                co_vm.lua_error_value = TValue.fromString(msg_obj);
+                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
+                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield_base, .count = co_vm.yield_count } },
+                }) continue;
+                return .{ .errored = co_vm.lua_error_value };
+            }
+
+            const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
             return .{ .errored = TValue.fromString(err_str) };
         };
 

@@ -57,8 +57,8 @@ pub fn debugGetFrameInfoAtLevel(self: *VM, level: i64) ?DebugFrameInfo {
     return .{
         .closure = ci.closure,
         .current_line = current_line,
-        .istailcall = ci.was_tail_called,
-        .is_main = (ci.previous == null),
+        .istailcall = ci.was_tail_called and !ci.func.is_main_chunk,
+        .is_main = ci.func.is_main_chunk,
         .debug_name = ci.debug_name,
         .debug_namewhat = ci.debug_namewhat,
     };
