@@ -175,12 +175,19 @@ pub fn freeRawProto(allocator: std.mem.Allocator, raw: RawProto) void {
     allocator.free(raw.strings);
     allocator.free(raw.native_ids);
     allocator.free(raw.const_refs);
+    for (raw.upvalues) |upv| {
+        if (upv.name) |name| allocator.free(name);
+    }
+    allocator.free(raw.upvalues);
+    for (raw.local_reg_names) |name_opt| {
+        if (name_opt) |name| allocator.free(name);
+    }
+    allocator.free(raw.local_reg_names);
     for (raw.protos) |nested| {
         freeRawProto(allocator, nested.*);
         allocator.destroy(@constCast(nested));
     }
     allocator.free(raw.protos);
-    allocator.free(raw.upvalues);
 }
 
 // Note: freeProto removed - ProtoObject is now GC-managed

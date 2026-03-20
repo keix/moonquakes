@@ -1259,8 +1259,8 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         // Initialize _ENV upvalue to the environment table.
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-            closure.upvalues[env_idx] = env_upval;
+            closure.upvalues[env_idx].closed = env_value;
+            closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
         }
 
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1319,8 +1319,8 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-        closure.upvalues[env_idx] = env_upval;
+        closure.upvalues[env_idx].closed = env_value;
+        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1429,8 +1429,8 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const closure = try vm.gc().allocClosure(proto);
         coalesceEquivalentUpvalues(closure);
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-            closure.upvalues[env_idx] = env_upval;
+            closure.upvalues[env_idx].closed = env_value;
+            closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
         }
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
         if (nresults > 1) {
@@ -1489,8 +1489,8 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        const env_upval = try vm.gc().allocClosedUpvalue(env_value);
-        closure.upvalues[env_idx] = env_upval;
+        closure.upvalues[env_idx].closed = env_value;
+        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1557,8 +1557,8 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the globals table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
-        closure.upvalues[env_idx] = env_upval;
+        closure.upvalues[env_idx].closed = TValue.fromTable(vm.globals());
+        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
     }
 
     const func_val = TValue.fromClosure(closure);

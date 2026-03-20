@@ -70,8 +70,8 @@ fn registerLuaDofileWrapper(globals: *TableObject, gc: *GC) !void {
     if (proto.protos.len < 1) return error.InvalidBuiltinDefinition;
     const closure = try gc.allocClosure(proto.protos[0]);
     if (closure.upvalues.len > 0) {
-        const env_upval = try gc.allocClosedUpvalue(TValue.fromTable(globals));
-        closure.upvalues[0] = env_upval;
+        closure.upvalues[0].closed = TValue.fromTable(globals);
+        closure.upvalues[0].location = &closure.upvalues[0].closed;
     }
     try setStringKey(globals, gc, "dofile", TValue.fromClosure(closure));
 }

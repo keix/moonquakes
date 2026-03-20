@@ -139,8 +139,9 @@ pub fn allocTable(self: anytype) !*TableObject {
 pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
     const obj = try allocObject(self, ClosureObject, 0);
 
-    // Initialize GC header (black = survives current cycle)
-    obj.header = newObjectHeader(self, .closure);
+    // Link the closure into the object list only after allocating child
+    // upvalues so it becomes the list head above them instead of cutting them off.
+    obj.header = GCObject.initWithMark(.closure, null, self.current_mark);
     obj.proto = proto;
 
     // Allocate upvalues array if needed
@@ -156,6 +157,7 @@ pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
     }
 
     // Add to GC object list
+    obj.header.next = self.objects;
     self.objects = &obj.header;
 
     return obj;
