@@ -38,6 +38,11 @@ pub const gc_tests = @import("tests/gc.zig");
 pub const vm_error_tests = @import("tests/vm_error.zig");
 pub const api_global_tests = @import("tests/api/global.zig");
 pub const api_modules_tests = @import("tests/api/modules.zig");
+pub const api_debug_tests = @import("tests/api/debug.zig");
+pub const api_coroutine_tests = @import("tests/api/coroutine.zig");
+pub const api_string_tests = @import("tests/api/string.zig");
+pub const api_table_tests = @import("tests/api/table.zig");
+pub const api_math_tests = @import("tests/api/math.zig");
 
 test {
     // This will include all tests from imported modules
