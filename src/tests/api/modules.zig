@@ -34,6 +34,22 @@ test "modules.package exposes core tables" {
     });
 }
 
+test "modules.package exposes config string and search helpers" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\return type(package.config), type(package.searchpath), type(package.loadlib)
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("string")),
+        TValue.fromString(try ctx.base.gc().allocString("function")),
+        TValue.fromString(try ctx.base.gc().allocString("function")),
+    });
+}
+
 test "modules.require returns builtin library table" {
     var ctx = api.ApiContext{};
     try ctx.init();
@@ -118,6 +134,93 @@ test "modules.require reports module not found" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "modules.package searchpath finds module path with default separators" {
+    const module_path = "tmp_api_pkg_search/module.lua";
+    try std.fs.cwd().makePath("tmp_api_pkg_search");
+    defer std.fs.cwd().deleteFile(module_path) catch {};
+    defer std.fs.cwd().deleteDir("tmp_api_pkg_search") catch {};
+    try writeFixture(module_path, "return true");
+
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local path = assert(package.searchpath("module", "./tmp_api_pkg_search/?.lua"))
+        \\return path
+    );
+
+    switch (result) {
+        .single => |value| {
+            const s = value.asString() orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings("./tmp_api_pkg_search/module.lua", s.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "modules.package searchpath reports searched paths on failure" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local path, err = package.searchpath("foo.bar", "./?.lua;./?/init.lua")
+        \\return path, err
+    );
+
+    switch (result) {
+        .multiple => |values| {
+            try testing.expectEqual(@as(usize, 2), values.len);
+            try testing.expect(values[0] == .nil);
+            const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
+            try api.expectStringContains(err_str.asSlice(), "./foo/bar.lua");
+            try api.expectStringContains(err_str.asSlice(), "./foo/bar/init.lua");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "modules.package searchpath supports custom separator and replacement" {
+    const module_path = "tmp-api-pkg-custom-foo.lua";
+    defer deleteFixture(module_path);
+    try writeFixture(module_path, "return true");
+
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local path = assert(package.searchpath("tmp_api_pkg_custom_foo", "./?.lua", "_", "-"))
+        \\return path
+    );
+
+    switch (result) {
+        .single => |value| {
+            const s = value.asString() orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings("./tmp-api-pkg-custom-foo.lua", s.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "modules.package loadlib reports unsupported C loader contract" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local f, msg, where = package.loadlib("libdemo.so", "luaopen_demo")
+        \\return f, msg, where
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .nil,
+        TValue.fromString(try ctx.base.gc().allocString("C libraries not supported")),
+        TValue.fromString(try ctx.base.gc().allocString("absent")),
+    });
 }
 
 test "modules.require caches true when preload loader returns nil" {

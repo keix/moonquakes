@@ -573,6 +573,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     if (nargs < 2) {
         vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         return;
     }
 
@@ -581,11 +582,13 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     const table = table_arg.asTable() orelse {
         vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         return;
     };
 
     const current_index = index_arg.toInteger() orelse {
         vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         return;
     };
 
@@ -614,6 +617,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     if (value == null or value.?.isNil()) {
         // No more elements
         vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         return;
     }
 
