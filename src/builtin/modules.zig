@@ -332,8 +332,8 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
 
     // Set up _ENV upvalue
     if (proto.nups > 0) {
-        const env_upval = try vm.gc().allocClosedUpvalue(TValue.fromTable(vm.globals()));
-        closure.upvalues[0] = env_upval;
+        closure.upvalues[0].closed = TValue.fromTable(vm.globals());
+        closure.upvalues[0].location = &closure.upvalues[0].closed;
     }
 
     const func_val = TValue.fromClosure(closure);
