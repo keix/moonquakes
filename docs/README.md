@@ -12,3 +12,4 @@ for the Moonquakes Lua implementation.
 - [Lexer and Parser](moonquakes-lexer-parser.md) - Compilation pipeline
 - [Builtin Functions](moonquakes-builtin-functions.md) - Native function API reference
 - [Test Framework](moonquakes-test-framework.md) - Testing infrastructure
+- [API Test Strategy](moonquakes-api-test-strategy.md) - Plan for freezing builtin behavior through black-box tests

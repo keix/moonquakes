@@ -36,6 +36,8 @@ pub const tailcall_tests = @import("tests/tailcall.zig");
 pub const function_calls_tests = @import("tests/function_calls.zig");
 pub const gc_tests = @import("tests/gc.zig");
 pub const vm_error_tests = @import("tests/vm_error.zig");
+pub const api_global_tests = @import("tests/api/global.zig");
+pub const api_modules_tests = @import("tests/api/modules.zig");
 
 test {
     // This will include all tests from imported modules
