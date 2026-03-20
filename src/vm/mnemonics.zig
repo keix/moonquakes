@@ -1762,6 +1762,14 @@ fn clearHookTransfer(vm: *VM) void {
     for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
 }
 
+inline fn hasCallHookListener(vm: *const VM) bool {
+    return !vm.in_hook and (vm.hook_mask & 0x01) != 0 and vm.hook_func != null;
+}
+
+inline fn hasReturnHookListener(vm: *const VM) bool {
+    return !vm.in_hook and (vm.hook_mask & 0x02) != 0 and vm.hook_func != null;
+}
+
 fn setHookTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
     if (vm.in_hook) return;
     vm.hook_transfer_start = start;
@@ -3959,9 +3967,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
-                    const call_transfer_count: u32 = nargs;
-                    setHookTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
-                    try dispatchCallHook(vm, null);
+                    if (hasCallHookListener(vm)) {
+                        const call_transfer_count: u32 = nargs;
+                        setHookTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
+                        try dispatchCallHook(vm, null);
+                    }
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
                     // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
@@ -3987,32 +3997,34 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    switch (nc.func.id) {
-                        .select => {
-                            var idx_u: u32 = 1;
-                            if (native_call_arg_count > 0) {
-                                const idx_val = native_call_args[0].toInteger() orelse 1;
-                                if (idx_val >= 1) idx_u = @intCast(idx_val);
-                            }
-                            const arg_count: u32 = @intCast(native_call_arg_count);
-                            const native_transfer_start: u32 = idx_u + 1;
-                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            setHookTransferFromValues(vm, native_transfer_start, src_slice);
-                        },
-                        .math_sin => {
-                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                            const out = TValue{ .number = std.math.sin(arg) };
-                            setHookTransferFromValues(vm, 2, &[_]TValue{out});
-                        },
-                        else => {
-                            const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
-                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
-                        },
+                    if (hasReturnHookListener(vm)) {
+                        switch (nc.func.id) {
+                            .select => {
+                                var idx_u: u32 = 1;
+                                if (native_call_arg_count > 0) {
+                                    const idx_val = native_call_args[0].toInteger() orelse 1;
+                                    if (idx_val >= 1) idx_u = @intCast(idx_val);
+                                }
+                                const arg_count: u32 = @intCast(native_call_arg_count);
+                                const native_transfer_start: u32 = idx_u + 1;
+                                const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                                const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                                const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                                setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                            },
+                            .math_sin => {
+                                const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                                const out = TValue{ .number = std.math.sin(arg) };
+                                setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                            },
+                            else => {
+                                const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
+                                const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                                setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                            },
+                        }
+                        try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
                     }
-                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
                     return .LoopContinue;
                 }
             }
@@ -4042,8 +4054,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                    try dispatchCallHook(vm, null);
+                    if (hasCallHookListener(vm)) {
+                        setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                        try dispatchCallHook(vm, null);
+                    }
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
                 }
@@ -4092,8 +4106,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                try dispatchCallHook(vm, null);
+                if (hasCallHookListener(vm)) {
+                    setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                    try dispatchCallHook(vm, null);
+                }
 
                 // Extend top to include vararg storage if needed
                 const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -4459,9 +4475,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                const transfer_src = returning_ci.base + a;
-                setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                try dispatchReturnHook(vm, null);
+                if (hasReturnHookListener(vm)) {
+                    const transfer_src = returning_ci.base + a;
+                    setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                    try dispatchReturnHook(vm, null);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4553,9 +4571,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            const transfer_src = vm.base + a;
-            setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
-            try dispatchReturnHook(vm, null);
+            if (hasReturnHookListener(vm)) {
+                const transfer_src = vm.base + a;
+                setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                try dispatchReturnHook(vm, null);
+            }
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -4585,8 +4605,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                clearHookTransfer(vm);
-                try dispatchReturnHook(vm, null);
+                if (hasReturnHookListener(vm)) {
+                    clearHookTransfer(vm);
+                    try dispatchReturnHook(vm, null);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4624,8 +4646,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            clearHookTransfer(vm);
-            try dispatchReturnHook(vm, null);
+            if (hasReturnHookListener(vm)) {
+                clearHookTransfer(vm);
+                try dispatchReturnHook(vm, null);
+            }
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -4649,8 +4673,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                setHookTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
-                try dispatchReturnHook(vm, null);
+                if (hasReturnHookListener(vm)) {
+                    setHookTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
+                    try dispatchReturnHook(vm, null);
+                }
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4696,8 +4722,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            setHookTransferFromStack(vm, a + 1, vm.base + a, 1);
-            try dispatchReturnHook(vm, null);
+            if (hasReturnHookListener(vm)) {
+                setHookTransferFromStack(vm, a + 1, vm.base + a, 1);
+                try dispatchReturnHook(vm, null);
+            }
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.

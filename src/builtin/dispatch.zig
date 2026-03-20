@@ -1,3 +1,33 @@
+/// Native builtin function interface (Lua-compatible)
+///
+/// All builtin functions are invoked by the VM using this unified calling convention.
+/// This function operates directly on the VM state and stack.
+///
+/// Parameters:
+/// - vm:        Execution context (VM state). Provides access to stack, registers, and runtime.
+/// - func_reg:  Register index where the function is located (base of call frame).
+/// - nargs:     Number of arguments passed to the function.
+/// - nresults:  Number of expected return values (Lua call convention).
+///
+/// Stack Layout:
+///   [func_reg]           : function
+///   [func_reg + 1 ... ]  : arguments
+///
+/// The builtin function must:
+/// - Read arguments from the VM stack
+/// - Push return values onto the stack
+/// - Respect the expected result count (nresults)
+///
+/// Notes:
+/// - This is the public interface exposed to the VM dispatcher.
+/// - Internal helper functions should NOT follow this signature.
+/// - Behavior must match Lua 5.4 semantics.
+///
+/// Example:
+///   nativePrint(vm, func_reg, nargs, nresults)
+///     -> reads nargs arguments
+///     -> writes up to nresults return values
+///
 const std = @import("std");
 const object = @import("../runtime/gc/object.zig");
 const TableObject = object.TableObject;
