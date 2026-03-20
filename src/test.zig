@@ -43,6 +43,9 @@ pub const api_coroutine_tests = @import("tests/api/coroutine.zig");
 pub const api_string_tests = @import("tests/api/string.zig");
 pub const api_table_tests = @import("tests/api/table.zig");
 pub const api_math_tests = @import("tests/api/math.zig");
+pub const api_utf8_tests = @import("tests/api/utf8.zig");
+pub const api_io_tests = @import("tests/api/io.zig");
+pub const api_os_tests = @import("tests/api/os.zig");
 
 test {
     // This will include all tests from imported modules
