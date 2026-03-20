@@ -36,6 +36,21 @@ pub const tailcall_tests = @import("tests/tailcall.zig");
 pub const function_calls_tests = @import("tests/function_calls.zig");
 pub const gc_tests = @import("tests/gc.zig");
 pub const vm_error_tests = @import("tests/vm_error.zig");
+pub const api_global_tests = @import("tests/api/global.zig");
+pub const api_modules_tests = @import("tests/api/modules.zig");
+pub const api_debug_tests = @import("tests/api/debug.zig");
+pub const api_coroutine_tests = @import("tests/api/coroutine.zig");
+pub const api_string_tests = @import("tests/api/string.zig");
+pub const api_table_tests = @import("tests/api/table.zig");
+pub const api_math_tests = @import("tests/api/math.zig");
+pub const api_utf8_tests = @import("tests/api/utf8.zig");
+pub const api_io_tests = @import("tests/api/io.zig");
+pub const api_os_tests = @import("tests/api/os.zig");
+pub const api_metatable_tests = @import("tests/api/metatable.zig");
+pub const api_numeric_tests = @import("tests/api/numeric.zig");
+pub const api_iteration_tests = @import("tests/api/iteration.zig");
+pub const api_error_tests = @import("tests/api/error.zig");
+pub const api_gc_tests = @import("tests/api/gc.zig");
 
 test {
     // This will include all tests from imported modules
