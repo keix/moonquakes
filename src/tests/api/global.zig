@@ -34,6 +34,107 @@ test "global.assert returns all arguments on success" {
     });
 }
 
+test "global compatibility surface presents Lua 5.4 identity" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\return _VERSION, _G == _ENV, _G.string == string, _G.table == table
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("Lua 5.4")),
+        .{ .boolean = true },
+        .{ .boolean = true },
+        .{ .boolean = true },
+    });
+}
+
+test "global writes through _G are reflected by global name resolution" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\_G.mq_api_freeze_probe = 42
+        \\local a = mq_api_freeze_probe
+        \\mq_api_freeze_probe = 99
+        \\local b = _G.mq_api_freeze_probe
+        \\_G.mq_api_freeze_probe = nil
+        \\return a, b, _G.mq_api_freeze_probe
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .{ .integer = 42 },
+        .{ .integer = 99 },
+        .nil,
+    });
+}
+
+test "global local _ENV shadows global lookup without mutating _G" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\x = 10
+        \\local function f()
+        \\  local _ENV = { x = 99, _G = _G }
+        \\  return x, _G.x
+        \\end
+        \\local a, b = f()
+        \\x = nil
+        \\return a, b, _G.x
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .{ .integer = 99 },
+        .{ .integer = 10 },
+        .nil,
+    });
+}
+
+test "global closures observe captured locals across later mutation" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local x = 10
+        \\local function f()
+        \\  return x
+        \\end
+        \\x = 20
+        \\return f()
+    );
+
+    try api.expectSingleInteger(result, 20);
+}
+
+test "global load environment remains isolated from _G" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\injected = 5
+        \\local env = { injected = 41, _G = _G }
+        \\local f = assert(load("injected = injected + 1; return injected, _G.injected", "=(env)", "t", env))
+        \\local a, b = f()
+        \\local c = env.injected
+        \\injected = nil
+        \\return a, b, c, _G.injected
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .{ .integer = 42 },
+        .{ .integer = 5 },
+        .{ .integer = 42 },
+        .nil,
+    });
+}
+
 test "global.type reports Lua type names" {
     var ctx = api.ApiContext{};
     try ctx.init();
@@ -50,6 +151,26 @@ test "global.type reports Lua type names" {
         TValue.fromString(try ctx.base.gc().allocString("string")),
         TValue.fromString(try ctx.base.gc().allocString("table")),
         TValue.fromString(try ctx.base.gc().allocString("function")),
+    });
+}
+
+test "global.type and tostring cover thread and userdata contracts" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local co = coroutine.create(function() end)
+        \\local ud = debug.newuserdata(4, 1)
+        \\return type(co), type(ud), tostring(123), tostring(true), tostring(nil)
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("thread")),
+        TValue.fromString(try ctx.base.gc().allocString("userdata")),
+        TValue.fromString(try ctx.base.gc().allocString("123")),
+        TValue.fromString(try ctx.base.gc().allocString("true")),
+        TValue.fromString(try ctx.base.gc().allocString("nil")),
     });
 }
 

@@ -255,7 +255,7 @@ pub const CLI = struct {
     fn printVersion(_: *CLI) !void {
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         const stdout = &stdout_writer.interface;
-        try ver.printIdentity(stdout);
+        try ver.printCredits(stdout);
     }
 
     fn printUsage(_: *CLI) !void {
@@ -265,14 +265,20 @@ pub const CLI = struct {
             \\Usage: moonquakes [options] [script [args...]]
             \\
             \\Options:
+            \\  -e chunk       Execute chunk
+            \\  -e<chunk>      Execute chunk
+            \\  -l mod         Require module before running
+            \\  -l<mod>        Require module before running
+            \\  -i             Enter REPL after executing script or chunks
             \\  -v, --version  Print version
-            \\  -h, --help     Print this help
+            \\  --help         Print this help
+            \\  -E             Ignore environment-driven startup behavior
+            \\  -W             Enable warnings
+            \\  --             Stop option processing
+            \\  -              Execute stdin as a script
             \\
-            \\If no script is given, start interactive mode (REPL).
-            \\
-            \\Example:
-            \\  moonquakes              # Start REPL
-            \\  moonquakes script.lua   # Run script
+            \\If no script is given, execute `-e` / `-l` inputs and exit, read stdin
+            \\when stdin is not a TTY, or start interactive mode (REPL) otherwise.
             \\
         );
     }

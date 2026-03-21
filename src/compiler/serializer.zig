@@ -321,6 +321,9 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
 
     // Allocate ProtoObject through GC
     const proto_obj = try gc.allocProto(k, code, protos, numparams, is_vararg, is_main_chunk, maxstacksize, nups, upvalues, local_reg_names, source, lineinfo);
+    // Ownership of upvalue names has moved into the ProtoObject/GC graph.
+    // Do not let serializer-side error cleanup free them again.
+    upvalue_name_bufs.clearRetainingCapacity();
 
     // Fix up nested protos that omitted source (same as this proto).
     if (proto_obj.source.len > 0) {

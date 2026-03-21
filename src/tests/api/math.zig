@@ -120,3 +120,62 @@ test "math randomseed makes random sequence reproducible" {
         .{ .boolean = true },
     });
 }
+
+test "math random supports zero one and two argument forms" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\math.randomseed(1, 2)
+        \\local a = math.random()
+        \\local b = math.random(10)
+        \\local c = math.random(5, 9)
+        \\return type(a), a >= 0 and a < 1, b >= 1 and b <= 10, c >= 5 and c <= 9
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("number")),
+        .{ .boolean = true },
+        .{ .boolean = true },
+        .{ .boolean = true },
+    });
+}
+
+test "math fmod log exp cos and atan expose stable numeric behavior" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\return math.fmod(17, 5), math.log(8, 2), math.exp(1), math.cos(0), math.atan(0)
+    );
+
+    switch (result) {
+        .multiple => |values| {
+            try testing.expectEqual(@as(usize, 5), values.len);
+            switch (values[0]) {
+                .number => |n| try testing.expectApproxEqAbs(@as(f64, 2.0), n, 1e-12),
+                .integer => |i| try testing.expectEqual(@as(i64, 2), i),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (values[1]) {
+                .number => |n| try testing.expectApproxEqAbs(@as(f64, 3.0), n, 1e-12),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (values[2]) {
+                .number => |n| try testing.expect(n > 2.7 and n < 2.8),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (values[3]) {
+                .number => |n| try testing.expectApproxEqAbs(@as(f64, 1.0), n, 1e-12),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (values[4]) {
+                .number => |n| try testing.expectApproxEqAbs(@as(f64, 0.0), n, 1e-12),
+                else => return error.TestUnexpectedResult,
+            }
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}

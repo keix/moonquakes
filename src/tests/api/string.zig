@@ -121,3 +121,81 @@ test "string.gsub returns replaced string and replacement count" {
         .{ .integer = 2 },
     });
 }
+
+test "string.gmatch iterates successive matches and captures" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local iter = string.gmatch("a1 b22", "(%a+)(%d*)")
+        \\local a1, a2 = iter()
+        \\local b1, b2 = iter()
+        \\local c = iter()
+        \\return a1, a2, b1, b2, c
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("a")),
+        TValue.fromString(try ctx.base.gc().allocString("1")),
+        TValue.fromString(try ctx.base.gc().allocString("b")),
+        TValue.fromString(try ctx.base.gc().allocString("22")),
+        .nil,
+    });
+}
+
+test "string.format handles width precision and quoted strings" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\return string.format("%04d|%.2f|%q", 7, 3.5, "hi")
+    );
+
+    switch (result) {
+        .single => |value| {
+            const s = value.asString() orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings("0007|3.50|\"hi\"", s.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "string.dump produces a loadable bytecode string" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local dumped = string.dump(function(x) return x + 1 end)
+        \\local f = assert(load(dumped, "=(dumped)", "b"))
+        \\return type(dumped), #dumped > 0, f(41)
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromString(try ctx.base.gc().allocString("string")),
+        .{ .boolean = true },
+        .{ .integer = 42 },
+    });
+}
+
+test "string.pack unpack and packsize roundtrip fixed binary layouts" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local packed = string.pack("<i4c3", 42, "hey")
+        \\local a, b, nextpos = string.unpack("<i4c3", packed)
+        \\return #packed, string.packsize("<i4c3"), a, b, nextpos
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .{ .integer = 7 },
+        .{ .integer = 7 },
+        .{ .integer = 42 },
+        TValue.fromString(try ctx.base.gc().allocString("hey")),
+        .{ .integer = 8 },
+    });
+}

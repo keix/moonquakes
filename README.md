@@ -7,7 +7,7 @@ Moonquakes imagines Lua as moonlight at night — still on the surface, quietly 
 ## Overview
 Moonquakes is a clean-room implementation of the **Lua 5.4** virtual machine and runtime.
 
-It is not a binding to the official C implementation — instead, it aims to reimagine the key components of Lua with a clear, modern design and a focus on readability, correctness, and hackability.
+It is not a binding to the official C implementation — it reimagines Lua from first principles with a clear, modern design and a focus on readability, correctness, and hackability.
 
 Even decades after its creation, Lua's architecture remains one of the most elegant and minimal designs in language engineering — small, clear, yet powerful enough to move worlds.
 
@@ -52,6 +52,22 @@ To build the static and shared libraries:
 ```sh
 make
 ```
+
+## Compatibility
+
+Moonquakes presents itself as Lua 5.4.
+
+This means:
+
+- `_VERSION == "Lua 5.4"`
+- Behavior observable from Lua code is defined by:
+  - the official Lua 5.4 test suite
+  - `src/tests/api`
+- Internal implementation details (VM, GC, memory layout, etc.) are not part of the contract
+
+Moonquakes is not derived from Lua's implementation.
+
+It is an independent implementation that reproduces Lua 5.4 semantics as observed from Lua code.
 
 ## Running C Example
 Build first (either `make` above or `zig build`), then run the example:
