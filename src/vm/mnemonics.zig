@@ -26,7 +26,9 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
+const traceback_state = @import("traceback.zig");
 const vm_gc = @import("gc.zig");
 const interrupt = @import("../interrupt.zig");
 
@@ -380,11 +382,7 @@ fn intFitsFloat(i: i64) bool {
 }
 
 fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
-    if (vm.field_cache.last_field_reg) |r| {
-        if (r == reg) {
-            vm.field_cache.int_repr_field_key = vm.field_cache.last_field_key;
-        }
-    }
+    field_cache.rememberIntReprContext(vm, reg);
 }
 
 fn shlInt(value: i64, shift: i64) i64 {
@@ -979,12 +977,10 @@ pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8)
             }
         }
     }
-    if (vm.field_cache.last_field_key) |key| {
-        const reg = vm.field_cache.last_field_reg orelse 0;
-        const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-        vm.field_cache.last_field_key = null;
-        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+    if (field_cache.takeLastFieldHint(vm)) |hint| {
+        const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+        const kind = if (hint.is_global) "global" else "field";
+        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
     }
     return "attempt to index a non-table value";
 }
@@ -1132,11 +1128,11 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
             else => {},
         }
         if (suppress_field_hint) {
-            vm.field_cache.last_field_key = null;
+            field_cache.clearLastFieldHint(vm);
             return "attempt to perform arithmetic on a non-numeric value";
         }
         const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-        vm.field_cache.last_field_key = null;
+        field_cache.clearLastFieldHint(vm);
         return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
     }
 
@@ -1183,8 +1179,7 @@ pub fn formatIntegerRepresentationError(vm: *VM, inst: Instruction, msg_buf: *[1
         }
     }
 
-    if (vm.field_cache.int_repr_field_key) |key| {
-        vm.field_cache.int_repr_field_key = null;
+    if (field_cache.takeIntReprFieldKey(vm)) |key| {
         return std.fmt.bufPrint(msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
     }
     return "number has no integer representation";
@@ -1518,12 +1513,7 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
-    vm.field_cache.last_field_reg = null;
-    vm.field_cache.last_field_key = null;
-    vm.field_cache.last_field_is_global = false;
-    vm.field_cache.last_field_is_method = false;
-    vm.field_cache.last_field_tick = 0;
-    vm.field_cache.int_repr_field_key = null;
+    field_cache.reset(vm);
 
     return new_ci;
 }
@@ -1539,12 +1529,7 @@ pub fn popCallInfo(vm: *VM) void {
         } else {
             vm.ci = null;
         }
-        vm.field_cache.last_field_reg = null;
-        vm.field_cache.last_field_key = null;
-        vm.field_cache.last_field_is_global = false;
-        vm.field_cache.last_field_is_method = false;
-        vm.field_cache.last_field_tick = 0;
-        vm.field_cache.int_repr_field_key = null;
+        field_cache.reset(vm);
     }
 }
 
@@ -1868,7 +1853,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                     },
                     else => return err,
                 };
-                try hook_state.dispatchReturn(vm, "close", null, executeSyncMM);
+                try hook_state.onReturn(vm, "close", null, executeSyncMM);
             } else {
                 current_err = setCloseCallError(vm, mm);
                 had_error = true;
@@ -1947,7 +1932,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             const protected_nresults = ci.nresults;
             const protected_error_handler = ci.error_handler;
             const target_ci = ci.previous;
-            captureTracebackSnapshot(vm, target_ci);
+            traceback_state.captureSnapshot(vm, target_ci);
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
                 closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
@@ -2043,7 +2028,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
 
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
-    captureTracebackSnapshot(vm, null);
+    traceback_state.captureSnapshot(vm, null);
     vm.errors.pending_error_unwind = false;
     vm.errors.pending_error_unwind_ci = null;
     return false;
@@ -2086,96 +2071,8 @@ fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TVa
     return executeSyncMM(vm, wrapper, &[_]TValue{ TValue.fromClosure(closure), value });
 }
 
-fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
-    const inferGlobalName = struct {
-        fn get(state: *VM, closure: *ClosureObject) ?TValue {
-            var it = state.globals().hash_part.iterator();
-            while (it.next()) |entry| {
-                const key = entry.key_ptr.*;
-                const value = entry.value_ptr.*;
-                const c = value.asClosure() orelse continue;
-                if (c != closure) continue;
-                const k = key.asString() orelse continue;
-                return TValue.fromString(k);
-            }
-            return null;
-        }
-    }.get;
-    const frameLine = struct {
-        fn get(ci: *const CallInfo) ?u32 {
-            const idx_opt = currentInstructionIndex(ci);
-            if (idx_opt == null) {
-                if (ci.func.lineinfo.len == 0) return null;
-                if (ci.func.lineinfo.len >= 2) return ci.func.lineinfo[ci.func.lineinfo.len - 2];
-                return ci.func.lineinfo[0];
-            }
-            const idx = idx_opt.?;
-            if (idx >= ci.func.lineinfo.len) return null;
-            var line = ci.func.lineinfo[idx];
-            if (idx > 0) {
-                const op = ci.func.code[idx].getOpCode();
-                if (op == .CALL and line > ci.func.lineinfo[idx - 1]) {
-                    line = ci.func.lineinfo[idx - 1];
-                }
-            }
-            return line;
-        }
-    }.get;
-
-    var count: usize = 0;
-    if (vm.callstack_size > 0) {
-        var i: i32 = @as(i32, @intCast(vm.callstack_size)) - 1;
-        while (i >= 0) : (i -= 1) {
-            const ci = &vm.callstack[@intCast(i)];
-            if (ci == stop_before) break;
-            // TODO(traceback): Snapshot is currently fixed-size.
-            // If deep recursion diagnostics become important, clamp with
-            // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback.snapshot_lines.len) break;
-            if (frameLine(ci)) |line| {
-                vm.traceback.snapshot_lines[count] = line;
-                vm.traceback.snapshot_names[count] = .nil;
-                vm.traceback.snapshot_closures[count] = ci.closure;
-                vm.traceback.snapshot_sources[count] = ci.func.source;
-                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
-                if (ci.closure) |cl| {
-                    if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback.snapshot_names[count] = name;
-                    }
-                }
-                count += 1;
-            }
-        }
-    } else {
-        var cur = vm.ci;
-        while (cur) |ci| : (cur = ci.previous) {
-            if (cur == stop_before) break;
-            // TODO(traceback): Snapshot is currently fixed-size.
-            // If deep recursion diagnostics become important, clamp with
-            // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback.snapshot_lines.len) break;
-            if (frameLine(ci)) |line| {
-                vm.traceback.snapshot_lines[count] = line;
-                vm.traceback.snapshot_names[count] = .nil;
-                vm.traceback.snapshot_closures[count] = ci.closure;
-                vm.traceback.snapshot_sources[count] = ci.func.source;
-                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
-                if (ci.closure) |cl| {
-                    if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback.snapshot_names[count] = name;
-                    }
-                }
-                count += 1;
-            }
-        }
-    }
-    vm.traceback.snapshot_count = @intCast(count);
-    vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
-    vm.errors.pending_error_from_error_builtin = false;
-}
-
 pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
-    captureTracebackSnapshot(vm, null);
+    traceback_state.captureSnapshot(vm, null);
 }
 
 /// Main VM execution loop.
@@ -2420,14 +2317,14 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                     else => {},
                                 }
                                 if (suppress_field_hint) {
-                                    vm.field_cache.last_field_key = null;
+                                    field_cache.clearLastFieldHint(vm);
                                     break :blk "attempt to perform arithmetic on a non-numeric value";
                                 }
                                 const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                                vm.field_cache.last_field_key = null;
+                                field_cache.clearLastFieldHint(vm);
                                 break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
                             }
-                            vm.field_cache.last_field_key = null;
+                            field_cache.clearLastFieldHint(vm);
                         }
                         if (firstArithmeticBadOperand(vm, inst)) |bad| {
                             const ty = namedValueTypeName(vm, bad);
@@ -2472,8 +2369,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.int_repr_field_key) |key| {
-                            vm.field_cache.int_repr_field_key = null;
+                        if (field_cache.takeIntReprFieldKey(vm)) |key| {
                             break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
                         }
                         break :blk "number has no integer representation";
@@ -2501,12 +2397,10 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.last_field_key) |key| {
-                            const reg = vm.field_cache.last_field_reg orelse 0;
-                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                            vm.field_cache.last_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        if (field_cache.takeLastFieldHint(vm)) |hint| {
+                            const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+                            const kind = if (hint.is_global) "global" else "field";
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
                     },
@@ -2533,12 +2427,10 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.last_field_key) |key| {
-                            const reg = vm.field_cache.last_field_reg orelse 0;
-                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                            vm.field_cache.last_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        if (field_cache.takeLastFieldHint(vm)) |hint| {
+                            const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+                            const kind = if (hint.is_global) "global" else "field";
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
                     },
@@ -2613,7 +2505,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         vm.hooks.countdown -|= 1;
         if (vm.hooks.countdown == 0) {
             vm.hooks.countdown = vm.hooks.count * 2;
-            try hook_state.dispatchCount(vm, executeSyncMM);
+            try hook_state.onCount(vm, executeSyncMM);
         }
     }
     if ((vm.hooks.mask & 0x04) != 0 and !vm.hooks.in_hook and ci.closure != null) {
@@ -2692,7 +2584,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 ci.hook_last_pc = idx_i32;
                 if (should_dispatch) {
                     ci.hook_last_line = line;
-                    try hook_state.dispatchLine(vm, line, executeSyncMM);
+                    try hook_state.onLine(vm, line, executeSyncMM);
                 }
             } else if (ci.hook_last_pc < 0) {
                 // Stripped chunk: no lineinfo. Lua still triggers one line hook
@@ -2707,7 +2599,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 ci.hook_last_pc = @intCast(idx);
                 ci.hook_last_line = -1;
-                try hook_state.dispatchLineNil(vm, executeSyncMM);
+                try hook_state.onLineNil(vm, executeSyncMM);
             }
         }
     }
@@ -3679,7 +3571,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     vm.top = frame_max;
-                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
+                    try hook_state.onReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     return .Continue;
                 }
             }
@@ -3790,11 +3682,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
-                    if (hook_state.hasCallListener(vm)) {
-                        const call_transfer_count: u32 = nargs;
-                        hook_state.setTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
-                        try hook_state.dispatchCall(vm, null, executeSyncMM);
-                    }
+                    try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
                     // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
@@ -3820,33 +3708,29 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    if (hook_state.hasReturnListener(vm)) {
-                        switch (nc.func.id) {
-                            .select => {
-                                var idx_u: u32 = 1;
-                                if (native_call_arg_count > 0) {
-                                    const idx_val = native_call_args[0].toInteger() orelse 1;
-                                    if (idx_val >= 1) idx_u = @intCast(idx_val);
-                                }
-                                const arg_count: u32 = @intCast(native_call_arg_count);
-                                const native_transfer_start: u32 = idx_u + 1;
-                                const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                                const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                                const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                                hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
-                            },
-                            .math_sin => {
-                                const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                                const out = TValue{ .number = std.math.sin(arg) };
-                                hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
-                            },
-                            else => {
-                                const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
-                                const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                                hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
-                            },
-                        }
-                        try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
+                    switch (nc.func.id) {
+                        .select => {
+                            var idx_u: u32 = 1;
+                            if (native_call_arg_count > 0) {
+                                const idx_val = native_call_args[0].toInteger() orelse 1;
+                                if (idx_val >= 1) idx_u = @intCast(idx_val);
+                            }
+                            const arg_count: u32 = @intCast(native_call_arg_count);
+                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
+                        },
+                        .math_sin => {
+                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                            const out = TValue{ .number = std.math.sin(arg) };
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
+                        },
+                        else => {
+                            const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
+                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
+                        },
                     }
                     return .LoopContinue;
                 }
@@ -3877,10 +3761,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    if (hook_state.hasCallListener(vm)) {
-                        hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                        try hook_state.dispatchCall(vm, null, executeSyncMM);
-                    }
+                    try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
                 }
@@ -3929,10 +3810,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                if (hook_state.hasCallListener(vm)) {
-                    hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                    try hook_state.dispatchCall(vm, null, executeSyncMM);
-                }
+                try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
 
                 // Extend top to include vararg storage if needed
                 const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -4117,8 +3995,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                try hook_state.dispatchTailCall(vm, null, executeSyncMM);
+                try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
 
                 return .LoopContinue;
             }
@@ -4209,24 +4086,22 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 if (idx_val >= 1) idx_u = @intCast(idx_val);
                             }
                             const arg_count: u32 = @intCast(native_call_arg_count);
-                            const native_transfer_start: u32 = idx_u + 1;
                             const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                             const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                             const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
                         },
                         .math_sin => {
                             const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                             const out = TValue{ .number = std.math.sin(arg) };
-                            hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
                         },
                         else => {
                             const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
                             const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
                         },
                     }
-                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
@@ -4298,11 +4173,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                if (hook_state.hasReturnListener(vm)) {
-                    const transfer_src = returning_ci.base + a;
-                    hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4394,11 +4265,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            if (hook_state.hasReturnListener(vm)) {
-                const transfer_src = vm.base + a;
-                hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -4428,10 +4295,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hook_state.hasReturnListener(vm)) {
-                    hook_state.clearTransfer(vm);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4469,10 +4333,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            if (hook_state.hasReturnListener(vm)) {
-                hook_state.clearTransfer(vm);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -4496,10 +4357,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hook_state.hasReturnListener(vm)) {
-                    hook_state.setTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4545,10 +4403,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            if (hook_state.hasReturnListener(vm)) {
-                hook_state.setTransferFromStack(vm, a + 1, vm.base + a, 1);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
@@ -4567,11 +4422,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                vm.field_cache.last_field_reg = a;
-                vm.field_cache.last_field_key = key;
-                vm.field_cache.last_field_is_global = true;
-                vm.field_cache.last_field_is_method = false;
-                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                field_cache.rememberFieldAccess(vm, a, key, true, false);
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -4637,11 +4488,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                vm.field_cache.last_field_reg = a;
-                vm.field_cache.last_field_key = key;
-                vm.field_cache.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
-                vm.field_cache.last_field_is_method = false;
-                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                field_cache.rememberFieldAccess(vm, a, key, if (table_val.asTable()) |t| t == vm.globals() else false, false);
             }
 
             if (table_val.asTable()) |table| {
@@ -4744,11 +4591,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = false;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, false);
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -4759,11 +4602,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
                     if (!table_val.isNil()) {
-                        vm.field_cache.last_field_reg = a;
-                        vm.field_cache.last_field_key = key;
-                        vm.field_cache.last_field_is_global = false;
-                        vm.field_cache.last_field_is_method = false;
-                        vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                        field_cache.rememberFieldAccess(vm, a, key, false, false);
                     }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
@@ -4816,11 +4655,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[c];
             if (obj.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = true;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, true);
                     if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
                         return result;
                     }
@@ -4830,11 +4665,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = true;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, true);
                     if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
                         return result;
                     }
