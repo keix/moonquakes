@@ -26,6 +26,7 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
 const traceback_state = @import("traceback.zig");
 const vm_gc = @import("gc.zig");
@@ -381,11 +382,7 @@ fn intFitsFloat(i: i64) bool {
 }
 
 fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
-    if (vm.field_cache.last_field_reg) |r| {
-        if (r == reg) {
-            vm.field_cache.int_repr_field_key = vm.field_cache.last_field_key;
-        }
-    }
+    field_cache.rememberIntReprContext(vm, reg);
 }
 
 fn shlInt(value: i64, shift: i64) i64 {
@@ -1519,12 +1516,7 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
-    vm.field_cache.last_field_reg = null;
-    vm.field_cache.last_field_key = null;
-    vm.field_cache.last_field_is_global = false;
-    vm.field_cache.last_field_is_method = false;
-    vm.field_cache.last_field_tick = 0;
-    vm.field_cache.int_repr_field_key = null;
+    field_cache.reset(vm);
 
     return new_ci;
 }
@@ -1540,12 +1532,7 @@ pub fn popCallInfo(vm: *VM) void {
         } else {
             vm.ci = null;
         }
-        vm.field_cache.last_field_reg = null;
-        vm.field_cache.last_field_key = null;
-        vm.field_cache.last_field_is_global = false;
-        vm.field_cache.last_field_is_method = false;
-        vm.field_cache.last_field_tick = 0;
-        vm.field_cache.int_repr_field_key = null;
+        field_cache.reset(vm);
     }
 }
 
@@ -4443,11 +4430,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                vm.field_cache.last_field_reg = a;
-                vm.field_cache.last_field_key = key;
-                vm.field_cache.last_field_is_global = true;
-                vm.field_cache.last_field_is_method = false;
-                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                field_cache.rememberFieldAccess(vm, a, key, true, false);
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -4513,11 +4496,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                vm.field_cache.last_field_reg = a;
-                vm.field_cache.last_field_key = key;
-                vm.field_cache.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
-                vm.field_cache.last_field_is_method = false;
-                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                field_cache.rememberFieldAccess(vm, a, key, if (table_val.asTable()) |t| t == vm.globals() else false, false);
             }
 
             if (table_val.asTable()) |table| {
@@ -4620,11 +4599,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = false;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, false);
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -4635,11 +4610,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
                     if (!table_val.isNil()) {
-                        vm.field_cache.last_field_reg = a;
-                        vm.field_cache.last_field_key = key;
-                        vm.field_cache.last_field_is_global = false;
-                        vm.field_cache.last_field_is_method = false;
-                        vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                        field_cache.rememberFieldAccess(vm, a, key, false, false);
                     }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
@@ -4692,11 +4663,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[c];
             if (obj.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = true;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, true);
                     if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
                         return result;
                     }
@@ -4706,11 +4673,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
-                    vm.field_cache.last_field_reg = a;
-                    vm.field_cache.last_field_key = key;
-                    vm.field_cache.last_field_is_global = false;
-                    vm.field_cache.last_field_is_method = true;
-                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
+                    field_cache.rememberFieldAccess(vm, a, key, false, true);
                     if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
                         return result;
                     }
