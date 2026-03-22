@@ -9,6 +9,7 @@ const GC = gc_mod.GC;
 const RootProvider = gc_mod.RootProvider;
 const FinalizerExecutor = gc_mod.FinalizerExecutor;
 const object = @import("../runtime/gc/object.zig");
+const call_debug = @import("call_debug.zig");
 const call = @import("call.zig");
 const VM = @import("vm.zig").VM;
 
@@ -101,11 +102,9 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
 
 fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
     const vm: *VM = @ptrCast(@alignCast(ctx));
-    vm.call_debug.next_name = "__gc";
-    vm.call_debug.next_namewhat = "metamethod";
+    call_debug.setNext(vm, "__gc", "metamethod");
     defer {
-        vm.call_debug.next_name = null;
-        vm.call_debug.next_namewhat = null;
+        call_debug.clearNext(vm);
     }
     return call.callValue(vm, func.*, args);
 }

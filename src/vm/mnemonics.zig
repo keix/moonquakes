@@ -26,6 +26,7 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const call_debug = @import("call_debug.zig");
 const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
 const traceback_state = @import("traceback.zig");
@@ -1503,12 +1504,7 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
         .nresults = nresults,
         .previous = vm.ci,
     };
-    if (vm.call_debug.next_name) |name| {
-        new_ci.debug_name = name;
-        new_ci.debug_namewhat = vm.call_debug.next_namewhat orelse "";
-        vm.call_debug.next_name = null;
-        vm.call_debug.next_namewhat = null;
-    }
+    call_debug.applyToCallInfo(vm, new_ci);
 
     vm.callstack_size += 1;
     vm.ci = new_ci;
