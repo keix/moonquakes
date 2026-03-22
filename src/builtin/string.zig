@@ -160,9 +160,9 @@ pub fn nativeStringLen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 /// string.sub(s, i [, j]) - Returns substring of s from i to j
 pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults;
-    const method_call = vm.last_field_is_method and vm.last_field_key != null and
-        std.mem.eql(u8, vm.last_field_key.?.asSlice(), "sub") and
-        vm.exec_tick - vm.last_field_tick <= 64;
+    const method_call = vm.field_cache.last_field_is_method and vm.field_cache.last_field_key != null and
+        std.mem.eql(u8, vm.field_cache.last_field_key.?.asSlice(), "sub") and
+        vm.field_cache.exec_tick - vm.field_cache.last_field_tick <= 64;
 
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];

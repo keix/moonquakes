@@ -52,6 +52,17 @@ pub const LuaException = api.LuaException;
 /// VM knows Runtime; Runtime does not know VM.
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
+
+    pub const FieldCache = struct {
+        last_field_reg: ?u8 = null,
+        last_field_key: ?*object.StringObject = null,
+        last_field_is_global: bool = false,
+        last_field_is_method: bool = false,
+        last_field_tick: u64 = 0,
+        int_repr_field_key: ?*object.StringObject = null,
+        exec_tick: u64 = 0,
+    };
+
     stack: [STACK_CAPACITY]TValue,
     top: u32,
     base: u32,
@@ -62,13 +73,7 @@ pub const VM = struct {
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
     lua_error_value: TValue = .nil,
-    last_field_reg: ?u8 = null,
-    last_field_key: ?*object.StringObject = null,
-    last_field_is_global: bool = false,
-    last_field_is_method: bool = false,
-    last_field_tick: u64 = 0,
-    int_repr_field_key: ?*object.StringObject = null,
-    exec_tick: u64 = 0,
+    field_cache: FieldCache = .{},
 
     // Yield state
     yield_base: u32 = 0,

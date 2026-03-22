@@ -379,9 +379,9 @@ fn intFitsFloat(i: i64) bool {
 }
 
 fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
-    if (vm.last_field_reg) |r| {
+    if (vm.field_cache.last_field_reg) |r| {
         if (r == reg) {
-            vm.int_repr_field_key = vm.last_field_key;
+            vm.field_cache.int_repr_field_key = vm.field_cache.last_field_key;
         }
     }
 }
@@ -978,11 +978,11 @@ pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8)
             }
         }
     }
-    if (vm.last_field_key) |key| {
-        const reg = vm.last_field_reg orelse 0;
+    if (vm.field_cache.last_field_key) |key| {
+        const reg = vm.field_cache.last_field_reg orelse 0;
         const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-        const kind = if (vm.last_field_is_global) "global" else "field";
-        vm.last_field_key = null;
+        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+        vm.field_cache.last_field_key = null;
         return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
     }
     return "attempt to index a non-table value";
@@ -1111,7 +1111,7 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
         }
     }
 
-    if (vm.last_field_key) |key| {
+    if (vm.field_cache.last_field_key) |key| {
         var suppress_field_hint = false;
         switch (inst.getOpCode()) {
             .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
@@ -1131,11 +1131,11 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
             else => {},
         }
         if (suppress_field_hint) {
-            vm.last_field_key = null;
+            vm.field_cache.last_field_key = null;
             return "attempt to perform arithmetic on a non-numeric value";
         }
-        const kind = if (vm.last_field_is_global) "global" else "field";
-        vm.last_field_key = null;
+        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+        vm.field_cache.last_field_key = null;
         return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
     }
 
@@ -1182,8 +1182,8 @@ pub fn formatIntegerRepresentationError(vm: *VM, inst: Instruction, msg_buf: *[1
         }
     }
 
-    if (vm.int_repr_field_key) |key| {
-        vm.int_repr_field_key = null;
+    if (vm.field_cache.int_repr_field_key) |key| {
+        vm.field_cache.int_repr_field_key = null;
         return std.fmt.bufPrint(msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
     }
     return "number has no integer representation";
@@ -1277,11 +1277,11 @@ fn buildCallNotFunctionMessage(vm: *VM, ci: *const CallInfo, call_reg: u8, calle
     if (findUniqueLocalNameByValue(ci, vm, called)) |lname| {
         return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (local '{s}')", .{ ty, lname }) catch "attempt to call a non-function value";
     }
-    if (vm.last_field_key != null and vm.exec_tick - vm.last_field_tick <= 64) {
-        const key = vm.last_field_key.?;
+    if (vm.field_cache.last_field_key != null and vm.field_cache.exec_tick - vm.field_cache.last_field_tick <= 64) {
+        const key = vm.field_cache.last_field_key.?;
         const self_reg = vm.base + call_reg + 1;
         const has_self_table = self_reg < vm.stack.len and vm.stack[self_reg].asTable() != null;
-        if (vm.last_field_is_method or has_self_table) {
+        if (vm.field_cache.last_field_is_method or has_self_table) {
             return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (method '{s}')", .{ ty, key.asSlice() }) catch "attempt to call a non-function value";
         }
     }
@@ -1517,12 +1517,12 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
-    vm.last_field_reg = null;
-    vm.last_field_key = null;
-    vm.last_field_is_global = false;
-    vm.last_field_is_method = false;
-    vm.last_field_tick = 0;
-    vm.int_repr_field_key = null;
+    vm.field_cache.last_field_reg = null;
+    vm.field_cache.last_field_key = null;
+    vm.field_cache.last_field_is_global = false;
+    vm.field_cache.last_field_is_method = false;
+    vm.field_cache.last_field_tick = 0;
+    vm.field_cache.int_repr_field_key = null;
 
     return new_ci;
 }
@@ -1538,12 +1538,12 @@ pub fn popCallInfo(vm: *VM) void {
         } else {
             vm.ci = null;
         }
-        vm.last_field_reg = null;
-        vm.last_field_key = null;
-        vm.last_field_is_global = false;
-        vm.last_field_is_method = false;
-        vm.last_field_tick = 0;
-        vm.int_repr_field_key = null;
+        vm.field_cache.last_field_reg = null;
+        vm.field_cache.last_field_key = null;
+        vm.field_cache.last_field_is_global = false;
+        vm.field_cache.last_field_is_method = false;
+        vm.field_cache.last_field_tick = 0;
+        vm.field_cache.int_repr_field_key = null;
     }
 }
 
@@ -2576,8 +2576,8 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            if (vm.exec_tick - vm.last_field_tick <= 64) {
+                        if (vm.field_cache.last_field_key) |key| {
+                            if (vm.field_cache.exec_tick - vm.field_cache.last_field_tick <= 64) {
                                 var suppress_field_hint = false;
                                 switch (inst.getOpCode()) {
                                     .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
@@ -2597,14 +2597,14 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                     else => {},
                                 }
                                 if (suppress_field_hint) {
-                                    vm.last_field_key = null;
+                                    vm.field_cache.last_field_key = null;
                                     break :blk "attempt to perform arithmetic on a non-numeric value";
                                 }
-                                const kind = if (vm.last_field_is_global) "global" else "field";
-                                vm.last_field_key = null;
+                                const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                                vm.field_cache.last_field_key = null;
                                 break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
                             }
-                            vm.last_field_key = null;
+                            vm.field_cache.last_field_key = null;
                         }
                         if (firstArithmeticBadOperand(vm, inst)) |bad| {
                             const ty = namedValueTypeName(vm, bad);
@@ -2649,8 +2649,8 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.int_repr_field_key) |key| {
-                            vm.int_repr_field_key = null;
+                        if (vm.field_cache.int_repr_field_key) |key| {
+                            vm.field_cache.int_repr_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
                         }
                         break :blk "number has no integer representation";
@@ -2678,11 +2678,11 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            const reg = vm.last_field_reg orelse 0;
+                        if (vm.field_cache.last_field_key) |key| {
+                            const reg = vm.field_cache.last_field_reg orelse 0;
                             const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.last_field_is_global) "global" else "field";
-                            vm.last_field_key = null;
+                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                            vm.field_cache.last_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
@@ -2710,11 +2710,11 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            const reg = vm.last_field_reg orelse 0;
+                        if (vm.field_cache.last_field_key) |key| {
+                            const reg = vm.field_cache.last_field_reg orelse 0;
                             const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.last_field_is_global) "global" else "field";
-                            vm.last_field_key = null;
+                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                            vm.field_cache.last_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
@@ -2783,7 +2783,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     if (interrupt.consume()) {
         return vm.raiseString("interrupted!");
     }
-    vm.exec_tick +%= 1;
+    vm.field_cache.exec_tick +%= 1;
     const ci = vm.ci.?;
     if (vm.hook_count > 0 and !vm.in_hook) {
         if (vm.hook_countdown == 0) vm.hook_countdown = vm.hook_count * 2;
@@ -4744,11 +4744,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                vm.last_field_reg = a;
-                vm.last_field_key = key;
-                vm.last_field_is_global = true;
-                vm.last_field_is_method = false;
-                vm.last_field_tick = vm.exec_tick;
+                vm.field_cache.last_field_reg = a;
+                vm.field_cache.last_field_key = key;
+                vm.field_cache.last_field_is_global = true;
+                vm.field_cache.last_field_is_method = false;
+                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -4814,11 +4814,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                vm.last_field_reg = a;
-                vm.last_field_key = key;
-                vm.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
-                vm.last_field_is_method = false;
-                vm.last_field_tick = vm.exec_tick;
+                vm.field_cache.last_field_reg = a;
+                vm.field_cache.last_field_key = key;
+                vm.field_cache.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
+                vm.field_cache.last_field_is_method = false;
+                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
             }
 
             if (table_val.asTable()) |table| {
@@ -4921,11 +4921,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = false;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = false;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -4936,11 +4936,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
                     if (!table_val.isNil()) {
-                        vm.last_field_reg = a;
-                        vm.last_field_key = key;
-                        vm.last_field_is_global = false;
-                        vm.last_field_is_method = false;
-                        vm.last_field_tick = vm.exec_tick;
+                        vm.field_cache.last_field_reg = a;
+                        vm.field_cache.last_field_key = key;
+                        vm.field_cache.last_field_is_global = false;
+                        vm.field_cache.last_field_is_method = false;
+                        vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
@@ -4993,11 +4993,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[c];
             if (obj.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = true;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = true;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
                         return result;
                     }
@@ -5007,11 +5007,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = true;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = true;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
                         return result;
                     }

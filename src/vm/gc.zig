@@ -89,10 +89,10 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     markUpvalues(vm, gc_ptr);
     gc_ptr.markValue(vm.lua_error_value);
     markTracebackSnapshot(vm, gc_ptr);
-    if (vm.last_field_key) |key| {
+    if (vm.field_cache.last_field_key) |key| {
         gc_ptr.mark(&key.header);
     }
-    if (vm.int_repr_field_key) |key| {
+    if (vm.field_cache.int_repr_field_key) |key| {
         gc_ptr.mark(&key.header);
     }
     markHooks(vm, gc_ptr);
