@@ -9,6 +9,7 @@ const VM = @import("../vm/vm.zig").VM;
 const hook_state = @import("../vm/hook.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+const yield_state = @import("../vm/yield.zig");
 
 // Bootstrap frame for first coroutine resume:
 //   CALL   R0, ... (body + resume args)
@@ -265,8 +266,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
 
 /// Set up coroutine for resume after yield (pass values to yield return)
 fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
-    if (co_vm.yield.from_tailcall) {
-        co_vm.yield.from_tailcall = false;
+    if (yield_state.clearTailcallResume(co_vm)) {
         const ci = co_vm.ci orelse return;
         const dst_base = ci.ret_base;
         const nresults = ci.nresults;
@@ -740,28 +740,9 @@ pub fn nativeCoroutineYield(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
         return vm.raiseString("attempt to yield from outside a coroutine");
     }
 
-    // Store yield value location for resume to read
-    // Arguments are at stack[base + func_reg + 1 .. + nargs]
-    //
-    // NOTE: nargs follows Moonquakes native call convention where nargs is
-    // the count of arguments passed (not including the function itself).
-    // If this convention changes, yield_count calculation may need adjustment.
-    vm.yield.base = vm.base + func_reg + 1;
-    vm.yield.count = nargs;
-
-    // Store where resume's return values should go (when coroutine is resumed)
-    // This is where CALL expects its results: stack[base + func_reg]
     const ci = vm.ci orelse return vm.raiseString("attempt to yield from outside a coroutine");
-    const is_tailcall_site = blk: {
-        const code_start = @intFromPtr(ci.func.code.ptr);
-        const pc_addr = @intFromPtr(ci.pc);
-        if (pc_addr <= code_start) break :blk false;
-        const prev_inst = (ci.pc - 1)[0];
-        break :blk prev_inst.getOpCode() == .TAILCALL;
-    };
-    vm.yield.from_tailcall = is_tailcall_site;
-    vm.yield.ret_base = if (is_tailcall_site) ci.ret_base else vm.base + func_reg;
-    vm.yield.nresults = if (nresults == 0) -1 else @as(i32, @intCast(nresults));
+    _ = ci;
+    yield_state.saveSuspendPoint(vm, func_reg, nargs, nresults);
 
     // Suspend execution - will be caught by executeCoroutine
     return error.Yield;
