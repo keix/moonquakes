@@ -1,3 +1,7 @@
+//! Lua Bytecode Serializer
+//!
+//! Serializes and deserializes ProtoObject bytecode chunks in Lua 5.4 format.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");

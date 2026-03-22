@@ -1,3 +1,7 @@
+//! Lua Parser and Code Generator
+//!
+//! Parses Lua source and emits RawProto bytecode plus debug metadata.
+
 const std = @import("std");
 const lexer = @import("lexer.zig");
 const Lexer = lexer.Lexer;
