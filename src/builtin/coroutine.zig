@@ -6,9 +6,11 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const VM = @import("../vm/vm.zig").VM;
+const error_state = @import("../vm/error_state.zig");
 const hook_state = @import("../vm/hook.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+const yield_state = @import("../vm/yield.zig");
 
 // Bootstrap frame for first coroutine resume:
 //   CALL   R0, ... (body + resume args)
@@ -234,7 +236,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 /// Result of coroutine execution
 const CoroutineResult = union(enum) {
     completed: u32,
-    yielded: struct { base: u32, count: u32 },
+    yielded: yield_state.YieldResult,
     errored: TValue,
 };
 
@@ -265,55 +267,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
 
 /// Set up coroutine for resume after yield (pass values to yield return)
 fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
-    if (co_vm.yield.from_tailcall) {
-        co_vm.yield.from_tailcall = false;
-        const ci = co_vm.ci orelse return;
-        const dst_base = ci.ret_base;
-        const nresults = ci.nresults;
-
-        if (ci.previous != null) {
-            if (nresults < 0) {
-                var i: u32 = 0;
-                while (i < num_args) : (i += 1) {
-                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
-                }
-            } else {
-                const expected: u32 = @intCast(nresults);
-                const copy_count = @min(num_args, expected);
-                var i: u32 = 0;
-                while (i < copy_count) : (i += 1) {
-                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
-                }
-                while (i < expected) : (i += 1) {
-                    co_vm.stack[dst_base + i] = .nil;
-                }
-            }
-            mnemonics.popCallInfo(co_vm);
-            const caller_frame_max = co_vm.base + co_vm.ci.?.func.maxstacksize;
-            co_vm.top = if (nresults < 0) dst_base + num_args else caller_frame_max;
-            return;
-        }
-    }
-
-    const ret_base = co_vm.yield.ret_base;
-    const nres = co_vm.yield.nresults;
-
-    if (nres < 0) {
-        var i: u32 = 0;
-        while (i < num_args) : (i += 1) {
-            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
-        }
-        co_vm.top = ret_base + num_args;
-    } else {
-        const max_copy = @as(u32, @intCast(nres));
-        var i: u32 = 0;
-        while (i < num_args and i < max_copy) : (i += 1) {
-            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
-        }
-        while (i < max_copy) : (i += 1) {
-            co_vm.stack[ret_base + i] = .nil;
-        }
-    }
+    yield_state.resumeWithValues(co_vm, caller_stack, arg_base, num_args, mnemonics.popCallInfo);
 }
 
 /// Execute coroutine until completion or yield
@@ -322,9 +276,9 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
     while (co_vm.ci != null) {
         if (co_vm.errors.pending_error_unwind and co_vm.errors.pending_error_unwind_ci != null and co_vm.ci == co_vm.errors.pending_error_unwind_ci.?) {
             if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
             }) continue;
-            return .{ .errored = co_vm.errors.lua_error_value };
+            return .{ .errored = error_state.getRaisedValue(co_vm) };
         }
         const ci = co_vm.ci.?;
         if (ci.pending_compare_active) {
@@ -337,8 +291,8 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
         }
         if (ci.pending_concat_active) {
             if (mnemonics.continueConcatFold(co_vm, ci) catch |cerr| switch (cerr) {
-                error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
-                else => return .{ .errored = co_vm.errors.lua_error_value },
+                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
+                else => return .{ .errored = error_state.getRaisedValue(co_vm) },
             }) continue;
         }
         const inst = ci.fetch() catch {
@@ -364,11 +318,11 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             // Handle LuaException
             if (err == error.LuaException) {
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
                 while (co_vm.ci) |unwind_ci| {
-                    mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, co_vm.errors.lua_error_value) catch |cerr| switch (cerr) {
-                        error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, error_state.getRaisedValue(co_vm)) catch |cerr| switch (cerr) {
+                        error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                         else => {},
                     };
                     co_vm.closeUpvalues(unwind_ci.base);
@@ -381,23 +335,23 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                     }
                 }
                 // Unhandled exception - return error
-                return .{ .errored = co_vm.errors.lua_error_value };
+                return .{ .errored = error_state.getRaisedValue(co_vm) };
             }
 
             // Handle yield - coroutine suspended
             if (err == error.Yield) {
                 hook_state.onReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
-                return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } };
+                return .{ .yielded = yield_state.currentResult(co_vm) };
             }
 
             if (err == error.CallStackOverflow) {
                 const msg = if (co_vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
                 const msg_obj = co_vm.gc().allocString(msg) catch return .{ .errored = .nil };
-                co_vm.errors.lua_error_value = TValue.fromString(msg_obj);
+                error_state.setRaisedValue(co_vm, TValue.fromString(msg_obj));
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
-                return .{ .errored = co_vm.errors.lua_error_value };
+                return .{ .errored = error_state.getRaisedValue(co_vm) };
             }
 
             // Convert ordinary VM runtime errors into catchable Lua exceptions,
@@ -440,11 +394,11 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = mnemonics.runtimeErrorWithCurrentLocation(co_vm, inst, err, msg, &full_msg_buf);
                 const msg_obj = co_vm.gc().allocString(full_msg) catch return .{ .errored = .nil };
-                co_vm.errors.lua_error_value = TValue.fromString(msg_obj);
+                error_state.setRaisedValue(co_vm, TValue.fromString(msg_obj));
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
-                return .{ .errored = co_vm.errors.lua_error_value };
+                return .{ .errored = error_state.getRaisedValue(co_vm) };
             }
 
             const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
@@ -625,7 +579,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     }
 
     if (thread.status == .running) {
-        if (thread == vm.thread and vm.errors.close_metamethod_depth > 0) {
+        if (thread == vm.thread and error_state.isClosingMetamethod(vm)) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
             vm.top = vm.base + func_reg + 2;
@@ -634,7 +588,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         return vm.raiseString("cannot resume non-suspended coroutine");
     }
     if (thread.status == .normal) {
-        if (thread == vm.thread and vm.errors.close_metamethod_depth > 0) {
+        if (thread == vm.thread and error_state.isClosingMetamethod(vm)) {
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
             vm.top = vm.base + func_reg + 2;
@@ -725,7 +679,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         .errored => |err_val| {
             thread.status = .dead;
             // Propagate the error (unlike resume which returns false)
-            vm.errors.lua_error_value = err_val;
+            error_state.setRaisedValue(vm, err_val);
             return error.LuaException;
         },
     }
@@ -740,28 +694,9 @@ pub fn nativeCoroutineYield(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
         return vm.raiseString("attempt to yield from outside a coroutine");
     }
 
-    // Store yield value location for resume to read
-    // Arguments are at stack[base + func_reg + 1 .. + nargs]
-    //
-    // NOTE: nargs follows Moonquakes native call convention where nargs is
-    // the count of arguments passed (not including the function itself).
-    // If this convention changes, yield_count calculation may need adjustment.
-    vm.yield.base = vm.base + func_reg + 1;
-    vm.yield.count = nargs;
-
-    // Store where resume's return values should go (when coroutine is resumed)
-    // This is where CALL expects its results: stack[base + func_reg]
     const ci = vm.ci orelse return vm.raiseString("attempt to yield from outside a coroutine");
-    const is_tailcall_site = blk: {
-        const code_start = @intFromPtr(ci.func.code.ptr);
-        const pc_addr = @intFromPtr(ci.pc);
-        if (pc_addr <= code_start) break :blk false;
-        const prev_inst = (ci.pc - 1)[0];
-        break :blk prev_inst.getOpCode() == .TAILCALL;
-    };
-    vm.yield.from_tailcall = is_tailcall_site;
-    vm.yield.ret_base = if (is_tailcall_site) ci.ret_base else vm.base + func_reg;
-    vm.yield.nresults = if (nresults == 0) -1 else @as(i32, @intCast(nresults));
+    _ = ci;
+    yield_state.saveSuspendPoint(vm, func_reg, nargs, nresults);
 
     // Suspend execution - will be caught by executeCoroutine
     return error.Yield;
@@ -838,7 +773,7 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
     const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
 
     // Reentrant self-close while running __close must fail.
-    if (thread == vm.thread and vm.errors.close_metamethod_depth > 0) {
+    if (thread == vm.thread and error_state.isClosingMetamethod(vm)) {
         return vm.raiseString("cannot close a running coroutine");
     }
 
@@ -852,9 +787,8 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
 
     // Dead coroutines: first close after an unhandled error returns that error.
     if (thread.status == .dead) {
-        if (!co_vm.errors.lua_error_value.isNil()) {
-            const err_val = co_vm.errors.lua_error_value;
-            co_vm.errors.lua_error_value = .nil;
+        if (!error_state.getRaisedValue(co_vm).isNil()) {
+            const err_val = error_state.takeRaisedValue(co_vm);
             setResult(vm, result_base, false, err_val, nresults);
             return;
         }
@@ -868,8 +802,7 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
             mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, .nil) catch |cerr| switch (cerr) {
                 error.LuaException => {
                     thread.status = .dead;
-                    const err_val = co_vm.errors.lua_error_value;
-                    co_vm.errors.lua_error_value = .nil;
+                    const err_val = error_state.takeRaisedValue(co_vm);
                     setResult(vm, result_base, false, err_val, nresults);
                     return;
                 },

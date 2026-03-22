@@ -26,6 +26,8 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const call_debug = @import("call_debug.zig");
+const error_state = @import("error_state.zig");
 const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
 const traceback_state = @import("traceback.zig");
@@ -1503,12 +1505,7 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
         .nresults = nresults,
         .previous = vm.ci,
     };
-    if (vm.call_debug.next_name) |name| {
-        new_ci.debug_name = name;
-        new_ci.debug_namewhat = vm.call_debug.next_namewhat orelse "";
-        vm.call_debug.next_name = null;
-        vm.call_debug.next_namewhat = null;
-    }
+    call_debug.applyToCallInfo(vm, new_ci);
 
     vm.callstack_size += 1;
     vm.ci = new_ci;
@@ -1628,7 +1625,7 @@ fn executeSyncMMWithDebug(
                 continue;
             }
             if (err == error.LuaException) {
-                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1689,7 +1686,7 @@ fn executeSyncMMWithDebug(
                     cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                     return err;
                 });
-                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1791,9 +1788,9 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
 
             if (mm.asClosure()) |closure| {
                 // executeSyncMM handles stack setup using vm.top
-                vm.errors.close_metamethod_depth +|= 1;
+                error_state.beginCloseMetamethod(vm);
                 defer {
-                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
+                    error_state.endCloseMetamethod(vm);
                 }
                 _ = executeSyncMM(vm, closure, &[_]TValue{ val, current_err }) catch |err| switch (err) {
                     error.LuaException => {
@@ -1826,9 +1823,9 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                 vm.stack[temp + 1] = val;
                 vm.stack[temp + 2] = current_err;
                 vm.top = temp + 3;
-                vm.errors.close_metamethod_depth +|= 1;
+                error_state.beginCloseMetamethod(vm);
                 defer {
-                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
+                    error_state.endCloseMetamethod(vm);
                 }
                 vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
                     error.LuaException => {
@@ -1919,9 +1916,9 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 /// Returns true if error was handled by a protected frame, false otherwise.
 /// The error value is taken from vm.errors.lua_error_value (set by vm.raise()).
 pub fn handleLuaException(vm: *VM) error{Yield}!bool {
-    vm.errors.error_handling_depth +|= 1;
+    error_state.beginHandling(vm);
     defer {
-        if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
+        error_state.endHandling(vm);
     }
     vm.traceback.snapshot_count = 0;
     vm.traceback.snapshot_has_error_frame = false;
@@ -1937,8 +1934,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 const unwind_ci = vm.ci.?;
                 closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
                     error.Yield => {
-                        vm.errors.pending_error_unwind = true;
-                        vm.errors.pending_error_unwind_ci = unwind_ci;
+                        error_state.setPendingUnwind(vm, unwind_ci);
                         return error.Yield;
                     },
                     else => {},
@@ -1957,9 +1953,9 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             if (already_handled) {
                 handled_error = vm.stack[ret_base + 1];
             } else if (!protected_error_handler.isNil()) {
-                vm.errors.error_handling_depth +|= 1;
+                error_state.beginHandling(vm);
                 defer {
-                    if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
+                    error_state.endHandling(vm);
                 }
                 if (protected_error_handler.asClosure()) |_| {
                     handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
@@ -2014,11 +2010,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     }
                 }
             }
-            vm.errors.lua_error_value = .nil; // Clear after use
+            error_state.clearRaisedValue(vm); // Clear after use
             const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
             vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
-            vm.errors.pending_error_unwind = false;
-            vm.errors.pending_error_unwind_ci = null;
+            error_state.clearPendingUnwind(vm);
             return true;
         }
         current = ci.previous;
@@ -2029,8 +2024,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
     traceback_state.captureSnapshot(vm, null);
-    vm.errors.pending_error_unwind = false;
-    vm.errors.pending_error_unwind_ci = null;
+    error_state.clearPendingUnwind(vm);
     return false;
 }
 
@@ -4173,7 +4167,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
+                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4265,7 +4259,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
+            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -4295,7 +4289,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
+                try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4333,7 +4327,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
+            try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -4357,7 +4351,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
+                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4403,7 +4397,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
+            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.

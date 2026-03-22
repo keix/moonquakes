@@ -1,5 +1,6 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const error_state = @import("../vm/error_state.zig");
 const VM = @import("../vm/vm.zig").VM;
 const execution = @import("../vm/execution.zig");
 const CallInfo = execution.CallInfo;
@@ -90,7 +91,7 @@ fn formatAssertFailure(vm: *VM, msg: []const u8, out_buf: *[320]u8) []const u8 {
 /// Raises an error with the given message (can be any value)
 pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     _ = nresults; // error() never returns
-    vm.errors.pending_error_from_error_builtin = true;
+    error_state.markErrorBuiltin(vm);
 
     // Lua's error() can throw any value, not just strings
     const error_value = if (nargs > 0)

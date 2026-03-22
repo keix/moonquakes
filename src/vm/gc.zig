@@ -9,7 +9,9 @@ const GC = gc_mod.GC;
 const RootProvider = gc_mod.RootProvider;
 const FinalizerExecutor = gc_mod.FinalizerExecutor;
 const object = @import("../runtime/gc/object.zig");
+const call_debug = @import("call_debug.zig");
 const call = @import("call.zig");
+const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
 pub fn rootProvider(self: *VM) RootProvider {
@@ -87,7 +89,7 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     gc_ptr.markStack(vm.stack[0..stack_extent]);
     markCallFrames(vm, gc_ptr);
     markUpvalues(vm, gc_ptr);
-    gc_ptr.markValue(vm.errors.lua_error_value);
+    gc_ptr.markValue(error_state.getRaisedValue(vm));
     markTracebackSnapshot(vm, gc_ptr);
     if (vm.field_cache.last_field_key) |key| {
         gc_ptr.mark(&key.header);
@@ -101,11 +103,9 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
 
 fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
     const vm: *VM = @ptrCast(@alignCast(ctx));
-    vm.call_debug.next_name = "__gc";
-    vm.call_debug.next_namewhat = "metamethod";
+    call_debug.setNext(vm, "__gc", "metamethod");
     defer {
-        vm.call_debug.next_name = null;
-        vm.call_debug.next_namewhat = null;
+        call_debug.clearNext(vm);
     }
     return call.callValue(vm, func.*, args);
 }
@@ -138,9 +138,9 @@ fn vmReportFinalizerError(ctx: *anyopaque) void {
 
     const stderr_file = std.fs.File.stderr();
     stderr_file.writeAll("Lua warning: error in __gc metamethod (") catch return;
-    writeFinalizerWarningValue(stderr_file, vm.errors.lua_error_value);
+    writeFinalizerWarningValue(stderr_file, error_state.getRaisedValue(vm));
     stderr_file.writeAll(")\n") catch {};
-    vm.errors.lua_error_value = .nil;
+    error_state.clearRaisedValue(vm);
 }
 
 pub fn finalizerExecutor(self: *VM) FinalizerExecutor {

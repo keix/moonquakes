@@ -34,6 +34,7 @@ const Runtime = @import("../runtime/runtime.zig").Runtime;
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const call_debug_mod = @import("call_debug.zig");
+const error_state_mod = @import("error_state.zig");
 const field_cache_mod = @import("field_cache.zig");
 const hook_mod = @import("hook.zig");
 const metamethod = @import("metamethod.zig");
@@ -58,16 +59,7 @@ pub const LuaException = api.LuaException;
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
 
-    pub const ErrorState = struct {
-        lua_error_value: TValue = .nil,
-        close_metamethod_depth: u8 = 0,
-        pending_error_unwind: bool = false,
-        pending_error_unwind_ci: ?*CallInfo = null,
-        error_handling_depth: u8 = 0,
-        pending_error_from_error_builtin: bool = false,
-        native_call_depth: u16 = 0,
-    };
-
+    pub const ErrorState = error_state_mod.ErrorState;
     pub const YieldState = yield_mod.YieldState;
     pub const HookState = hook_mod.HookState;
     pub const TracebackState = traceback_mod.TracebackState;

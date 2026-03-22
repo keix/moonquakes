@@ -12,6 +12,7 @@ const TableObject = object.TableObject;
 const UpvalueObject = object.UpvalueObject;
 const ThreadObject = object.ThreadObject;
 const builtin_dispatch = @import("../builtin/dispatch.zig");
+const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
 pub fn gc(self: *VM) *GC {
@@ -73,7 +74,7 @@ pub const LuaException = error{LuaException};
 
 /// Raise with value. pcall/xpcall catches this.
 pub fn raise(self: *VM, value: TValue) LuaException {
-    self.errors.lua_error_value = value;
+    error_state.setRaisedValue(self, value);
     return error.LuaException;
 }
 
@@ -97,9 +98,9 @@ pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults
             }
         }
     }
-    self.errors.native_call_depth +|= 1;
+    error_state.beginNativeCall(self);
     defer {
-        if (self.errors.native_call_depth > 0) self.errors.native_call_depth -= 1;
+        error_state.endNativeCall(self);
     }
     try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }

@@ -6,6 +6,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
+const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
 pub const HookState = struct {
@@ -204,7 +205,7 @@ pub fn onReturn(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]con
 }
 
 pub fn onReturnOnYield(vm: *VM, invoke: anytype) !void {
-    try onReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, invoke);
+    try onReturn(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, invoke);
 }
 
 pub fn onReturnFromStack(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
