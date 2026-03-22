@@ -235,7 +235,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
 /// Result of coroutine execution
 const CoroutineResult = union(enum) {
     completed: u32,
-    yielded: struct { base: u32, count: u32 },
+    yielded: yield_state.YieldResult,
     errored: TValue,
 };
 
@@ -275,7 +275,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
     while (co_vm.ci != null) {
         if (co_vm.errors.pending_error_unwind and co_vm.errors.pending_error_unwind_ci != null and co_vm.ci == co_vm.errors.pending_error_unwind_ci.?) {
             if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
             }) continue;
             return .{ .errored = co_vm.errors.lua_error_value };
         }
@@ -290,7 +290,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
         }
         if (ci.pending_concat_active) {
             if (mnemonics.continueConcatFold(co_vm, ci) catch |cerr| switch (cerr) {
-                error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 else => return .{ .errored = co_vm.errors.lua_error_value },
             }) continue;
         }
@@ -317,11 +317,11 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             // Handle LuaException
             if (err == error.LuaException) {
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
                 while (co_vm.ci) |unwind_ci| {
                     mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, co_vm.errors.lua_error_value) catch |cerr| switch (cerr) {
-                        error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                        error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                         else => {},
                     };
                     co_vm.closeUpvalues(unwind_ci.base);
@@ -340,7 +340,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             // Handle yield - coroutine suspended
             if (err == error.Yield) {
                 hook_state.onReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
-                return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } };
+                return .{ .yielded = yield_state.currentResult(co_vm) };
             }
 
             if (err == error.CallStackOverflow) {
@@ -348,7 +348,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                 const msg_obj = co_vm.gc().allocString(msg) catch return .{ .errored = .nil };
                 co_vm.errors.lua_error_value = TValue.fromString(msg_obj);
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
                 return .{ .errored = co_vm.errors.lua_error_value };
             }
@@ -395,7 +395,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                 const msg_obj = co_vm.gc().allocString(full_msg) catch return .{ .errored = .nil };
                 co_vm.errors.lua_error_value = TValue.fromString(msg_obj);
                 if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } },
+                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 }) continue;
                 return .{ .errored = co_vm.errors.lua_error_value };
             }

@@ -15,6 +15,11 @@ pub const YieldState = struct {
     from_tailcall: bool = false,
 };
 
+pub const YieldResult = struct {
+    base: u32,
+    count: u32,
+};
+
 pub fn saveSuspendPoint(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) void {
     vm.yield.base = vm.base + func_reg + 1;
     vm.yield.count = nargs;
@@ -88,4 +93,11 @@ pub fn resumeWithValues(vm: *VM, caller_stack: []TValue, arg_base: u32, num_args
             vm.stack[ret_base + i] = .nil;
         }
     }
+}
+
+pub fn currentResult(vm: *const VM) YieldResult {
+    return .{
+        .base = vm.yield.base,
+        .count = vm.yield.count,
+    };
 }
