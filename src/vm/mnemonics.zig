@@ -977,12 +977,10 @@ pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8)
             }
         }
     }
-    if (vm.field_cache.last_field_key) |key| {
-        const reg = vm.field_cache.last_field_reg orelse 0;
-        const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-        vm.field_cache.last_field_key = null;
-        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+    if (field_cache.takeLastFieldHint(vm)) |hint| {
+        const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+        const kind = if (hint.is_global) "global" else "field";
+        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
     }
     return "attempt to index a non-table value";
 }
@@ -1130,11 +1128,11 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
             else => {},
         }
         if (suppress_field_hint) {
-            vm.field_cache.last_field_key = null;
+            field_cache.clearLastFieldHint(vm);
             return "attempt to perform arithmetic on a non-numeric value";
         }
         const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-        vm.field_cache.last_field_key = null;
+        field_cache.clearLastFieldHint(vm);
         return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
     }
 
@@ -1181,8 +1179,7 @@ pub fn formatIntegerRepresentationError(vm: *VM, inst: Instruction, msg_buf: *[1
         }
     }
 
-    if (vm.field_cache.int_repr_field_key) |key| {
-        vm.field_cache.int_repr_field_key = null;
+    if (field_cache.takeIntReprFieldKey(vm)) |key| {
         return std.fmt.bufPrint(msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
     }
     return "number has no integer representation";
@@ -2320,14 +2317,14 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                     else => {},
                                 }
                                 if (suppress_field_hint) {
-                                    vm.field_cache.last_field_key = null;
+                                    field_cache.clearLastFieldHint(vm);
                                     break :blk "attempt to perform arithmetic on a non-numeric value";
                                 }
                                 const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                                vm.field_cache.last_field_key = null;
+                                field_cache.clearLastFieldHint(vm);
                                 break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
                             }
-                            vm.field_cache.last_field_key = null;
+                            field_cache.clearLastFieldHint(vm);
                         }
                         if (firstArithmeticBadOperand(vm, inst)) |bad| {
                             const ty = namedValueTypeName(vm, bad);
@@ -2372,8 +2369,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.int_repr_field_key) |key| {
-                            vm.field_cache.int_repr_field_key = null;
+                        if (field_cache.takeIntReprFieldKey(vm)) |key| {
                             break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
                         }
                         break :blk "number has no integer representation";
@@ -2401,12 +2397,10 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.last_field_key) |key| {
-                            const reg = vm.field_cache.last_field_reg orelse 0;
-                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                            vm.field_cache.last_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        if (field_cache.takeLastFieldHint(vm)) |hint| {
+                            const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+                            const kind = if (hint.is_global) "global" else "field";
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
                     },
@@ -2433,12 +2427,10 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.field_cache.last_field_key) |key| {
-                            const reg = vm.field_cache.last_field_reg orelse 0;
-                            const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
-                            vm.field_cache.last_field_key = null;
-                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
+                        if (field_cache.takeLastFieldHint(vm)) |hint| {
+                            const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+                            const kind = if (hint.is_global) "global" else "field";
+                            break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
                     },
