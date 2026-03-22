@@ -2,6 +2,7 @@
 //!
 //! Snapshot storage for Lua-visible traceback reporting during error unwinding.
 
+const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -99,4 +100,54 @@ pub fn captureSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
     vm.traceback.snapshot_count = @intCast(count);
     vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
     vm.errors.pending_error_from_error_builtin = false;
+}
+
+pub fn lastSnapshotLine(vm: *const VM) ?u32 {
+    if (vm.traceback.snapshot_count == 0) return null;
+    return vm.traceback.snapshot_lines[vm.traceback.snapshot_count - 1];
+}
+
+pub fn formatSnapshotFrame(
+    host_vm: *VM,
+    target_vm: *VM,
+    index: usize,
+    out_buf: []u8,
+    infer_global: anytype,
+    infer_declared: anytype,
+    infer_enclosing: anytype,
+) []const u8 {
+    var snapshot_name: ?[]const u8 = null;
+    if (target_vm.traceback.snapshot_names[index].asString()) |name| {
+        snapshot_name = name.asSlice();
+    }
+    if (snapshot_name == null) {
+        if (target_vm.traceback.snapshot_closures[index]) |cl| {
+            if (infer_global(target_vm, cl)) |name| {
+                snapshot_name = name;
+            }
+        }
+    }
+    if (snapshot_name == null) {
+        var decl_buf: [128]u8 = undefined;
+        if (infer_declared(
+            host_vm,
+            target_vm.traceback.snapshot_sources[index],
+            target_vm.traceback.snapshot_def_lines[index],
+            &decl_buf,
+        )) |name| {
+            snapshot_name = name;
+        } else if (infer_enclosing(
+            host_vm,
+            target_vm.traceback.snapshot_sources[index],
+            target_vm.traceback.snapshot_lines[index],
+            &decl_buf,
+        )) |name2| {
+            snapshot_name = name2;
+        }
+    }
+
+    return if (snapshot_name) |name|
+        (std.fmt.bufPrint(out_buf, "[string]:{d}: in function '{s}'", .{ target_vm.traceback.snapshot_lines[index], name }) catch "[Lua function]")
+    else
+        (std.fmt.bufPrint(out_buf, "[string]:{d}: in function <[string]:{d}>", .{ target_vm.traceback.snapshot_lines[index], target_vm.traceback.snapshot_def_lines[index] }) catch "[Lua function]");
 }

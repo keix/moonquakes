@@ -6,6 +6,7 @@ const NativeClosureObject = object.NativeClosureObject;
 const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
+const traceback_state = @import("../vm/traceback.zig");
 const VM = @import("../vm/vm.zig").VM;
 const CallInfo = @import("../vm/execution.zig").CallInfo;
 
@@ -2376,74 +2377,15 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 pos += 2;
             }
             var frame_buf: [128]u8 = undefined;
-            var snapshot_name: ?[]const u8 = null;
-            if (target_vm.traceback.snapshot_names[i].asString()) |name| {
-                snapshot_name = name.asSlice();
-            }
-            if (snapshot_name == null) {
-                if (target_vm.traceback.snapshot_closures[i]) |cl| {
-                    if (inferGlobalFunctionName(target_vm, cl)) |name| {
-                        snapshot_name = name;
-                    }
-                }
-            }
-            if (snapshot_name == null) {
-                var decl_buf: [128]u8 = undefined;
-                if (inferDeclaredNameFromSourceLine(
-                    vm,
-                    target_vm.traceback.snapshot_sources[i],
-                    target_vm.traceback.snapshot_def_lines[i],
-                    &decl_buf,
-                )) |name| {
-                    snapshot_name = name;
-                } else if (inferEnclosingFunctionName(
-                    vm,
-                    target_vm.traceback.snapshot_sources[i],
-                    target_vm.traceback.snapshot_lines[i],
-                    &decl_buf,
-                )) |name2| {
-                    snapshot_name = name2;
-                }
-            }
-            const frame_info = if (snapshot_name) |name|
-                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function '{s}'", .{ target_vm.traceback.snapshot_lines[i], name }) catch "[Lua function]")
-            else
-                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function <[string]:{d}>", .{ target_vm.traceback.snapshot_lines[i], target_vm.traceback.snapshot_def_lines[i] }) catch "[Lua function]");
+            const frame_info = traceback_state.formatSnapshotFrame(vm, target_vm, i, &frame_buf, inferGlobalFunctionName, inferDeclaredNameFromSourceLine, inferEnclosingFunctionName);
             const copy_len = @min(frame_info.len, buf.len - pos);
             @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
             pos += copy_len;
         }
         if (message) |msg| {
-            if (std.mem.indexOf(u8, msg, "stack overflow") != null and target_vm.traceback.snapshot_count > 0) {
-                const last = target_vm.traceback.snapshot_lines[target_vm.traceback.snapshot_count - 1];
-                const tail_line = last + 25;
-                frame_num += 1;
-                if (frame_num >= level) {
-                    if (pos + 2 < buf.len) {
-                        buf[pos] = '\n';
-                        buf[pos + 1] = '\t';
-                        pos += 2;
-                    }
-                    var frame_buf: [128]u8 = undefined;
-                    const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{tail_line}) catch "[Lua function]";
-                    const copy_len = @min(frame_info.len, buf.len - pos);
-                    @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
-                    pos += copy_len;
-                }
-            }
-        }
-        if (target_vm.ci) |ci| {
-            if (frameCurrentLine(ci)) |line| {
-                const last = target_vm.traceback.snapshot_lines[target_vm.traceback.snapshot_count - 1];
-                var tail_line = line;
-                if (tail_line == last) {
-                    if (message) |msg| {
-                        if (std.mem.indexOf(u8, msg, "stack overflow") != null) {
-                            tail_line = last + 25;
-                        }
-                    }
-                }
-                if (tail_line != last) {
+            if (std.mem.indexOf(u8, msg, "stack overflow") != null) {
+                if (traceback_state.lastSnapshotLine(target_vm)) |last| {
+                    const tail_line = last + 25;
                     frame_num += 1;
                     if (frame_num >= level) {
                         if (pos + 2 < buf.len) {
@@ -2456,6 +2398,35 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                         const copy_len = @min(frame_info.len, buf.len - pos);
                         @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
                         pos += copy_len;
+                    }
+                }
+            }
+        }
+        if (target_vm.ci) |ci| {
+            if (frameCurrentLine(ci)) |line| {
+                if (traceback_state.lastSnapshotLine(target_vm)) |last| {
+                    var tail_line = line;
+                    if (tail_line == last) {
+                        if (message) |msg| {
+                            if (std.mem.indexOf(u8, msg, "stack overflow") != null) {
+                                tail_line = last + 25;
+                            }
+                        }
+                    }
+                    if (tail_line != last) {
+                        frame_num += 1;
+                        if (frame_num >= level) {
+                            if (pos + 2 < buf.len) {
+                                buf[pos] = '\n';
+                                buf[pos + 1] = '\t';
+                                pos += 2;
+                            }
+                            var frame_buf: [128]u8 = undefined;
+                            const frame_info = std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function", .{tail_line}) catch "[Lua function]";
+                            const copy_len = @min(frame_info.len, buf.len - pos);
+                            @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
+                            pos += copy_len;
+                        }
                     }
                 }
             }
