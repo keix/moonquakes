@@ -27,6 +27,7 @@ const call = @import("call.zig");
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 const hook_state = @import("hook.zig");
+const traceback_state = @import("traceback.zig");
 const vm_gc = @import("gc.zig");
 const interrupt = @import("../interrupt.zig");
 
@@ -1947,7 +1948,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             const protected_nresults = ci.nresults;
             const protected_error_handler = ci.error_handler;
             const target_ci = ci.previous;
-            captureTracebackSnapshot(vm, target_ci);
+            traceback_state.captureSnapshot(vm, target_ci);
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
                 closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
@@ -2043,7 +2044,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
 
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
-    captureTracebackSnapshot(vm, null);
+    traceback_state.captureSnapshot(vm, null);
     vm.errors.pending_error_unwind = false;
     vm.errors.pending_error_unwind_ci = null;
     return false;
@@ -2086,96 +2087,8 @@ fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TVa
     return executeSyncMM(vm, wrapper, &[_]TValue{ TValue.fromClosure(closure), value });
 }
 
-fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
-    const inferGlobalName = struct {
-        fn get(state: *VM, closure: *ClosureObject) ?TValue {
-            var it = state.globals().hash_part.iterator();
-            while (it.next()) |entry| {
-                const key = entry.key_ptr.*;
-                const value = entry.value_ptr.*;
-                const c = value.asClosure() orelse continue;
-                if (c != closure) continue;
-                const k = key.asString() orelse continue;
-                return TValue.fromString(k);
-            }
-            return null;
-        }
-    }.get;
-    const frameLine = struct {
-        fn get(ci: *const CallInfo) ?u32 {
-            const idx_opt = currentInstructionIndex(ci);
-            if (idx_opt == null) {
-                if (ci.func.lineinfo.len == 0) return null;
-                if (ci.func.lineinfo.len >= 2) return ci.func.lineinfo[ci.func.lineinfo.len - 2];
-                return ci.func.lineinfo[0];
-            }
-            const idx = idx_opt.?;
-            if (idx >= ci.func.lineinfo.len) return null;
-            var line = ci.func.lineinfo[idx];
-            if (idx > 0) {
-                const op = ci.func.code[idx].getOpCode();
-                if (op == .CALL and line > ci.func.lineinfo[idx - 1]) {
-                    line = ci.func.lineinfo[idx - 1];
-                }
-            }
-            return line;
-        }
-    }.get;
-
-    var count: usize = 0;
-    if (vm.callstack_size > 0) {
-        var i: i32 = @as(i32, @intCast(vm.callstack_size)) - 1;
-        while (i >= 0) : (i -= 1) {
-            const ci = &vm.callstack[@intCast(i)];
-            if (ci == stop_before) break;
-            // TODO(traceback): Snapshot is currently fixed-size.
-            // If deep recursion diagnostics become important, clamp with
-            // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback.snapshot_lines.len) break;
-            if (frameLine(ci)) |line| {
-                vm.traceback.snapshot_lines[count] = line;
-                vm.traceback.snapshot_names[count] = .nil;
-                vm.traceback.snapshot_closures[count] = ci.closure;
-                vm.traceback.snapshot_sources[count] = ci.func.source;
-                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
-                if (ci.closure) |cl| {
-                    if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback.snapshot_names[count] = name;
-                    }
-                }
-                count += 1;
-            }
-        }
-    } else {
-        var cur = vm.ci;
-        while (cur) |ci| : (cur = ci.previous) {
-            if (cur == stop_before) break;
-            // TODO(traceback): Snapshot is currently fixed-size.
-            // If deep recursion diagnostics become important, clamp with
-            // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback.snapshot_lines.len) break;
-            if (frameLine(ci)) |line| {
-                vm.traceback.snapshot_lines[count] = line;
-                vm.traceback.snapshot_names[count] = .nil;
-                vm.traceback.snapshot_closures[count] = ci.closure;
-                vm.traceback.snapshot_sources[count] = ci.func.source;
-                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
-                if (ci.closure) |cl| {
-                    if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback.snapshot_names[count] = name;
-                    }
-                }
-                count += 1;
-            }
-        }
-    }
-    vm.traceback.snapshot_count = @intCast(count);
-    vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
-    vm.errors.pending_error_from_error_builtin = false;
-}
-
 pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
-    captureTracebackSnapshot(vm, null);
+    traceback_state.captureSnapshot(vm, null);
 }
 
 /// Main VM execution loop.
