@@ -27,6 +27,7 @@ const call = @import("call.zig");
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
 const call_debug = @import("call_debug.zig");
+const error_state = @import("error_state.zig");
 const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
 const traceback_state = @import("traceback.zig");
@@ -1915,9 +1916,9 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 /// Returns true if error was handled by a protected frame, false otherwise.
 /// The error value is taken from vm.errors.lua_error_value (set by vm.raise()).
 pub fn handleLuaException(vm: *VM) error{Yield}!bool {
-    vm.errors.error_handling_depth +|= 1;
+    error_state.beginHandling(vm);
     defer {
-        if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
+        error_state.endHandling(vm);
     }
     vm.traceback.snapshot_count = 0;
     vm.traceback.snapshot_has_error_frame = false;
@@ -1933,8 +1934,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 const unwind_ci = vm.ci.?;
                 closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
                     error.Yield => {
-                        vm.errors.pending_error_unwind = true;
-                        vm.errors.pending_error_unwind_ci = unwind_ci;
+                        error_state.setPendingUnwind(vm, unwind_ci);
                         return error.Yield;
                     },
                     else => {},
@@ -1953,9 +1953,9 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             if (already_handled) {
                 handled_error = vm.stack[ret_base + 1];
             } else if (!protected_error_handler.isNil()) {
-                vm.errors.error_handling_depth +|= 1;
+                error_state.beginHandling(vm);
                 defer {
-                    if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
+                    error_state.endHandling(vm);
                 }
                 if (protected_error_handler.asClosure()) |_| {
                     handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
@@ -2010,11 +2010,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     }
                 }
             }
-            vm.errors.lua_error_value = .nil; // Clear after use
+            error_state.clearRaisedValue(vm); // Clear after use
             const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
             vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
-            vm.errors.pending_error_unwind = false;
-            vm.errors.pending_error_unwind_ci = null;
+            error_state.clearPendingUnwind(vm);
             return true;
         }
         current = ci.previous;
@@ -2025,8 +2024,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
     traceback_state.captureSnapshot(vm, null);
-    vm.errors.pending_error_unwind = false;
-    vm.errors.pending_error_unwind_ci = null;
+    error_state.clearPendingUnwind(vm);
     return false;
 }
 
