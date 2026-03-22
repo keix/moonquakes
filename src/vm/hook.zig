@@ -45,3 +45,63 @@ pub fn setTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
         vm.hooks.transfer_values[i] = v;
     }
 }
+
+pub fn dispatchLine(vm: *VM, line: i64, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x04) == 0) return;
+    const hook = vm.hooks.func orelse return;
+    if (line <= 0) return;
+    if (vm.hooks.skip_next_line) return;
+
+    const event_name = try vm.gc().allocString("line");
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try invoke(vm, hook, &[_]TValue{
+        TValue.fromString(event_name),
+        .{ .integer = line },
+    });
+}
+
+pub fn dispatchLineNil(vm: *VM, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x04) == 0) return;
+    const hook = vm.hooks.func orelse return;
+
+    const event_name = try vm.gc().allocString("line");
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    vm.hooks.skip_next_line = true;
+    _ = try invoke(vm, hook, &[_]TValue{
+        TValue.fromString(event_name),
+        .nil,
+    });
+}
+
+pub fn dispatchCount(vm: *VM, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if (vm.hooks.count == 0) return;
+    const hook = vm.hooks.func orelse return;
+
+    const event_name = try vm.gc().allocString("count");
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}

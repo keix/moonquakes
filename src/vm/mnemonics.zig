@@ -1798,67 +1798,6 @@ fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
     _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-fn dispatchLineHook(vm: *VM, line: i64) !void {
-    if (vm.hooks.in_hook) return;
-    if ((vm.hooks.mask & 0x04) == 0) return;
-    const hook = vm.hooks.func orelse return;
-    if (line <= 0) return;
-    if (line > 0 and vm.hooks.skip_next_line) {
-        return;
-    }
-    const event_name = try vm.gc().allocString("line");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{
-        TValue.fromString(event_name),
-        .{ .integer = line },
-    });
-}
-
-fn dispatchLineHookNil(vm: *VM) !void {
-    if (vm.hooks.in_hook) return;
-    if ((vm.hooks.mask & 0x04) == 0) return;
-    const hook = vm.hooks.func orelse return;
-
-    const event_name = try vm.gc().allocString("line");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    vm.hooks.skip_next_line = true;
-    _ = try executeSyncMM(vm, hook, &[_]TValue{
-        TValue.fromString(event_name),
-        .nil,
-    });
-}
-
-fn dispatchCountHook(vm: *VM) !void {
-    if (vm.hooks.in_hook) return;
-    if (vm.hooks.count == 0) return;
-    const hook = vm.hooks.func orelse return;
-
-    const event_name = try vm.gc().allocString("count");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
 fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x02) == 0) return;
@@ -2752,7 +2691,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         vm.hooks.countdown -|= 1;
         if (vm.hooks.countdown == 0) {
             vm.hooks.countdown = vm.hooks.count * 2;
-            try dispatchCountHook(vm);
+            try hook_state.dispatchCount(vm, executeSyncMM);
         }
     }
     if ((vm.hooks.mask & 0x04) != 0 and !vm.hooks.in_hook and ci.closure != null) {
@@ -2831,7 +2770,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 ci.hook_last_pc = idx_i32;
                 if (should_dispatch) {
                     ci.hook_last_line = line;
-                    try dispatchLineHook(vm, line);
+                    try hook_state.dispatchLine(vm, line, executeSyncMM);
                 }
             } else if (ci.hook_last_pc < 0) {
                 // Stripped chunk: no lineinfo. Lua still triggers one line hook
@@ -2846,7 +2785,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 ci.hook_last_pc = @intCast(idx);
                 ci.hook_last_line = -1;
-                try dispatchLineHookNil(vm);
+                try hook_state.dispatchLineNil(vm, executeSyncMM);
             }
         }
     }
