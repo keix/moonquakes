@@ -1,3 +1,7 @@
+//! Lua VM Opcodes
+//!
+//! Defines the instruction set and encoded instruction format used by Moonquakes.
+
 const std = @import("std");
 
 pub const OpCode = enum(u7) {

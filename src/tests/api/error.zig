@@ -23,6 +23,24 @@ test "error pcall preserves success flag and all return values" {
     });
 }
 
+test "error pcall failure shape is false plus string error object" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local ok, err = pcall(function()
+        \\  error("x")
+        \\end)
+        \\return ok, type(err)
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        .{ .boolean = false },
+        TValue.fromString(try ctx.base.gc().allocString("string")),
+    });
+}
+
 test "error level zero returns raw message without source prefix" {
     var ctx = api.ApiContext{};
     try ctx.init();

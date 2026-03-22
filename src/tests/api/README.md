@@ -38,6 +38,8 @@ contract must be updated deliberately and explicitly.
 
 ## What "Frozen" Means
 
+The compatibility contract is considered frozen as of `v0.3`.
+
 For Moonquakes, "frozen" means:
 
 - behavior covered by this suite is treated as a compatibility boundary
@@ -48,8 +50,7 @@ For Moonquakes, "frozen" means:
 
 This is a behavior freeze, not an implementation freeze.
 
-The VM may change substantially as long as the contracts asserted here still
-hold.
+The VM may change substantially as long as the contracts asserted here still hold.
 
 ## What These Tests Must Assert
 
@@ -64,16 +65,14 @@ Preferred assertions:
 - stable message fragments when wording matters semantically
 
 Tests in this directory should usually compile and execute small Lua chunks
-through the normal runtime path instead of calling internal Zig helpers
-directly.
+through the normal runtime path instead of calling internal Zig helpers directly.
 
 That requirement is intentional. These tests are supposed to validate the
 runtime as users experience it, not as internal helpers are currently arranged.
 
 ## What These Tests Should Avoid Freezing
 
-This suite should avoid locking down details that do not represent a deliberate
-user-facing contract.
+This suite should avoid locking down details that do not represent a deliberate user-facing contract.
 
 Unless explicitly intended, do not freeze:
 
@@ -124,8 +123,7 @@ Taken together, these tests define the current frozen behavior for:
 
 This suite does not yet claim that every Lua 5.4 edge case is frozen.
 
-The following remain partially covered or intentionally outside the current
-freeze boundary:
+The following remain partially covered or intentionally outside the current freeze boundary:
 
 - weak table semantics
 - full `package` compatibility beyond currently tested behavior
@@ -138,9 +136,9 @@ These areas may still evolve before they are explicitly frozen.
 
 The most obvious currently under-specified surfaces are:
 
-- advanced `package` details such as `searchpath`, `loadlib`, and remaining path semantics
-- advanced `debug` behavior around locals, userdata, and interactive helpers
-- advanced `string` behavior such as formatting, iterators, and binary pack/unpack helpers
+- remaining `package` details beyond the currently covered `require`, `searchpath`, and `loadlib` contracts
+- remaining `debug` behavior beyond the currently covered hook, local, upvalue, metatable, traceback, and userdata contracts
+- remaining `string` behavior beyond the currently covered formatting, iterators, dump, and binary pack/unpack contracts
 - host-sensitive `io` and `os` details that need careful black-box coverage
 
 When these areas are expanded, they should be added to the existing library
@@ -177,12 +175,9 @@ When changing builtin behavior or VM/runtime semantics:
 1. Update or add an API test if the behavior is user-visible.
 2. Treat failures in this directory as compatibility regressions by default.
 3. Do not weaken assertions just to make an optimization pass.
-4. If a contract must change intentionally, update this README or the relevant
-   strategy document to make the change explicit.
+4. If a contract must change intentionally, update this README or the relevant strategy document to make the change explicit.
 
-If a future optimization breaks `src/tests/api`, that is a signal that the
-optimization needs to be corrected or the contract needs an intentional
-compatibility decision.
+If a future optimization breaks `src/tests/api`, that is a signal that the optimization needs to be corrected or the contract needs an intentional compatibility decision.
 
 ## Style Guidance For New API Tests
 
@@ -200,5 +195,4 @@ Test names should read like guarantees, for example:
 - `numeric rawlen bypasses __len and rawequal ignores metamethods`
 - `error xpcall reports handler failures with canonical message`
 
-That naming style is deliberate. These tests are meant to describe the frozen
-surface, not just the implementation being exercised today.
+That naming style is deliberate. These tests are meant to describe the frozen surface, not just the implementation being exercised today.

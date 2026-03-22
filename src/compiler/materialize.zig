@@ -1,3 +1,7 @@
+//! Proto Materialization
+//!
+//! Converts RawProto compiler output into GC-managed ProtoObject graphs.
+
 const std = @import("std");
 const proto = @import("proto.zig");
 const RawProto = proto.RawProto;

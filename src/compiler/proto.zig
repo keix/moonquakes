@@ -1,3 +1,7 @@
+//! Compiler Proto Types
+//!
+//! Shared compiler-side proto structures used before GC materialization.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("opcodes.zig").Instruction;

@@ -51,6 +51,8 @@ run: $(TARGET)
 	LD_LIBRARY_PATH=$(ZIG_LIBDIR) ./$(TARGET)
 
 test: zig-libs
+	zig build test --summary all
+
 	@C_RESET=$$(printf '\033[0m'); \
 	C_CYAN=$$(printf '\033[36m'); \
 	C_GREEN=$$(printf '\033[32m'); \

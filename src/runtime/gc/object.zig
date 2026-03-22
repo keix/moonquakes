@@ -19,6 +19,8 @@
 
 const std = @import("std");
 const proto_mod = @import("../../compiler/proto.zig");
+const NativeFn = @import("../native.zig").NativeFn;
+const TValue = @import("../value.zig").TValue;
 pub const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 pub const Upvaldesc = proto_mod.Upvaldesc;
 
@@ -145,8 +147,6 @@ pub const StringObject = struct {
 /// Keys can be: strings, numbers, booleans, tables, functions, userdata.
 /// nil cannot be a key (Lua semantics).
 pub const TableObject = struct {
-    const TValue = @import("../value.zig").TValue;
-
     /// Custom hash context for TValue keys
     /// Supports all Lua key types: strings, numbers, booleans, objects
     pub const TValueKeyContext = struct {
@@ -531,8 +531,6 @@ pub const ClosureObject = struct {
 /// Wraps a native function pointer. Reachable while referenced from
 /// globals/registry or other GC-managed objects, and collected when unreachable.
 pub const NativeClosureObject = struct {
-    const NativeFn = @import("../native.zig").NativeFn;
-
     header: GCObject,
     func: NativeFn,
 
@@ -548,8 +546,6 @@ pub const NativeClosureObject = struct {
 /// - "Open" upvalue: location points to a stack slot (variable still on stack)
 /// - "Closed" upvalue: location points to self.closed (stack frame popped)
 pub const UpvalueObject = struct {
-    const TValue = @import("../value.zig").TValue;
-
     header: GCObject,
     /// Pointer to the value (stack slot when open, &closed when closed)
     location: *TValue,
@@ -591,8 +587,6 @@ pub const UpvalueObject = struct {
 /// Lua semantics: Proto contains TValues (constants) and nested ProtoObjects,
 /// forming a tree structure that must be traced by GC.
 pub const ProtoObject = struct {
-    const TValue = @import("../value.zig").TValue;
-
     header: GCObject,
     /// Constants table (may contain GC objects like strings)
     k: []const TValue,
@@ -635,8 +629,6 @@ pub const ProtoObject = struct {
 ///
 /// Memory layout: [UserdataObject header][nuvalue * TValue][size bytes]
 pub const UserdataObject = struct {
-    const TValue = @import("../value.zig").TValue;
-
     header: GCObject,
     /// Size of the raw data block in bytes
     size: usize,

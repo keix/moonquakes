@@ -1,3 +1,7 @@
+//! Lua Lexer
+//!
+//! Tokenizes Lua source into the token stream consumed by the parser.
+
 const std = @import("std");
 
 pub const TokenKind = enum {

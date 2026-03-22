@@ -82,6 +82,11 @@ src/tests/api/
   os.zig
   utf8.zig
   modules.zig
+  metatable.zig
+  numeric.zig
+  iteration.zig
+  error.zig
+  gc.zig
 ```
 
 ### Utility Layer
@@ -155,6 +160,15 @@ Recommended implementation order:
 8. `utf8`
 9. `io`
 10. `os`
+
+Cross-cutting runtime surfaces should be added as separate files when they cut
+across multiple builtin libraries, for example:
+
+- `metatable`
+- `numeric`
+- `iteration`
+- `error`
+- `gc`
 
 Rationale:
 
@@ -242,7 +256,7 @@ The first milestone should be small and concrete:
 - add `global.zig`
 - wire it into `src/test.zig`
 
-`global.zig` should cover:
+The initial `global.zig` milestone should cover:
 
 - `assert`
 - `error`
@@ -256,7 +270,33 @@ The first milestone should be small and concrete:
 - `dofile`
 - `warn`
 
-This single module will establish the style for the rest of the API suite.
+That initial milestone establishes the style for the rest of the API suite.
+
+## Current Status
+
+The strategy above has now been implemented substantially beyond the initial
+milestone.
+
+`src/tests/api` currently includes:
+
+- `global`
+- `modules`
+- `debug`
+- `coroutine`
+- `string`
+- `table`
+- `math`
+- `utf8`
+- `io`
+- `os`
+- `metatable`
+- `numeric`
+- `iteration`
+- `error`
+- `gc`
+
+The suite now freezes a broad Lua-visible compatibility surface and acts as the
+main API boundary for the `v0.3.0` freeze effort.
 
 ## Success Criteria
 

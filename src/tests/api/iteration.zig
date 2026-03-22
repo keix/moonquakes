@@ -156,3 +156,27 @@ test "iteration next rejects invalid continuation keys" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "iteration next rejects non table first argument with Lua error shape" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local ok, err = pcall(function()
+        \\  return next(nil)
+        \\end)
+        \\return ok, type(err), err
+    );
+
+    switch (result) {
+        .multiple => |values| {
+            try testing.expectEqual(@as(usize, 3), values.len);
+            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[1].eql(TValue.fromString(try ctx.base.gc().allocString("string"))));
+            const err = values[2].asString() orelse return error.TestUnexpectedResult;
+            try api.expectStringContains(err.asSlice(), "table expected");
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
