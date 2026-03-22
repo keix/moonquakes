@@ -1756,42 +1756,6 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     };
 }
 
-fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.hooks.in_hook) return;
-    if ((vm.hooks.mask & 0x02) == 0) return;
-    const hook = vm.hooks.func orelse return;
-    if (name_override == null) {
-        if (vm.ci) |ci| {
-            if (ci.closure == null) return;
-        }
-    }
-
-    const event_name = try vm.gc().allocString("return");
-    const effective_name: ?[]const u8 = if (name_override) |n|
-        n
-    else if (vm.errors.close_metamethod_depth > 0)
-        "close"
-    else
-        null;
-    const saved_name_override = vm.hooks.name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.last_line = -1;
-    vm.hooks.name_override = effective_name;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.name_override = saved_name_override;
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-pub fn dispatchReturnHookOnYield(vm: *VM) !void {
-    try dispatchReturnHook(vm, null);
-}
-
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
 pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) anyerror!void {
@@ -1904,7 +1868,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                     },
                     else => return err,
                 };
-                try dispatchReturnHook(vm, "close");
+                try hook_state.dispatchReturn(vm, "close", null, executeSyncMM);
             } else {
                 current_err = setCloseCallError(vm, mm);
                 had_error = true;
@@ -3715,7 +3679,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     vm.top = frame_max;
-                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     return .Continue;
                 }
             }
@@ -3882,7 +3846,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                             },
                         }
-                        try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                        try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     }
                     return .LoopContinue;
                 }
@@ -4262,7 +4226,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                         },
                     }
-                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
@@ -4337,7 +4301,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (hook_state.hasReturnListener(vm)) {
                     const transfer_src = returning_ci.base + a;
                     hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                    try dispatchReturnHook(vm, null);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4433,7 +4397,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             if (hook_state.hasReturnListener(vm)) {
                 const transfer_src = vm.base + a;
                 hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                try dispatchReturnHook(vm, null);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
 
             if (ret_count == 0) {
@@ -4466,7 +4430,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 if (hook_state.hasReturnListener(vm)) {
                     hook_state.clearTransfer(vm);
-                    try dispatchReturnHook(vm, null);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4507,7 +4471,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             }
             if (hook_state.hasReturnListener(vm)) {
                 hook_state.clearTransfer(vm);
-                try dispatchReturnHook(vm, null);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
             return .{ .ReturnVM = .none };
         },
@@ -4534,7 +4498,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 if (hook_state.hasReturnListener(vm)) {
                     hook_state.setTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
-                    try dispatchReturnHook(vm, null);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4583,7 +4547,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             };
             if (hook_state.hasReturnListener(vm)) {
                 hook_state.setTransferFromStack(vm, a + 1, vm.base + a, 1);
-                try dispatchReturnHook(vm, null);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },

@@ -147,3 +147,34 @@ pub fn dispatchTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !v
 
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
+
+pub fn dispatchReturn(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x02) == 0) return;
+    const hook = vm.hooks.func orelse return;
+    if (name_override == null) {
+        if (vm.ci) |ci| {
+            if (ci.closure == null) return;
+        }
+    }
+
+    const event_name = try vm.gc().allocString("return");
+    const effective_name = if (name_override) |n| n else close_name_override;
+    const saved_name_override = vm.hooks.name_override;
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = effective_name;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
+pub fn dispatchReturnOnYield(vm: *VM, invoke: anytype) !void {
+    try dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, invoke);
+}

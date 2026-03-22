@@ -6,6 +6,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const VM = @import("../vm/vm.zig").VM;
+const hook_state = @import("../vm/hook.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
 
@@ -385,7 +386,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
 
             // Handle yield - coroutine suspended
             if (err == error.Yield) {
-                mnemonics.dispatchReturnHookOnYield(co_vm) catch {};
+                hook_state.dispatchReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
                 return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } };
             }
 
