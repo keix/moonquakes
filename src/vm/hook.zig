@@ -105,3 +105,45 @@ pub fn dispatchCount(vm: *VM, invoke: anytype) !void {
 
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
+
+pub fn dispatchCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x01) == 0) return;
+    const hook = vm.hooks.func orelse return;
+
+    const event_name = try vm.gc().allocString("call");
+    const saved_name_override = vm.hooks.name_override;
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = name_override;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}
+
+pub fn dispatchTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x01) == 0) return;
+    const hook = vm.hooks.func orelse return;
+
+    const event_name = try vm.gc().allocString("tail call");
+    const saved_name_override = vm.hooks.name_override;
+    const saved_top = vm.top;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = name_override;
+    vm.hooks.in_hook = true;
+    defer {
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
+        vm.top = saved_top;
+    }
+
+    _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
+}

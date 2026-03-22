@@ -1756,48 +1756,6 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     };
 }
 
-fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.hooks.in_hook) return;
-    if ((vm.hooks.mask & 0x01) == 0) return;
-    const hook = vm.hooks.func orelse return;
-
-    const event_name = try vm.gc().allocString("call");
-    const saved_name_override = vm.hooks.name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.last_line = -1;
-    vm.hooks.name_override = name_override;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.name_override = saved_name_override;
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.hooks.in_hook) return;
-    if ((vm.hooks.mask & 0x01) == 0) return;
-    const hook = vm.hooks.func orelse return;
-
-    const event_name = try vm.gc().allocString("tail call");
-    const saved_name_override = vm.hooks.name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.hooks.in_hook;
-    vm.hooks.last_line = -1;
-    vm.hooks.name_override = name_override;
-    vm.hooks.in_hook = true;
-    defer {
-        vm.hooks.name_override = saved_name_override;
-        vm.hooks.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
 fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x02) == 0) return;
@@ -3871,7 +3829,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     if (hook_state.hasCallListener(vm)) {
                         const call_transfer_count: u32 = nargs;
                         hook_state.setTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
-                        try dispatchCallHook(vm, null);
+                        try hook_state.dispatchCall(vm, null, executeSyncMM);
                     }
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
@@ -3957,7 +3915,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
                     if (hook_state.hasCallListener(vm)) {
                         hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                        try dispatchCallHook(vm, null);
+                        try hook_state.dispatchCall(vm, null, executeSyncMM);
                     }
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
@@ -4009,7 +3967,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
                 if (hook_state.hasCallListener(vm)) {
                     hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                    try dispatchCallHook(vm, null);
+                    try hook_state.dispatchCall(vm, null, executeSyncMM);
                 }
 
                 // Extend top to include vararg storage if needed
@@ -4196,7 +4154,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
                 hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                try dispatchTailCallHook(vm, null);
+                try hook_state.dispatchTailCall(vm, null, executeSyncMM);
 
                 return .LoopContinue;
             }
