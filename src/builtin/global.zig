@@ -4,6 +4,7 @@ const VM = @import("../vm/vm.zig").VM;
 const Upvaldesc = @import("../compiler/proto.zig").Upvaldesc;
 const string = @import("string.zig");
 const call = @import("../vm/call.zig");
+const error_state = @import("../vm/error_state.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const metamethod = @import("../vm/metamethod.zig");
 
@@ -329,7 +330,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
             // Always clear error value after handling
-            vm.errors.lua_error_value = .nil;
+            error_state.clearRaisedValue(vm);
             vm.traceback.snapshot_count = 0;
             vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 2;
         },
@@ -389,12 +390,12 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             }
             // Get error value and call handler
             const error_value = vm.errors.lua_error_value;
-            vm.errors.lua_error_value = .nil;
+            error_state.clearRaisedValue(vm);
 
             // Call error handler with the error value
             var handler_args = [1]TValue{error_value};
-            vm.errors.error_handling_depth += 1;
-            defer vm.errors.error_handling_depth -= 1;
+            error_state.beginHandling(vm);
+            defer error_state.endHandling(vm);
             const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| switch (handler_err) {
                 error.LuaException => {
                     // Lua-compatible behavior: if message handler fails,
@@ -404,7 +405,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                         const err_str = try vm.gc().allocString("error in error handling");
                         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                     }
-                    vm.errors.lua_error_value = .nil;
+                    error_state.clearRaisedValue(vm);
                     return;
                 },
                 else => return handler_err, // OOM etc. propagate up
@@ -1193,7 +1194,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                             vm.stack[vm.base + func_reg + 1] = vm.errors.lua_error_value;
                         }
                     }
-                    vm.errors.lua_error_value = .nil;
+                    error_state.clearRaisedValue(vm);
                     return;
                 },
                 else => return err,

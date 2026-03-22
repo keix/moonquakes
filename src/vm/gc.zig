@@ -11,6 +11,7 @@ const FinalizerExecutor = gc_mod.FinalizerExecutor;
 const object = @import("../runtime/gc/object.zig");
 const call_debug = @import("call_debug.zig");
 const call = @import("call.zig");
+const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
 pub fn rootProvider(self: *VM) RootProvider {
@@ -139,7 +140,7 @@ fn vmReportFinalizerError(ctx: *anyopaque) void {
     stderr_file.writeAll("Lua warning: error in __gc metamethod (") catch return;
     writeFinalizerWarningValue(stderr_file, vm.errors.lua_error_value);
     stderr_file.writeAll(")\n") catch {};
-    vm.errors.lua_error_value = .nil;
+    error_state.clearRaisedValue(vm);
 }
 
 pub fn finalizerExecutor(self: *VM) FinalizerExecutor {

@@ -6,6 +6,7 @@ const NativeFn = @import("../runtime/native.zig").NativeFn;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const VM = @import("../vm/vm.zig").VM;
+const error_state = @import("../vm/error_state.zig");
 const hook_state = @import("../vm/hook.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
@@ -788,7 +789,7 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
     if (thread.status == .dead) {
         if (!co_vm.errors.lua_error_value.isNil()) {
             const err_val = co_vm.errors.lua_error_value;
-            co_vm.errors.lua_error_value = .nil;
+            error_state.clearRaisedValue(co_vm);
             setResult(vm, result_base, false, err_val, nresults);
             return;
         }
@@ -803,7 +804,7 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
                 error.LuaException => {
                     thread.status = .dead;
                     const err_val = co_vm.errors.lua_error_value;
-                    co_vm.errors.lua_error_value = .nil;
+                    error_state.clearRaisedValue(co_vm);
                     setResult(vm, result_base, false, err_val, nresults);
                     return;
                 },
