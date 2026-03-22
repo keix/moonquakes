@@ -26,6 +26,7 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const hook_state = @import("hook.zig");
 const vm_gc = @import("gc.zig");
 const interrupt = @import("../interrupt.zig");
 
@@ -1753,45 +1754,6 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
         .debug_sethook => "sethook",
         else => null,
     };
-}
-
-fn clearHookTransfer(vm: *VM) void {
-    if (vm.hooks.in_hook) return;
-    vm.hooks.transfer_start = 1;
-    vm.hooks.transfer_count = 0;
-    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
-}
-
-inline fn hasCallHookListener(vm: *const VM) bool {
-    return !vm.hooks.in_hook and (vm.hooks.mask & 0x01) != 0 and vm.hooks.func != null;
-}
-
-inline fn hasReturnHookListener(vm: *const VM) bool {
-    return !vm.hooks.in_hook and (vm.hooks.mask & 0x02) != 0 and vm.hooks.func != null;
-}
-
-fn setHookTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
-    if (vm.hooks.in_hook) return;
-    vm.hooks.transfer_start = start;
-    const cap: usize = vm.hooks.transfer_values.len;
-    const n: usize = @min(@as(usize, @intCast(count)), cap);
-    vm.hooks.transfer_count = @intCast(n);
-    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        vm.hooks.transfer_values[i] = vm.stack[src_base + @as(u32, @intCast(i))];
-    }
-}
-
-fn setHookTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
-    if (vm.hooks.in_hook) return;
-    vm.hooks.transfer_start = start;
-    const n: usize = @min(values.len, vm.hooks.transfer_values.len);
-    vm.hooks.transfer_count = @intCast(n);
-    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
-    for (values[0..n], 0..) |v, i| {
-        vm.hooks.transfer_values[i] = v;
-    }
 }
 
 fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
@@ -3967,9 +3929,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
-                    if (hasCallHookListener(vm)) {
+                    if (hook_state.hasCallListener(vm)) {
                         const call_transfer_count: u32 = nargs;
-                        setHookTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
+                        hook_state.setTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
                         try dispatchCallHook(vm, null);
                     }
                     try vm.callNative(nc.func.id, a, nargs, nresults);
@@ -3997,7 +3959,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    if (hasReturnHookListener(vm)) {
+                    if (hook_state.hasReturnListener(vm)) {
                         switch (nc.func.id) {
                             .select => {
                                 var idx_u: u32 = 1;
@@ -4010,17 +3972,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                                 const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                                 const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                                setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                                hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
                             },
                             .math_sin => {
                                 const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                                 const out = TValue{ .number = std.math.sin(arg) };
-                                setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                                hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
                             },
                             else => {
                                 const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
                                 const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                                setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                                hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                             },
                         }
                         try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
@@ -4054,8 +4016,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    if (hasCallHookListener(vm)) {
-                        setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                    if (hook_state.hasCallListener(vm)) {
+                        hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
                         try dispatchCallHook(vm, null);
                     }
                     vm.top = new_base + func_proto.maxstacksize;
@@ -4106,8 +4068,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                if (hasCallHookListener(vm)) {
-                    setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                if (hook_state.hasCallListener(vm)) {
+                    hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
                     try dispatchCallHook(vm, null);
                 }
 
@@ -4294,7 +4256,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
                 try dispatchTailCallHook(vm, null);
 
                 return .LoopContinue;
@@ -4390,17 +4352,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                             const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                             const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                            hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
                         },
                         .math_sin => {
                             const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                             const out = TValue{ .number = std.math.sin(arg) };
-                            setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                            hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
                         },
                         else => {
                             const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
                             const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                            hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                         },
                     }
                     try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
@@ -4475,9 +4437,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                if (hasReturnHookListener(vm)) {
+                if (hook_state.hasReturnListener(vm)) {
                     const transfer_src = returning_ci.base + a;
-                    setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                    hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
                     try dispatchReturnHook(vm, null);
                 }
                 popCallInfo(vm);
@@ -4571,9 +4533,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            if (hasReturnHookListener(vm)) {
+            if (hook_state.hasReturnListener(vm)) {
                 const transfer_src = vm.base + a;
-                setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
                 try dispatchReturnHook(vm, null);
             }
 
@@ -4605,8 +4567,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hasReturnHookListener(vm)) {
-                    clearHookTransfer(vm);
+                if (hook_state.hasReturnListener(vm)) {
+                    hook_state.clearTransfer(vm);
                     try dispatchReturnHook(vm, null);
                 }
                 popCallInfo(vm);
@@ -4646,8 +4608,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            if (hasReturnHookListener(vm)) {
-                clearHookTransfer(vm);
+            if (hook_state.hasReturnListener(vm)) {
+                hook_state.clearTransfer(vm);
                 try dispatchReturnHook(vm, null);
             }
             return .{ .ReturnVM = .none };
@@ -4673,8 +4635,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hasReturnHookListener(vm)) {
-                    setHookTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
+                if (hook_state.hasReturnListener(vm)) {
+                    hook_state.setTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
                     try dispatchReturnHook(vm, null);
                 }
                 popCallInfo(vm);
@@ -4722,8 +4684,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            if (hasReturnHookListener(vm)) {
-                setHookTransferFromStack(vm, a + 1, vm.base + a, 1);
+            if (hook_state.hasReturnListener(vm)) {
+                hook_state.setTransferFromStack(vm, a + 1, vm.base + a, 1);
                 try dispatchReturnHook(vm, null);
             }
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
