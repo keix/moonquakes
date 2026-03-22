@@ -266,54 +266,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
 
 /// Set up coroutine for resume after yield (pass values to yield return)
 fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
-    if (yield_state.clearTailcallResume(co_vm)) {
-        const ci = co_vm.ci orelse return;
-        const dst_base = ci.ret_base;
-        const nresults = ci.nresults;
-
-        if (ci.previous != null) {
-            if (nresults < 0) {
-                var i: u32 = 0;
-                while (i < num_args) : (i += 1) {
-                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
-                }
-            } else {
-                const expected: u32 = @intCast(nresults);
-                const copy_count = @min(num_args, expected);
-                var i: u32 = 0;
-                while (i < copy_count) : (i += 1) {
-                    co_vm.stack[dst_base + i] = caller_stack[arg_base + i];
-                }
-                while (i < expected) : (i += 1) {
-                    co_vm.stack[dst_base + i] = .nil;
-                }
-            }
-            mnemonics.popCallInfo(co_vm);
-            const caller_frame_max = co_vm.base + co_vm.ci.?.func.maxstacksize;
-            co_vm.top = if (nresults < 0) dst_base + num_args else caller_frame_max;
-            return;
-        }
-    }
-
-    const ret_base = co_vm.yield.ret_base;
-    const nres = co_vm.yield.nresults;
-
-    if (nres < 0) {
-        var i: u32 = 0;
-        while (i < num_args) : (i += 1) {
-            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
-        }
-        co_vm.top = ret_base + num_args;
-    } else {
-        const max_copy = @as(u32, @intCast(nres));
-        var i: u32 = 0;
-        while (i < num_args and i < max_copy) : (i += 1) {
-            co_vm.stack[ret_base + i] = caller_stack[arg_base + i];
-        }
-        while (i < max_copy) : (i += 1) {
-            co_vm.stack[ret_base + i] = .nil;
-        }
-    }
+    yield_state.resumeWithValues(co_vm, caller_stack, arg_base, num_args, mnemonics.popCallInfo);
 }
 
 /// Execute coroutine until completion or yield
