@@ -386,7 +386,7 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
 
             // Handle yield - coroutine suspended
             if (err == error.Yield) {
-                hook_state.dispatchReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
+                hook_state.onReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
                 return .{ .yielded = .{ .base = co_vm.yield.base, .count = co_vm.yield.count } };
             }
 

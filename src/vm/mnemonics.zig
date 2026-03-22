@@ -1868,7 +1868,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                     },
                     else => return err,
                 };
-                try hook_state.dispatchReturn(vm, "close", null, executeSyncMM);
+                try hook_state.onReturn(vm, "close", null, executeSyncMM);
             } else {
                 current_err = setCloseCallError(vm, mm);
                 had_error = true;
@@ -2613,7 +2613,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         vm.hooks.countdown -|= 1;
         if (vm.hooks.countdown == 0) {
             vm.hooks.countdown = vm.hooks.count * 2;
-            try hook_state.dispatchCount(vm, executeSyncMM);
+            try hook_state.onCount(vm, executeSyncMM);
         }
     }
     if ((vm.hooks.mask & 0x04) != 0 and !vm.hooks.in_hook and ci.closure != null) {
@@ -2692,7 +2692,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 ci.hook_last_pc = idx_i32;
                 if (should_dispatch) {
                     ci.hook_last_line = line;
-                    try hook_state.dispatchLine(vm, line, executeSyncMM);
+                    try hook_state.onLine(vm, line, executeSyncMM);
                 }
             } else if (ci.hook_last_pc < 0) {
                 // Stripped chunk: no lineinfo. Lua still triggers one line hook
@@ -2707,7 +2707,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 ci.hook_last_pc = @intCast(idx);
                 ci.hook_last_line = -1;
-                try hook_state.dispatchLineNil(vm, executeSyncMM);
+                try hook_state.onLineNil(vm, executeSyncMM);
             }
         }
     }
@@ -3679,7 +3679,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     vm.top = frame_max;
-                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
+                    try hook_state.onReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     return .Continue;
                 }
             }
@@ -3790,11 +3790,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
-                    if (hook_state.hasCallListener(vm)) {
-                        const call_transfer_count: u32 = nargs;
-                        hook_state.setTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
-                        try hook_state.dispatchCall(vm, null, executeSyncMM);
-                    }
+                    try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
                     // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
@@ -3820,33 +3816,29 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    if (hook_state.hasReturnListener(vm)) {
-                        switch (nc.func.id) {
-                            .select => {
-                                var idx_u: u32 = 1;
-                                if (native_call_arg_count > 0) {
-                                    const idx_val = native_call_args[0].toInteger() orelse 1;
-                                    if (idx_val >= 1) idx_u = @intCast(idx_val);
-                                }
-                                const arg_count: u32 = @intCast(native_call_arg_count);
-                                const native_transfer_start: u32 = idx_u + 1;
-                                const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                                const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                                const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                                hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
-                            },
-                            .math_sin => {
-                                const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                                const out = TValue{ .number = std.math.sin(arg) };
-                                hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
-                            },
-                            else => {
-                                const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
-                                const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                                hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
-                            },
-                        }
-                        try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
+                    switch (nc.func.id) {
+                        .select => {
+                            var idx_u: u32 = 1;
+                            if (native_call_arg_count > 0) {
+                                const idx_val = native_call_args[0].toInteger() orelse 1;
+                                if (idx_val >= 1) idx_u = @intCast(idx_val);
+                            }
+                            const arg_count: u32 = @intCast(native_call_arg_count);
+                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
+                        },
+                        .math_sin => {
+                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                            const out = TValue{ .number = std.math.sin(arg) };
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
+                        },
+                        else => {
+                            const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
+                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
+                        },
                     }
                     return .LoopContinue;
                 }
@@ -3877,10 +3869,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    if (hook_state.hasCallListener(vm)) {
-                        hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                        try hook_state.dispatchCall(vm, null, executeSyncMM);
-                    }
+                    try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
                 }
@@ -3929,10 +3918,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                if (hook_state.hasCallListener(vm)) {
-                    hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                    try hook_state.dispatchCall(vm, null, executeSyncMM);
-                }
+                try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
 
                 // Extend top to include vararg storage if needed
                 const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -4117,8 +4103,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                try hook_state.dispatchTailCall(vm, null, executeSyncMM);
+                try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
 
                 return .LoopContinue;
             }
@@ -4209,24 +4194,22 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 if (idx_val >= 1) idx_u = @intCast(idx_val);
                             }
                             const arg_count: u32 = @intCast(native_call_arg_count);
-                            const native_transfer_start: u32 = idx_u + 1;
                             const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                             const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                             const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
                         },
                         .math_sin => {
                             const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                             const out = TValue{ .number = std.math.sin(arg) };
-                            hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
+                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
                         },
                         else => {
                             const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
                             const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
                         },
                     }
-                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
@@ -4298,11 +4281,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                if (hook_state.hasReturnListener(vm)) {
-                    const transfer_src = returning_ci.base + a;
-                    hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4394,11 +4373,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            if (hook_state.hasReturnListener(vm)) {
-                const transfer_src = vm.base + a;
-                hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -4428,10 +4403,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hook_state.hasReturnListener(vm)) {
-                    hook_state.clearTransfer(vm);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4469,10 +4441,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            if (hook_state.hasReturnListener(vm)) {
-                hook_state.clearTransfer(vm);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -4496,10 +4465,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hook_state.hasReturnListener(vm)) {
-                    hook_state.setTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
-                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-                }
+                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4545,10 +4511,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            if (hook_state.hasReturnListener(vm)) {
-                hook_state.setTransferFromStack(vm, a + 1, vm.base + a, 1);
-                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
-            }
+            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.

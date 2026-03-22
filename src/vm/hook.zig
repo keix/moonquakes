@@ -23,22 +23,22 @@ pub const HookState = struct {
     last_line: i64 = -1,
 };
 
-pub fn clearTransfer(vm: *VM) void {
+fn clearTransfer(vm: *VM) void {
     if (vm.hooks.in_hook) return;
     vm.hooks.transfer_start = 1;
     vm.hooks.transfer_count = 0;
     for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
 }
 
-pub inline fn hasCallListener(vm: *const VM) bool {
+fn hasCallListener(vm: *const VM) bool {
     return !vm.hooks.in_hook and (vm.hooks.mask & 0x01) != 0 and vm.hooks.func != null;
 }
 
-pub inline fn hasReturnListener(vm: *const VM) bool {
+fn hasReturnListener(vm: *const VM) bool {
     return !vm.hooks.in_hook and (vm.hooks.mask & 0x02) != 0 and vm.hooks.func != null;
 }
 
-pub fn setTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
+fn setTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
     if (vm.hooks.in_hook) return;
     vm.hooks.transfer_start = start;
     const cap: usize = vm.hooks.transfer_values.len;
@@ -51,7 +51,7 @@ pub fn setTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void
     }
 }
 
-pub fn setTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
+fn setTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
     if (vm.hooks.in_hook) return;
     vm.hooks.transfer_start = start;
     const n: usize = @min(values.len, vm.hooks.transfer_values.len);
@@ -62,7 +62,7 @@ pub fn setTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
     }
 }
 
-pub fn dispatchLine(vm: *VM, line: i64, invoke: anytype) !void {
+pub fn onLine(vm: *VM, line: i64, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x04) == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -84,7 +84,7 @@ pub fn dispatchLine(vm: *VM, line: i64, invoke: anytype) !void {
     });
 }
 
-pub fn dispatchLineNil(vm: *VM, invoke: anytype) !void {
+pub fn onLineNil(vm: *VM, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x04) == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -105,7 +105,7 @@ pub fn dispatchLineNil(vm: *VM, invoke: anytype) !void {
     });
 }
 
-pub fn dispatchCount(vm: *VM, invoke: anytype) !void {
+pub fn onCount(vm: *VM, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if (vm.hooks.count == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -122,7 +122,7 @@ pub fn dispatchCount(vm: *VM, invoke: anytype) !void {
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn dispatchCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
+pub fn onCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x01) == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -143,7 +143,13 @@ pub fn dispatchCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void 
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn dispatchTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
+pub fn onCallFromStack(vm: *VM, name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+    if (!hasCallListener(vm)) return;
+    setTransferFromStack(vm, start, src_base, count);
+    try onCall(vm, name_override, invoke);
+}
+
+pub fn onTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x01) == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -164,7 +170,13 @@ pub fn dispatchTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !v
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn dispatchReturn(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, invoke: anytype) !void {
+pub fn onTailCallFromStack(vm: *VM, name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+    if (!hasCallListener(vm)) return;
+    setTransferFromStack(vm, start, src_base, count);
+    try onTailCall(vm, name_override, invoke);
+}
+
+pub fn onReturn(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, invoke: anytype) !void {
     if (vm.hooks.in_hook) return;
     if ((vm.hooks.mask & 0x02) == 0) return;
     const hook = vm.hooks.func orelse return;
@@ -191,6 +203,24 @@ pub fn dispatchReturn(vm: *VM, name_override: ?[]const u8, close_name_override: 
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn dispatchReturnOnYield(vm: *VM, invoke: anytype) !void {
-    try dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, invoke);
+pub fn onReturnOnYield(vm: *VM, invoke: anytype) !void {
+    try onReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, invoke);
+}
+
+pub fn onReturnFromStack(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+    if (!hasReturnListener(vm)) return;
+    setTransferFromStack(vm, start, src_base, count);
+    try onReturn(vm, name_override, close_name_override, invoke);
+}
+
+pub fn onReturnFromValues(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, start: u32, values: []const TValue, invoke: anytype) !void {
+    if (!hasReturnListener(vm)) return;
+    setTransferFromValues(vm, start, values);
+    try onReturn(vm, name_override, close_name_override, invoke);
+}
+
+pub fn onReturnCleared(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, invoke: anytype) !void {
+    if (!hasReturnListener(vm)) return;
+    clearTransfer(vm);
+    try onReturn(vm, name_override, close_name_override, invoke);
 }
