@@ -3,6 +3,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const error_state = @import("../vm/error_state.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
@@ -904,7 +905,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const force_c_what = level_arg != null and
         level_arg.? == 2 and
         vm.errors.error_handling_depth > 0 and
-        vm.errors.close_metamethod_depth > 0;
+        error_state.isClosingMetamethod(vm);
 
     // Create result table
     const result_table = try vm.gc().allocTable();

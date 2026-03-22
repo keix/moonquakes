@@ -325,7 +325,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults == 0 or nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = vm.errors.lua_error_value;
+                vm.stack[vm.base + func_reg + 1] = error_state.getRaisedValue(vm);
                 var i: u32 = 2;
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
@@ -389,8 +389,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 try setNotCallableErrorValue(vm, func_val);
             }
             // Get error value and call handler
-            const error_value = vm.errors.lua_error_value;
-            error_state.clearRaisedValue(vm);
+            const error_value = error_state.takeRaisedValue(vm);
 
             // Call error handler with the error value
             var handler_args = [1]TValue{error_value};
@@ -1187,11 +1186,11 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                 error.LuaException => {
                     vm.stack[vm.base + func_reg] = .nil;
                     if (nresults > 1) {
-                        if (vm.errors.lua_error_value.isNil()) {
+                        if (error_state.getRaisedValue(vm).isNil()) {
                             const err_fallback = try vm.gc().allocString("error");
                             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
                         } else {
-                            vm.stack[vm.base + func_reg + 1] = vm.errors.lua_error_value;
+                            vm.stack[vm.base + func_reg + 1] = error_state.getRaisedValue(vm);
                         }
                     }
                     error_state.clearRaisedValue(vm);

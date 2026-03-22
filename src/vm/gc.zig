@@ -89,7 +89,7 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     gc_ptr.markStack(vm.stack[0..stack_extent]);
     markCallFrames(vm, gc_ptr);
     markUpvalues(vm, gc_ptr);
-    gc_ptr.markValue(vm.errors.lua_error_value);
+    gc_ptr.markValue(error_state.getRaisedValue(vm));
     markTracebackSnapshot(vm, gc_ptr);
     if (vm.field_cache.last_field_key) |key| {
         gc_ptr.mark(&key.header);
@@ -138,7 +138,7 @@ fn vmReportFinalizerError(ctx: *anyopaque) void {
 
     const stderr_file = std.fs.File.stderr();
     stderr_file.writeAll("Lua warning: error in __gc metamethod (") catch return;
-    writeFinalizerWarningValue(stderr_file, vm.errors.lua_error_value);
+    writeFinalizerWarningValue(stderr_file, error_state.getRaisedValue(vm));
     stderr_file.writeAll(")\n") catch {};
     error_state.clearRaisedValue(vm);
 }

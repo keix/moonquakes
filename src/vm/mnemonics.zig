@@ -1625,7 +1625,7 @@ fn executeSyncMMWithDebug(
                 continue;
             }
             if (err == error.LuaException) {
-                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1686,7 +1686,7 @@ fn executeSyncMMWithDebug(
                     cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                     return err;
                 });
-                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1788,9 +1788,9 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
 
             if (mm.asClosure()) |closure| {
                 // executeSyncMM handles stack setup using vm.top
-                vm.errors.close_metamethod_depth +|= 1;
+                error_state.beginCloseMetamethod(vm);
                 defer {
-                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
+                    error_state.endCloseMetamethod(vm);
                 }
                 _ = executeSyncMM(vm, closure, &[_]TValue{ val, current_err }) catch |err| switch (err) {
                     error.LuaException => {
@@ -1823,9 +1823,9 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                 vm.stack[temp + 1] = val;
                 vm.stack[temp + 2] = current_err;
                 vm.top = temp + 3;
-                vm.errors.close_metamethod_depth +|= 1;
+                error_state.beginCloseMetamethod(vm);
                 defer {
-                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
+                    error_state.endCloseMetamethod(vm);
                 }
                 vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
                     error.LuaException => {
@@ -4167,7 +4167,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
+                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4259,7 +4259,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
+            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
 
             if (ret_count == 0) {
                 return .{ .ReturnVM = .none };
@@ -4289,7 +4289,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
+                try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4327,7 +4327,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            try hook_state.onReturnCleared(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
+            try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
             return .{ .ReturnVM = .none };
         },
         .RETURN1 => {
@@ -4351,7 +4351,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
+                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
                 popCallInfo(vm);
 
                 // Get caller's frame extent for vm.top restoration
@@ -4397,7 +4397,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            try hook_state.onReturnFromStack(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
+            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.

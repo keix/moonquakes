@@ -21,6 +21,16 @@ pub fn setRaisedValue(vm: *VM, value: TValue) void {
     vm.errors.lua_error_value = value;
 }
 
+pub fn getRaisedValue(vm: *const VM) TValue {
+    return vm.errors.lua_error_value;
+}
+
+pub fn takeRaisedValue(vm: *VM) TValue {
+    const value = vm.errors.lua_error_value;
+    clearRaisedValue(vm);
+    return value;
+}
+
 pub fn clearRaisedValue(vm: *VM) void {
     vm.errors.lua_error_value = .nil;
 }
@@ -49,4 +59,26 @@ pub fn setPendingUnwind(vm: *VM, ci: *CallInfo) void {
 pub fn clearPendingUnwind(vm: *VM) void {
     vm.errors.pending_error_unwind = false;
     vm.errors.pending_error_unwind_ci = null;
+}
+
+pub fn beginCloseMetamethod(vm: *VM) void {
+    vm.errors.close_metamethod_depth +|= 1;
+}
+
+pub fn endCloseMetamethod(vm: *VM) void {
+    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
+}
+
+pub fn isClosingMetamethod(vm: *const VM) bool {
+    return vm.errors.close_metamethod_depth > 0;
+}
+
+pub fn markErrorBuiltin(vm: *VM) void {
+    vm.errors.pending_error_from_error_builtin = true;
+}
+
+pub fn takeErrorBuiltinFlag(vm: *VM) bool {
+    const flag = vm.errors.pending_error_from_error_builtin;
+    vm.errors.pending_error_from_error_builtin = false;
+    return flag;
 }

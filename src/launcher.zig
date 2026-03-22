@@ -14,6 +14,7 @@ const TableObject = @import("runtime/gc/object.zig").TableObject;
 const TValue = @import("runtime/value.zig").TValue;
 const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
+const error_state = @import("vm/error_state.zig");
 const pipeline = @import("compiler/pipeline.zig");
 const serializer = @import("compiler/serializer.zig");
 const call = @import("vm/call.zig");
@@ -60,8 +61,8 @@ fn formatErrorValue(vm: *VM, value: TValue) ?[]const u8 {
 }
 
 fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
-    if (formatErrorValue(vm, vm.errors.lua_error_value)) |msg| {
-        if (vm.errors.lua_error_value.asString() != null) {
+    if (formatErrorValue(vm, error_state.getRaisedValue(vm))) |msg| {
+        if (error_state.getRaisedValue(vm).asString() != null) {
             std.debug.print("{s}\n", .{msg});
         } else {
             std.debug.print("{s}: {s}\n", .{ exec_name, msg });
@@ -69,7 +70,7 @@ fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
         return;
     }
 
-    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(vm.errors.lua_error_value) });
+    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(error_state.getRaisedValue(vm)) });
 }
 
 fn stripUtf8Bom(bytes: []const u8) []const u8 {
@@ -179,7 +180,7 @@ pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     _ = Mnemonics.execute(vm, proto) catch |err| {
         if (err == error.LuaException) {
-            if (vm.errors.lua_error_value.asString()) |err_str| {
+            if (error_state.getRaisedValue(vm).asString()) |err_str| {
                 std.debug.print("LUA_INIT:1: {s}\n", .{err_str.asSlice()});
             } else {
                 std.debug.print("LUA_INIT:1: (error object is not a string)\n", .{});

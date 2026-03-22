@@ -9,6 +9,7 @@ const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
+const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
 pub const TracebackState = struct {
@@ -98,8 +99,7 @@ pub fn captureSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
         }
     }
     vm.traceback.snapshot_count = @intCast(count);
-    vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
-    vm.errors.pending_error_from_error_builtin = false;
+    vm.traceback.snapshot_has_error_frame = error_state.takeErrorBuiltinFlag(vm);
 }
 
 pub fn lastSnapshotLine(vm: *const VM) ?u32 {
