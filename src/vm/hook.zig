@@ -5,7 +5,23 @@
 
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
+const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
 const VM = @import("vm.zig").VM;
+
+pub const HookState = struct {
+    func: ?*ClosureObject = null,
+    func_value: TValue = .nil,
+    mask: u8 = 0, // 1=call, 2=return, 4=line
+    count: u32 = 0,
+    countdown: u32 = 0,
+    in_hook: bool = false,
+    transfer_start: u32 = 1,
+    transfer_count: u32 = 0,
+    transfer_values: [64]TValue = [_]TValue{.nil} ** 64,
+    name_override: ?[]const u8 = null,
+    skip_next_line: bool = false,
+    last_line: i64 = -1,
+};
 
 pub fn clearTransfer(vm: *VM) void {
     if (vm.hooks.in_hook) return;

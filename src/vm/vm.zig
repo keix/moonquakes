@@ -33,7 +33,12 @@ const ThreadObject = object.ThreadObject;
 const Runtime = @import("../runtime/runtime.zig").Runtime;
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
+const call_debug_mod = @import("call_debug.zig");
+const field_cache_mod = @import("field_cache.zig");
+const hook_mod = @import("hook.zig");
 const metamethod = @import("metamethod.zig");
+const traceback_mod = @import("traceback.zig");
+const yield_mod = @import("yield.zig");
 
 // Implementation modules
 const api = @import("api.zig");
@@ -53,14 +58,6 @@ pub const LuaException = api.LuaException;
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
 
-    pub const YieldState = struct {
-        base: u32 = 0,
-        count: u32 = 0,
-        ret_base: u32 = 0,
-        nresults: i32 = 0, // -1 = variable results
-        from_tailcall: bool = false,
-    };
-
     pub const ErrorState = struct {
         lua_error_value: TValue = .nil,
         close_metamethod_depth: u8 = 0,
@@ -71,46 +68,13 @@ pub const VM = struct {
         native_call_depth: u16 = 0,
     };
 
-    pub const HookState = struct {
-        func: ?*ClosureObject = null,
-        func_value: TValue = .nil,
-        mask: u8 = 0, // 1=call, 2=return, 4=line
-        count: u32 = 0,
-        countdown: u32 = 0,
-        in_hook: bool = false,
-        transfer_start: u32 = 1,
-        transfer_count: u32 = 0,
-        transfer_values: [64]TValue = [_]TValue{.nil} ** 64,
-        name_override: ?[]const u8 = null,
-        skip_next_line: bool = false,
-        last_line: i64 = -1,
-    };
+    pub const YieldState = yield_mod.YieldState;
+    pub const HookState = hook_mod.HookState;
+    pub const TracebackState = traceback_mod.TracebackState;
+    pub const FieldCache = field_cache_mod.FieldCache;
+    pub const CallDebugState = call_debug_mod.CallDebugState;
 
-    pub const TracebackState = struct {
-        snapshot_lines: [256]u32 = [_]u32{0} ** 256,
-        snapshot_names: [256]TValue = [_]TValue{.nil} ** 256,
-        snapshot_closures: [256]?*ClosureObject = [_]?*ClosureObject{null} ** 256,
-        snapshot_sources: [256][]const u8 = [_][]const u8{""} ** 256,
-        snapshot_def_lines: [256]u32 = [_]u32{0} ** 256,
-        snapshot_count: u16 = 0,
-        snapshot_has_error_frame: bool = false,
-    };
-
-    pub const FieldCache = struct {
-        last_field_reg: ?u8 = null,
-        last_field_key: ?*object.StringObject = null,
-        last_field_is_global: bool = false,
-        last_field_is_method: bool = false,
-        last_field_tick: u64 = 0,
-        int_repr_field_key: ?*object.StringObject = null,
-        exec_tick: u64 = 0,
-    };
-
-    pub const CallDebugState = struct {
-        next_name: ?[]const u8 = null,
-        next_namewhat: ?[]const u8 = null,
-    };
-
+    // Core execution state
     stack: [STACK_CAPACITY]TValue,
     top: u32,
     base: u32,
@@ -120,6 +84,8 @@ pub const VM = struct {
     callstack: [200]CallInfo,
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
+
+    // Grouped auxiliary state
     yield: YieldState = .{},
     errors: ErrorState = .{},
     hooks: HookState = .{},
@@ -127,6 +93,7 @@ pub const VM = struct {
     field_cache: FieldCache = .{},
     call_debug: CallDebugState = .{},
 
+    // Shared runtime identity
     rt: *Runtime,
     thread: *ThreadObject,
 
