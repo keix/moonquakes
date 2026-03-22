@@ -432,7 +432,7 @@ fn runUntilReturn(
     // Execute until we return to saved depth
     var direct_result: ?TValue = null;
     while (vm.callstack_size > saved_depth) {
-        if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
+        if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
             if (try mnemonics.handleLuaException(vm)) {
                 if (vm.callstack_size <= saved_depth) return error.HandledException;
                 continue;
@@ -468,7 +468,7 @@ fn runUntilReturn(
             if (err == error.LuaException) {
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
-                    mnemonics.closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
+                    mnemonics.closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
                     vm.closeUpvalues(unwind_ci.base);
                     mnemonics.popCallInfo(vm);
                 }
@@ -497,7 +497,7 @@ fn runUntilReturn(
                 // Set error message and try to handle as LuaException
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => mnemonics.formatArithmeticError(vm, inst, &msg_buf),
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
@@ -517,7 +517,7 @@ fn runUntilReturn(
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = mnemonics.runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err; // OOM: can't convert, propagate original error
                 });
@@ -588,7 +588,7 @@ fn runUntilReturnInto(
     var direct_none = false;
 
     while (vm.callstack_size > saved_depth) {
-        if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
+        if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
             if (try mnemonics.handleLuaException(vm)) {
                 if (vm.callstack_size <= saved_depth) return error.HandledException;
                 continue;
@@ -615,7 +615,7 @@ fn runUntilReturnInto(
             if (err == error.LuaException) {
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
-                    mnemonics.closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
+                    mnemonics.closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
                     vm.closeUpvalues(unwind_ci.base);
                     mnemonics.popCallInfo(vm);
                 }
@@ -643,7 +643,7 @@ fn runUntilReturnInto(
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => mnemonics.formatArithmeticError(vm, inst, &msg_buf),
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
@@ -663,7 +663,7 @@ fn runUntilReturnInto(
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = mnemonics.runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupOnError(vm, saved_depth, saved_base, saved_top);
                     return err;
                 });

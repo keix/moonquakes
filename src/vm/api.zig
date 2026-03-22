@@ -73,7 +73,7 @@ pub const LuaException = error{LuaException};
 
 /// Raise with value. pcall/xpcall catches this.
 pub fn raise(self: *VM, value: TValue) LuaException {
-    self.lua_error_value = value;
+    self.errors.lua_error_value = value;
     return error.LuaException;
 }
 
@@ -97,9 +97,9 @@ pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults
             }
         }
     }
-    self.native_call_depth +|= 1;
+    self.errors.native_call_depth +|= 1;
     defer {
-        if (self.native_call_depth > 0) self.native_call_depth -= 1;
+        if (self.errors.native_call_depth > 0) self.errors.native_call_depth -= 1;
     }
     try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
 }

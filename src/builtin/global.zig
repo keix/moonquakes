@@ -269,7 +269,7 @@ fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
     var msg_buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value", .{ty}) catch "attempt to call a value";
     const msg_obj = try vm.gc().allocString(msg);
-    vm.lua_error_value = TValue.fromString(msg_obj);
+    vm.errors.lua_error_value = TValue.fromString(msg_obj);
 }
 
 /// pcall(f [, arg1, ...]) - Calls function f with given arguments in protected mode
@@ -324,13 +324,13 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             // Lua error: return (false, error_value)
             vm.stack[vm.base + func_reg] = .{ .boolean = false };
             if (nresults == 0 or nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                vm.stack[vm.base + func_reg + 1] = vm.errors.lua_error_value;
                 var i: u32 = 2;
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
             // Always clear error value after handling
-            vm.lua_error_value = .nil;
-            vm.traceback_snapshot_count = 0;
+            vm.errors.lua_error_value = .nil;
+            vm.traceback.snapshot_count = 0;
             vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 2;
         },
         else => return err, // OOM etc. propagate up
@@ -388,13 +388,13 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 try setNotCallableErrorValue(vm, func_val);
             }
             // Get error value and call handler
-            const error_value = vm.lua_error_value;
-            vm.lua_error_value = .nil;
+            const error_value = vm.errors.lua_error_value;
+            vm.errors.lua_error_value = .nil;
 
             // Call error handler with the error value
             var handler_args = [1]TValue{error_value};
-            vm.error_handling_depth += 1;
-            defer vm.error_handling_depth -= 1;
+            vm.errors.error_handling_depth += 1;
+            defer vm.errors.error_handling_depth -= 1;
             const handler_result = call.callValue(vm, handler_val, &handler_args) catch |handler_err| switch (handler_err) {
                 error.LuaException => {
                     // Lua-compatible behavior: if message handler fails,
@@ -404,7 +404,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                         const err_str = try vm.gc().allocString("error in error handling");
                         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                     }
-                    vm.lua_error_value = .nil;
+                    vm.errors.lua_error_value = .nil;
                     return;
                 },
                 else => return handler_err, // OOM etc. propagate up
@@ -417,7 +417,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 var i: u32 = 2;
                 while (i < nresults) : (i += 1) vm.stack[vm.base + func_reg + i] = .nil;
             }
-            vm.traceback_snapshot_count = 0;
+            vm.traceback.snapshot_count = 0;
             vm.top = if (nresults > 0) vm.base + func_reg + nresults else vm.base + func_reg + 2;
         },
         else => return err, // OOM etc. propagate up
@@ -1186,14 +1186,14 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
                 error.LuaException => {
                     vm.stack[vm.base + func_reg] = .nil;
                     if (nresults > 1) {
-                        if (vm.lua_error_value.isNil()) {
+                        if (vm.errors.lua_error_value.isNil()) {
                             const err_fallback = try vm.gc().allocString("error");
                             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_fallback);
                         } else {
-                            vm.stack[vm.base + func_reg + 1] = vm.lua_error_value;
+                            vm.stack[vm.base + func_reg + 1] = vm.errors.lua_error_value;
                         }
                     }
-                    vm.lua_error_value = .nil;
+                    vm.errors.lua_error_value = .nil;
                     return;
                 },
                 else => return err,

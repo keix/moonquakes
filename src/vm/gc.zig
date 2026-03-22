@@ -56,8 +56,8 @@ fn markUpvalues(vm: *const VM, gc_ptr: *GC) void {
 }
 
 fn markHooks(vm: *const VM, gc_ptr: *GC) void {
-    gc_ptr.markValue(vm.hook_func_value);
-    if (vm.hook_func) |hook| {
+    gc_ptr.markValue(vm.hooks.func_value);
+    if (vm.hooks.func) |hook| {
         gc_ptr.mark(&hook.header);
     }
 }
@@ -69,10 +69,10 @@ fn markTempRoots(vm: *const VM, gc_ptr: *GC) void {
 }
 
 fn markTracebackSnapshot(vm: *const VM, gc_ptr: *GC) void {
-    const n: usize = @intCast(vm.traceback_snapshot_count);
-    for (vm.traceback_snapshot_names[0..n], 0..) |name, i| {
+    const n: usize = @intCast(vm.traceback.snapshot_count);
+    for (vm.traceback.snapshot_names[0..n], 0..) |name, i| {
         gc_ptr.markValue(name);
-        if (vm.traceback_snapshot_closures[i]) |closure| {
+        if (vm.traceback.snapshot_closures[i]) |closure| {
             gc_ptr.mark(&closure.header);
         }
     }
@@ -87,12 +87,12 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     gc_ptr.markStack(vm.stack[0..stack_extent]);
     markCallFrames(vm, gc_ptr);
     markUpvalues(vm, gc_ptr);
-    gc_ptr.markValue(vm.lua_error_value);
+    gc_ptr.markValue(vm.errors.lua_error_value);
     markTracebackSnapshot(vm, gc_ptr);
-    if (vm.last_field_key) |key| {
+    if (vm.field_cache.last_field_key) |key| {
         gc_ptr.mark(&key.header);
     }
-    if (vm.int_repr_field_key) |key| {
+    if (vm.field_cache.int_repr_field_key) |key| {
         gc_ptr.mark(&key.header);
     }
     markHooks(vm, gc_ptr);
@@ -101,11 +101,11 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
 
 fn vmCallValue(ctx: *anyopaque, func: *const TValue, args: []const TValue) anyerror!TValue {
     const vm: *VM = @ptrCast(@alignCast(ctx));
-    vm.next_call_debug_name = "__gc";
-    vm.next_call_debug_namewhat = "metamethod";
+    vm.call_debug.next_name = "__gc";
+    vm.call_debug.next_namewhat = "metamethod";
     defer {
-        vm.next_call_debug_name = null;
-        vm.next_call_debug_namewhat = null;
+        vm.call_debug.next_name = null;
+        vm.call_debug.next_namewhat = null;
     }
     return call.callValue(vm, func.*, args);
 }
@@ -138,9 +138,9 @@ fn vmReportFinalizerError(ctx: *anyopaque) void {
 
     const stderr_file = std.fs.File.stderr();
     stderr_file.writeAll("Lua warning: error in __gc metamethod (") catch return;
-    writeFinalizerWarningValue(stderr_file, vm.lua_error_value);
+    writeFinalizerWarningValue(stderr_file, vm.errors.lua_error_value);
     stderr_file.writeAll(")\n") catch {};
-    vm.lua_error_value = .nil;
+    vm.errors.lua_error_value = .nil;
 }
 
 pub fn finalizerExecutor(self: *VM) FinalizerExecutor {

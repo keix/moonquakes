@@ -33,7 +33,12 @@ const ThreadObject = object.ThreadObject;
 const Runtime = @import("../runtime/runtime.zig").Runtime;
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
+const call_debug_mod = @import("call_debug.zig");
+const field_cache_mod = @import("field_cache.zig");
+const hook_mod = @import("hook.zig");
 const metamethod = @import("metamethod.zig");
+const traceback_mod = @import("traceback.zig");
+const yield_mod = @import("yield.zig");
 
 // Implementation modules
 const api = @import("api.zig");
@@ -52,6 +57,24 @@ pub const LuaException = api.LuaException;
 /// VM knows Runtime; Runtime does not know VM.
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
+
+    pub const ErrorState = struct {
+        lua_error_value: TValue = .nil,
+        close_metamethod_depth: u8 = 0,
+        pending_error_unwind: bool = false,
+        pending_error_unwind_ci: ?*CallInfo = null,
+        error_handling_depth: u8 = 0,
+        pending_error_from_error_builtin: bool = false,
+        native_call_depth: u16 = 0,
+    };
+
+    pub const YieldState = yield_mod.YieldState;
+    pub const HookState = hook_mod.HookState;
+    pub const TracebackState = traceback_mod.TracebackState;
+    pub const FieldCache = field_cache_mod.FieldCache;
+    pub const CallDebugState = call_debug_mod.CallDebugState;
+
+    // Core execution state
     stack: [STACK_CAPACITY]TValue,
     top: u32,
     base: u32,
@@ -61,22 +84,16 @@ pub const VM = struct {
     callstack: [200]CallInfo,
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
-    lua_error_value: TValue = .nil,
-    last_field_reg: ?u8 = null,
-    last_field_key: ?*object.StringObject = null,
-    last_field_is_global: bool = false,
-    last_field_is_method: bool = false,
-    last_field_tick: u64 = 0,
-    int_repr_field_key: ?*object.StringObject = null,
-    exec_tick: u64 = 0,
 
-    // Yield state
-    yield_base: u32 = 0,
-    yield_count: u32 = 0,
-    yield_ret_base: u32 = 0,
-    yield_nresults: i32 = 0, // -1 = variable results
-    yield_from_tailcall: bool = false,
+    // Grouped auxiliary state
+    yield: YieldState = .{},
+    errors: ErrorState = .{},
+    hooks: HookState = .{},
+    traceback: TracebackState = .{},
+    field_cache: FieldCache = .{},
+    call_debug: CallDebugState = .{},
 
+    // Shared runtime identity
     rt: *Runtime,
     thread: *ThreadObject,
 
@@ -84,34 +101,6 @@ pub const VM = struct {
     // remaining depth limits in deeply nested native/metamethod paths.
     temp_roots: [32]TValue = [_]TValue{.nil} ** 32,
     temp_roots_count: u8 = 0,
-
-    hook_func: ?*ClosureObject = null,
-    hook_func_value: TValue = .nil,
-    hook_mask: u8 = 0, // 1=call, 2=return, 4=line
-    hook_count: u32 = 0,
-    hook_countdown: u32 = 0,
-    in_hook: bool = false,
-    hook_transfer_start: u32 = 1,
-    hook_transfer_count: u32 = 0,
-    hook_transfer_values: [64]TValue = [_]TValue{.nil} ** 64,
-    hook_name_override: ?[]const u8 = null,
-    hook_skip_next_line: bool = false,
-    hook_last_line: i64 = -1,
-    close_metamethod_depth: u8 = 0,
-    pending_error_unwind: bool = false,
-    pending_error_unwind_ci: ?*CallInfo = null,
-    next_call_debug_name: ?[]const u8 = null,
-    next_call_debug_namewhat: ?[]const u8 = null,
-    error_handling_depth: u8 = 0,
-    traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
-    traceback_snapshot_names: [256]TValue = [_]TValue{.nil} ** 256,
-    traceback_snapshot_closures: [256]?*ClosureObject = [_]?*ClosureObject{null} ** 256,
-    traceback_snapshot_sources: [256][]const u8 = [_][]const u8{""} ** 256,
-    traceback_snapshot_def_lines: [256]u32 = [_]u32{0} ** 256,
-    traceback_snapshot_count: u16 = 0,
-    traceback_snapshot_has_error_frame: bool = false,
-    pending_error_from_error_builtin: bool = false,
-    native_call_depth: u16 = 0,
 
     // Lifecycle
     pub const init = lifecycle.init;

@@ -26,6 +26,7 @@ const call = @import("call.zig");
 // Import VM (one-way dependency: Mnemonics -> VM)
 const vm_mod = @import("vm.zig");
 const VM = vm_mod.VM;
+const hook_state = @import("hook.zig");
 const vm_gc = @import("gc.zig");
 const interrupt = @import("../interrupt.zig");
 
@@ -379,9 +380,9 @@ fn intFitsFloat(i: i64) bool {
 }
 
 fn maybeSetIntReprContext(vm: *VM, reg: u8) void {
-    if (vm.last_field_reg) |r| {
+    if (vm.field_cache.last_field_reg) |r| {
         if (r == reg) {
-            vm.int_repr_field_key = vm.last_field_key;
+            vm.field_cache.int_repr_field_key = vm.field_cache.last_field_key;
         }
     }
 }
@@ -978,11 +979,11 @@ pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8)
             }
         }
     }
-    if (vm.last_field_key) |key| {
-        const reg = vm.last_field_reg orelse 0;
+    if (vm.field_cache.last_field_key) |key| {
+        const reg = vm.field_cache.last_field_reg orelse 0;
         const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-        const kind = if (vm.last_field_is_global) "global" else "field";
-        vm.last_field_key = null;
+        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+        vm.field_cache.last_field_key = null;
         return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
     }
     return "attempt to index a non-table value";
@@ -1111,7 +1112,7 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
         }
     }
 
-    if (vm.last_field_key) |key| {
+    if (vm.field_cache.last_field_key) |key| {
         var suppress_field_hint = false;
         switch (inst.getOpCode()) {
             .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
@@ -1131,11 +1132,11 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8) []co
             else => {},
         }
         if (suppress_field_hint) {
-            vm.last_field_key = null;
+            vm.field_cache.last_field_key = null;
             return "attempt to perform arithmetic on a non-numeric value";
         }
-        const kind = if (vm.last_field_is_global) "global" else "field";
-        vm.last_field_key = null;
+        const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+        vm.field_cache.last_field_key = null;
         return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
     }
 
@@ -1182,8 +1183,8 @@ pub fn formatIntegerRepresentationError(vm: *VM, inst: Instruction, msg_buf: *[1
         }
     }
 
-    if (vm.int_repr_field_key) |key| {
-        vm.int_repr_field_key = null;
+    if (vm.field_cache.int_repr_field_key) |key| {
+        vm.field_cache.int_repr_field_key = null;
         return std.fmt.bufPrint(msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
     }
     return "number has no integer representation";
@@ -1277,11 +1278,11 @@ fn buildCallNotFunctionMessage(vm: *VM, ci: *const CallInfo, call_reg: u8, calle
     if (findUniqueLocalNameByValue(ci, vm, called)) |lname| {
         return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (local '{s}')", .{ ty, lname }) catch "attempt to call a non-function value";
     }
-    if (vm.last_field_key != null and vm.exec_tick - vm.last_field_tick <= 64) {
-        const key = vm.last_field_key.?;
+    if (vm.field_cache.last_field_key != null and vm.field_cache.exec_tick - vm.field_cache.last_field_tick <= 64) {
+        const key = vm.field_cache.last_field_key.?;
         const self_reg = vm.base + call_reg + 1;
         const has_self_table = self_reg < vm.stack.len and vm.stack[self_reg].asTable() != null;
-        if (vm.last_field_is_method or has_self_table) {
+        if (vm.field_cache.last_field_is_method or has_self_table) {
             return std.fmt.bufPrint(out_buf, "attempt to call a {s} value (method '{s}')", .{ ty, key.asSlice() }) catch "attempt to call a non-function value";
         }
     }
@@ -1507,22 +1508,22 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
         .nresults = nresults,
         .previous = vm.ci,
     };
-    if (vm.next_call_debug_name) |name| {
+    if (vm.call_debug.next_name) |name| {
         new_ci.debug_name = name;
-        new_ci.debug_namewhat = vm.next_call_debug_namewhat orelse "";
-        vm.next_call_debug_name = null;
-        vm.next_call_debug_namewhat = null;
+        new_ci.debug_namewhat = vm.call_debug.next_namewhat orelse "";
+        vm.call_debug.next_name = null;
+        vm.call_debug.next_namewhat = null;
     }
 
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
-    vm.last_field_reg = null;
-    vm.last_field_key = null;
-    vm.last_field_is_global = false;
-    vm.last_field_is_method = false;
-    vm.last_field_tick = 0;
-    vm.int_repr_field_key = null;
+    vm.field_cache.last_field_reg = null;
+    vm.field_cache.last_field_key = null;
+    vm.field_cache.last_field_is_global = false;
+    vm.field_cache.last_field_is_method = false;
+    vm.field_cache.last_field_tick = 0;
+    vm.field_cache.int_repr_field_key = null;
 
     return new_ci;
 }
@@ -1538,12 +1539,12 @@ pub fn popCallInfo(vm: *VM) void {
         } else {
             vm.ci = null;
         }
-        vm.last_field_reg = null;
-        vm.last_field_key = null;
-        vm.last_field_is_global = false;
-        vm.last_field_is_method = false;
-        vm.last_field_tick = 0;
-        vm.int_repr_field_key = null;
+        vm.field_cache.last_field_reg = null;
+        vm.field_cache.last_field_key = null;
+        vm.field_cache.last_field_is_global = false;
+        vm.field_cache.last_field_is_method = false;
+        vm.field_cache.last_field_tick = 0;
+        vm.field_cache.int_repr_field_key = null;
     }
 }
 
@@ -1642,7 +1643,7 @@ fn executeSyncMMWithDebug(
                 continue;
             }
             if (err == error.LuaException) {
-                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1651,7 +1652,7 @@ fn executeSyncMMWithDebug(
                 }
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
-                    closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
+                    closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
                     vm.closeUpvalues(unwind_ci.base);
                     popCallInfo(vm);
                 }
@@ -1679,7 +1680,7 @@ fn executeSyncMMWithDebug(
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => formatArithmeticError(vm, inst, &msg_buf),
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
@@ -1699,11 +1700,11 @@ fn executeSyncMMWithDebug(
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                     return err;
                 });
-                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1721,7 +1722,7 @@ fn executeSyncMMWithDebug(
                     "?";
                 var msg_buf: [128]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
                 cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                 return error.LuaException;
             }
@@ -1755,214 +1756,36 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     };
 }
 
-fn clearHookTransfer(vm: *VM) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = 1;
-    vm.hook_transfer_count = 0;
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
-}
-
-inline fn hasCallHookListener(vm: *const VM) bool {
-    return !vm.in_hook and (vm.hook_mask & 0x01) != 0 and vm.hook_func != null;
-}
-
-inline fn hasReturnHookListener(vm: *const VM) bool {
-    return !vm.in_hook and (vm.hook_mask & 0x02) != 0 and vm.hook_func != null;
-}
-
-fn setHookTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = start;
-    const cap: usize = vm.hook_transfer_values.len;
-    const n: usize = @min(@as(usize, @intCast(count)), cap);
-    vm.hook_transfer_count = @intCast(n);
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        vm.hook_transfer_values[i] = vm.stack[src_base + @as(u32, @intCast(i))];
-    }
-}
-
-fn setHookTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = start;
-    const n: usize = @min(values.len, vm.hook_transfer_values.len);
-    vm.hook_transfer_count = @intCast(n);
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
-    for (values[0..n], 0..) |v, i| {
-        vm.hook_transfer_values[i] = v;
-    }
-}
-
-fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x01) == 0) return;
-    const hook = vm.hook_func orelse return;
-
-    const event_name = try vm.gc().allocString("call");
-    const saved_name_override = vm.hook_name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = name_override;
-    vm.in_hook = true;
-    defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x01) == 0) return;
-    const hook = vm.hook_func orelse return;
-
-    const event_name = try vm.gc().allocString("tail call");
-    const saved_name_override = vm.hook_name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = name_override;
-    vm.in_hook = true;
-    defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-fn dispatchLineHook(vm: *VM, line: i64) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x04) == 0) return;
-    const hook = vm.hook_func orelse return;
-    if (line <= 0) return;
-    if (line > 0 and vm.hook_skip_next_line) {
-        return;
-    }
-    const event_name = try vm.gc().allocString("line");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
-    defer {
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{
-        TValue.fromString(event_name),
-        .{ .integer = line },
-    });
-}
-
-fn dispatchLineHookNil(vm: *VM) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x04) == 0) return;
-    const hook = vm.hook_func orelse return;
-
-    const event_name = try vm.gc().allocString("line");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
-    defer {
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    vm.hook_skip_next_line = true;
-    _ = try executeSyncMM(vm, hook, &[_]TValue{
-        TValue.fromString(event_name),
-        .nil,
-    });
-}
-
-fn dispatchCountHook(vm: *VM) !void {
-    if (vm.in_hook) return;
-    if (vm.hook_count == 0) return;
-    const hook = vm.hook_func orelse return;
-
-    const event_name = try vm.gc().allocString("count");
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
-    defer {
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x02) == 0) return;
-    const hook = vm.hook_func orelse return;
-    if (name_override == null) {
-        if (vm.ci) |ci| {
-            if (ci.closure == null) return;
-        }
-    }
-
-    const event_name = try vm.gc().allocString("return");
-    const effective_name: ?[]const u8 = if (name_override) |n|
-        n
-    else if (vm.close_metamethod_depth > 0)
-        "close"
-    else
-        null;
-    const saved_name_override = vm.hook_name_override;
-    const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = effective_name;
-    vm.in_hook = true;
-    defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
-        vm.top = saved_top;
-    }
-
-    _ = try executeSyncMM(vm, hook, &[_]TValue{TValue.fromString(event_name)});
-}
-
-pub fn dispatchReturnHookOnYield(vm: *VM) !void {
-    try dispatchReturnHook(vm, null);
-}
-
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
 pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) anyerror!void {
     const close_tag = "in metamethod 'close'";
     const annotateCloseError = struct {
         fn run(vm2: *VM, tag: []const u8) void {
-            const s = vm2.lua_error_value.asString() orelse return;
+            const s = vm2.errors.lua_error_value.asString() orelse return;
             if (std.mem.indexOf(u8, s.asSlice(), tag) != null) return;
             const merged = std.fmt.allocPrint(vm2.gc().allocator, "{s} {s}", .{ s.asSlice(), tag }) catch return;
             defer vm2.gc().allocator.free(merged);
             const merged_obj = vm2.gc().allocString(merged) catch return;
-            vm2.lua_error_value = TValue.fromString(merged_obj);
+            vm2.errors.lua_error_value = TValue.fromString(merged_obj);
         }
     }.run;
 
     var current_err = err_obj;
     var had_error = !current_err.isNil();
 
-    const saved_name_override = vm.hook_name_override;
-    if (!err_obj.isNil()) vm.hook_name_override = "pcall";
-    defer vm.hook_name_override = saved_name_override;
+    const saved_name_override = vm.hooks.name_override;
+    if (!err_obj.isNil()) vm.hooks.name_override = "pcall";
+    defer vm.hooks.name_override = saved_name_override;
 
     const setCloseCallError = struct {
         fn run(vm2: *VM, mm_val: TValue) TValue {
             var msg_buf: [128]u8 = undefined;
             const ty = callableValueTypeName(mm_val);
             const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value (metamethod 'close')", .{ty}) catch "attempt to call a value (metamethod 'close')";
-            const obj = vm2.gc().allocString(msg) catch return vm2.lua_error_value;
+            const obj = vm2.gc().allocString(msg) catch return vm2.errors.lua_error_value;
             const v = TValue.fromString(obj);
-            vm2.lua_error_value = v;
+            vm2.errors.lua_error_value = v;
             return v;
         }
     }.run;
@@ -1983,14 +1806,14 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
 
             if (mm.asClosure()) |closure| {
                 // executeSyncMM handles stack setup using vm.top
-                vm.close_metamethod_depth +|= 1;
+                vm.errors.close_metamethod_depth +|= 1;
                 defer {
-                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
                 }
                 _ = executeSyncMM(vm, closure, &[_]TValue{ val, current_err }) catch |err| switch (err) {
                     error.LuaException => {
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -1998,10 +1821,10 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                         continue;
                     },
                     error.CallStackOverflow => {
-                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
-                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
+                        const msg = if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.errors.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2018,14 +1841,14 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                 vm.stack[temp + 1] = val;
                 vm.stack[temp + 2] = current_err;
                 vm.top = temp + 3;
-                vm.close_metamethod_depth +|= 1;
+                vm.errors.close_metamethod_depth +|= 1;
                 defer {
-                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
                 }
                 vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
                     error.LuaException => {
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2033,10 +1856,10 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                         continue;
                     },
                     error.CallStackOverflow => {
-                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
-                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
+                        const msg = if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.errors.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2045,7 +1868,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                     },
                     else => return err,
                 };
-                try dispatchReturnHook(vm, "close");
+                try hook_state.dispatchReturn(vm, "close", null, executeSyncMM);
             } else {
                 current_err = setCloseCallError(vm, mm);
                 had_error = true;
@@ -2063,7 +1886,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
     }
 
     if (had_error) {
-        vm.lua_error_value = current_err;
+        vm.errors.lua_error_value = current_err;
         return error.LuaException;
     }
 }
@@ -2109,14 +1932,14 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 
 /// Handle a LuaException by unwinding to the nearest protected frame.
 /// Returns true if error was handled by a protected frame, false otherwise.
-/// The error value is taken from vm.lua_error_value (set by vm.raise()).
+/// The error value is taken from vm.errors.lua_error_value (set by vm.raise()).
 pub fn handleLuaException(vm: *VM) error{Yield}!bool {
-    vm.error_handling_depth +|= 1;
+    vm.errors.error_handling_depth +|= 1;
     defer {
-        if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+        if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
     }
-    vm.traceback_snapshot_count = 0;
-    vm.traceback_snapshot_has_error_frame = false;
+    vm.traceback.snapshot_count = 0;
+    vm.traceback.snapshot_has_error_frame = false;
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
@@ -2127,10 +1950,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             captureTracebackSnapshot(vm, target_ci);
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
-                closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch |cerr| switch (cerr) {
+                closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
                     error.Yield => {
-                        vm.pending_error_unwind = true;
-                        vm.pending_error_unwind_ci = unwind_ci;
+                        vm.errors.pending_error_unwind = true;
+                        vm.errors.pending_error_unwind_ci = unwind_ci;
                         return error.Yield;
                     },
                     else => {},
@@ -2139,7 +1962,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 popCallInfo(vm);
             }
 
-            var handled_error = vm.lua_error_value;
+            var handled_error = vm.errors.lua_error_value;
             const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil();
             // Defensive: avoid clobbering a previously captured non-nil error in the
             // same protected return slot when a reentrant handler path reports nil.
@@ -2149,19 +1972,19 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             if (already_handled) {
                 handled_error = vm.stack[ret_base + 1];
             } else if (!protected_error_handler.isNil()) {
-                vm.error_handling_depth +|= 1;
+                vm.errors.error_handling_depth +|= 1;
                 defer {
-                    if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+                    if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
                 }
                 if (protected_error_handler.asClosure()) |_| {
                     handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
                         error.Yield => return error.Yield,
                         error.LuaException => blk: {
-                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.errors.lua_error_value;
                             break :blk TValue.fromString(s);
                         },
                         else => blk: {
-                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.errors.lua_error_value;
                             break :blk TValue.fromString(s);
                         },
                     };
@@ -2176,12 +1999,12 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                         error.LuaException => {
                             handler_ok = false;
                             const s = vm.gc().allocString("error in error handling") catch null;
-                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                         },
                         else => {
                             handler_ok = false;
                             const s = vm.gc().allocString("error in error handling") catch null;
-                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                         },
                     };
                     if (handler_ok) {
@@ -2190,7 +2013,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     vm.top = temp;
                 } else {
                     const s = vm.gc().allocString("error in error handling") catch null;
-                    handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                    handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                 }
             }
 
@@ -2206,11 +2029,11 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     }
                 }
             }
-            vm.lua_error_value = .nil; // Clear after use
+            vm.errors.lua_error_value = .nil; // Clear after use
             const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
             vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
-            vm.pending_error_unwind = false;
-            vm.pending_error_unwind_ci = null;
+            vm.errors.pending_error_unwind = false;
+            vm.errors.pending_error_unwind_ci = null;
             return true;
         }
         current = ci.previous;
@@ -2221,19 +2044,19 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
     captureTracebackSnapshot(vm, null);
-    vm.pending_error_unwind = false;
-    vm.pending_error_unwind_ci = null;
+    vm.errors.pending_error_unwind = false;
+    vm.errors.pending_error_unwind_ci = null;
     return false;
 }
 
 fn normalizeUnhandledErrorValue(vm: *VM) void {
-    if (vm.lua_error_value.asString() != null) return;
+    if (vm.errors.lua_error_value.asString() != null) return;
 
-    const mm = metamethod.getMetamethod(vm.lua_error_value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse return;
+    const mm = metamethod.getMetamethod(vm.errors.lua_error_value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse return;
     const closure = mm.asClosure() orelse return;
-    const result = executeTostringForUnhandledError(vm, closure, vm.lua_error_value) catch return;
+    const result = executeTostringForUnhandledError(vm, closure, vm.errors.lua_error_value) catch return;
     if (result.asString()) |s| {
-        vm.lua_error_value = TValue.fromString(s);
+        vm.errors.lua_error_value = TValue.fromString(s);
     }
 }
 
@@ -2308,16 +2131,16 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             // TODO(traceback): Snapshot is currently fixed-size.
             // If deep recursion diagnostics become important, clamp with
             // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (count >= vm.traceback.snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
-                vm.traceback_snapshot_lines[count] = line;
-                vm.traceback_snapshot_names[count] = .nil;
-                vm.traceback_snapshot_closures[count] = ci.closure;
-                vm.traceback_snapshot_sources[count] = ci.func.source;
-                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                vm.traceback.snapshot_lines[count] = line;
+                vm.traceback.snapshot_names[count] = .nil;
+                vm.traceback.snapshot_closures[count] = ci.closure;
+                vm.traceback.snapshot_sources[count] = ci.func.source;
+                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
                 if (ci.closure) |cl| {
                     if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback_snapshot_names[count] = name;
+                        vm.traceback.snapshot_names[count] = name;
                     }
                 }
                 count += 1;
@@ -2330,25 +2153,25 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             // TODO(traceback): Snapshot is currently fixed-size.
             // If deep recursion diagnostics become important, clamp with
             // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (count >= vm.traceback.snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
-                vm.traceback_snapshot_lines[count] = line;
-                vm.traceback_snapshot_names[count] = .nil;
-                vm.traceback_snapshot_closures[count] = ci.closure;
-                vm.traceback_snapshot_sources[count] = ci.func.source;
-                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                vm.traceback.snapshot_lines[count] = line;
+                vm.traceback.snapshot_names[count] = .nil;
+                vm.traceback.snapshot_closures[count] = ci.closure;
+                vm.traceback.snapshot_sources[count] = ci.func.source;
+                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
                 if (ci.closure) |cl| {
                     if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback_snapshot_names[count] = name;
+                        vm.traceback.snapshot_names[count] = name;
                     }
                 }
                 count += 1;
             }
         }
     }
-    vm.traceback_snapshot_count = @intCast(count);
-    vm.traceback_snapshot_has_error_frame = vm.pending_error_from_error_builtin;
-    vm.pending_error_from_error_builtin = false;
+    vm.traceback.snapshot_count = @intCast(count);
+    vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
+    vm.errors.pending_error_from_error_builtin = false;
 }
 
 pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
@@ -2384,7 +2207,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
         if (vm.gc().hasPendingFinalizers()) {
             vm.gc().drainFinalizers();
         }
-        if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
+        if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
             if (try handleLuaException(vm)) continue;
             return error.LuaException;
         }
@@ -2439,7 +2262,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => blk: {
                         const op_name: ?[]const u8 = switch (inst.getOpCode()) {
                             .BAND, .BANDK => "'band'",
@@ -2576,8 +2399,8 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            if (vm.exec_tick - vm.last_field_tick <= 64) {
+                        if (vm.field_cache.last_field_key) |key| {
+                            if (vm.field_cache.exec_tick - vm.field_cache.last_field_tick <= 64) {
                                 var suppress_field_hint = false;
                                 switch (inst.getOpCode()) {
                                     .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {
@@ -2597,14 +2420,14 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                     else => {},
                                 }
                                 if (suppress_field_hint) {
-                                    vm.last_field_key = null;
+                                    vm.field_cache.last_field_key = null;
                                     break :blk "attempt to perform arithmetic on a non-numeric value";
                                 }
-                                const kind = if (vm.last_field_is_global) "global" else "field";
-                                vm.last_field_key = null;
+                                const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                                vm.field_cache.last_field_key = null;
                                 break :blk std.fmt.bufPrint(&msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} '{s}')", .{ kind, key.asSlice() }) catch "attempt to perform arithmetic on a non-numeric value";
                             }
-                            vm.last_field_key = null;
+                            vm.field_cache.last_field_key = null;
                         }
                         if (firstArithmeticBadOperand(vm, inst)) |bad| {
                             const ty = namedValueTypeName(vm, bad);
@@ -2649,8 +2472,8 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.int_repr_field_key) |key| {
-                            vm.int_repr_field_key = null;
+                        if (vm.field_cache.int_repr_field_key) |key| {
+                            vm.field_cache.int_repr_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "number has no integer representation (field '{s}')", .{key.asSlice()}) catch "number has no integer representation";
                         }
                         break :blk "number has no integer representation";
@@ -2678,11 +2501,11 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            const reg = vm.last_field_reg orelse 0;
+                        if (vm.field_cache.last_field_key) |key| {
+                            const reg = vm.field_cache.last_field_reg orelse 0;
                             const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.last_field_is_global) "global" else "field";
-                            vm.last_field_key = null;
+                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                            vm.field_cache.last_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
@@ -2710,11 +2533,11 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                                 }
                             }
                         }
-                        if (vm.last_field_key) |key| {
-                            const reg = vm.last_field_reg orelse 0;
+                        if (vm.field_cache.last_field_key) |key| {
+                            const reg = vm.field_cache.last_field_reg orelse 0;
                             const ty = if (vm.base + reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + reg]) else "non-table";
-                            const kind = if (vm.last_field_is_global) "global" else "field";
-                            vm.last_field_key = null;
+                            const kind = if (vm.field_cache.last_field_is_global) "global" else "field";
+                            vm.field_cache.last_field_key = null;
                             break :blk std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, key.asSlice() }) catch "attempt to index a non-table value";
                         }
                         break :blk "attempt to index a non-table value";
@@ -2756,7 +2579,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
                 if (try handleLuaException(vm)) continue;
@@ -2783,17 +2606,17 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     if (interrupt.consume()) {
         return vm.raiseString("interrupted!");
     }
-    vm.exec_tick +%= 1;
+    vm.field_cache.exec_tick +%= 1;
     const ci = vm.ci.?;
-    if (vm.hook_count > 0 and !vm.in_hook) {
-        if (vm.hook_countdown == 0) vm.hook_countdown = vm.hook_count * 2;
-        vm.hook_countdown -|= 1;
-        if (vm.hook_countdown == 0) {
-            vm.hook_countdown = vm.hook_count * 2;
-            try dispatchCountHook(vm);
+    if (vm.hooks.count > 0 and !vm.hooks.in_hook) {
+        if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count * 2;
+        vm.hooks.countdown -|= 1;
+        if (vm.hooks.countdown == 0) {
+            vm.hooks.countdown = vm.hooks.count * 2;
+            try hook_state.dispatchCount(vm, executeSyncMM);
         }
     }
-    if ((vm.hook_mask & 0x04) != 0 and !vm.in_hook and ci.closure != null) {
+    if ((vm.hooks.mask & 0x04) != 0 and !vm.hooks.in_hook and ci.closure != null) {
         if (currentInstructionIndex(ci)) |idx| {
             if (idx < ci.func.lineinfo.len) {
                 var line_u32 = ci.func.lineinfo[idx];
@@ -2869,7 +2692,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 ci.hook_last_pc = idx_i32;
                 if (should_dispatch) {
                     ci.hook_last_line = line;
-                    try dispatchLineHook(vm, line);
+                    try hook_state.dispatchLine(vm, line, executeSyncMM);
                 }
             } else if (ci.hook_last_pc < 0) {
                 // Stripped chunk: no lineinfo. Lua still triggers one line hook
@@ -2884,7 +2707,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 ci.hook_last_pc = @intCast(idx);
                 ci.hook_last_line = -1;
-                try dispatchLineHookNil(vm);
+                try hook_state.dispatchLineNil(vm, executeSyncMM);
             }
         }
     }
@@ -3856,7 +3679,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     vm.top = frame_max;
-                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     return .Continue;
                 }
             }
@@ -3967,10 +3790,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     }
                     // Ensure vm.top is past all arguments so native functions can use temp registers safely
                     vm.top = vm.base + a + 1 + nargs;
-                    if (hasCallHookListener(vm)) {
+                    if (hook_state.hasCallListener(vm)) {
                         const call_transfer_count: u32 = nargs;
-                        setHookTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
-                        try dispatchCallHook(vm, null);
+                        hook_state.setTransferFromStack(vm, 1, vm.base + a + 1, call_transfer_count);
+                        try hook_state.dispatchCall(vm, null, executeSyncMM);
                     }
                     try vm.callNative(nc.func.id, a, nargs, nresults);
 
@@ -3997,7 +3820,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // For MULTRET (C=0), caller depends on vm.top to know result count.
                     // For fixed results (C>0), keep conservative frame top.
                     vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    if (hasReturnHookListener(vm)) {
+                    if (hook_state.hasReturnListener(vm)) {
                         switch (nc.func.id) {
                             .select => {
                                 var idx_u: u32 = 1;
@@ -4010,20 +3833,20 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                                 const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                                 const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                                 const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                                setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                                hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
                             },
                             .math_sin => {
                                 const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                                 const out = TValue{ .number = std.math.sin(arg) };
-                                setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                                hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
                             },
                             else => {
                                 const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
                                 const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                                setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                                hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                             },
                         }
-                        try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                        try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
                     }
                     return .LoopContinue;
                 }
@@ -4054,9 +3877,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         }
                     }
                     _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    if (hasCallHookListener(vm)) {
-                        setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                        try dispatchCallHook(vm, null);
+                    if (hook_state.hasCallListener(vm)) {
+                        hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                        try hook_state.dispatchCall(vm, null, executeSyncMM);
                     }
                     vm.top = new_base + func_proto.maxstacksize;
                     return .LoopContinue;
@@ -4106,9 +3929,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                if (hasCallHookListener(vm)) {
-                    setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                    try dispatchCallHook(vm, null);
+                if (hook_state.hasCallListener(vm)) {
+                    hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                    try hook_state.dispatchCall(vm, null, executeSyncMM);
                 }
 
                 // Extend top to include vararg storage if needed
@@ -4294,8 +4117,8 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
                 vm.base = new_base;
                 vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                setHookTransferFromStack(vm, 1, new_base, func_proto.numparams);
-                try dispatchTailCallHook(vm, null);
+                hook_state.setTransferFromStack(vm, 1, new_base, func_proto.numparams);
+                try hook_state.dispatchTailCall(vm, null, executeSyncMM);
 
                 return .LoopContinue;
             }
@@ -4390,20 +4213,20 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
                             const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
                             const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            setHookTransferFromValues(vm, native_transfer_start, src_slice);
+                            hook_state.setTransferFromValues(vm, native_transfer_start, src_slice);
                         },
                         .math_sin => {
                             const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
                             const out = TValue{ .number = std.math.sin(arg) };
-                            setHookTransferFromValues(vm, 2, &[_]TValue{out});
+                            hook_state.setTransferFromValues(vm, 2, &[_]TValue{out});
                         },
                         else => {
                             const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
                             const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            setHookTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
+                            hook_state.setTransferFromStack(vm, 2, vm.base + a + 1, native_transfer_count);
                         },
                     }
-                    try dispatchReturnHook(vm, nativeReturnHookName(nc.func.id));
+                    try hook_state.dispatchReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
 
                     // Pop current frame and copy results
                     if (current_ci.previous != null) {
@@ -4475,10 +4298,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     0
                 else
                     b - 1;
-                if (hasReturnHookListener(vm)) {
+                if (hook_state.hasReturnListener(vm)) {
                     const transfer_src = returning_ci.base + a;
-                    setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                    try dispatchReturnHook(vm, null);
+                    hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4571,10 +4394,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 0
             else
                 b - 1;
-            if (hasReturnHookListener(vm)) {
+            if (hook_state.hasReturnListener(vm)) {
                 const transfer_src = vm.base + a;
-                setHookTransferFromStack(vm, a + 1, transfer_src, ret_count);
-                try dispatchReturnHook(vm, null);
+                hook_state.setTransferFromStack(vm, a + 1, transfer_src, ret_count);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
 
             if (ret_count == 0) {
@@ -4605,9 +4428,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hasReturnHookListener(vm)) {
-                    clearHookTransfer(vm);
-                    try dispatchReturnHook(vm, null);
+                if (hook_state.hasReturnListener(vm)) {
+                    hook_state.clearTransfer(vm);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4646,9 +4469,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     return err;
                 };
             }
-            if (hasReturnHookListener(vm)) {
-                clearHookTransfer(vm);
-                try dispatchReturnHook(vm, null);
+            if (hook_state.hasReturnListener(vm)) {
+                hook_state.clearTransfer(vm);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
             return .{ .ReturnVM = .none };
         },
@@ -4673,9 +4496,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
-                if (hasReturnHookListener(vm)) {
-                    setHookTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
-                    try dispatchReturnHook(vm, null);
+                if (hook_state.hasReturnListener(vm)) {
+                    hook_state.setTransferFromStack(vm, a + 1, returning_ci.base + a, 1);
+                    try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
                 }
                 popCallInfo(vm);
 
@@ -4722,9 +4545,9 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
                 return err;
             };
-            if (hasReturnHookListener(vm)) {
-                setHookTransferFromStack(vm, a + 1, vm.base + a, 1);
-                try dispatchReturnHook(vm, null);
+            if (hook_state.hasReturnListener(vm)) {
+                hook_state.setTransferFromStack(vm, a + 1, vm.base + a, 1);
+                try hook_state.dispatchReturn(vm, null, if (vm.errors.close_metamethod_depth > 0) "close" else null, executeSyncMM);
             }
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
@@ -4744,11 +4567,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             const key_val = ci.func.k[c];
             if (key_val.asString()) |key| {
-                vm.last_field_reg = a;
-                vm.last_field_key = key;
-                vm.last_field_is_global = true;
-                vm.last_field_is_method = false;
-                vm.last_field_tick = vm.exec_tick;
+                vm.field_cache.last_field_reg = a;
+                vm.field_cache.last_field_key = key;
+                vm.field_cache.last_field_is_global = true;
+                vm.field_cache.last_field_is_method = false;
+                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                 if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
                     return result;
                 }
@@ -4814,11 +4637,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const table_val = vm.stack[vm.base + b];
             const key_val = vm.stack[vm.base + c];
             if (key_val.asString()) |key| {
-                vm.last_field_reg = a;
-                vm.last_field_key = key;
-                vm.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
-                vm.last_field_is_method = false;
-                vm.last_field_tick = vm.exec_tick;
+                vm.field_cache.last_field_reg = a;
+                vm.field_cache.last_field_key = key;
+                vm.field_cache.last_field_is_global = if (table_val.asTable()) |t| t == vm.globals() else false;
+                vm.field_cache.last_field_is_method = false;
+                vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
             }
 
             if (table_val.asTable()) |table| {
@@ -4921,11 +4744,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             if (table_val.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = false;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = false;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
                         return result;
                     }
@@ -4936,11 +4759,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
                     if (!table_val.isNil()) {
-                        vm.last_field_reg = a;
-                        vm.last_field_key = key;
-                        vm.last_field_is_global = false;
-                        vm.last_field_is_method = false;
-                        vm.last_field_tick = vm.exec_tick;
+                        vm.field_cache.last_field_reg = a;
+                        vm.field_cache.last_field_key = key;
+                        vm.field_cache.last_field_is_global = false;
+                        vm.field_cache.last_field_is_method = false;
+                        vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     }
                     if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
                         return result;
@@ -4993,11 +4816,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const key_val = ci.func.k[c];
             if (obj.asTable()) |table| {
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = true;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = true;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
                         return result;
                     }
@@ -5007,11 +4830,11 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             } else {
                 // Non-table value: check for shared metatable with __index
                 if (key_val.asString()) |key| {
-                    vm.last_field_reg = a;
-                    vm.last_field_key = key;
-                    vm.last_field_is_global = false;
-                    vm.last_field_is_method = true;
-                    vm.last_field_tick = vm.exec_tick;
+                    vm.field_cache.last_field_reg = a;
+                    vm.field_cache.last_field_key = key;
+                    vm.field_cache.last_field_is_global = false;
+                    vm.field_cache.last_field_is_method = true;
+                    vm.field_cache.last_field_tick = vm.field_cache.exec_tick;
                     if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
                         return result;
                     }

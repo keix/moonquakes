@@ -60,8 +60,8 @@ fn formatErrorValue(vm: *VM, value: TValue) ?[]const u8 {
 }
 
 fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
-    if (formatErrorValue(vm, vm.lua_error_value)) |msg| {
-        if (vm.lua_error_value.asString() != null) {
+    if (formatErrorValue(vm, vm.errors.lua_error_value)) |msg| {
+        if (vm.errors.lua_error_value.asString() != null) {
             std.debug.print("{s}\n", .{msg});
         } else {
             std.debug.print("{s}: {s}\n", .{ exec_name, msg });
@@ -69,7 +69,7 @@ fn printUnhandledLuaError(vm: *VM, exec_name: []const u8) void {
         return;
     }
 
-    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(vm.lua_error_value) });
+    std.debug.print("{s}: error object is a {s} value\n", .{ exec_name, errorValueTypeName(vm.errors.lua_error_value) });
 }
 
 fn stripUtf8Bom(bytes: []const u8) []const u8 {
@@ -179,7 +179,7 @@ pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     _ = Mnemonics.execute(vm, proto) catch |err| {
         if (err == error.LuaException) {
-            if (vm.lua_error_value.asString()) |err_str| {
+            if (vm.errors.lua_error_value.asString()) |err_str| {
                 std.debug.print("LUA_INIT:1: {s}\n", .{err_str.asSlice()});
             } else {
                 std.debug.print("LUA_INIT:1: (error object is not a string)\n", .{});
