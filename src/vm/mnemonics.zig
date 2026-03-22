@@ -1507,11 +1507,11 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
         .nresults = nresults,
         .previous = vm.ci,
     };
-    if (vm.next_call_debug_name) |name| {
+    if (vm.call_debug.next_name) |name| {
         new_ci.debug_name = name;
-        new_ci.debug_namewhat = vm.next_call_debug_namewhat orelse "";
-        vm.next_call_debug_name = null;
-        vm.next_call_debug_namewhat = null;
+        new_ci.debug_namewhat = vm.call_debug.next_namewhat orelse "";
+        vm.call_debug.next_name = null;
+        vm.call_debug.next_namewhat = null;
     }
 
     vm.callstack_size += 1;
@@ -1642,7 +1642,7 @@ fn executeSyncMMWithDebug(
                 continue;
             }
             if (err == error.LuaException) {
-                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1651,7 +1651,7 @@ fn executeSyncMMWithDebug(
                 }
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
-                    closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch {};
+                    closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
                     vm.closeUpvalues(unwind_ci.base);
                     popCallInfo(vm);
                 }
@@ -1679,7 +1679,7 @@ fn executeSyncMMWithDebug(
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => formatArithmeticError(vm, inst, &msg_buf),
                     error.DivideByZero => "divide by zero",
                     error.ModuloByZero => "attempt to perform 'n%0'",
@@ -1699,11 +1699,11 @@ fn executeSyncMMWithDebug(
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                     return err;
                 });
-                if (vm.close_metamethod_depth == 0 and try handleLuaException(vm)) {
+                if (vm.errors.close_metamethod_depth == 0 and try handleLuaException(vm)) {
                     if (vm.callstack_size > saved_depth) {
                         continue;
                     }
@@ -1721,7 +1721,7 @@ fn executeSyncMMWithDebug(
                     "?";
                 var msg_buf: [128]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "variable '{s}' got a non-closable value", .{name}) catch "variable got a non-closable value";
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(msg) catch return err);
                 cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                 return error.LuaException;
             }
@@ -1756,59 +1756,59 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
 }
 
 fn clearHookTransfer(vm: *VM) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = 1;
-    vm.hook_transfer_count = 0;
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+    if (vm.hooks.in_hook) return;
+    vm.hooks.transfer_start = 1;
+    vm.hooks.transfer_count = 0;
+    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
 }
 
 inline fn hasCallHookListener(vm: *const VM) bool {
-    return !vm.in_hook and (vm.hook_mask & 0x01) != 0 and vm.hook_func != null;
+    return !vm.hooks.in_hook and (vm.hooks.mask & 0x01) != 0 and vm.hooks.func != null;
 }
 
 inline fn hasReturnHookListener(vm: *const VM) bool {
-    return !vm.in_hook and (vm.hook_mask & 0x02) != 0 and vm.hook_func != null;
+    return !vm.hooks.in_hook and (vm.hooks.mask & 0x02) != 0 and vm.hooks.func != null;
 }
 
 fn setHookTransferFromStack(vm: *VM, start: u32, src_base: u32, count: u32) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = start;
-    const cap: usize = vm.hook_transfer_values.len;
+    if (vm.hooks.in_hook) return;
+    vm.hooks.transfer_start = start;
+    const cap: usize = vm.hooks.transfer_values.len;
     const n: usize = @min(@as(usize, @intCast(count)), cap);
-    vm.hook_transfer_count = @intCast(n);
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+    vm.hooks.transfer_count = @intCast(n);
+    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
     var i: usize = 0;
     while (i < n) : (i += 1) {
-        vm.hook_transfer_values[i] = vm.stack[src_base + @as(u32, @intCast(i))];
+        vm.hooks.transfer_values[i] = vm.stack[src_base + @as(u32, @intCast(i))];
     }
 }
 
 fn setHookTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
-    if (vm.in_hook) return;
-    vm.hook_transfer_start = start;
-    const n: usize = @min(values.len, vm.hook_transfer_values.len);
-    vm.hook_transfer_count = @intCast(n);
-    for (&vm.hook_transfer_values) |*slot| slot.* = .nil;
+    if (vm.hooks.in_hook) return;
+    vm.hooks.transfer_start = start;
+    const n: usize = @min(values.len, vm.hooks.transfer_values.len);
+    vm.hooks.transfer_count = @intCast(n);
+    for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
     for (values[0..n], 0..) |v, i| {
-        vm.hook_transfer_values[i] = v;
+        vm.hooks.transfer_values[i] = v;
     }
 }
 
 fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x01) == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x01) == 0) return;
+    const hook = vm.hooks.func orelse return;
 
     const event_name = try vm.gc().allocString("call");
-    const saved_name_override = vm.hook_name_override;
+    const saved_name_override = vm.hooks.name_override;
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = name_override;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = name_override;
+    vm.hooks.in_hook = true;
     defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1816,20 +1816,20 @@ fn dispatchCallHook(vm: *VM, name_override: ?[]const u8) !void {
 }
 
 fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x01) == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x01) == 0) return;
+    const hook = vm.hooks.func orelse return;
 
     const event_name = try vm.gc().allocString("tail call");
-    const saved_name_override = vm.hook_name_override;
+    const saved_name_override = vm.hooks.name_override;
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = name_override;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = name_override;
+    vm.hooks.in_hook = true;
     defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1837,19 +1837,19 @@ fn dispatchTailCallHook(vm: *VM, name_override: ?[]const u8) !void {
 }
 
 fn dispatchLineHook(vm: *VM, line: i64) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x04) == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x04) == 0) return;
+    const hook = vm.hooks.func orelse return;
     if (line <= 0) return;
-    if (line > 0 and vm.hook_skip_next_line) {
+    if (line > 0 and vm.hooks.skip_next_line) {
         return;
     }
     const event_name = try vm.gc().allocString("line");
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
     defer {
-        vm.in_hook = saved_in_hook;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1860,20 +1860,20 @@ fn dispatchLineHook(vm: *VM, line: i64) !void {
 }
 
 fn dispatchLineHookNil(vm: *VM) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x04) == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x04) == 0) return;
+    const hook = vm.hooks.func orelse return;
 
     const event_name = try vm.gc().allocString("line");
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
     defer {
-        vm.in_hook = saved_in_hook;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
-    vm.hook_skip_next_line = true;
+    vm.hooks.skip_next_line = true;
     _ = try executeSyncMM(vm, hook, &[_]TValue{
         TValue.fromString(event_name),
         .nil,
@@ -1881,16 +1881,16 @@ fn dispatchLineHookNil(vm: *VM) !void {
 }
 
 fn dispatchCountHook(vm: *VM) !void {
-    if (vm.in_hook) return;
-    if (vm.hook_count == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if (vm.hooks.count == 0) return;
+    const hook = vm.hooks.func orelse return;
 
     const event_name = try vm.gc().allocString("count");
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.in_hook = true;
     defer {
-        vm.in_hook = saved_in_hook;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1898,9 +1898,9 @@ fn dispatchCountHook(vm: *VM) !void {
 }
 
 fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
-    if (vm.in_hook) return;
-    if ((vm.hook_mask & 0x02) == 0) return;
-    const hook = vm.hook_func orelse return;
+    if (vm.hooks.in_hook) return;
+    if ((vm.hooks.mask & 0x02) == 0) return;
+    const hook = vm.hooks.func orelse return;
     if (name_override == null) {
         if (vm.ci) |ci| {
             if (ci.closure == null) return;
@@ -1910,19 +1910,19 @@ fn dispatchReturnHook(vm: *VM, name_override: ?[]const u8) !void {
     const event_name = try vm.gc().allocString("return");
     const effective_name: ?[]const u8 = if (name_override) |n|
         n
-    else if (vm.close_metamethod_depth > 0)
+    else if (vm.errors.close_metamethod_depth > 0)
         "close"
     else
         null;
-    const saved_name_override = vm.hook_name_override;
+    const saved_name_override = vm.hooks.name_override;
     const saved_top = vm.top;
-    const saved_in_hook = vm.in_hook;
-    vm.hook_last_line = -1;
-    vm.hook_name_override = effective_name;
-    vm.in_hook = true;
+    const saved_in_hook = vm.hooks.in_hook;
+    vm.hooks.last_line = -1;
+    vm.hooks.name_override = effective_name;
+    vm.hooks.in_hook = true;
     defer {
-        vm.hook_name_override = saved_name_override;
-        vm.in_hook = saved_in_hook;
+        vm.hooks.name_override = saved_name_override;
+        vm.hooks.in_hook = saved_in_hook;
         vm.top = saved_top;
     }
 
@@ -1939,30 +1939,30 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
     const close_tag = "in metamethod 'close'";
     const annotateCloseError = struct {
         fn run(vm2: *VM, tag: []const u8) void {
-            const s = vm2.lua_error_value.asString() orelse return;
+            const s = vm2.errors.lua_error_value.asString() orelse return;
             if (std.mem.indexOf(u8, s.asSlice(), tag) != null) return;
             const merged = std.fmt.allocPrint(vm2.gc().allocator, "{s} {s}", .{ s.asSlice(), tag }) catch return;
             defer vm2.gc().allocator.free(merged);
             const merged_obj = vm2.gc().allocString(merged) catch return;
-            vm2.lua_error_value = TValue.fromString(merged_obj);
+            vm2.errors.lua_error_value = TValue.fromString(merged_obj);
         }
     }.run;
 
     var current_err = err_obj;
     var had_error = !current_err.isNil();
 
-    const saved_name_override = vm.hook_name_override;
-    if (!err_obj.isNil()) vm.hook_name_override = "pcall";
-    defer vm.hook_name_override = saved_name_override;
+    const saved_name_override = vm.hooks.name_override;
+    if (!err_obj.isNil()) vm.hooks.name_override = "pcall";
+    defer vm.hooks.name_override = saved_name_override;
 
     const setCloseCallError = struct {
         fn run(vm2: *VM, mm_val: TValue) TValue {
             var msg_buf: [128]u8 = undefined;
             const ty = callableValueTypeName(mm_val);
             const msg = std.fmt.bufPrint(&msg_buf, "attempt to call a {s} value (metamethod 'close')", .{ty}) catch "attempt to call a value (metamethod 'close')";
-            const obj = vm2.gc().allocString(msg) catch return vm2.lua_error_value;
+            const obj = vm2.gc().allocString(msg) catch return vm2.errors.lua_error_value;
             const v = TValue.fromString(obj);
-            vm2.lua_error_value = v;
+            vm2.errors.lua_error_value = v;
             return v;
         }
     }.run;
@@ -1983,14 +1983,14 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
 
             if (mm.asClosure()) |closure| {
                 // executeSyncMM handles stack setup using vm.top
-                vm.close_metamethod_depth +|= 1;
+                vm.errors.close_metamethod_depth +|= 1;
                 defer {
-                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
                 }
                 _ = executeSyncMM(vm, closure, &[_]TValue{ val, current_err }) catch |err| switch (err) {
                     error.LuaException => {
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -1998,10 +1998,10 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                         continue;
                     },
                     error.CallStackOverflow => {
-                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
-                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
+                        const msg = if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.errors.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2018,14 +2018,14 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                 vm.stack[temp + 1] = val;
                 vm.stack[temp + 2] = current_err;
                 vm.top = temp + 3;
-                vm.close_metamethod_depth +|= 1;
+                vm.errors.close_metamethod_depth +|= 1;
                 defer {
-                    if (vm.close_metamethod_depth > 0) vm.close_metamethod_depth -= 1;
+                    if (vm.errors.close_metamethod_depth > 0) vm.errors.close_metamethod_depth -= 1;
                 }
                 vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 0) catch |err| switch (err) {
                     error.LuaException => {
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2033,10 +2033,10 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                         continue;
                     },
                     error.CallStackOverflow => {
-                        const msg = if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow";
-                        vm.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
+                        const msg = if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
+                        vm.errors.lua_error_value = TValue.fromString(try vm.gc().allocString(msg));
                         annotateCloseError(vm, close_tag);
-                        current_err = vm.lua_error_value;
+                        current_err = vm.errors.lua_error_value;
                         had_error = true;
                         vm.top = saved_top;
                         if (r == 0) break;
@@ -2063,7 +2063,7 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
     }
 
     if (had_error) {
-        vm.lua_error_value = current_err;
+        vm.errors.lua_error_value = current_err;
         return error.LuaException;
     }
 }
@@ -2109,14 +2109,14 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
 
 /// Handle a LuaException by unwinding to the nearest protected frame.
 /// Returns true if error was handled by a protected frame, false otherwise.
-/// The error value is taken from vm.lua_error_value (set by vm.raise()).
+/// The error value is taken from vm.errors.lua_error_value (set by vm.raise()).
 pub fn handleLuaException(vm: *VM) error{Yield}!bool {
-    vm.error_handling_depth +|= 1;
+    vm.errors.error_handling_depth +|= 1;
     defer {
-        if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+        if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
     }
-    vm.traceback_snapshot_count = 0;
-    vm.traceback_snapshot_has_error_frame = false;
+    vm.traceback.snapshot_count = 0;
+    vm.traceback.snapshot_has_error_frame = false;
     var current = vm.ci;
     while (current) |ci| {
         if (ci.is_protected) {
@@ -2127,10 +2127,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             captureTracebackSnapshot(vm, target_ci);
             while (vm.ci != null and vm.ci != target_ci) {
                 const unwind_ci = vm.ci.?;
-                closeTBCVariables(vm, unwind_ci, 0, vm.lua_error_value) catch |cerr| switch (cerr) {
+                closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
                     error.Yield => {
-                        vm.pending_error_unwind = true;
-                        vm.pending_error_unwind_ci = unwind_ci;
+                        vm.errors.pending_error_unwind = true;
+                        vm.errors.pending_error_unwind_ci = unwind_ci;
                         return error.Yield;
                     },
                     else => {},
@@ -2139,7 +2139,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 popCallInfo(vm);
             }
 
-            var handled_error = vm.lua_error_value;
+            var handled_error = vm.errors.lua_error_value;
             const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil();
             // Defensive: avoid clobbering a previously captured non-nil error in the
             // same protected return slot when a reentrant handler path reports nil.
@@ -2149,19 +2149,19 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             if (already_handled) {
                 handled_error = vm.stack[ret_base + 1];
             } else if (!protected_error_handler.isNil()) {
-                vm.error_handling_depth +|= 1;
+                vm.errors.error_handling_depth +|= 1;
                 defer {
-                    if (vm.error_handling_depth > 0) vm.error_handling_depth -= 1;
+                    if (vm.errors.error_handling_depth > 0) vm.errors.error_handling_depth -= 1;
                 }
                 if (protected_error_handler.asClosure()) |_| {
                     handled_error = call.callValueSafe(vm, protected_error_handler, &[_]TValue{handled_error}) catch |handler_err| switch (handler_err) {
                         error.Yield => return error.Yield,
                         error.LuaException => blk: {
-                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.errors.lua_error_value;
                             break :blk TValue.fromString(s);
                         },
                         else => blk: {
-                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.lua_error_value;
+                            const s = vm.gc().allocString("error in error handling") catch break :blk vm.errors.lua_error_value;
                             break :blk TValue.fromString(s);
                         },
                     };
@@ -2176,12 +2176,12 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                         error.LuaException => {
                             handler_ok = false;
                             const s = vm.gc().allocString("error in error handling") catch null;
-                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                         },
                         else => {
                             handler_ok = false;
                             const s = vm.gc().allocString("error in error handling") catch null;
-                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                            handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                         },
                     };
                     if (handler_ok) {
@@ -2190,7 +2190,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     vm.top = temp;
                 } else {
                     const s = vm.gc().allocString("error in error handling") catch null;
-                    handled_error = if (s) |ss| TValue.fromString(ss) else vm.lua_error_value;
+                    handled_error = if (s) |ss| TValue.fromString(ss) else vm.errors.lua_error_value;
                 }
             }
 
@@ -2206,11 +2206,11 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                     }
                 }
             }
-            vm.lua_error_value = .nil; // Clear after use
+            vm.errors.lua_error_value = .nil; // Clear after use
             const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
             vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
-            vm.pending_error_unwind = false;
-            vm.pending_error_unwind_ci = null;
+            vm.errors.pending_error_unwind = false;
+            vm.errors.pending_error_unwind_ci = null;
             return true;
         }
         current = ci.previous;
@@ -2221,19 +2221,19 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
     // No protected frame handled this error. Preserve current stack lines so
     // debug.traceback(thread) can report frames after coroutine becomes dead.
     captureTracebackSnapshot(vm, null);
-    vm.pending_error_unwind = false;
-    vm.pending_error_unwind_ci = null;
+    vm.errors.pending_error_unwind = false;
+    vm.errors.pending_error_unwind_ci = null;
     return false;
 }
 
 fn normalizeUnhandledErrorValue(vm: *VM) void {
-    if (vm.lua_error_value.asString() != null) return;
+    if (vm.errors.lua_error_value.asString() != null) return;
 
-    const mm = metamethod.getMetamethod(vm.lua_error_value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse return;
+    const mm = metamethod.getMetamethod(vm.errors.lua_error_value, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse return;
     const closure = mm.asClosure() orelse return;
-    const result = executeTostringForUnhandledError(vm, closure, vm.lua_error_value) catch return;
+    const result = executeTostringForUnhandledError(vm, closure, vm.errors.lua_error_value) catch return;
     if (result.asString()) |s| {
-        vm.lua_error_value = TValue.fromString(s);
+        vm.errors.lua_error_value = TValue.fromString(s);
     }
 }
 
@@ -2308,16 +2308,16 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             // TODO(traceback): Snapshot is currently fixed-size.
             // If deep recursion diagnostics become important, clamp with
             // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (count >= vm.traceback.snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
-                vm.traceback_snapshot_lines[count] = line;
-                vm.traceback_snapshot_names[count] = .nil;
-                vm.traceback_snapshot_closures[count] = ci.closure;
-                vm.traceback_snapshot_sources[count] = ci.func.source;
-                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                vm.traceback.snapshot_lines[count] = line;
+                vm.traceback.snapshot_names[count] = .nil;
+                vm.traceback.snapshot_closures[count] = ci.closure;
+                vm.traceback.snapshot_sources[count] = ci.func.source;
+                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
                 if (ci.closure) |cl| {
                     if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback_snapshot_names[count] = name;
+                        vm.traceback.snapshot_names[count] = name;
                     }
                 }
                 count += 1;
@@ -2330,25 +2330,25 @@ fn captureTracebackSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             // TODO(traceback): Snapshot is currently fixed-size.
             // If deep recursion diagnostics become important, clamp with
             // @min(callstack_size, snapshot_cap) and emit a truncation log.
-            if (count >= vm.traceback_snapshot_lines.len) break;
+            if (count >= vm.traceback.snapshot_lines.len) break;
             if (frameLine(ci)) |line| {
-                vm.traceback_snapshot_lines[count] = line;
-                vm.traceback_snapshot_names[count] = .nil;
-                vm.traceback_snapshot_closures[count] = ci.closure;
-                vm.traceback_snapshot_sources[count] = ci.func.source;
-                vm.traceback_snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+                vm.traceback.snapshot_lines[count] = line;
+                vm.traceback.snapshot_names[count] = .nil;
+                vm.traceback.snapshot_closures[count] = ci.closure;
+                vm.traceback.snapshot_sources[count] = ci.func.source;
+                vm.traceback.snapshot_def_lines[count] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
                 if (ci.closure) |cl| {
                     if (inferGlobalName(vm, cl)) |name| {
-                        vm.traceback_snapshot_names[count] = name;
+                        vm.traceback.snapshot_names[count] = name;
                     }
                 }
                 count += 1;
             }
         }
     }
-    vm.traceback_snapshot_count = @intCast(count);
-    vm.traceback_snapshot_has_error_frame = vm.pending_error_from_error_builtin;
-    vm.pending_error_from_error_builtin = false;
+    vm.traceback.snapshot_count = @intCast(count);
+    vm.traceback.snapshot_has_error_frame = vm.errors.pending_error_from_error_builtin;
+    vm.errors.pending_error_from_error_builtin = false;
 }
 
 pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
@@ -2384,7 +2384,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
         if (vm.gc().hasPendingFinalizers()) {
             vm.gc().drainFinalizers();
         }
-        if (vm.pending_error_unwind and vm.pending_error_unwind_ci != null and vm.ci == vm.pending_error_unwind_ci.?) {
+        if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
             if (try handleLuaException(vm)) continue;
             return error.LuaException;
         }
@@ -2439,7 +2439,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             {
                 var msg_buf: [128]u8 = undefined;
                 const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.error_handling_depth > 0) "error in error handling" else "stack overflow",
+                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
                     error.ArithmeticError => blk: {
                         const op_name: ?[]const u8 = switch (inst.getOpCode()) {
                             .BAND, .BANDK => "'band'",
@@ -2756,7 +2756,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                 };
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
-                vm.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
                 if (try handleLuaException(vm)) continue;
@@ -2785,15 +2785,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     }
     vm.field_cache.exec_tick +%= 1;
     const ci = vm.ci.?;
-    if (vm.hook_count > 0 and !vm.in_hook) {
-        if (vm.hook_countdown == 0) vm.hook_countdown = vm.hook_count * 2;
-        vm.hook_countdown -|= 1;
-        if (vm.hook_countdown == 0) {
-            vm.hook_countdown = vm.hook_count * 2;
+    if (vm.hooks.count > 0 and !vm.hooks.in_hook) {
+        if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count * 2;
+        vm.hooks.countdown -|= 1;
+        if (vm.hooks.countdown == 0) {
+            vm.hooks.countdown = vm.hooks.count * 2;
             try dispatchCountHook(vm);
         }
     }
-    if ((vm.hook_mask & 0x04) != 0 and !vm.in_hook and ci.closure != null) {
+    if ((vm.hooks.mask & 0x04) != 0 and !vm.hooks.in_hook and ci.closure != null) {
         if (currentInstructionIndex(ci)) |idx| {
             if (idx < ci.func.lineinfo.len) {
                 var line_u32 = ci.func.lineinfo[idx];

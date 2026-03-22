@@ -53,6 +53,49 @@ pub const LuaException = api.LuaException;
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
 
+    pub const YieldState = struct {
+        base: u32 = 0,
+        count: u32 = 0,
+        ret_base: u32 = 0,
+        nresults: i32 = 0, // -1 = variable results
+        from_tailcall: bool = false,
+    };
+
+    pub const ErrorState = struct {
+        lua_error_value: TValue = .nil,
+        close_metamethod_depth: u8 = 0,
+        pending_error_unwind: bool = false,
+        pending_error_unwind_ci: ?*CallInfo = null,
+        error_handling_depth: u8 = 0,
+        pending_error_from_error_builtin: bool = false,
+        native_call_depth: u16 = 0,
+    };
+
+    pub const HookState = struct {
+        func: ?*ClosureObject = null,
+        func_value: TValue = .nil,
+        mask: u8 = 0, // 1=call, 2=return, 4=line
+        count: u32 = 0,
+        countdown: u32 = 0,
+        in_hook: bool = false,
+        transfer_start: u32 = 1,
+        transfer_count: u32 = 0,
+        transfer_values: [64]TValue = [_]TValue{.nil} ** 64,
+        name_override: ?[]const u8 = null,
+        skip_next_line: bool = false,
+        last_line: i64 = -1,
+    };
+
+    pub const TracebackState = struct {
+        snapshot_lines: [256]u32 = [_]u32{0} ** 256,
+        snapshot_names: [256]TValue = [_]TValue{.nil} ** 256,
+        snapshot_closures: [256]?*ClosureObject = [_]?*ClosureObject{null} ** 256,
+        snapshot_sources: [256][]const u8 = [_][]const u8{""} ** 256,
+        snapshot_def_lines: [256]u32 = [_]u32{0} ** 256,
+        snapshot_count: u16 = 0,
+        snapshot_has_error_frame: bool = false,
+    };
+
     pub const FieldCache = struct {
         last_field_reg: ?u8 = null,
         last_field_key: ?*object.StringObject = null,
@@ -61,6 +104,11 @@ pub const VM = struct {
         last_field_tick: u64 = 0,
         int_repr_field_key: ?*object.StringObject = null,
         exec_tick: u64 = 0,
+    };
+
+    pub const CallDebugState = struct {
+        next_name: ?[]const u8 = null,
+        next_namewhat: ?[]const u8 = null,
     };
 
     stack: [STACK_CAPACITY]TValue,
@@ -72,15 +120,12 @@ pub const VM = struct {
     callstack: [200]CallInfo,
     callstack_size: u8,
     open_upvalues: ?*UpvalueObject,
-    lua_error_value: TValue = .nil,
+    yield: YieldState = .{},
+    errors: ErrorState = .{},
+    hooks: HookState = .{},
+    traceback: TracebackState = .{},
     field_cache: FieldCache = .{},
-
-    // Yield state
-    yield_base: u32 = 0,
-    yield_count: u32 = 0,
-    yield_ret_base: u32 = 0,
-    yield_nresults: i32 = 0, // -1 = variable results
-    yield_from_tailcall: bool = false,
+    call_debug: CallDebugState = .{},
 
     rt: *Runtime,
     thread: *ThreadObject,
@@ -89,34 +134,6 @@ pub const VM = struct {
     // remaining depth limits in deeply nested native/metamethod paths.
     temp_roots: [32]TValue = [_]TValue{.nil} ** 32,
     temp_roots_count: u8 = 0,
-
-    hook_func: ?*ClosureObject = null,
-    hook_func_value: TValue = .nil,
-    hook_mask: u8 = 0, // 1=call, 2=return, 4=line
-    hook_count: u32 = 0,
-    hook_countdown: u32 = 0,
-    in_hook: bool = false,
-    hook_transfer_start: u32 = 1,
-    hook_transfer_count: u32 = 0,
-    hook_transfer_values: [64]TValue = [_]TValue{.nil} ** 64,
-    hook_name_override: ?[]const u8 = null,
-    hook_skip_next_line: bool = false,
-    hook_last_line: i64 = -1,
-    close_metamethod_depth: u8 = 0,
-    pending_error_unwind: bool = false,
-    pending_error_unwind_ci: ?*CallInfo = null,
-    next_call_debug_name: ?[]const u8 = null,
-    next_call_debug_namewhat: ?[]const u8 = null,
-    error_handling_depth: u8 = 0,
-    traceback_snapshot_lines: [256]u32 = [_]u32{0} ** 256,
-    traceback_snapshot_names: [256]TValue = [_]TValue{.nil} ** 256,
-    traceback_snapshot_closures: [256]?*ClosureObject = [_]?*ClosureObject{null} ** 256,
-    traceback_snapshot_sources: [256][]const u8 = [_][]const u8{""} ** 256,
-    traceback_snapshot_def_lines: [256]u32 = [_]u32{0} ** 256,
-    traceback_snapshot_count: u16 = 0,
-    traceback_snapshot_has_error_frame: bool = false,
-    pending_error_from_error_builtin: bool = false,
-    native_call_depth: u16 = 0,
 
     // Lifecycle
     pub const init = lifecycle.init;

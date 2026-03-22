@@ -67,7 +67,7 @@ test "TBC with value without __close - error" {
 
     const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.LuaException, result);
-    const err_str = ctx.vm.lua_error_value.asString() orelse return error.TestUnexpectedResult;
+    const err_str = ctx.vm.errors.lua_error_value.asString() orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, err_str.asSlice(), "non-closable value") != null);
 }
 
@@ -89,7 +89,7 @@ test "TBC with table without __close - error" {
 
     const result = Mnemonics.execute(ctx.vm, proto);
     try testing.expectError(error.LuaException, result);
-    const err_str = ctx.vm.lua_error_value.asString() orelse return error.TestUnexpectedResult;
+    const err_str = ctx.vm.errors.lua_error_value.asString() orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, err_str.asSlice(), "non-closable value") != null);
 }
 

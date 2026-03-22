@@ -595,22 +595,22 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Return hook function (or nil)
     if (nresults > 0 or want_all) {
-        vm.stack[vm.base + func_reg] = target_vm.hook_func_value;
+        vm.stack[vm.base + func_reg] = target_vm.hooks.func_value;
     }
 
     // Return mask string
     if (nresults > 1 or want_all) {
         var mask_buf: [4]u8 = undefined;
         var pos: usize = 0;
-        if (target_vm.hook_mask & 1 != 0) {
+        if (target_vm.hooks.mask & 1 != 0) {
             mask_buf[pos] = 'c';
             pos += 1;
         }
-        if (target_vm.hook_mask & 2 != 0) {
+        if (target_vm.hooks.mask & 2 != 0) {
             mask_buf[pos] = 'r';
             pos += 1;
         }
-        if (target_vm.hook_mask & 4 != 0) {
+        if (target_vm.hooks.mask & 4 != 0) {
             mask_buf[pos] = 'l';
             pos += 1;
         }
@@ -619,7 +619,7 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Return count
     if (nresults > 2 or want_all) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(target_vm.hook_count) };
+        vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(target_vm.hooks.count) };
     }
     if (want_all) {
         vm.top = vm.base + func_reg + 3;
@@ -750,7 +750,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         is_main_chunk = frame_info.is_main;
         if (frame_info.debug_name) |n| func_name = n;
         if (frame_info.debug_namewhat) |nw| func_namewhat = nw;
-        if (func_name != null and func_namewhat != null and target_closure != null and level_arg != null and !(vm.in_hook and vm.hook_name_override != null)) {
+        if (func_name != null and func_namewhat != null and target_closure != null and level_arg != null and !(vm.hooks.in_hook and vm.hooks.name_override != null)) {
             if (!isConsistentLevelName(vm, level_arg.?, target_closure.?, func_name.?, func_namewhat.?)) {
                 func_name = null;
                 func_namewhat = null;
@@ -771,12 +771,12 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         return;
     }
 
-    if (want_name and level_arg != null and level_arg.? == 1 and target_closure != null and vm.hook_func != null and target_closure.? == vm.hook_func.? and vm.in_hook) {
+    if (want_name and level_arg != null and level_arg.? == 1 and target_closure != null and vm.hooks.func != null and target_closure.? == vm.hooks.func.? and vm.hooks.in_hook) {
         func_namewhat = "hook";
     }
 
     if (want_name and level_arg != null and level_arg.? >= 2) {
-        if (vm.hook_name_override) |override| {
+        if (vm.hooks.name_override) |override| {
             func_name = override;
             func_namewhat = "global";
         }
@@ -843,7 +843,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         }
     }
 
-    if (want_name and level_arg != null and level_arg.? == 2 and vm.in_hook and vm.hook_name_override == null and target_closure != null) {
+    if (want_name and level_arg != null and level_arg.? == 2 and vm.hooks.in_hook and vm.hooks.name_override == null and target_closure != null) {
         if (inferDeclaredNameForClosure(vm, target_closure.?, &inferred_name_storage)) |decl_name| {
             func_name = decl_name;
             func_namewhat = "local";
@@ -890,20 +890,20 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Last-resort fallback for level-based lookup in runtimes without
     // source-name or local-name metadata.
-    if (want_name and level_arg != null and level_arg.? == 2 and vm.error_handling_depth > 0) {
+    if (want_name and level_arg != null and level_arg.? == 2 and vm.errors.error_handling_depth > 0) {
         func_name = "pcall";
         func_namewhat = "global";
     }
 
-    if (want_name and level_arg != null and level_arg.? == 1 and vm.hook_func != null and vm.in_hook) {
+    if (want_name and level_arg != null and level_arg.? == 1 and vm.hooks.func != null and vm.hooks.in_hook) {
         func_name = null;
         func_namewhat = "hook";
     }
 
     const force_c_what = level_arg != null and
         level_arg.? == 2 and
-        vm.error_handling_depth > 0 and
-        vm.close_metamethod_depth > 0;
+        vm.errors.error_handling_depth > 0 and
+        vm.errors.close_metamethod_depth > 0;
 
     // Create result table
     const result_table = try vm.gc().allocTable();
@@ -1055,9 +1055,9 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_transfer) {
             const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hook_transfer_start) });
+            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hooks.transfer_start) });
             const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hook_transfer_count) });
+            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hooks.transfer_count) });
         }
 
         if (want_activelines) {
@@ -1137,9 +1137,9 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_transfer) {
             const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hook_transfer_start) });
+            try result_table.set(TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hooks.transfer_start) });
             const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hook_transfer_count) });
+            try result_table.set(TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hooks.transfer_count) });
         }
     }
 
@@ -1546,19 +1546,19 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     // Handle f as stack level
     if (f_arg.toInteger()) |level| {
         if (level < 0) {
-            if (vm.in_hook) {
+            if (vm.hooks.in_hook) {
                 writeGetlocalNilResult(vm, func_reg, nresults);
                 return;
             }
             return vm.raiseString("bad argument to 'getlocal' (level out of range)");
         }
-        if (vm.in_hook and level == 2 and local_int >= @as(i64, @intCast(vm.hook_transfer_start))) {
-            const start_i: i64 = @intCast(vm.hook_transfer_start);
-            const count_i: i64 = @intCast(vm.hook_transfer_count);
+        if (vm.hooks.in_hook and level == 2 and local_int >= @as(i64, @intCast(vm.hooks.transfer_start))) {
+            const start_i: i64 = @intCast(vm.hooks.transfer_start);
+            const count_i: i64 = @intCast(vm.hooks.transfer_count);
             const rel = local_int - start_i;
-            if (rel >= 0 and rel < count_i and @as(u64, @intCast(rel)) < vm.hook_transfer_values.len) {
+            if (rel >= 0 and rel < count_i and @as(u64, @intCast(rel)) < vm.hooks.transfer_values.len) {
                 const idx: usize = @intCast(rel);
-                try writeGetlocalPairResult(vm, func_reg, nresults, "(temporary)", vm.hook_transfer_values[idx]);
+                try writeGetlocalPairResult(vm, func_reg, nresults, "(temporary)", vm.hooks.transfer_values[idx]);
                 return;
             }
         }
@@ -1576,7 +1576,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         }
 
         const ci = getCallInfoAtLevel(target_vm, level) orelse {
-            if (vm.in_hook) {
+            if (vm.hooks.in_hook) {
                 writeGetlocalNilResult(vm, func_reg, nresults);
                 return;
             }
@@ -1611,7 +1611,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
                     name = local_name;
                 }
             }
-            if (vm.in_hook and level == 2 and local_int == 1 and reg == 0) {
+            if (vm.hooks.in_hook and level == 2 and local_int == 1 and reg == 0) {
                 const pc_ptr = @intFromPtr(ci.pc);
                 const code_ptr = @intFromPtr(ci.func.code.ptr);
                 if (pc_ptr > code_ptr and ci.func.code.len > 0) {
@@ -1938,17 +1938,17 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // No args or nil first arg = clear hook
     if (nargs <= arg_off) {
-        target_vm.hook_func = null;
-        target_vm.hook_func_value = TValue.nil;
-        target_vm.hook_mask = 0;
-        target_vm.hook_count = 0;
-        target_vm.hook_countdown = 0;
-        target_vm.hook_name_override = null;
-        target_vm.in_hook = false;
-        target_vm.hook_skip_next_line = false;
-        target_vm.hook_transfer_start = 1;
-        target_vm.hook_transfer_count = 0;
-        for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
+        target_vm.hooks.func = null;
+        target_vm.hooks.func_value = TValue.nil;
+        target_vm.hooks.mask = 0;
+        target_vm.hooks.count = 0;
+        target_vm.hooks.countdown = 0;
+        target_vm.hooks.name_override = null;
+        target_vm.hooks.in_hook = false;
+        target_vm.hooks.skip_next_line = false;
+        target_vm.hooks.transfer_start = 1;
+        target_vm.hooks.transfer_count = 0;
+        for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
         return;
     }
 
@@ -1956,17 +1956,17 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // nil clears the hook
     if (hook_arg.isNil()) {
-        target_vm.hook_func = null;
-        target_vm.hook_func_value = TValue.nil;
-        target_vm.hook_mask = 0;
-        target_vm.hook_count = 0;
-        target_vm.hook_countdown = 0;
-        target_vm.hook_name_override = null;
-        target_vm.in_hook = false;
-        target_vm.hook_skip_next_line = false;
-        target_vm.hook_transfer_start = 1;
-        target_vm.hook_transfer_count = 0;
-        for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
+        target_vm.hooks.func = null;
+        target_vm.hooks.func_value = TValue.nil;
+        target_vm.hooks.mask = 0;
+        target_vm.hooks.count = 0;
+        target_vm.hooks.countdown = 0;
+        target_vm.hooks.name_override = null;
+        target_vm.hooks.in_hook = false;
+        target_vm.hooks.skip_next_line = false;
+        target_vm.hooks.transfer_start = 1;
+        target_vm.hooks.transfer_count = 0;
+        for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
         return;
     }
 
@@ -2000,17 +2000,17 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     }
 
     // Store hook settings
-    target_vm.hook_func = hook_func;
-    target_vm.hook_func_value = hook_arg;
-    target_vm.hook_mask = mask;
-    target_vm.hook_count = count;
-    target_vm.hook_countdown = if (count == 0) 0 else count * 2;
-    target_vm.hook_name_override = null;
-    target_vm.in_hook = false;
-    target_vm.hook_skip_next_line = false;
-    target_vm.hook_transfer_start = 1;
-    target_vm.hook_transfer_count = 0;
-    for (&target_vm.hook_transfer_values) |*slot| slot.* = TValue.nil;
+    target_vm.hooks.func = hook_func;
+    target_vm.hooks.func_value = hook_arg;
+    target_vm.hooks.mask = mask;
+    target_vm.hooks.count = count;
+    target_vm.hooks.countdown = if (count == 0) 0 else count * 2;
+    target_vm.hooks.name_override = null;
+    target_vm.hooks.in_hook = false;
+    target_vm.hooks.skip_next_line = false;
+    target_vm.hooks.transfer_start = 1;
+    target_vm.hooks.transfer_count = 0;
+    for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
     if (target_vm.ci) |ci| {
         if ((mask & 0x04) != 0) {
             ci.hook_last_line = if (ci.func.numparams == 0 and ci.func.is_vararg) -1 else currentLineForCallInfo(ci);
@@ -2351,8 +2351,8 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     // For xpcall/debug.traceback handlers and dead coroutines, use the
     // captured unwind-time snapshot when available.
-    if (target_vm.traceback_snapshot_count > 0 and (message != null or target_vm != vm)) {
-        if (target_vm.traceback_snapshot_has_error_frame) {
+    if (target_vm.traceback.snapshot_count > 0 and (message != null or target_vm != vm)) {
+        if (target_vm.traceback.snapshot_has_error_frame) {
             frame_num += 1;
             if (frame_num >= level) {
                 if (pos + 2 < buf.len) {
@@ -2367,7 +2367,7 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             }
         }
         var i: usize = 0;
-        while (i < target_vm.traceback_snapshot_count) : (i += 1) {
+        while (i < target_vm.traceback.snapshot_count) : (i += 1) {
             frame_num += 1;
             if (frame_num < level) continue;
             if (pos + 2 < buf.len) {
@@ -2377,11 +2377,11 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             }
             var frame_buf: [128]u8 = undefined;
             var snapshot_name: ?[]const u8 = null;
-            if (target_vm.traceback_snapshot_names[i].asString()) |name| {
+            if (target_vm.traceback.snapshot_names[i].asString()) |name| {
                 snapshot_name = name.asSlice();
             }
             if (snapshot_name == null) {
-                if (target_vm.traceback_snapshot_closures[i]) |cl| {
+                if (target_vm.traceback.snapshot_closures[i]) |cl| {
                     if (inferGlobalFunctionName(target_vm, cl)) |name| {
                         snapshot_name = name;
                     }
@@ -2391,31 +2391,31 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 var decl_buf: [128]u8 = undefined;
                 if (inferDeclaredNameFromSourceLine(
                     vm,
-                    target_vm.traceback_snapshot_sources[i],
-                    target_vm.traceback_snapshot_def_lines[i],
+                    target_vm.traceback.snapshot_sources[i],
+                    target_vm.traceback.snapshot_def_lines[i],
                     &decl_buf,
                 )) |name| {
                     snapshot_name = name;
                 } else if (inferEnclosingFunctionName(
                     vm,
-                    target_vm.traceback_snapshot_sources[i],
-                    target_vm.traceback_snapshot_lines[i],
+                    target_vm.traceback.snapshot_sources[i],
+                    target_vm.traceback.snapshot_lines[i],
                     &decl_buf,
                 )) |name2| {
                     snapshot_name = name2;
                 }
             }
             const frame_info = if (snapshot_name) |name|
-                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function '{s}'", .{ target_vm.traceback_snapshot_lines[i], name }) catch "[Lua function]")
+                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function '{s}'", .{ target_vm.traceback.snapshot_lines[i], name }) catch "[Lua function]")
             else
-                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function <[string]:{d}>", .{ target_vm.traceback_snapshot_lines[i], target_vm.traceback_snapshot_def_lines[i] }) catch "[Lua function]");
+                (std.fmt.bufPrint(&frame_buf, "[string]:{d}: in function <[string]:{d}>", .{ target_vm.traceback.snapshot_lines[i], target_vm.traceback.snapshot_def_lines[i] }) catch "[Lua function]");
             const copy_len = @min(frame_info.len, buf.len - pos);
             @memcpy(buf[pos..][0..copy_len], frame_info[0..copy_len]);
             pos += copy_len;
         }
         if (message) |msg| {
-            if (std.mem.indexOf(u8, msg, "stack overflow") != null and target_vm.traceback_snapshot_count > 0) {
-                const last = target_vm.traceback_snapshot_lines[target_vm.traceback_snapshot_count - 1];
+            if (std.mem.indexOf(u8, msg, "stack overflow") != null and target_vm.traceback.snapshot_count > 0) {
+                const last = target_vm.traceback.snapshot_lines[target_vm.traceback.snapshot_count - 1];
                 const tail_line = last + 25;
                 frame_num += 1;
                 if (frame_num >= level) {
@@ -2434,7 +2434,7 @@ pub fn nativeDebugTraceback(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         }
         if (target_vm.ci) |ci| {
             if (frameCurrentLine(ci)) |line| {
-                const last = target_vm.traceback_snapshot_lines[target_vm.traceback_snapshot_count - 1];
+                const last = target_vm.traceback.snapshot_lines[target_vm.traceback.snapshot_count - 1];
                 var tail_line = line;
                 if (tail_line == last) {
                     if (message) |msg| {
@@ -2610,7 +2610,7 @@ fn formatFrame(vm: *VM, ci: anytype, out_buf: []u8) []const u8 {
     else
         source_raw;
 
-    const is_hook_frame = vm.in_hook and vm.hook_func != null and ci.closure != null and ci.closure.? == vm.hook_func.?;
+    const is_hook_frame = vm.hooks.in_hook and vm.hooks.func != null and ci.closure != null and ci.closure.? == vm.hooks.func.?;
     const where = if (is_hook_frame) "in hook" else "in function";
 
     if (frameCurrentLine(ci)) |line| {

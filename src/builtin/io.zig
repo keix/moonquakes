@@ -1502,7 +1502,7 @@ pub fn nativeIoLinesUnreadableIterator(vm: anytype, func_reg: u32, nargs: u32, n
     _ = nargs;
     _ = nresults;
     const s = try vm.gc().allocString("file is not readable");
-    vm.lua_error_value = TValue.fromString(s);
+    vm.errors.lua_error_value = TValue.fromString(s);
     return error.LuaException;
 }
 

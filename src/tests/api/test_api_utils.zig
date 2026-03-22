@@ -41,7 +41,7 @@ pub const ApiContext = struct {
     pub fn execExpectLuaException(self: *ApiContext, source: []const u8) ![]const u8 {
         const result = self.exec(source);
         try testing.expectError(error.LuaException, result);
-        const err_str = self.base.vm.lua_error_value.asString() orelse return error.TestUnexpectedResult;
+        const err_str = self.base.vm.errors.lua_error_value.asString() orelse return error.TestUnexpectedResult;
         return err_str.asSlice();
     }
 

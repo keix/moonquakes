@@ -229,7 +229,7 @@ pub const REPL = struct {
             return null;
         };
         const result = @import("../vm/mnemonics.zig").execute(self.vm, proto) catch {
-            if (self.vm.lua_error_value.asString()) |err_str| {
+            if (self.vm.errors.lua_error_value.asString()) |err_str| {
                 stderr.print("[string]:?: {s}\n", .{err_str.asSlice()}) catch {};
             } else {
                 stderr.writeAll("error: runtime error\n") catch {};
