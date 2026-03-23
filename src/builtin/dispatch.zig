@@ -181,6 +181,7 @@ fn registerStdLibsInPackageLoaded(globals: *TableObject, gc: *GC) !void {
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
 fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
+    // Dispatcher-backed global functions.
     const global_entries = [_]BuiltinEntry{
         .{ .name = "print", .id = .print },
         .{ .name = "tostring", .id = .tostring },
@@ -206,6 +207,8 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
         .{ .name = "warn", .id = .warn },
     };
     try registerEntries(globals, gc, &global_entries);
+
+    // Wrapper-only globals and fixed global bindings.
     try registerLuaDofileWrapper(globals, gc);
 
     // _G and _ENV are self-references to the globals table itself
@@ -219,6 +222,8 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
 /// String Library: string.len, string.sub, etc. (skeleton implementations)
 fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     const string_table = try gc.allocTable();
+
+    // Dispatcher-backed string functions.
     const string_entries = [_]BuiltinEntry{
         .{ .name = "len", .id = .string_len },
         .{ .name = "sub", .id = .string_sub },
@@ -240,6 +245,7 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     };
     try registerEntries(string_table, gc, &string_entries);
 
+    // Public library table and shared string metatable.
     try setStringKey(globals, gc, "string", TValue.fromTable(string_table));
 
     // Set shared string metatable so "str:method(...)" works.
@@ -251,6 +257,8 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
 /// IO Library: io.write, io.open, etc. (skeleton implementations)
 fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     const io_table = try gc.allocTable();
+
+    // Dispatcher-backed io functions.
     const io_entries = [_]BuiltinEntry{
         .{ .name = "write", .id = .io_write },
         .{ .name = "close", .id = .io_close },
@@ -265,6 +273,8 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
         .{ .name = "type", .id = .io_type },
     };
     try registerEntries(io_table, gc, &io_entries);
+
+    // Stdio handles are initialized separately from dispatcher registration.
     try io.initStdioHandles(io_table, gc);
 
     try setStringKey(globals, gc, "io", TValue.fromTable(io_table));
@@ -274,12 +284,13 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
 fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     const math_table = try gc.allocTable();
 
-    // Math constants
+    // Exported math constants remain explicit.
     try setStringKey(math_table, gc, "pi", .{ .number = math.MATH_PI });
     try setStringKey(math_table, gc, "huge", .{ .number = math.MATH_HUGE });
     try setStringKey(math_table, gc, "maxinteger", .{ .integer = math.MATH_MAXINTEGER });
     try setStringKey(math_table, gc, "mininteger", .{ .integer = math.MATH_MININTEGER });
 
+    // Dispatcher-backed math functions.
     const math_entries = [_]BuiltinEntry{
         .{ .name = "abs", .id = .math_abs },
         .{ .name = "acos", .id = .math_acos },
@@ -313,6 +324,8 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
 /// Table Library: table.insert, table.remove, etc. (skeleton implementations)
 fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
     const table_table = try gc.allocTable();
+
+    // Dispatcher-backed table functions.
     const table_entries = [_]BuiltinEntry{
         .{ .name = "insert", .id = .table_insert },
         .{ .name = "remove", .id = .table_remove },
@@ -330,6 +343,8 @@ fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
 /// OS Library: os.clock, os.date, etc. (skeleton implementations)
 fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
     const os_table = try gc.allocTable();
+
+    // Dispatcher-backed os functions.
     const os_entries = [_]BuiltinEntry{
         .{ .name = "clock", .id = .os_clock },
         .{ .name = "date", .id = .os_date },
@@ -351,6 +366,8 @@ fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
 /// Debug Library: debug.debug, debug.getinfo, etc. (skeleton implementations)
 fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     const debug_table = try gc.allocTable();
+
+    // Dispatcher-backed debug functions.
     const debug_entries = [_]BuiltinEntry{
         .{ .name = "debug", .id = .debug_debug },
         .{ .name = "gethook", .id = .debug_gethook },
@@ -379,10 +396,11 @@ fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
 fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
     const utf8_table = try gc.allocTable();
 
-    // UTF-8 pattern constant
+    // Exported utf8 constants remain explicit.
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
     try setStringKey(utf8_table, gc, "charpattern", TValue.fromString(charpattern_str));
 
+    // Dispatcher-backed utf8 functions.
     const utf8_entries = [_]BuiltinEntry{
         .{ .name = "char", .id = .utf8_char },
         .{ .name = "codes", .id = .utf8_codes },
@@ -398,6 +416,8 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
 /// Coroutine Library: coroutine.create, coroutine.resume, etc. (skeleton implementations)
 fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
     const coroutine_table = try gc.allocTable();
+
+    // Dispatcher-backed coroutine functions.
     const coroutine_entries = [_]BuiltinEntry{
         .{ .name = "create", .id = .coroutine_create },
         .{ .name = "resume", .id = .coroutine_resume },
@@ -415,19 +435,20 @@ fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
 fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
-    // Global require function
+    // Global require entrypoint is registered separately from the package table.
     try registerNative(globals, gc, "require", .require);
 
-    // Package table for module system
+    // Package table for module system.
     const package_table = try gc.allocTable();
 
+    // Dispatcher-backed package functions.
     const package_entries = [_]BuiltinEntry{
         .{ .name = "loadlib", .id = .package_loadlib },
         .{ .name = "searchpath", .id = .package_searchpath },
     };
     try registerEntries(package_table, gc, &package_entries);
 
-    // Package configuration and paths (platform-specific in real implementation)
+    // Static package fields remain explicit.
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
     try setStringKey(package_table, gc, "config", TValue.fromString(config_str));
 
@@ -437,7 +458,7 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
     try setStringKey(package_table, gc, "cpath", TValue.fromString(cpath_str));
 
-    // Package tables for loaded modules and searchers
+    // Mutable package state tables remain explicit.
     const loaded_table = try gc.allocTable();
     try setStringKey(package_table, gc, "loaded", TValue.fromTable(loaded_table));
 

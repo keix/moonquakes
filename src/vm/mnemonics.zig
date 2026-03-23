@@ -447,6 +447,58 @@ pub const formatForLoopError = error_format.formatForLoopError;
 pub const formatNoCloseMetamethodError = error_format.formatNoCloseMetamethodError;
 const buildCallNotFunctionMessage = error_format.buildCallNotFunctionMessage;
 
+fn isVmRuntimeError(err: anyerror) bool {
+    return err == error.CallStackOverflow or
+        err == error.ArithmeticError or
+        err == error.DivideByZero or
+        err == error.ModuloByZero or
+        err == error.IntegerRepresentation or
+        err == error.OrderComparisonError or
+        err == error.LengthError or
+        err == error.NotATable or
+        err == error.NotAFunction or
+        err == error.InvalidTableKey or
+        err == error.InvalidTableOperation or
+        err == error.InvalidForLoopInit or
+        err == error.InvalidForLoopLimit or
+        err == error.InvalidForLoopStep or
+        err == error.NoCloseMetamethod or
+        err == error.FormatError;
+}
+
+fn formatVmRuntimeErrorMessage(vm: *VM, inst: Instruction, err: anyerror, msg_buf: *[128]u8) []const u8 {
+    return switch (err) {
+        error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
+        error.ArithmeticError => formatArithmeticError(vm, inst, msg_buf),
+        error.DivideByZero => "divide by zero",
+        error.ModuloByZero => "attempt to perform 'n%0'",
+        error.IntegerRepresentation => formatIntegerRepresentationError(vm, inst, msg_buf),
+        error.NotATable => formatIndexOnNonTableError(vm, inst, msg_buf),
+        error.NotAFunction => "attempt to call a non-function value",
+        error.OrderComparisonError => "attempt to compare values",
+        error.LengthError => "attempt to get length of a value",
+        error.InvalidTableKey => "table index is nil or NaN",
+        error.InvalidTableOperation => formatIndexOnNonTableError(vm, inst, msg_buf),
+        error.InvalidForLoopInit => formatForLoopError(vm, inst, err, msg_buf),
+        error.InvalidForLoopLimit => formatForLoopError(vm, inst, err, msg_buf),
+        error.InvalidForLoopStep => formatForLoopError(vm, inst, err, msg_buf),
+        error.NoCloseMetamethod => formatNoCloseMetamethodError(vm, inst, msg_buf),
+        error.FormatError => "bad argument to string format",
+        else => "runtime error",
+    };
+}
+
+fn continueIfLuaExceptionHandled(vm: *VM, err: anyerror) error{Yield}!bool {
+    if (err != error.LuaException) return false;
+    return try handleLuaException(vm);
+}
+
+fn continueMetamethodIfLuaExceptionHandled(vm: *VM, err: anyerror, saved_depth: u8) error{Yield}!bool {
+    if (err != error.LuaException or error_state.isClosingMetamethod(vm)) return false;
+    if (!(try handleLuaException(vm))) return false;
+    return vm.callstack_size > saved_depth;
+}
+
 fn metamethodEventName(comptime event: MetaEvent) []const u8 {
     return switch (event) {
         .add => "add",
@@ -738,14 +790,10 @@ fn executeSyncMMWithDebug(
             if (err == error.HandledException) {
                 continue;
             }
+            if (try continueMetamethodIfLuaExceptionHandled(vm, err, saved_depth)) {
+                continue;
+            }
             if (err == error.LuaException) {
-                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
-                    if (vm.callstack_size > saved_depth) {
-                        continue;
-                    }
-                    cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
-                    return error.LuaException;
-                }
                 while (vm.callstack_size > saved_depth) {
                     const unwind_ci = &vm.callstack[vm.callstack_size - 1];
                     closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
@@ -757,56 +805,16 @@ fn executeSyncMMWithDebug(
                 vm.top = saved_top;
                 return error.LuaException;
             }
-            if (err == error.CallStackOverflow or
-                err == error.ArithmeticError or
-                err == error.DivideByZero or
-                err == error.ModuloByZero or
-                err == error.IntegerRepresentation or
-                err == error.OrderComparisonError or
-                err == error.LengthError or
-                err == error.NotATable or
-                err == error.NotAFunction or
-                err == error.InvalidTableKey or
-                err == error.InvalidTableOperation or
-                err == error.InvalidForLoopInit or
-                err == error.InvalidForLoopLimit or
-                err == error.InvalidForLoopStep or
-                err == error.NoCloseMetamethod or
-                err == error.FormatError)
-            {
+            if (isVmRuntimeError(err)) {
                 var msg_buf: [128]u8 = undefined;
-                const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
-                    error.ArithmeticError => formatArithmeticError(vm, inst, &msg_buf),
-                    error.DivideByZero => "divide by zero",
-                    error.ModuloByZero => "attempt to perform 'n%0'",
-                    error.IntegerRepresentation => formatIntegerRepresentationError(vm, inst, &msg_buf),
-                    error.NotATable => formatIndexOnNonTableError(vm, inst, &msg_buf),
-                    error.NotAFunction => "attempt to call a non-function value",
-                    error.OrderComparisonError => "attempt to compare values",
-                    error.LengthError => "attempt to get length of a value",
-                    error.InvalidTableKey => "table index is nil or NaN",
-                    error.InvalidTableOperation => formatIndexOnNonTableError(vm, inst, &msg_buf),
-                    error.InvalidForLoopInit => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.InvalidForLoopLimit => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.InvalidForLoopStep => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.NoCloseMetamethod => formatNoCloseMetamethodError(vm, inst, &msg_buf),
-                    error.FormatError => "bad argument to string format",
-                    else => "runtime error",
-                };
+                const msg = formatVmRuntimeErrorMessage(vm, inst, err, &msg_buf);
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithCurrentLocation(vm, inst, err, msg, &full_msg_buf);
                 vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                     return err;
                 });
-                if (!error_state.isClosingMetamethod(vm) and try handleLuaException(vm)) {
-                    if (vm.callstack_size > saved_depth) {
-                        continue;
-                    }
-                    cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
-                    return error.LuaException;
-                }
+                if (try continueMetamethodIfLuaExceptionHandled(vm, error.LuaException, saved_depth)) continue;
                 cleanupToSavedDepth(vm, saved_depth, saved_ci, saved_base, saved_top);
                 return error.LuaException;
             }
@@ -1213,7 +1221,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             vm.gc().drainFinalizers();
         }
         if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
-            if (try handleLuaException(vm)) continue;
+            if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
             return error.LuaException;
         }
         const ci = vm.ci orelse return error.LuaException;
@@ -1240,57 +1248,23 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
                 }
                 return .none;
             }
-            if (err == error.LuaException and try handleLuaException(vm)) continue;
+            if (try continueIfLuaExceptionHandled(vm, err)) continue;
             return err;
         };
 
         const result = do(vm, inst) catch |err| {
             if (err == error.HandledException) continue;
-            if (err == error.LuaException and try handleLuaException(vm)) continue;
+            if (try continueIfLuaExceptionHandled(vm, err)) continue;
             // Convert VM errors to LuaException for pcall catchability
-            if (err == error.CallStackOverflow or
-                err == error.ArithmeticError or
-                err == error.DivideByZero or
-                err == error.ModuloByZero or
-                err == error.IntegerRepresentation or
-                err == error.OrderComparisonError or
-                err == error.LengthError or
-                err == error.NotATable or
-                err == error.NotAFunction or
-                err == error.InvalidTableKey or
-                err == error.InvalidTableOperation or
-                err == error.InvalidForLoopInit or
-                err == error.InvalidForLoopLimit or
-                err == error.InvalidForLoopStep or
-                err == error.NoCloseMetamethod or
-                err == error.FormatError)
-            {
+            if (isVmRuntimeError(err)) {
                 var msg_buf: [128]u8 = undefined;
-                const msg = switch (err) {
-                    error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
-                    error.ArithmeticError => formatArithmeticError(vm, inst, &msg_buf),
-                    error.DivideByZero => "divide by zero",
-                    error.ModuloByZero => "attempt to perform 'n%0'",
-                    error.IntegerRepresentation => formatIntegerRepresentationError(vm, inst, &msg_buf),
-                    error.NotATable => formatIndexOnNonTableError(vm, inst, &msg_buf),
-                    error.NotAFunction => "attempt to call a non-function value",
-                    error.OrderComparisonError => "attempt to compare values",
-                    error.LengthError => "attempt to get length of a value",
-                    error.InvalidTableKey => "table index is nil or NaN",
-                    error.InvalidTableOperation => formatIndexOnNonTableError(vm, inst, &msg_buf),
-                    error.InvalidForLoopInit => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.InvalidForLoopLimit => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.InvalidForLoopStep => formatForLoopError(vm, inst, err, &msg_buf),
-                    error.NoCloseMetamethod => formatNoCloseMetamethodError(vm, inst, &msg_buf),
-                    error.FormatError => "bad argument to string format",
-                    else => "runtime error",
-                };
+                const msg = formatVmRuntimeErrorMessage(vm, inst, err, &msg_buf);
                 var full_msg_buf: [320]u8 = undefined;
                 const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
                 vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
                     return err;
                 });
-                if (try handleLuaException(vm)) continue;
+                if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
                 return error.LuaException;
             }
             return err;
