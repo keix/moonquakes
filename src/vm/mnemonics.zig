@@ -124,6 +124,8 @@ var protected_call_bootstrap_proto = object.ProtoObject{
     .lineinfo = protected_call_bootstrap_lineinfo[0..],
 };
 
+// Push a synthetic protected frame that runs CALL/RETURN around the user target.
+// This gives pcall/xpcall a normal Lua frame to unwind into on failure.
 fn dispatchProtectedCall(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_results: u32, handler: ?TValue, ret_base: u32) !ExecuteResult {
     if (total_args == 0) {
         vm.stack[vm.base + a] = .{ .boolean = false };
@@ -151,6 +153,72 @@ fn dispatchProtectedCall(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_r
 
     vm.top = call_base + total_args;
     return .LoopContinue;
+}
+
+// xpcall inserts an error handler before the real call target.
+// Normalize the register layout so the protected bootstrap sees func(...) only.
+fn prepareXpcall(vm: *VM, a: u8, total_args: u32, fail_base: u32) !struct { total_args: u32, handler: TValue } {
+    if (total_args < 2) {
+        vm.stack[fail_base] = .{ .boolean = false };
+        vm.stack[fail_base + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
+        return error.InvalidXpcallHandler;
+    }
+
+    const handler = vm.stack[vm.base + a + 2];
+    const inner_total_args = total_args - 1;
+    if (inner_total_args > 1) {
+        var i: u32 = 0;
+        const shift_count = inner_total_args - 1;
+        while (i < shift_count) : (i += 1) {
+            vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
+        }
+    }
+
+    return .{ .total_args = inner_total_args, .handler = handler };
+}
+
+// Tail-called pcall/xpcall reuses the current frame instead of pushing a new
+// CallInfo, but it still needs the same protected bootstrap semantics.
+fn reuseCurrentFrameForProtectedCall(current_ci: *CallInfo, ret_base: u32, total_results: u32, handler: ?TValue, new_base: u32) void {
+    const pcall_nresults: i16 = if (total_results > 0)
+        @intCast(total_results - 1)
+    else
+        -1;
+    current_ci.func = &protected_call_bootstrap_proto;
+    current_ci.closure = null;
+    current_ci.pc = protected_call_bootstrap_proto.code.ptr;
+    current_ci.base = new_base;
+    current_ci.ret_base = ret_base;
+    current_ci.nresults = pcall_nresults;
+    current_ci.was_tail_called = true;
+    current_ci.vararg_base = 0;
+    current_ci.vararg_count = 0;
+    current_ci.is_protected = true;
+    current_ci.error_handler = handler orelse .nil;
+    current_ci.tbc_bitmap = 0;
+    current_ci.pending_return_a = null;
+    current_ci.pending_return_count = null;
+    current_ci.pending_return_reexec = false;
+    current_ci.pending_compare_active = false;
+    current_ci.pending_compare_negate = 0;
+    current_ci.pending_compare_invert = false;
+    current_ci.pending_compare_result_slot = 0;
+    current_ci.pending_concat_active = false;
+    current_ci.pending_concat_a = 0;
+    current_ci.pending_concat_b = 0;
+    current_ci.pending_concat_i = -1;
+}
+
+// Return/tailcall paths need identical TBC cleanup semantics: propagate errors,
+// but remember when __close yielded so the return instruction can re-execute.
+fn closeTbcForReturn(vm: *VM, ci: *CallInfo) !void {
+    if (ci.tbc_bitmap == 0) return;
+    closeTBCVariables(vm, ci, 0, .nil) catch |err| {
+        if (err == error.Yield) {
+            ci.pending_return_reexec = true;
+        }
+        return err;
+    };
 }
 
 fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
@@ -2435,24 +2503,15 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             return try dispatchProtectedCall(vm, ci, a, total_args, total_results, null, vm.base + a);
                         }
 
-                        // xpcall(func, msgh, ...) => protected call of func(...), with handler
-                        if (total_args < 2) {
-                            vm.stack[vm.base + a] = .{ .boolean = false };
-                            vm.stack[vm.base + a + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
-                            const frame_max = vm.base + ci.func.maxstacksize;
-                            vm.top = if (c == 0) vm.base + a + 2 else frame_max;
-                            return .Continue;
-                        }
-                        const handler = vm.stack[vm.base + a + 2];
-                        const inner_total_args = total_args - 1; // drop handler
-                        if (inner_total_args > 1) {
-                            var i: u32 = 0;
-                            const shift_count = inner_total_args - 1;
-                            while (i < shift_count) : (i += 1) {
-                                vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
-                            }
-                        }
-                        return try dispatchProtectedCall(vm, ci, a, inner_total_args, total_results, handler, vm.base + a);
+                        const prepared = prepareXpcall(vm, a, total_args, vm.base + a) catch |err| switch (err) {
+                            error.InvalidXpcallHandler => {
+                                const frame_max = vm.base + ci.func.maxstacksize;
+                                vm.top = if (c == 0) vm.base + a + 2 else frame_max;
+                                return .Continue;
+                            },
+                            else => return err,
+                        };
+                        return try dispatchProtectedCall(vm, ci, a, prepared.total_args, total_results, prepared.handler, vm.base + a);
                     }
                     const nargs: u32 = if (b > 0) b - 1 else blk: {
                         const arg_start = vm.base + a + 1;
@@ -2642,7 +2701,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Close TBC variables if k flag is set
             if (k) {
-                try closeTBCVariables(vm, current_ci, 0, .nil);
+                try closeTbcForReturn(vm, current_ci);
             }
 
             // Close upvalues before tail call
@@ -2805,51 +2864,19 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         var handler: ?TValue = null;
                         var effective_total_args = total_args_call;
                         if (nc.func.id == .xpcall) {
-                            if (total_args_call < 2) {
-                                vm.stack[ret_base] = .{ .boolean = false };
-                                vm.stack[ret_base + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
-                                popCallInfo(vm);
-                                vm.top = ret_base + 2;
-                                return .LoopContinue;
-                            }
-                            handler = vm.stack[vm.base + a + 2];
-                            effective_total_args = total_args_call - 1;
-                            if (effective_total_args > 1) {
-                                var i: u32 = 0;
-                                const shift_count = effective_total_args - 1;
-                                while (i < shift_count) : (i += 1) {
-                                    vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
-                                }
-                            }
+                            const prepared = prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
+                                error.InvalidXpcallHandler => {
+                                    popCallInfo(vm);
+                                    vm.top = ret_base + 2;
+                                    return .LoopContinue;
+                                },
+                                else => return err,
+                            };
+                            handler = prepared.handler;
+                            effective_total_args = prepared.total_args;
                         }
-                        const pcall_nresults: i16 = if (total_results > 0)
-                            @intCast(total_results - 1)
-                        else
-                            -1;
                         const new_base = vm.base + a + 1;
-                        current_ci.func = &protected_call_bootstrap_proto;
-                        current_ci.closure = null;
-                        current_ci.pc = protected_call_bootstrap_proto.code.ptr;
-                        current_ci.base = new_base;
-                        current_ci.ret_base = ret_base;
-                        current_ci.nresults = pcall_nresults;
-                        current_ci.was_tail_called = true;
-                        current_ci.vararg_base = 0;
-                        current_ci.vararg_count = 0;
-                        current_ci.is_protected = true;
-                        current_ci.error_handler = handler orelse .nil;
-                        current_ci.tbc_bitmap = 0;
-                        current_ci.pending_return_a = null;
-                        current_ci.pending_return_count = null;
-                        current_ci.pending_return_reexec = false;
-                        current_ci.pending_compare_active = false;
-                        current_ci.pending_compare_negate = 0;
-                        current_ci.pending_compare_invert = false;
-                        current_ci.pending_compare_result_slot = 0;
-                        current_ci.pending_concat_active = false;
-                        current_ci.pending_concat_a = 0;
-                        current_ci.pending_concat_b = 0;
-                        current_ci.pending_concat_i = -1;
+                        reuseCurrentFrameForProtectedCall(current_ci, ret_base, total_results, handler, new_base);
                         vm.base = new_base;
                         vm.top = new_base + effective_total_args;
                         return .LoopContinue;
@@ -2946,14 +2973,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 }
 
                 // Close TBC variables before returning (Lua 5.4)
-                if (returning_ci.tbc_bitmap != 0) {
-                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
-                        if (err == error.Yield) {
-                            returning_ci.pending_return_reexec = true;
-                        }
-                        return err;
-                    };
-                }
+                try closeTbcForReturn(vm, returning_ci);
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
@@ -3041,14 +3061,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     top_ci.pending_return_count = vm.top - (vm.base + a);
                 }
             }
-            if (top_ci.tbc_bitmap != 0) {
-                closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
-                    if (err == error.Yield) {
-                        top_ci.pending_return_reexec = true;
-                    }
-                    return err;
-                };
-            }
+            try closeTbcForReturn(vm, top_ci);
             const ret_count: u32 = if (b == 0)
                 top_ci.pending_return_count orelse (vm.top - (vm.base + a))
             else if (b == 1)
@@ -3074,14 +3087,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 // Close TBC variables before returning (Lua 5.4)
-                if (returning_ci.tbc_bitmap != 0) {
-                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
-                        if (err == error.Yield) {
-                            returning_ci.pending_return_reexec = true;
-                        }
-                        return err;
-                    };
-                }
+                try closeTbcForReturn(vm, returning_ci);
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
@@ -3115,14 +3121,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Top-level return - close TBC variables
             const top_ci = vm.ci.?;
-            if (top_ci.tbc_bitmap != 0) {
-                closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
-                    if (err == error.Yield) {
-                        top_ci.pending_return_reexec = true;
-                    }
-                    return err;
-                };
-            }
+            try closeTbcForReturn(vm, top_ci);
             try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
             return .{ .ReturnVM = .none };
         },
@@ -3136,14 +3135,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                 const is_protected = returning_ci.is_protected;
 
                 // Close TBC variables before returning (Lua 5.4)
-                if (returning_ci.tbc_bitmap != 0) {
-                    closeTBCVariables(vm, returning_ci, 0, .nil) catch |err| {
-                        if (err == error.Yield) {
-                            returning_ci.pending_return_reexec = true;
-                        }
-                        return err;
-                    };
-                }
+                try closeTbcForReturn(vm, returning_ci);
                 if (vm.open_upvalues != null) {
                     vm.closeUpvalues(returning_ci.base);
                 }
@@ -3187,12 +3179,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
 
             // Top-level return - close TBC variables
             const top_ci = vm.ci.?;
-            closeTBCVariables(vm, top_ci, 0, .nil) catch |err| {
-                if (err == error.Yield) {
-                    top_ci.pending_return_reexec = true;
-                }
-                return err;
-            };
+            try closeTbcForReturn(vm, top_ci);
             try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
             return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
         },
