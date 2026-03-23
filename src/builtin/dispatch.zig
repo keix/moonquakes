@@ -66,6 +66,17 @@ fn registerNative(tbl: *TableObject, gc: *GC, name: []const u8, id: NativeFnId) 
     try setStringKey(tbl, gc, name, TValue.fromNativeClosure(nc));
 }
 
+const BuiltinEntry = struct {
+    name: []const u8,
+    id: NativeFnId,
+};
+
+fn registerEntries(tbl: *TableObject, gc: *GC, entries: []const BuiltinEntry) !void {
+    for (entries) |entry| {
+        try registerNative(tbl, gc, entry.name, entry.id);
+    }
+}
+
 fn registerLuaDofileWrapper(globals: *TableObject, gc: *GC) !void {
     const source =
         \\return function (filename)
@@ -170,32 +181,35 @@ fn registerStdLibsInPackageLoaded(globals: *TableObject, gc: *GC) !void {
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
 fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
-    // Core functions (implemented)
-    try registerNative(globals, gc, "print", .print);
-    try registerNative(globals, gc, "tostring", .tostring);
-    try registerNative(globals, gc, "assert", .assert);
-    try registerNative(globals, gc, "error", .lua_error);
-    try registerNative(globals, gc, "collectgarbage", .collectgarbage);
+    // Dispatcher-backed global functions.
+    const global_entries = [_]BuiltinEntry{
+        .{ .name = "print", .id = .print },
+        .{ .name = "tostring", .id = .tostring },
+        .{ .name = "assert", .id = .assert },
+        .{ .name = "error", .id = .lua_error },
+        .{ .name = "collectgarbage", .id = .collectgarbage },
+        .{ .name = "type", .id = .lua_type },
+        .{ .name = "pcall", .id = .pcall },
+        .{ .name = "xpcall", .id = .xpcall },
+        .{ .name = "next", .id = .next },
+        .{ .name = "pairs", .id = .pairs },
+        .{ .name = "ipairs", .id = .ipairs },
+        .{ .name = "getmetatable", .id = .getmetatable },
+        .{ .name = "setmetatable", .id = .setmetatable },
+        .{ .name = "rawget", .id = .rawget },
+        .{ .name = "rawset", .id = .rawset },
+        .{ .name = "rawlen", .id = .rawlen },
+        .{ .name = "rawequal", .id = .rawequal },
+        .{ .name = "select", .id = .select },
+        .{ .name = "tonumber", .id = .tonumber },
+        .{ .name = "load", .id = .load },
+        .{ .name = "loadfile", .id = .loadfile },
+        .{ .name = "warn", .id = .warn },
+    };
+    try registerEntries(globals, gc, &global_entries);
 
-    // Additional global functions (skeleton implementations)
-    try registerNative(globals, gc, "type", .lua_type);
-    try registerNative(globals, gc, "pcall", .pcall);
-    try registerNative(globals, gc, "xpcall", .xpcall);
-    try registerNative(globals, gc, "next", .next);
-    try registerNative(globals, gc, "pairs", .pairs);
-    try registerNative(globals, gc, "ipairs", .ipairs);
-    try registerNative(globals, gc, "getmetatable", .getmetatable);
-    try registerNative(globals, gc, "setmetatable", .setmetatable);
-    try registerNative(globals, gc, "rawget", .rawget);
-    try registerNative(globals, gc, "rawset", .rawset);
-    try registerNative(globals, gc, "rawlen", .rawlen);
-    try registerNative(globals, gc, "rawequal", .rawequal);
-    try registerNative(globals, gc, "select", .select);
-    try registerNative(globals, gc, "tonumber", .tonumber);
-    try registerNative(globals, gc, "load", .load);
-    try registerNative(globals, gc, "loadfile", .loadfile);
+    // Wrapper-only globals and fixed global bindings.
     try registerLuaDofileWrapper(globals, gc);
-    try registerNative(globals, gc, "warn", .warn);
 
     // _G and _ENV are self-references to the globals table itself
     try setStringKey(globals, gc, "_G", TValue.fromTable(globals));
@@ -209,24 +223,29 @@ fn initGlobalFunctions(globals: *TableObject, gc: *GC) !void {
 fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
     const string_table = try gc.allocTable();
 
-    try registerNative(string_table, gc, "len", .string_len);
-    try registerNative(string_table, gc, "sub", .string_sub);
-    try registerNative(string_table, gc, "upper", .string_upper);
-    try registerNative(string_table, gc, "lower", .string_lower);
-    try registerNative(string_table, gc, "byte", .string_byte);
-    try registerNative(string_table, gc, "char", .string_char);
-    try registerNative(string_table, gc, "rep", .string_rep);
-    try registerNative(string_table, gc, "reverse", .string_reverse);
-    try registerNative(string_table, gc, "find", .string_find);
-    try registerNative(string_table, gc, "match", .string_match);
-    try registerNative(string_table, gc, "gmatch", .string_gmatch);
-    try registerNative(string_table, gc, "gsub", .string_gsub);
-    try registerNative(string_table, gc, "format", .string_format);
-    try registerNative(string_table, gc, "dump", .string_dump);
-    try registerNative(string_table, gc, "pack", .string_pack);
-    try registerNative(string_table, gc, "unpack", .string_unpack);
-    try registerNative(string_table, gc, "packsize", .string_packsize);
+    // Dispatcher-backed string functions.
+    const string_entries = [_]BuiltinEntry{
+        .{ .name = "len", .id = .string_len },
+        .{ .name = "sub", .id = .string_sub },
+        .{ .name = "upper", .id = .string_upper },
+        .{ .name = "lower", .id = .string_lower },
+        .{ .name = "byte", .id = .string_byte },
+        .{ .name = "char", .id = .string_char },
+        .{ .name = "rep", .id = .string_rep },
+        .{ .name = "reverse", .id = .string_reverse },
+        .{ .name = "find", .id = .string_find },
+        .{ .name = "match", .id = .string_match },
+        .{ .name = "gmatch", .id = .string_gmatch },
+        .{ .name = "gsub", .id = .string_gsub },
+        .{ .name = "format", .id = .string_format },
+        .{ .name = "dump", .id = .string_dump },
+        .{ .name = "pack", .id = .string_pack },
+        .{ .name = "unpack", .id = .string_unpack },
+        .{ .name = "packsize", .id = .string_packsize },
+    };
+    try registerEntries(string_table, gc, &string_entries);
 
+    // Public library table and shared string metatable.
     try setStringKey(globals, gc, "string", TValue.fromTable(string_table));
 
     // Set shared string metatable so "str:method(...)" works.
@@ -239,17 +258,23 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
 fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
     const io_table = try gc.allocTable();
 
-    try registerNative(io_table, gc, "write", .io_write);
-    try registerNative(io_table, gc, "close", .io_close);
-    try registerNative(io_table, gc, "flush", .io_flush);
-    try registerNative(io_table, gc, "input", .io_input);
-    try registerNative(io_table, gc, "lines", .io_lines);
-    try registerNative(io_table, gc, "open", .io_open);
-    try registerNative(io_table, gc, "output", .io_output);
-    try registerNative(io_table, gc, "popen", .io_popen);
-    try registerNative(io_table, gc, "read", .io_read);
-    try registerNative(io_table, gc, "tmpfile", .io_tmpfile);
-    try registerNative(io_table, gc, "type", .io_type);
+    // Dispatcher-backed io functions.
+    const io_entries = [_]BuiltinEntry{
+        .{ .name = "write", .id = .io_write },
+        .{ .name = "close", .id = .io_close },
+        .{ .name = "flush", .id = .io_flush },
+        .{ .name = "input", .id = .io_input },
+        .{ .name = "lines", .id = .io_lines },
+        .{ .name = "open", .id = .io_open },
+        .{ .name = "output", .id = .io_output },
+        .{ .name = "popen", .id = .io_popen },
+        .{ .name = "read", .id = .io_read },
+        .{ .name = "tmpfile", .id = .io_tmpfile },
+        .{ .name = "type", .id = .io_type },
+    };
+    try registerEntries(io_table, gc, &io_entries);
+
+    // Stdio handles are initialized separately from dispatcher registration.
     try io.initStdioHandles(io_table, gc);
 
     try setStringKey(globals, gc, "io", TValue.fromTable(io_table));
@@ -259,36 +284,39 @@ fn initIOLibrary(globals: *TableObject, gc: *GC) !void {
 fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     const math_table = try gc.allocTable();
 
-    // Math constants
+    // Exported math constants remain explicit.
     try setStringKey(math_table, gc, "pi", .{ .number = math.MATH_PI });
     try setStringKey(math_table, gc, "huge", .{ .number = math.MATH_HUGE });
     try setStringKey(math_table, gc, "maxinteger", .{ .integer = math.MATH_MAXINTEGER });
     try setStringKey(math_table, gc, "mininteger", .{ .integer = math.MATH_MININTEGER });
 
-    // Math functions
-    try registerNative(math_table, gc, "abs", .math_abs);
-    try registerNative(math_table, gc, "acos", .math_acos);
-    try registerNative(math_table, gc, "asin", .math_asin);
-    try registerNative(math_table, gc, "atan", .math_atan);
-    try registerNative(math_table, gc, "ceil", .math_ceil);
-    try registerNative(math_table, gc, "cos", .math_cos);
-    try registerNative(math_table, gc, "deg", .math_deg);
-    try registerNative(math_table, gc, "exp", .math_exp);
-    try registerNative(math_table, gc, "floor", .math_floor);
-    try registerNative(math_table, gc, "fmod", .math_fmod);
-    try registerNative(math_table, gc, "log", .math_log);
-    try registerNative(math_table, gc, "max", .math_max);
-    try registerNative(math_table, gc, "min", .math_min);
-    try registerNative(math_table, gc, "modf", .math_modf);
-    try registerNative(math_table, gc, "rad", .math_rad);
-    try registerNative(math_table, gc, "random", .math_random);
-    try registerNative(math_table, gc, "randomseed", .math_randomseed);
-    try registerNative(math_table, gc, "sin", .math_sin);
-    try registerNative(math_table, gc, "sqrt", .math_sqrt);
-    try registerNative(math_table, gc, "tan", .math_tan);
-    try registerNative(math_table, gc, "tointeger", .math_tointeger);
-    try registerNative(math_table, gc, "type", .math_type);
-    try registerNative(math_table, gc, "ult", .math_ult);
+    // Dispatcher-backed math functions.
+    const math_entries = [_]BuiltinEntry{
+        .{ .name = "abs", .id = .math_abs },
+        .{ .name = "acos", .id = .math_acos },
+        .{ .name = "asin", .id = .math_asin },
+        .{ .name = "atan", .id = .math_atan },
+        .{ .name = "ceil", .id = .math_ceil },
+        .{ .name = "cos", .id = .math_cos },
+        .{ .name = "deg", .id = .math_deg },
+        .{ .name = "exp", .id = .math_exp },
+        .{ .name = "floor", .id = .math_floor },
+        .{ .name = "fmod", .id = .math_fmod },
+        .{ .name = "log", .id = .math_log },
+        .{ .name = "max", .id = .math_max },
+        .{ .name = "min", .id = .math_min },
+        .{ .name = "modf", .id = .math_modf },
+        .{ .name = "rad", .id = .math_rad },
+        .{ .name = "random", .id = .math_random },
+        .{ .name = "randomseed", .id = .math_randomseed },
+        .{ .name = "sin", .id = .math_sin },
+        .{ .name = "sqrt", .id = .math_sqrt },
+        .{ .name = "tan", .id = .math_tan },
+        .{ .name = "tointeger", .id = .math_tointeger },
+        .{ .name = "type", .id = .math_type },
+        .{ .name = "ult", .id = .math_ult },
+    };
+    try registerEntries(math_table, gc, &math_entries);
 
     try setStringKey(globals, gc, "math", TValue.fromTable(math_table));
 }
@@ -297,13 +325,17 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
 fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
     const table_table = try gc.allocTable();
 
-    try registerNative(table_table, gc, "insert", .table_insert);
-    try registerNative(table_table, gc, "remove", .table_remove);
-    try registerNative(table_table, gc, "sort", .table_sort);
-    try registerNative(table_table, gc, "concat", .table_concat);
-    try registerNative(table_table, gc, "move", .table_move);
-    try registerNative(table_table, gc, "pack", .table_pack);
-    try registerNative(table_table, gc, "unpack", .table_unpack);
+    // Dispatcher-backed table functions.
+    const table_entries = [_]BuiltinEntry{
+        .{ .name = "insert", .id = .table_insert },
+        .{ .name = "remove", .id = .table_remove },
+        .{ .name = "sort", .id = .table_sort },
+        .{ .name = "concat", .id = .table_concat },
+        .{ .name = "move", .id = .table_move },
+        .{ .name = "pack", .id = .table_pack },
+        .{ .name = "unpack", .id = .table_unpack },
+    };
+    try registerEntries(table_table, gc, &table_entries);
 
     try setStringKey(globals, gc, "table", TValue.fromTable(table_table));
 }
@@ -312,17 +344,21 @@ fn initTableLibrary(globals: *TableObject, gc: *GC) !void {
 fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
     const os_table = try gc.allocTable();
 
-    try registerNative(os_table, gc, "clock", .os_clock);
-    try registerNative(os_table, gc, "date", .os_date);
-    try registerNative(os_table, gc, "difftime", .os_difftime);
-    try registerNative(os_table, gc, "execute", .os_execute);
-    try registerNative(os_table, gc, "exit", .os_exit);
-    try registerNative(os_table, gc, "getenv", .os_getenv);
-    try registerNative(os_table, gc, "remove", .os_remove);
-    try registerNative(os_table, gc, "rename", .os_rename);
-    try registerNative(os_table, gc, "setlocale", .os_setlocale);
-    try registerNative(os_table, gc, "time", .os_time);
-    try registerNative(os_table, gc, "tmpname", .os_tmpname);
+    // Dispatcher-backed os functions.
+    const os_entries = [_]BuiltinEntry{
+        .{ .name = "clock", .id = .os_clock },
+        .{ .name = "date", .id = .os_date },
+        .{ .name = "difftime", .id = .os_difftime },
+        .{ .name = "execute", .id = .os_execute },
+        .{ .name = "exit", .id = .os_exit },
+        .{ .name = "getenv", .id = .os_getenv },
+        .{ .name = "remove", .id = .os_remove },
+        .{ .name = "rename", .id = .os_rename },
+        .{ .name = "setlocale", .id = .os_setlocale },
+        .{ .name = "time", .id = .os_time },
+        .{ .name = "tmpname", .id = .os_tmpname },
+    };
+    try registerEntries(os_table, gc, &os_entries);
 
     try setStringKey(globals, gc, "os", TValue.fromTable(os_table));
 }
@@ -331,23 +367,27 @@ fn initOSLibrary(globals: *TableObject, gc: *GC) !void {
 fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
     const debug_table = try gc.allocTable();
 
-    try registerNative(debug_table, gc, "debug", .debug_debug);
-    try registerNative(debug_table, gc, "gethook", .debug_gethook);
-    try registerNative(debug_table, gc, "getinfo", .debug_getinfo);
-    try registerNative(debug_table, gc, "getlocal", .debug_getlocal);
-    try registerNative(debug_table, gc, "getmetatable", .debug_getmetatable);
-    try registerNative(debug_table, gc, "getregistry", .debug_getregistry);
-    try registerNative(debug_table, gc, "getupvalue", .debug_getupvalue);
-    try registerNative(debug_table, gc, "getuservalue", .debug_getuservalue);
-    try registerNative(debug_table, gc, "newuserdata", .debug_newuserdata);
-    try registerNative(debug_table, gc, "sethook", .debug_sethook);
-    try registerNative(debug_table, gc, "setlocal", .debug_setlocal);
-    try registerNative(debug_table, gc, "setmetatable", .debug_setmetatable);
-    try registerNative(debug_table, gc, "setupvalue", .debug_setupvalue);
-    try registerNative(debug_table, gc, "setuservalue", .debug_setuservalue);
-    try registerNative(debug_table, gc, "traceback", .debug_traceback);
-    try registerNative(debug_table, gc, "upvalueid", .debug_upvalueid);
-    try registerNative(debug_table, gc, "upvaluejoin", .debug_upvaluejoin);
+    // Dispatcher-backed debug functions.
+    const debug_entries = [_]BuiltinEntry{
+        .{ .name = "debug", .id = .debug_debug },
+        .{ .name = "gethook", .id = .debug_gethook },
+        .{ .name = "getinfo", .id = .debug_getinfo },
+        .{ .name = "getlocal", .id = .debug_getlocal },
+        .{ .name = "getmetatable", .id = .debug_getmetatable },
+        .{ .name = "getregistry", .id = .debug_getregistry },
+        .{ .name = "getupvalue", .id = .debug_getupvalue },
+        .{ .name = "getuservalue", .id = .debug_getuservalue },
+        .{ .name = "newuserdata", .id = .debug_newuserdata },
+        .{ .name = "sethook", .id = .debug_sethook },
+        .{ .name = "setlocal", .id = .debug_setlocal },
+        .{ .name = "setmetatable", .id = .debug_setmetatable },
+        .{ .name = "setupvalue", .id = .debug_setupvalue },
+        .{ .name = "setuservalue", .id = .debug_setuservalue },
+        .{ .name = "traceback", .id = .debug_traceback },
+        .{ .name = "upvalueid", .id = .debug_upvalueid },
+        .{ .name = "upvaluejoin", .id = .debug_upvaluejoin },
+    };
+    try registerEntries(debug_table, gc, &debug_entries);
 
     try setStringKey(globals, gc, "debug", TValue.fromTable(debug_table));
 }
@@ -356,15 +396,19 @@ fn initDebugLibrary(globals: *TableObject, gc: *GC) !void {
 fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
     const utf8_table = try gc.allocTable();
 
-    // UTF-8 pattern constant
+    // Exported utf8 constants remain explicit.
     const charpattern_str = try gc.allocString(utf8.UTF8_CHARPATTERN);
     try setStringKey(utf8_table, gc, "charpattern", TValue.fromString(charpattern_str));
 
-    try registerNative(utf8_table, gc, "char", .utf8_char);
-    try registerNative(utf8_table, gc, "codes", .utf8_codes);
-    try registerNative(utf8_table, gc, "codepoint", .utf8_codepoint);
-    try registerNative(utf8_table, gc, "len", .utf8_len);
-    try registerNative(utf8_table, gc, "offset", .utf8_offset);
+    // Dispatcher-backed utf8 functions.
+    const utf8_entries = [_]BuiltinEntry{
+        .{ .name = "char", .id = .utf8_char },
+        .{ .name = "codes", .id = .utf8_codes },
+        .{ .name = "codepoint", .id = .utf8_codepoint },
+        .{ .name = "len", .id = .utf8_len },
+        .{ .name = "offset", .id = .utf8_offset },
+    };
+    try registerEntries(utf8_table, gc, &utf8_entries);
 
     try setStringKey(globals, gc, "utf8", TValue.fromTable(utf8_table));
 }
@@ -373,31 +417,38 @@ fn initUtf8Library(globals: *TableObject, gc: *GC) !void {
 fn initCoroutineLibrary(globals: *TableObject, gc: *GC) !void {
     const coroutine_table = try gc.allocTable();
 
-    try registerNative(coroutine_table, gc, "create", .coroutine_create);
-    try registerNative(coroutine_table, gc, "resume", .coroutine_resume);
-    try registerNative(coroutine_table, gc, "running", .coroutine_running);
-    try registerNative(coroutine_table, gc, "status", .coroutine_status);
-    try registerNative(coroutine_table, gc, "wrap", .coroutine_wrap);
-    try registerNative(coroutine_table, gc, "yield", .coroutine_yield);
-    try registerNative(coroutine_table, gc, "isyieldable", .coroutine_isyieldable);
-    try registerNative(coroutine_table, gc, "close", .coroutine_close);
+    // Dispatcher-backed coroutine functions.
+    const coroutine_entries = [_]BuiltinEntry{
+        .{ .name = "create", .id = .coroutine_create },
+        .{ .name = "resume", .id = .coroutine_resume },
+        .{ .name = "running", .id = .coroutine_running },
+        .{ .name = "status", .id = .coroutine_status },
+        .{ .name = "wrap", .id = .coroutine_wrap },
+        .{ .name = "yield", .id = .coroutine_yield },
+        .{ .name = "isyieldable", .id = .coroutine_isyieldable },
+        .{ .name = "close", .id = .coroutine_close },
+    };
+    try registerEntries(coroutine_table, gc, &coroutine_entries);
 
     try setStringKey(globals, gc, "coroutine", TValue.fromTable(coroutine_table));
 }
 
 /// Module System: require, package.loadlib, package.searchpath (skeleton implementations)
 fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
-    // Global require function
+    // Global require entrypoint is registered separately from the package table.
     try registerNative(globals, gc, "require", .require);
 
-    // Package table for module system
+    // Package table for module system.
     const package_table = try gc.allocTable();
 
-    // Package functions
-    try registerNative(package_table, gc, "loadlib", .package_loadlib);
-    try registerNative(package_table, gc, "searchpath", .package_searchpath);
+    // Dispatcher-backed package functions.
+    const package_entries = [_]BuiltinEntry{
+        .{ .name = "loadlib", .id = .package_loadlib },
+        .{ .name = "searchpath", .id = .package_searchpath },
+    };
+    try registerEntries(package_table, gc, &package_entries);
 
-    // Package configuration and paths (platform-specific in real implementation)
+    // Static package fields remain explicit.
     const config_str = try gc.allocString("/\n;\n?\n!\n-");
     try setStringKey(package_table, gc, "config", TValue.fromString(config_str));
 
@@ -407,7 +458,7 @@ fn initModuleSystem(globals: *TableObject, gc: *GC) !void {
     const cpath_str = try gc.allocString("./?.so;/usr/local/lib/lua/5.4/?.so");
     try setStringKey(package_table, gc, "cpath", TValue.fromString(cpath_str));
 
-    // Package tables for loaded modules and searchers
+    // Mutable package state tables remain explicit.
     const loaded_table = try gc.allocTable();
     try setStringKey(package_table, gc, "loaded", TValue.fromTable(loaded_table));
 
