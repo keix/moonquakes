@@ -1,3 +1,8 @@
+//! Coroutine-library builtin functions and resume/yield helpers.
+//!
+//! Shared helper logic stays near the top of the file.
+//! Dispatcher entrypoints are grouped below.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
@@ -49,188 +54,6 @@ const resume_c_depth_limit: u32 = 197;
 fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
     if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
     return co_vm.stack[0];
-}
-
-// Lua 5.4 Coroutine Library
-// Reference: https://www.lua.org/manual/5.4/manual.html#2.6
-
-/// coroutine.create(f) - Creates a new coroutine with body f
-pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nresults;
-
-    if (nargs < 1) {
-        return vm.raiseString("bad argument #1 to 'create' (function expected)");
-    }
-
-    const func_arg = vm.stack[vm.base + func_reg + 1];
-
-    // Must be a function (closure or native closure)
-    if (!func_arg.isCallable()) {
-        return vm.raiseString("bad argument #1 to 'create' (function expected)");
-    }
-
-    // Create a new VM for the coroutine (shares the same Runtime)
-    const new_vm = try VM.init(vm.rt);
-
-    // Set up the coroutine's initial state:
-    // The function will be called when the coroutine is resumed
-    // For now, store the function at stack[0]
-    new_vm.stack[0] = func_arg;
-    new_vm.top = 1;
-    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
-    if (new_vm.thread.entry_func) |entry_fn| {
-        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
-    }
-
-    // Return the thread object
-    vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
-}
-
-/// coroutine.resume(co [, val1, ...]) - Starts or continues coroutine co
-/// Returns (true, results...) on success, (false, error_message) on failure
-pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    vm.beginGCGuard();
-    defer vm.endGCGuard();
-
-    if (nargs < 1) {
-        return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
-    }
-
-    const thread_arg = vm.stack[vm.base + func_reg + 1];
-    const thread = thread_arg.asThread() orelse {
-        return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
-    };
-
-    if (vm.rt.resume_c_depth >= resume_c_depth_limit) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("C stack overflow"));
-        vm.top = vm.base + func_reg + 2;
-        return;
-    }
-    vm.rt.resume_c_depth += 1;
-    defer vm.rt.resume_c_depth -= 1;
-
-    // Check if the coroutine can be resumed
-    if (thread.status == .dead) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume dead coroutine"));
-        return;
-    }
-
-    if (thread.status == .running) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
-        return;
-    }
-    if (thread.status == .normal) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
-        return;
-    }
-
-    const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
-    const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
-    const arg_base = vm.base + func_reg + 2; // skip thread argument
-    const is_first_resume = thread.status == .created;
-    const body = threadEntryBody(thread, co_vm);
-
-    if (is_first_resume) {
-        // First resume - check function type and set up call frame
-        co_vm.stack[0] = body;
-        const is_lua_body = body.asClosure() != null;
-        const is_native_body = body.isObject() and body.object.type == .native_closure;
-        if (!is_lua_body and !is_native_body) {
-            vm.stack[vm.base + func_reg] = .{ .boolean = false };
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
-            return;
-        }
-        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
-    } else {
-        // Resume after yield
-        setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
-    }
-
-    // Update statuses
-    const caller_thread = vm.thread;
-    caller_thread.status = .normal; // Caller is waiting
-    thread.status = .running; // Coroutine is now running
-    vm.rt.setCurrentThread(thread);
-    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
-
-    // Execute the coroutine
-    const exec_result = executeCoroutine(co_vm);
-
-    // Restore caller status
-    caller_thread.status = .running;
-    vm.rt.setCurrentThread(caller_thread);
-    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
-
-    // Handle result
-    switch (exec_result) {
-        .completed => |result_count| {
-            // Coroutine completed - mark as dead
-            thread.status = .dead;
-
-            // Return (true, results...)
-            vm.stack[vm.base + func_reg] = .{ .boolean = true };
-
-            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
-            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
-            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
-            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
-            const actual_copy = @min(result_count, max_copy);
-            var j: u32 = 0;
-            while (j < actual_copy) : (j += 1) {
-                vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[j];
-            }
-            if (nresults > 0 and actual_copy < expected_payload) {
-                var k = actual_copy;
-                while (k < expected_payload) : (k += 1) {
-                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
-                }
-            }
-            vm.top = if (nresults == 0)
-                vm.base + func_reg + 1 + actual_copy
-            else
-                vm.base + func_reg + 1 + expected_payload;
-        },
-        .yielded => |yield_info| {
-            // Coroutine yielded - keep as suspended
-            thread.status = .suspended;
-
-            // Return (true, yield_values...)
-            vm.stack[vm.base + func_reg] = .{ .boolean = true };
-
-            // Copy yield values from coroutine stack to caller stack
-            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
-            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
-            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
-            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
-            const actual_copy = @min(yield_info.count, max_copy);
-            var j: u32 = 0;
-            while (j < actual_copy) : (j += 1) {
-                vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[yield_info.base + j];
-            }
-            if (nresults > 0 and actual_copy < expected_payload) {
-                var k = actual_copy;
-                while (k < expected_payload) : (k += 1) {
-                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
-                }
-            }
-            vm.top = if (nresults == 0)
-                vm.base + func_reg + 1 + actual_copy
-            else
-                vm.base + func_reg + 1 + expected_payload;
-        },
-        .errored => |err_val| {
-            // Coroutine errored - mark as dead
-            thread.status = .dead;
-            vm.stack[vm.base + func_reg] = .{ .boolean = false };
-            vm.stack[vm.base + func_reg + 1] = err_val;
-            // Update vm.top for MULTRET support (false + error message)
-            vm.top = vm.base + func_reg + 2;
-        },
-    }
 }
 
 /// Result of coroutine execution
@@ -436,6 +259,159 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
 
     // ci became null without explicit return - treat as empty return
     return .{ .completed = 0 };
+}
+
+// Lua 5.4 Coroutine Library
+// Reference: https://www.lua.org/manual/5.4/manual.html#2.6
+
+/// coroutine.create(f) - Creates a new coroutine with body f
+pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = nresults;
+
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'create' (function expected)");
+    }
+
+    const func_arg = vm.stack[vm.base + func_reg + 1];
+    if (!func_arg.isCallable()) {
+        return vm.raiseString("bad argument #1 to 'create' (function expected)");
+    }
+
+    const new_vm = try VM.init(vm.rt);
+    new_vm.stack[0] = func_arg;
+    new_vm.top = 1;
+    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
+    if (new_vm.thread.entry_func) |entry_fn| {
+        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
+    }
+
+    vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
+}
+
+/// coroutine.resume(co [, val1, ...]) - Starts or continues coroutine co
+/// Returns (true, results...) on success, (false, error_message) on failure
+pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    vm.beginGCGuard();
+    defer vm.endGCGuard();
+
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
+    }
+
+    const thread_arg = vm.stack[vm.base + func_reg + 1];
+    const thread = thread_arg.asThread() orelse {
+        return vm.raiseString("bad argument #1 to 'resume' (thread expected)");
+    };
+
+    if (vm.rt.resume_c_depth >= resume_c_depth_limit) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("C stack overflow"));
+        vm.top = vm.base + func_reg + 2;
+        return;
+    }
+    vm.rt.resume_c_depth += 1;
+    defer vm.rt.resume_c_depth -= 1;
+
+    if (thread.status == .dead) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume dead coroutine"));
+        return;
+    }
+
+    if (thread.status == .running or thread.status == .normal) {
+        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("cannot resume non-suspended coroutine"));
+        return;
+    }
+
+    const co_vm: *VM = @ptrCast(@alignCast(thread.vm));
+    const num_args: u32 = if (nargs > 1) nargs - 1 else 0;
+    const arg_base = vm.base + func_reg + 2;
+    const is_first_resume = thread.status == .created;
+    const body = threadEntryBody(thread, co_vm);
+
+    if (is_first_resume) {
+        co_vm.stack[0] = body;
+        const is_lua_body = body.asClosure() != null;
+        const is_native_body = body.isObject() and body.object.type == .native_closure;
+        if (!is_lua_body and !is_native_body) {
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString("coroutine body must be a Lua function"));
+            return;
+        }
+        setupFirstResume(co_vm, &vm.stack, arg_base, num_args);
+    } else {
+        setupResumeAfterYield(co_vm, &vm.stack, arg_base, num_args);
+    }
+
+    const caller_thread = vm.thread;
+    caller_thread.status = .normal;
+    thread.status = .running;
+    vm.rt.setCurrentThread(thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(co_vm));
+
+    const exec_result = executeCoroutine(co_vm);
+
+    caller_thread.status = .running;
+    vm.rt.setCurrentThread(caller_thread);
+    vm.rt.gc.setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
+
+    switch (exec_result) {
+        .completed => |result_count| {
+            thread.status = .dead;
+            vm.stack[vm.base + func_reg] = .{ .boolean = true };
+
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
+            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
+            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
+            const actual_copy = @min(result_count, max_copy);
+            var j: u32 = 0;
+            while (j < actual_copy) : (j += 1) {
+                vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[j];
+            }
+            if (nresults > 0 and actual_copy < expected_payload) {
+                var k = actual_copy;
+                while (k < expected_payload) : (k += 1) {
+                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
+                }
+            }
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + 1 + actual_copy
+            else
+                vm.base + func_reg + 1 + expected_payload;
+        },
+        .yielded => |yield_info| {
+            thread.status = .suspended;
+            vm.stack[vm.base + func_reg] = .{ .boolean = true };
+
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + func_reg));
+            const payload_cap: u32 = if (stack_room > 0) stack_room - 1 else 0;
+            const expected_payload: u32 = if (nresults == 0) 0 else @min(nresults - 1, payload_cap);
+            const max_copy: u32 = if (nresults == 0) payload_cap else expected_payload;
+            const actual_copy = @min(yield_info.count, max_copy);
+            var j: u32 = 0;
+            while (j < actual_copy) : (j += 1) {
+                vm.stack[vm.base + func_reg + 1 + j] = co_vm.stack[yield_info.base + j];
+            }
+            if (nresults > 0 and actual_copy < expected_payload) {
+                var k = actual_copy;
+                while (k < expected_payload) : (k += 1) {
+                    vm.stack[vm.base + func_reg + 1 + k] = .nil;
+                }
+            }
+            vm.top = if (nresults == 0)
+                vm.base + func_reg + 1 + actual_copy
+            else
+                vm.base + func_reg + 1 + expected_payload;
+        },
+        .errored => |err_val| {
+            thread.status = .dead;
+            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = err_val;
+            vm.top = vm.base + func_reg + 2;
+        },
+    }
 }
 
 /// coroutine.running() - Returns running coroutine plus boolean indicating main thread

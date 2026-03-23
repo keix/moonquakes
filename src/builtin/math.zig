@@ -1,3 +1,8 @@
+//! Math-library builtin functions, numeric coercion helpers, and RNG helpers.
+//!
+//! Shared helper logic stays near the top of the file.
+//! Dispatcher entrypoints are grouped below.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
@@ -231,6 +236,8 @@ fn numLess(a: TValue, b: TValue) bool {
     if (a.isNumber() and b.isInteger()) return compareFloatInt(a.number, b.integer, false);
     return false;
 }
+
+// Dispatcher entrypoints.
 
 /// Lua 5.4 Math Library
 /// Corresponds to Lua manual chapter "Mathematical Functions"
@@ -715,6 +722,8 @@ pub fn nativeMathUlt(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     const un: u64 = @bitCast(n);
     vm.stack[vm.base + func_reg] = .{ .boolean = um < un };
 }
+
+// Exported constants used during library registration.
 
 /// math.pi - The value of π
 pub const MATH_PI: f64 = std.math.pi;

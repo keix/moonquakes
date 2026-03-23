@@ -1,3 +1,8 @@
+//! Operating-system builtin functions and date/time helpers.
+//!
+//! Shared helper logic stays near the top of the file.
+//! Dispatcher entrypoints are grouped below.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const TableObject = @import("../runtime/gc/object.zig").TableObject;
@@ -11,6 +16,239 @@ fn makeShellScript(allocator: std.mem.Allocator, cmd: []const u8) ![]u8 {
         "mq_status=0\n{{ {s}; mq_status=$?; }}\nexit $mq_status",
         .{cmd},
     );
+}
+
+/// Broken-down time structure
+const DateTime = struct {
+    year: i64,
+    month: i64, // 1-12
+    day: i64, // 1-31
+    hour: i64, // 0-23
+    min: i64, // 0-59
+    sec: i64, // 0-59
+    wday: i64, // 1-7, Sunday is 1
+    yday: i64, // 1-366
+};
+
+/// Convert Unix timestamp to broken-down time
+fn epochToDateTime(timestamp: i64, use_utc: bool) DateTime {
+    _ = use_utc; // TODO: handle timezone offset for local time
+
+    var days = @divFloor(timestamp, 86400);
+    var remaining = @mod(timestamp, 86400);
+    if (remaining < 0) {
+        remaining += 86400;
+        days -= 1;
+    }
+
+    const hour = @divFloor(remaining, 3600);
+    remaining = @mod(remaining, 3600);
+    const min = @divFloor(remaining, 60);
+    const sec = @mod(remaining, 60);
+
+    var wday = @mod(days + 4, 7) + 1;
+    if (wday < 1) wday += 7;
+
+    const civil = civilFromDays(days);
+    const yday = dayOfYear(civil.year, civil.month, civil.day);
+
+    return .{
+        .year = civil.year,
+        .month = civil.month,
+        .day = civil.day,
+        .hour = hour,
+        .min = min,
+        .sec = sec,
+        .wday = wday,
+        .yday = yday,
+    };
+}
+
+fn isLeapYear(year: i64) bool {
+    if (@mod(year, 400) == 0) return true;
+    if (@mod(year, 100) == 0) return false;
+    if (@mod(year, 4) == 0) return true;
+    return false;
+}
+
+const DateFormatError = error{InvalidConversionSpecifier};
+
+/// Format datetime using strftime-like format
+fn formatDateTimeAlloc(allocator: std.mem.Allocator, format: []const u8, dt: *const DateTime) (DateFormatError || error{OutOfMemory})![]u8 {
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+
+    const weekday_abbrev = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    const weekday_full = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    const month_abbrev = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    const month_full = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+
+    const day: u64 = @intCast(dt.day);
+    const month: u64 = @intCast(dt.month);
+    const hour: u64 = @intCast(dt.hour);
+    const min: u64 = @intCast(dt.min);
+    const sec: u64 = @intCast(dt.sec);
+    const yday: u64 = @intCast(dt.yday);
+    const year_short: u64 = @intCast(@mod(dt.year, 100));
+
+    while (i < format.len) {
+        if (format[i] != '%') {
+            try out.append(allocator, format[i]);
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= format.len) return error.InvalidConversionSpecifier;
+
+        var spec = format[i + 1];
+        var advance: usize = 2;
+        if (spec == 'E' or spec == 'O') {
+            const modifier = spec;
+            if (i + 2 >= format.len) return error.InvalidConversionSpecifier;
+            spec = format[i + 2];
+            advance = 3;
+            const valid_with_modifier = switch (modifier) {
+                'E' => switch (spec) {
+                    'c', 'C', 'x', 'X', 'y', 'Y' => true,
+                    else => false,
+                },
+                'O' => switch (spec) {
+                    'd', 'e', 'H', 'I', 'm', 'M', 'S', 'u', 'U', 'V', 'w', 'W', 'y' => true,
+                    else => false,
+                },
+                else => false,
+            };
+            if (!valid_with_modifier) return error.InvalidConversionSpecifier;
+        }
+
+        switch (spec) {
+            'a' => try out.appendSlice(allocator, weekday_abbrev[@intCast(dt.wday - 1)]),
+            'A' => try out.appendSlice(allocator, weekday_full[@intCast(dt.wday - 1)]),
+            'b', 'h' => try out.appendSlice(allocator, month_abbrev[@intCast(dt.month - 1)]),
+            'B' => try out.appendSlice(allocator, month_full[@intCast(dt.month - 1)]),
+            'c' => try appendFmtList(&out, allocator, "{s} {s} {d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{
+                weekday_abbrev[@intCast(dt.wday - 1)],
+                month_abbrev[@intCast(dt.month - 1)],
+                day,
+                hour,
+                min,
+                sec,
+                dt.year,
+            }),
+            'd' => try appendFmtList(&out, allocator, "{d:0>2}", .{day}),
+            'e' => try appendFmtList(&out, allocator, "{d:>2}", .{day}),
+            'H' => try appendFmtList(&out, allocator, "{d:0>2}", .{hour}),
+            'I' => try appendFmtList(&out, allocator, "{d:0>2}", .{hour12u(hour)}),
+            'j' => try appendFmtList(&out, allocator, "{d:0>3}", .{yday}),
+            'm' => try appendFmtList(&out, allocator, "{d:0>2}", .{month}),
+            'M' => try appendFmtList(&out, allocator, "{d:0>2}", .{min}),
+            'p' => try out.appendSlice(allocator, if (dt.hour < 12) "AM" else "PM"),
+            'S' => try appendFmtList(&out, allocator, "{d:0>2}", .{sec}),
+            'w' => try appendFmtList(&out, allocator, "{d}", .{@as(u64, @intCast(dt.wday - 1))}),
+            'x' => try appendFmtList(&out, allocator, "{d:0>2}/{d:0>2}/{d:0>2}", .{ month, day, year_short }),
+            'X' => try appendFmtList(&out, allocator, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, min, sec }),
+            'y' => try appendFmtList(&out, allocator, "{d:0>2}", .{year_short}),
+            'Y' => try appendFmtList(&out, allocator, "{d}", .{dt.year}),
+            '%' => try out.appendSlice(allocator, "%"),
+            else => return error.InvalidConversionSpecifier,
+        }
+        i += advance;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn hour12u(hour: u64) u64 {
+    const h = @mod(hour, 12);
+    return if (h == 0) 12 else h;
+}
+
+const CivilDate = struct {
+    year: i64,
+    month: i64,
+    day: i64,
+};
+
+fn civilFromDays(days_since_epoch: i64) CivilDate {
+    const z = days_since_epoch + 719468;
+    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe = z - era * 146097;
+    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
+    var year = yoe + era * 400;
+    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+    const mp = @divFloor(5 * doy + 2, 153);
+    const day = doy - @divFloor(153 * mp + 2, 5) + 1;
+    const month = mp + (if (mp < 10) @as(i64, 3) else @as(i64, -9));
+    if (month <= 2) year += 1;
+    return .{ .year = year, .month = month, .day = day };
+}
+
+fn dayOfYear(year: i64, month: i64, day: i64) i64 {
+    const month_offsets = if (isLeapYear(year))
+        [_]i64{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 }
+    else
+        [_]i64{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    return month_offsets[@intCast(month - 1)] + day;
+}
+
+fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
+    var y = year;
+    y -= if (month <= 2) 1 else 0;
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    const mp = month + (if (month > 2) @as(i64, -3) else @as(i64, 9));
+    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn getDateField(table: *TableObject, vm: anytype, name: []const u8) !?TValue {
+    const key = try vm.gc().allocString(name);
+    return table.get(TValue.fromString(key));
+}
+
+fn readDateFieldInt(table: *TableObject, vm: anytype, name: []const u8, required: bool, default_value: i64) !i64 {
+    const value_opt = try getDateField(table, vm, name);
+    const value = value_opt orelse {
+        if (required) {
+            var msg_buf: [96]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is missing in date table", .{name});
+            return vm.raiseString(msg);
+        }
+        return default_value;
+    };
+    return value.toInteger() orelse {
+        var msg_buf: [80]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is not an integer", .{name});
+        return vm.raiseString(msg);
+    };
+}
+
+fn checkFieldIntBound(vm: anytype, name: []const u8, value: i64) !void {
+    if (value < std.math.minInt(i32) or value > std.math.maxInt(i32)) {
+        var msg_buf: [80]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is out-of-bound", .{name});
+        return vm.raiseString(msg);
+    }
+}
+
+fn normalizeYearMonth(year: *i64, month: *i64) void {
+    const month_zero = month.* - 1;
+    year.* += @divFloor(month_zero, 12);
+    month.* = @mod(month_zero, 12) + 1;
+}
+
+fn writeDateField(table: *TableObject, vm: anytype, name: []const u8, value: TValue) !void {
+    const key = try vm.gc().allocString(name);
+    try table.set(TValue.fromString(key), value);
+}
+
+fn appendFmtList(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+    var tmp: [96]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&tmp, fmt, args) catch {
+        return error.OutOfMemory;
+    };
+    try out.appendSlice(allocator, formatted);
 }
 
 /// Lua 5.4 Operating System Library
@@ -120,242 +358,6 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     const result_str = try vm.gc().allocString(result);
     vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
-}
-
-/// Broken-down time structure
-const DateTime = struct {
-    year: i64,
-    month: i64, // 1-12
-    day: i64, // 1-31
-    hour: i64, // 0-23
-    min: i64, // 0-59
-    sec: i64, // 0-59
-    wday: i64, // 1-7, Sunday is 1
-    yday: i64, // 1-366
-};
-
-/// Convert Unix timestamp to broken-down time
-fn epochToDateTime(timestamp: i64, use_utc: bool) DateTime {
-    _ = use_utc; // TODO: handle timezone offset for local time
-
-    // Days since Unix epoch (1970-01-01)
-    var days = @divFloor(timestamp, 86400);
-    var remaining = @mod(timestamp, 86400);
-    if (remaining < 0) {
-        remaining += 86400;
-        days -= 1;
-    }
-
-    const hour = @divFloor(remaining, 3600);
-    remaining = @mod(remaining, 3600);
-    const min = @divFloor(remaining, 60);
-    const sec = @mod(remaining, 60);
-
-    // Calculate weekday (1970-01-01 was Thursday = 5)
-    var wday = @mod(days + 4, 7) + 1; // 1 = Sunday, 7 = Saturday
-    if (wday < 1) wday += 7;
-
-    const civil = civilFromDays(days);
-    const yday = dayOfYear(civil.year, civil.month, civil.day);
-
-    return .{
-        .year = civil.year,
-        .month = civil.month,
-        .day = civil.day,
-        .hour = hour,
-        .min = min,
-        .sec = sec,
-        .wday = wday,
-        .yday = yday,
-    };
-}
-
-fn isLeapYear(year: i64) bool {
-    if (@mod(year, 400) == 0) return true;
-    if (@mod(year, 100) == 0) return false;
-    if (@mod(year, 4) == 0) return true;
-    return false;
-}
-
-const DateFormatError = error{InvalidConversionSpecifier};
-
-/// Format datetime using strftime-like format
-fn formatDateTimeAlloc(allocator: std.mem.Allocator, format: []const u8, dt: *const DateTime) (DateFormatError || error{OutOfMemory})![]u8 {
-    var out: std.ArrayList(u8) = .{};
-    errdefer out.deinit(allocator);
-    var i: usize = 0;
-
-    const weekday_abbrev = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-    const weekday_full = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    const month_abbrev = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-    const month_full = [_][]const u8{ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
-
-    // Convert to unsigned for proper formatting
-    const day: u64 = @intCast(dt.day);
-    const month: u64 = @intCast(dt.month);
-    const hour: u64 = @intCast(dt.hour);
-    const min: u64 = @intCast(dt.min);
-    const sec: u64 = @intCast(dt.sec);
-    const yday: u64 = @intCast(dt.yday);
-    const year_short: u64 = @intCast(@mod(dt.year, 100));
-
-    while (i < format.len) {
-        if (format[i] != '%') {
-            try out.append(allocator, format[i]);
-            i += 1;
-            continue;
-        }
-        if (i + 1 >= format.len) return error.InvalidConversionSpecifier;
-
-        var spec = format[i + 1];
-        var advance: usize = 2;
-        if (spec == 'E' or spec == 'O') {
-            const modifier = spec;
-            if (i + 2 >= format.len) return error.InvalidConversionSpecifier;
-            spec = format[i + 2];
-            advance = 3;
-            const valid_with_modifier = switch (modifier) {
-                'E' => switch (spec) {
-                    'c', 'C', 'x', 'X', 'y', 'Y' => true,
-                    else => false,
-                },
-                'O' => switch (spec) {
-                    'd', 'e', 'H', 'I', 'm', 'M', 'S', 'u', 'U', 'V', 'w', 'W', 'y' => true,
-                    else => false,
-                },
-                else => false,
-            };
-            if (!valid_with_modifier) return error.InvalidConversionSpecifier;
-        }
-
-        switch (spec) {
-            'a' => try out.appendSlice(allocator, weekday_abbrev[@intCast(dt.wday - 1)]),
-            'A' => try out.appendSlice(allocator, weekday_full[@intCast(dt.wday - 1)]),
-            'b', 'h' => try out.appendSlice(allocator, month_abbrev[@intCast(dt.month - 1)]),
-            'B' => try out.appendSlice(allocator, month_full[@intCast(dt.month - 1)]),
-            'c' => try appendFmtList(&out, allocator, "{s} {s} {d:0>2} {d:0>2}:{d:0>2}:{d:0>2} {d}", .{
-                weekday_abbrev[@intCast(dt.wday - 1)],
-                month_abbrev[@intCast(dt.month - 1)],
-                day,
-                hour,
-                min,
-                sec,
-                dt.year,
-            }),
-            'd' => try appendFmtList(&out, allocator, "{d:0>2}", .{day}),
-            'e' => try appendFmtList(&out, allocator, "{d:>2}", .{day}),
-            'H' => try appendFmtList(&out, allocator, "{d:0>2}", .{hour}),
-            'I' => try appendFmtList(&out, allocator, "{d:0>2}", .{hour12u(hour)}),
-            'j' => try appendFmtList(&out, allocator, "{d:0>3}", .{yday}),
-            'm' => try appendFmtList(&out, allocator, "{d:0>2}", .{month}),
-            'M' => try appendFmtList(&out, allocator, "{d:0>2}", .{min}),
-            'p' => try out.appendSlice(allocator, if (dt.hour < 12) "AM" else "PM"),
-            'S' => try appendFmtList(&out, allocator, "{d:0>2}", .{sec}),
-            'w' => try appendFmtList(&out, allocator, "{d}", .{@as(u64, @intCast(dt.wday - 1))}),
-            'x' => try appendFmtList(&out, allocator, "{d:0>2}/{d:0>2}/{d:0>2}", .{ month, day, year_short }),
-            'X' => try appendFmtList(&out, allocator, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hour, min, sec }),
-            'y' => try appendFmtList(&out, allocator, "{d:0>2}", .{year_short}),
-            'Y' => try appendFmtList(&out, allocator, "{d}", .{dt.year}),
-            '%' => try out.appendSlice(allocator, "%"),
-            else => return error.InvalidConversionSpecifier,
-        }
-        i += advance;
-    }
-
-    return out.toOwnedSlice(allocator);
-}
-
-fn hour12u(hour: u64) u64 {
-    const h = @mod(hour, 12);
-    return if (h == 0) 12 else h;
-}
-
-const CivilDate = struct {
-    year: i64,
-    month: i64,
-    day: i64,
-};
-
-fn civilFromDays(days_since_epoch: i64) CivilDate {
-    const z = days_since_epoch + 719468;
-    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
-    const doe = z - era * 146097; // [0, 146096]
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365); // [0, 399]
-    var year = yoe + era * 400;
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100)); // [0, 365]
-    const mp = @divFloor(5 * doy + 2, 153); // [0, 11]
-    const day = doy - @divFloor(153 * mp + 2, 5) + 1; // [1, 31]
-    const month = mp + (if (mp < 10) @as(i64, 3) else @as(i64, -9)); // [1, 12]
-    if (month <= 2) year += 1;
-    return .{ .year = year, .month = month, .day = day };
-}
-
-fn dayOfYear(year: i64, month: i64, day: i64) i64 {
-    const month_offsets = if (isLeapYear(year))
-        [_]i64{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 }
-    else
-        [_]i64{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
-    return month_offsets[@intCast(month - 1)] + day;
-}
-
-fn daysFromCivil(year: i64, month: i64, day: i64) i64 {
-    var y = year;
-    y -= if (month <= 2) 1 else 0;
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const mp = month + (if (month > 2) @as(i64, -3) else @as(i64, 9));
-    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
-}
-
-fn getDateField(table: *TableObject, vm: anytype, name: []const u8) !?TValue {
-    const key = try vm.gc().allocString(name);
-    return table.get(TValue.fromString(key));
-}
-
-fn readDateFieldInt(table: *TableObject, vm: anytype, name: []const u8, required: bool, default_value: i64) !i64 {
-    const value_opt = try getDateField(table, vm, name);
-    const value = value_opt orelse {
-        if (required) {
-            var msg_buf: [96]u8 = undefined;
-            const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is missing in date table", .{name});
-            return vm.raiseString(msg);
-        }
-        return default_value;
-    };
-    return value.toInteger() orelse {
-        var msg_buf: [80]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is not an integer", .{name});
-        return vm.raiseString(msg);
-    };
-}
-
-fn checkFieldIntBound(vm: anytype, name: []const u8, value: i64) !void {
-    if (value < std.math.minInt(i32) or value > std.math.maxInt(i32)) {
-        var msg_buf: [80]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&msg_buf, "field '{s}' is out-of-bound", .{name});
-        return vm.raiseString(msg);
-    }
-}
-
-fn normalizeYearMonth(year: *i64, month: *i64) void {
-    const month_zero = month.* - 1;
-    year.* += @divFloor(month_zero, 12);
-    month.* = @mod(month_zero, 12) + 1;
-}
-
-fn writeDateField(table: *TableObject, vm: anytype, name: []const u8, value: TValue) !void {
-    const key = try vm.gc().allocString(name);
-    try table.set(TValue.fromString(key), value);
-}
-
-fn appendFmtList(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
-    var tmp: [96]u8 = undefined;
-    const formatted = std.fmt.bufPrint(&tmp, fmt, args) catch {
-        return error.OutOfMemory;
-    };
-    try out.appendSlice(allocator, formatted);
 }
 
 /// os.difftime(t2, t1) - Returns the difference in seconds between two time values

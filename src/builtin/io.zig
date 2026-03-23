@@ -1,3 +1,8 @@
+//! Input/output builtin functions, file-handle helpers, and buffering helpers.
+//!
+//! Shared helper logic stays near the top of the file.
+//! Dispatcher entrypoints are being grouped below in small steps.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
@@ -190,6 +195,223 @@ fn createStdioFileObjectInit(gc: *GC, stdio_type: []const u8) !*FileObject {
     file_obj.mode = try gc.allocString(if (kind == .stdin) "r" else "w");
     file_obj.metatable = try createFileMetatableInit(gc);
     return file_obj;
+}
+
+/// Create a stdio handle (stdin, stdout, or stderr)
+fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*TableObject {
+    const file_table = try vm.gc().allocTable();
+    vm.stack[vm.base + temp_slot] = TValue.fromTable(file_table);
+
+    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
+    const stdio_str = try vm.gc().allocString(stdio_type);
+    try file_table.set(TValue.fromString(stdio_key), TValue.fromString(stdio_str));
+
+    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+    const empty_str = try vm.gc().allocString("");
+    try file_table.set(TValue.fromString(output_key), TValue.fromString(empty_str));
+
+    const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
+    try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
+
+    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+    const mode_str = try vm.gc().allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
+    try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
+
+    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+    const bufmode_str = try vm.gc().allocString("full");
+    try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
+
+    const pos_key = try vm.gc().allocString(FILE_POS_KEY);
+    try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
+
+    const mt = try createFileMetatable(vm, temp_slot + 1);
+    file_table.metatable = mt;
+
+    return file_table;
+}
+
+/// Result from running a command
+const CommandResult = struct {
+    output: []u8,
+    exit_code: i64,
+};
+
+/// Run a shell command and capture its output
+fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
+    const script = try makeShellScript(allocator, cmd);
+    defer allocator.free(script);
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
+
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+
+    try child.spawn();
+
+    var stdout_list: std.ArrayList(u8) = .{};
+    defer stdout_list.deinit(allocator);
+
+    var stdout_reader = child.stdout.?;
+    while (true) {
+        var buf: [4096]u8 = undefined;
+        const bytes_read = try stdout_reader.read(&buf);
+        if (bytes_read == 0) break;
+        try stdout_list.appendSlice(allocator, buf[0..bytes_read]);
+    }
+
+    const term = try child.wait();
+
+    const exit_code: i64 = switch (term) {
+        .Exited => |code| code,
+        .Signal => |sig| -@as(i64, sig),
+        .Stopped => |sig| -@as(i64, sig),
+        .Unknown => |val| -@as(i64, val),
+    };
+
+    const output = try stdout_list.toOwnedSlice(allocator);
+
+    return .{
+        .output = output,
+        .exit_code = exit_code,
+    };
+}
+
+fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []const u8) !i64 {
+    const script = try makeShellScript(allocator, cmd);
+    defer allocator.free(script);
+    const argv = [_][]const u8{ "/bin/sh", "-c", script };
+    var child = std.process.Child.init(&argv, allocator);
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    if (child.stdin) |stdin_file| {
+        try stdin_file.writeAll(input);
+        stdin_file.close();
+        child.stdin = null;
+    }
+
+    const term = try child.wait();
+    return switch (term) {
+        .Exited => |code| code,
+        .Signal => |sig| -@as(i64, sig),
+        .Stopped => |sig| -@as(i64, sig),
+        .Unknown => |val| -@as(i64, val),
+    };
+}
+
+/// Create metatable for file handles with read/close methods
+///
+/// GC SAFETY CONTRACT:
+/// Uses temp stack slots to protect intermediate allocations.
+/// Pattern: allocate -> store in stack[temp_slot+N] -> allocate next
+///
+/// Stack slot usage:
+///   temp_slot:   metatable (mt)
+///   temp_slot+1: index_table
+///   temp_slot+2: scratch for native closures
+fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
+    const mt = try vm.gc().allocTable();
+    vm.stack[vm.base + temp_slot] = TValue.fromTable(mt);
+
+    const index_table = try vm.gc().allocTable();
+    vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(index_table);
+
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.index)), TValue.fromTable(index_table));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.name)), TValue.fromString(try vm.gc().allocString("FILE*")));
+
+    const read_nc = try vm.gc().allocNativeClosure(.{ .id = .file_read });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(read_nc);
+    const read_key = try vm.gc().allocString("read");
+    try index_table.set(TValue.fromString(read_key), TValue.fromNativeClosure(read_nc));
+
+    const close_nc = try vm.gc().allocNativeClosure(.{ .id = .file_close });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(close_nc);
+    const close_key = try vm.gc().allocString("close");
+    try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
+    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
+
+    const write_nc = try vm.gc().allocNativeClosure(.{ .id = .file_write });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(write_nc);
+    const write_key = try vm.gc().allocString("write");
+    try index_table.set(TValue.fromString(write_key), TValue.fromNativeClosure(write_nc));
+
+    const lines_nc = try vm.gc().allocNativeClosure(.{ .id = .file_lines });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(lines_nc);
+    const lines_key = try vm.gc().allocString("lines");
+    try index_table.set(TValue.fromString(lines_key), TValue.fromNativeClosure(lines_nc));
+
+    const flush_nc = try vm.gc().allocNativeClosure(.{ .id = .file_flush });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(flush_nc);
+    const flush_key = try vm.gc().allocString("flush");
+    try index_table.set(TValue.fromString(flush_key), TValue.fromNativeClosure(flush_nc));
+
+    const seek_nc = try vm.gc().allocNativeClosure(.{ .id = .file_seek });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(seek_nc);
+    const seek_key = try vm.gc().allocString("seek");
+    try index_table.set(TValue.fromString(seek_key), TValue.fromNativeClosure(seek_nc));
+
+    const setvbuf_nc = try vm.gc().allocNativeClosure(.{ .id = .file_setvbuf });
+    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(setvbuf_nc);
+    const setvbuf_key = try vm.gc().allocString("setvbuf");
+    try index_table.set(TValue.fromString(setvbuf_key), TValue.fromNativeClosure(setvbuf_nc));
+
+    return mt;
+}
+
+/// FileObject-based write implementation
+fn nativeFileWriteFileObject(vm: anytype, file_obj: *FileObject, self_arg: TValue, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (file_obj.closed) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("file is closed");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    if (file_obj.kind == .stdin) {
+        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString("file is not writable");
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+        return;
+    }
+
+    const string = @import("string.zig");
+    const saved_top = vm.top;
+    defer vm.top = saved_top;
+
+    var i: u32 = 1;
+    while (i < nargs) : (i += 1) {
+        const tmp_reg = vm.top;
+        vm.top += 2;
+
+        const arg_reg = func_reg + 1 + i;
+        vm.stack[vm.base + tmp_reg + 1] = vm.stack[vm.base + arg_reg];
+        try string.nativeToString(vm, tmp_reg, 1, 1);
+
+        const result = vm.stack[vm.base + tmp_reg];
+        if (result.asString()) |str_val| {
+            file_obj.write(str_val.asSlice()) catch {
+                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
+                if (nresults > 1) {
+                    const err_str = try vm.gc().allocString("write error");
+                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+                }
+                return;
+            };
+        }
+
+        vm.top -= 2;
+    }
+
+    if (nresults > 0) {
+        vm.stack[vm.base + func_reg] = self_arg;
+    }
 }
 
 fn isValidOpenMode(mode: []const u8) bool {
@@ -1048,45 +1270,6 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     }
 
     if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-}
-
-/// Create a stdio handle (stdin, stdout, or stderr)
-fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*TableObject {
-    const file_table = try vm.gc().allocTable();
-    vm.stack[vm.base + temp_slot] = TValue.fromTable(file_table);
-
-    // Mark as stdio
-    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
-    const stdio_str = try vm.gc().allocString(stdio_type);
-    try file_table.set(TValue.fromString(stdio_key), TValue.fromString(stdio_str));
-
-    // Empty content buffer (stdin reads dynamically)
-    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-    const empty_str = try vm.gc().allocString("");
-    try file_table.set(TValue.fromString(output_key), TValue.fromString(empty_str));
-
-    // Not closed
-    const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-    try file_table.set(TValue.fromString(closed_key), .{ .boolean = false });
-
-    // Mode
-    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
-    const mode_str = try vm.gc().allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
-    try file_table.set(TValue.fromString(mode_key), TValue.fromString(mode_str));
-
-    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-    const bufmode_str = try vm.gc().allocString("full");
-    try file_table.set(TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
-
-    // Position
-    const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    try file_table.set(TValue.fromString(pos_key), .{ .integer = 0 });
-
-    // Create metatable
-    const mt = try createFileMetatable(vm, temp_slot + 1);
-    file_table.metatable = mt;
-
-    return file_table;
 }
 
 /// io.lines([filename, ...]) - Returns an iterator function for reading files line by line
@@ -1952,159 +2135,6 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     if (nresults == 0) {
         vm.stack[vm.base + func_reg] = .nil;
     }
-}
-
-/// Result from running a command
-const CommandResult = struct {
-    output: []u8,
-    exit_code: i64,
-};
-
-/// Run a shell command and capture its output
-fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !CommandResult {
-    // Run via shell and force explicit status propagation from the outer shell.
-    // Compound-command wrapping prevents `sh` from exec-optimizing simple commands.
-    const script = try makeShellScript(allocator, cmd);
-    defer allocator.free(script);
-    const argv = [_][]const u8{ "/bin/sh", "-c", script };
-
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdout_behavior = .Pipe;
-    // Lua io.popen() captures stdout only.
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
-
-    // Read all stdout
-    var stdout_list: std.ArrayList(u8) = .{};
-    defer stdout_list.deinit(allocator);
-
-    // Read stdout in chunks
-    var stdout_reader = child.stdout.?;
-    while (true) {
-        var buf: [4096]u8 = undefined;
-        const bytes_read = try stdout_reader.read(&buf);
-        if (bytes_read == 0) break;
-        try stdout_list.appendSlice(allocator, buf[0..bytes_read]);
-    }
-
-    // Wait for process to complete
-    const term = try child.wait();
-
-    const exit_code: i64 = switch (term) {
-        .Exited => |code| code,
-        .Signal => |sig| -@as(i64, sig),
-        .Stopped => |sig| -@as(i64, sig),
-        .Unknown => |val| -@as(i64, val),
-    };
-
-    // Transfer ownership of the output buffer
-    const output = try stdout_list.toOwnedSlice(allocator);
-
-    return .{
-        .output = output,
-        .exit_code = exit_code,
-    };
-}
-
-fn runCommandWithInput(allocator: std.mem.Allocator, cmd: []const u8, input: []const u8) !i64 {
-    const script = try makeShellScript(allocator, cmd);
-    defer allocator.free(script);
-    const argv = [_][]const u8{ "/bin/sh", "-c", script };
-    var child = std.process.Child.init(&argv, allocator);
-    child.stdin_behavior = .Pipe;
-    // For popen(..., "w"), caller only needs process exit status.
-    // Ignore child output streams to avoid pipe backpressure deadlocks.
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    if (child.stdin) |stdin_file| {
-        try stdin_file.writeAll(input);
-        stdin_file.close();
-        child.stdin = null; // prevent double-close in Child.cleanupStreams()
-    }
-
-    const term = try child.wait();
-    return switch (term) {
-        .Exited => |code| code,
-        .Signal => |sig| -@as(i64, sig),
-        .Stopped => |sig| -@as(i64, sig),
-        .Unknown => |val| -@as(i64, val),
-    };
-}
-
-/// Create metatable for file handles with read/close methods
-///
-/// GC SAFETY CONTRACT:
-/// Uses temp stack slots to protect intermediate allocations.
-/// Pattern: allocate -> store in stack[temp_slot+N] -> allocate next
-///
-/// Stack slot usage:
-///   temp_slot:   metatable (mt)
-///   temp_slot+1: index_table
-///   temp_slot+2: scratch for native closures
-fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
-    // Stack slot usage:
-    //   temp_slot:   metatable (mt)
-    //   temp_slot+1: index_table
-    //   temp_slot+2: scratch for native closures
-
-    const mt = try vm.gc().allocTable();
-    vm.stack[vm.base + temp_slot] = TValue.fromTable(mt);
-
-    const index_table = try vm.gc().allocTable();
-    vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(index_table);
-
-    // Both tables protected, safe to set __index
-    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.index)), TValue.fromTable(index_table));
-    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.name)), TValue.fromString(try vm.gc().allocString("FILE*")));
-
-    // Native closure must be protected before allocating its key string
-    const read_nc = try vm.gc().allocNativeClosure(.{ .id = .file_read });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(read_nc);
-    const read_key = try vm.gc().allocString("read");
-    try index_table.set(TValue.fromString(read_key), TValue.fromNativeClosure(read_nc));
-
-    // Reuse scratch slot for close method
-    const close_nc = try vm.gc().allocNativeClosure(.{ .id = .file_close });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(close_nc);
-    const close_key = try vm.gc().allocString("close");
-    try index_table.set(TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
-    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
-    try mt.set(TValue.fromString(vm.gc().mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
-
-    // Reuse scratch slot for write method
-    const write_nc = try vm.gc().allocNativeClosure(.{ .id = .file_write });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(write_nc);
-    const write_key = try vm.gc().allocString("write");
-    try index_table.set(TValue.fromString(write_key), TValue.fromNativeClosure(write_nc));
-
-    // Reuse scratch slot for lines method
-    const lines_nc = try vm.gc().allocNativeClosure(.{ .id = .file_lines });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(lines_nc);
-    const lines_key = try vm.gc().allocString("lines");
-    try index_table.set(TValue.fromString(lines_key), TValue.fromNativeClosure(lines_nc));
-
-    // Reuse scratch slot for flush method
-    const flush_nc = try vm.gc().allocNativeClosure(.{ .id = .file_flush });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(flush_nc);
-    const flush_key = try vm.gc().allocString("flush");
-    try index_table.set(TValue.fromString(flush_key), TValue.fromNativeClosure(flush_nc));
-
-    // Reuse scratch slot for seek method
-    const seek_nc = try vm.gc().allocNativeClosure(.{ .id = .file_seek });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(seek_nc);
-    const seek_key = try vm.gc().allocString("seek");
-    try index_table.set(TValue.fromString(seek_key), TValue.fromNativeClosure(seek_nc));
-
-    // Reuse scratch slot for setvbuf method
-    const setvbuf_nc = try vm.gc().allocNativeClosure(.{ .id = .file_setvbuf });
-    vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(setvbuf_nc);
-    const setvbuf_key = try vm.gc().allocString("setvbuf");
-    try index_table.set(TValue.fromString(setvbuf_key), TValue.fromNativeClosure(setvbuf_nc));
-
-    return mt;
 }
 
 /// io.read(...) - Reads from default input file according to given formats
@@ -3209,63 +3239,6 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
     if (nresults > 0) {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
-    }
-}
-
-/// FileObject-based write implementation
-fn nativeFileWriteFileObject(vm: anytype, file_obj: *FileObject, self_arg: TValue, func_reg: u32, nargs: u32, nresults: u32) !void {
-    // Check if closed
-    if (file_obj.closed) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("file is closed");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    }
-
-    // Check write permission (stdin is not writable)
-    if (file_obj.kind == .stdin) {
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString("file is not writable");
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-        return;
-    }
-
-    // Convert each argument to string and write
-    const string = @import("string.zig");
-    const saved_top = vm.top;
-    defer vm.top = saved_top;
-
-    var i: u32 = 1; // Start from 1 (skip self)
-    while (i < nargs) : (i += 1) {
-        const tmp_reg = vm.top;
-        vm.top += 2;
-
-        const arg_reg = func_reg + 1 + i;
-        vm.stack[vm.base + tmp_reg + 1] = vm.stack[vm.base + arg_reg];
-        try string.nativeToString(vm, tmp_reg, 1, 1);
-
-        const result = vm.stack[vm.base + tmp_reg];
-        if (result.asString()) |str_val| {
-            file_obj.write(str_val.asSlice()) catch {
-                if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
-                if (nresults > 1) {
-                    const err_str = try vm.gc().allocString("write error");
-                    vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-                }
-                return;
-            };
-        }
-
-        vm.top -= 2;
-    }
-
-    // Return the file handle for chaining
-    if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = self_arg;
     }
 }
 

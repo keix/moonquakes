@@ -1,3 +1,8 @@
+//! Error-related builtin functions and shared formatting helpers.
+//!
+//! Internal helpers stay near the top of the file.
+//! Dispatcher entrypoints remain grouped at the bottom.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const error_state = @import("../vm/error_state.zig");
@@ -5,56 +10,6 @@ const VM = @import("../vm/vm.zig").VM;
 const execution = @import("../vm/execution.zig");
 const CallInfo = execution.CallInfo;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
-
-/// Expression Layer: assert() function
-/// Lua signature: assert(v [, message])
-/// If v is false or nil, raises an error with optional message
-pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs == 0) {
-        return vm.raiseString("value expected");
-    }
-
-    var value = vm.stack[vm.base + func_reg + 1];
-    if (nargs == 1 and value.isNil()) {
-        const alt = vm.stack[vm.base + func_reg + 2];
-        if (!alt.isNil()) {
-            value = alt;
-        }
-    }
-
-    // In Lua, only nil and false are falsy
-    const is_truthy = switch (value) {
-        .nil => false,
-        .boolean => |b| b,
-        else => true,
-    };
-
-    if (!is_truthy) {
-        // Get optional message from second argument
-        if (nargs >= 2) {
-            const msg_arg = vm.stack[vm.base + func_reg + 2];
-            // Lua's assert can throw any value as error
-            return vm.raise(msg_arg);
-        }
-        var msg_buf: [320]u8 = undefined;
-        return vm.raiseString(formatAssertFailure(vm, "assertion failed!", &msg_buf));
-    }
-
-    // Return all arguments if assertion succeeds (Lua behavior)
-    // Arguments are at func_reg+1, func_reg+2, ..., func_reg+nargs
-    // Results go to func_reg, func_reg+1, ..., func_reg+actual_results-1
-    if (nresults > 0) {
-        const actual_results = @min(nargs, nresults);
-        var i: u32 = 0;
-        while (i < actual_results) : (i += 1) {
-            vm.stack[vm.base + func_reg + i] = vm.stack[vm.base + func_reg + 1 + i];
-        }
-        // Fill remaining result slots with nil if nresults > nargs
-        while (i < nresults) : (i += 1) {
-            vm.stack[vm.base + func_reg + i] = .nil;
-        }
-    }
-}
 
 fn formatAssertFailure(vm: *VM, msg: []const u8, out_buf: *[320]u8) []const u8 {
     const ci = vm.ci orelse return msg;
@@ -84,36 +39,6 @@ fn formatAssertFailure(vm: *VM, msg: []const u8, out_buf: *[320]u8) []const u8 {
 
     if (line == 0) return msg;
     return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line, msg }) catch msg;
-}
-
-/// Expression Layer: error() function
-/// Lua signature: error(message [, level])
-/// Raises an error with the given message (can be any value)
-pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    _ = nresults; // error() never returns
-    error_state.markErrorBuiltin(vm);
-
-    // Lua's error() can throw any value, not just strings
-    const error_value = if (nargs > 0)
-        vm.stack[vm.base + func_reg + 1]
-    else
-        .nil;
-
-    const level_i: i64 = if (nargs >= 2) blk: {
-        const level_arg = vm.stack[vm.base + func_reg + 2];
-        break :blk level_arg.toInteger() orelse return vm.raiseString("bad argument #2 to 'error' (number expected)");
-    } else 1;
-
-    if (level_i > 0) {
-        if (error_value.asString()) |msg_obj| {
-            var full_msg_buf: [320]u8 = undefined;
-            if (errorMessageWithLevel(vm, msg_obj.asSlice(), level_i, &full_msg_buf)) |full_msg| {
-                return vm.raiseString(full_msg);
-            }
-        }
-    }
-
-    return vm.raise(error_value);
 }
 
 fn currentInstructionIndex(ci: *const CallInfo) ?usize {
@@ -168,4 +93,76 @@ fn errorMessageWithLevel(vm: *VM, msg: []const u8, level: i64, out_buf: *[320]u8
     else
         source_raw;
     return std.fmt.bufPrint(out_buf, "{s}:{d}: {s}", .{ source, line, msg }) catch null;
+}
+
+// Dispatcher entrypoints.
+
+/// Lua signature: assert(v [, message])
+/// If v is false or nil, raises an error with optional message.
+pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs == 0) {
+        return vm.raiseString("value expected");
+    }
+
+    var value = vm.stack[vm.base + func_reg + 1];
+    if (nargs == 1 and value.isNil()) {
+        const alt = vm.stack[vm.base + func_reg + 2];
+        if (!alt.isNil()) {
+            value = alt;
+        }
+    }
+
+    const is_truthy = switch (value) {
+        .nil => false,
+        .boolean => |b| b,
+        else => true,
+    };
+
+    if (!is_truthy) {
+        if (nargs >= 2) {
+            const msg_arg = vm.stack[vm.base + func_reg + 2];
+            return vm.raise(msg_arg);
+        }
+        var msg_buf: [320]u8 = undefined;
+        return vm.raiseString(formatAssertFailure(vm, "assertion failed!", &msg_buf));
+    }
+
+    if (nresults > 0) {
+        const actual_results = @min(nargs, nresults);
+        var i: u32 = 0;
+        while (i < actual_results) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = vm.stack[vm.base + func_reg + 1 + i];
+        }
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
+    }
+}
+
+/// Lua signature: error(message [, level])
+/// Raises an error with the given message (can be any value).
+pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    _ = nresults;
+    error_state.markErrorBuiltin(vm);
+
+    const error_value = if (nargs > 0)
+        vm.stack[vm.base + func_reg + 1]
+    else
+        .nil;
+
+    const level_i: i64 = if (nargs >= 2) blk: {
+        const level_arg = vm.stack[vm.base + func_reg + 2];
+        break :blk level_arg.toInteger() orelse return vm.raiseString("bad argument #2 to 'error' (number expected)");
+    } else 1;
+
+    if (level_i > 0) {
+        if (error_value.asString()) |msg_obj| {
+            var full_msg_buf: [320]u8 = undefined;
+            if (errorMessageWithLevel(vm, msg_obj.asSlice(), level_i, &full_msg_buf)) |full_msg| {
+                return vm.raiseString(full_msg);
+            }
+        }
+    }
+
+    return vm.raise(error_value);
 }

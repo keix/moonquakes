@@ -1,3 +1,8 @@
+//! Module-system builtin functions for `require` and `package`.
+//!
+//! Search-path and loader helpers stay near the top of the file.
+//! Dispatcher entrypoints are grouped below.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const TableObject = @import("../runtime/gc/object.zig").TableObject;
@@ -7,217 +12,6 @@ const VM = @import("../vm/vm.zig").VM;
 
 /// Default search path (fallback if package.path is not set)
 const DEFAULT_PATH = "./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
-
-/// Lua 5.4 Module System
-/// Corresponds to Lua manual chapter "Modules"
-/// Reference: https://www.lua.org/manual/5.4/manual.html#6.3
-///
-/// require(modname) - Loads the given module
-/// 1. Checks package.loaded[modname]
-/// 2. Checks package.preload[modname]
-/// 3. Searches using package.path
-/// 4. Caches result in package.loaded
-pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 1) {
-        return vm.raiseString("bad argument #1 to 'require' (string expected)");
-    }
-
-    const modname_arg = vm.stack[vm.base + func_reg + 1];
-    const modname = if (modname_arg.asString()) |str_obj|
-        str_obj.asSlice()
-    else {
-        return vm.raiseString("bad argument #1 to 'require' (string expected)");
-    };
-
-    // Get stable package table (independent from reassignment of global "package").
-    const hidden_package_key = try vm.gc().allocString("__moonquakes_package");
-    var package_table: ?*TableObject = null;
-    if (vm.globals().get(TValue.fromString(hidden_package_key))) |v| {
-        package_table = v.asTable();
-    }
-    if (package_table == null) {
-        const package_key = try vm.gc().allocString("package");
-        if (vm.globals().get(TValue.fromString(package_key))) |v| {
-            package_table = v.asTable();
-        }
-    }
-
-    // Get package.loaded
-    var loaded_table: ?*TableObject = null;
-    if (package_table) |pkg| {
-        const loaded_key = try vm.gc().allocString("loaded");
-        if (pkg.get(TValue.fromString(loaded_key))) |v| {
-            loaded_table = v.asTable();
-        }
-    }
-
-    // Create loaded table if it doesn't exist
-    if (loaded_table == null) {
-        loaded_table = try vm.gc().allocTable();
-        if (package_table) |pkg| {
-            const loaded_key = try vm.gc().allocString("loaded");
-            try pkg.set(TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
-        }
-    }
-
-    // Step 1: Check package.loaded[modname]
-    const mod_key = try vm.gc().allocString(modname);
-    if (!vm.pushTempRoot(TValue.fromString(mod_key))) return error.OutOfMemory;
-    defer vm.popTempRoots(1);
-    if (loaded_table.?.get(TValue.fromString(mod_key))) |cached| {
-        if (cached.toBoolean()) {
-            if (nresults > 0) {
-                vm.stack[vm.base + func_reg] = cached;
-            }
-            if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = .nil;
-            }
-            return;
-        }
-    }
-
-    // package.searchers must be a table when present (Lua compatibility).
-    if (package_table) |pkg| {
-        const searchers_key = try vm.gc().allocString("searchers");
-        if (pkg.get(TValue.fromString(searchers_key))) |searchers_val| {
-            if (searchers_val.asTable() == null) {
-                return vm.raiseString("'package.searchers' must be a table");
-            }
-        }
-    }
-
-    // Step 2: Check package.preload[modname]
-    if (package_table) |pkg| {
-        const preload_key = try vm.gc().allocString("preload");
-        if (pkg.get(TValue.fromString(preload_key))) |preload_val| {
-            if (preload_val.asTable()) |preload| {
-                if (preload.get(TValue.fromString(mod_key))) |loader| {
-                    if (!loader.isNil()) {
-                        // Call the preload function with (modname, ":preload:")
-                        const preload_loader_data = try vm.gc().allocString(":preload:");
-                        const result = try call.callValue(vm, loader, &[_]TValue{
-                            TValue.fromString(mod_key),
-                            TValue.fromString(preload_loader_data),
-                        });
-
-                        // Compatibility shim: some tests rely on defining globals via local _ENV.
-                        if (result.asTable()) |res_table| {
-                            const xuxu_key = try vm.gc().allocString("xuxu");
-                            if (res_table.get(TValue.fromString(xuxu_key)) == null) {
-                                if (vm.globals().get(TValue.fromString(xuxu_key))) |global_xuxu| {
-                                    try res_table.set(TValue.fromString(xuxu_key), global_xuxu);
-                                }
-                            }
-                        }
-                        if (!result.isNil()) {
-                            try loaded_table.?.set(TValue.fromString(mod_key), result);
-                        }
-                        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
-                        if (require_result.isNil()) {
-                            require_result = TValue{ .boolean = true };
-                            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
-                        }
-
-                        if (nresults > 0) {
-                            vm.stack[vm.base + func_reg] = require_result;
-                        }
-                        if (nresults > 1) {
-                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(preload_loader_data);
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    // Step 3: Check for built-in modules (return global table if it exists)
-    const builtin_modules = [_][]const u8{ "debug", "string", "table", "math", "io", "os", "coroutine", "utf8", "package" };
-    for (builtin_modules) |builtin| {
-        if (std.mem.eql(u8, modname, builtin)) {
-            const builtin_key = try vm.gc().allocString(builtin);
-            if (vm.globals().get(TValue.fromString(builtin_key))) |global_val| {
-                // Cache it
-                try loaded_table.?.set(TValue.fromString(mod_key), global_val);
-                if (nresults > 0) {
-                    vm.stack[vm.base + func_reg] = global_val;
-                }
-                if (nresults > 1) {
-                    vm.stack[vm.base + func_reg + 1] = .nil;
-                }
-                return;
-            }
-        }
-    }
-
-    // Build "module not found" details in Lua-compatible order.
-    var err_buf: [262144]u8 = undefined;
-    var err_pos: usize = 0;
-
-    {
-        var line_buf: [256]u8 = undefined;
-        const preload_line = std.fmt.bufPrint(&line_buf, "\n\tno field package.preload['{s}']", .{modname}) catch "";
-        appendErrorDetail(&err_buf, &err_pos, preload_line);
-    }
-
-    // Step 4: Search for module file using package.path
-    const package_path = getPackageStringField(package_table, "path");
-    const base_path = switch (package_path) {
-        .missing => DEFAULT_PATH,
-        .path => |p| p,
-        .invalid_type => return vm.raiseString("package.path must be a string"),
-    };
-
-    var search_path_buf: [2048]u8 = undefined;
-    const search_path = buildRequireSearchPath(vm, base_path, package_path == .missing, &search_path_buf);
-
-    var path_buf: [1024]u8 = undefined;
-    var path_len: usize = 0;
-    if (searchPathImpl(modname, search_path, ".", "/", &path_buf, &path_len, &err_buf, &err_pos)) {
-        // Load and execute the module file
-        const result = try loadModuleFile(vm, path_buf[0..path_len], mod_key);
-        if (!result.isNil()) {
-            try loaded_table.?.set(TValue.fromString(mod_key), result);
-        }
-        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
-        if (require_result.isNil()) {
-            require_result = TValue{ .boolean = true };
-            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
-        }
-
-        // Return the result
-        if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = require_result;
-        }
-        if (nresults > 1) {
-            const loader_data = try vm.gc().allocString(path_buf[0..path_len]);
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(loader_data);
-        }
-
-        // Compatibility shim for tests that track loader modname via global REQUIRED.
-        const required_key = try vm.gc().allocString("REQUIRED");
-        if (vm.globals().get(TValue.fromString(required_key)) != null) {
-            try vm.globals().set(TValue.fromString(required_key), TValue.fromString(mod_key));
-        }
-        return;
-    }
-
-    // Also append C loader search failures from package.cpath.
-    const package_cpath = getPackageStringField(package_table, "cpath");
-    const cpath = switch (package_cpath) {
-        .missing => "",
-        .path => |p| p,
-        .invalid_type => return vm.raiseString("package.cpath must be a string"),
-    };
-    if (cpath.len > 0) {
-        _ = searchPathImpl(modname, cpath, ".", "/", &path_buf, &path_len, &err_buf, &err_pos);
-    }
-
-    // Build and raise final "module not found" error.
-    var msg_buf: [262512]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "module '{s}' not found:{s}", .{ modname, err_buf[0..err_pos] }) catch "module not found";
-    return vm.raiseString(msg);
-}
 
 const PackagePath = union(enum) {
     missing,
@@ -349,95 +143,6 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
     });
 }
 
-/// package.loadlib(libname, funcname) - Dynamically links with C library libname
-/// Moonquakes does not support C library loading - returns nil + error
-pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    // Validate arguments exist (for proper error messages)
-    if (nargs < 2) {
-        return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
-    }
-
-    const libname_arg = vm.stack[vm.base + func_reg + 1];
-    if (libname_arg.asString() == null) {
-        return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
-    }
-
-    const funcname_arg = vm.stack[vm.base + func_reg + 2];
-    if (funcname_arg.asString() == null) {
-        return vm.raiseString("bad argument #2 to 'loadlib' (string expected)");
-    }
-
-    // Moonquakes is a pure Zig implementation - no C library support.
-    // Return nil, error_message, where (Lua convention for loadlib failures).
-    vm.stack[vm.base + func_reg] = .nil;
-    if (nresults > 1) {
-        const err_str = try vm.gc().allocString("C libraries not supported");
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-    }
-    if (nresults > 2) {
-        const when_str = try vm.gc().allocString("absent");
-        vm.stack[vm.base + func_reg + 2] = TValue.fromString(when_str);
-    }
-}
-
-/// package.searchpath(name, path [, sep [, rep]]) - Searches for name in given path
-/// Returns first matching file path, or nil + error message
-pub fn nativePackageSearchpath(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs < 2) {
-        return vm.raiseString("bad argument #1 to 'searchpath' (string expected)");
-    }
-
-    const name_arg = vm.stack[vm.base + func_reg + 1];
-    const path_arg = vm.stack[vm.base + func_reg + 2];
-
-    const name = if (name_arg.asString()) |s| s.asSlice() else {
-        return vm.raiseString("bad argument #1 to 'searchpath' (string expected)");
-    };
-    const path = if (path_arg.asString()) |s| s.asSlice() else {
-        return vm.raiseString("bad argument #2 to 'searchpath' (string expected)");
-    };
-
-    // Optional sep (default ".")
-    const sep: []const u8 = if (nargs >= 3) blk: {
-        const sep_arg = vm.stack[vm.base + func_reg + 3];
-        if (sep_arg.asString()) |s| {
-            break :blk s.asSlice();
-        }
-        break :blk ".";
-    } else ".";
-
-    // Optional rep (default "/")
-    const rep: []const u8 = if (nargs >= 4) blk: {
-        const rep_arg = vm.stack[vm.base + func_reg + 4];
-        if (rep_arg.asString()) |s| {
-            break :blk s.asSlice();
-        }
-        break :blk "/";
-    } else "/";
-
-    // Search for the file using the path template
-    var out_buf: [16384]u8 = undefined;
-    var out_len: usize = 0;
-    var err_buf: [262144]u8 = undefined;
-    var err_pos: usize = 0;
-
-    if (searchPathImpl(name, path, sep, rep, &out_buf, &out_len, &err_buf, &err_pos)) {
-        // Return the found path
-        const path_str = try vm.gc().allocString(out_buf[0..out_len]);
-        vm.stack[vm.base + func_reg] = TValue.fromString(path_str);
-        if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = .nil;
-        }
-    } else {
-        // Return nil + error message
-        vm.stack[vm.base + func_reg] = .nil;
-        if (nresults > 1) {
-            const err_str = try vm.gc().allocString(err_buf[0..err_pos]);
-            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-        }
-    }
-}
-
 /// Core path search implementation
 /// Writes found path to out_buf and returns the slice, or null if not found
 /// Error details are accumulated in err_buf
@@ -533,3 +238,280 @@ fn searchPathImpl(
 // - package.loaded - Table of already loaded modules
 // - package.preload - Table of preloaded modules
 // - package.searchers - Table of searcher functions used by require
+
+// Dispatcher entrypoints.
+
+/// Lua 5.4 Module System
+/// Corresponds to Lua manual chapter "Modules"
+/// Reference: https://www.lua.org/manual/5.4/manual.html#6.3
+///
+/// require(modname) - Loads the given module
+/// 1. Checks package.loaded[modname]
+/// 2. Checks package.preload[modname]
+/// 3. Searches using package.path
+/// 4. Caches result in package.loaded
+pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs < 1) {
+        return vm.raiseString("bad argument #1 to 'require' (string expected)");
+    }
+
+    const modname_arg = vm.stack[vm.base + func_reg + 1];
+    const modname = if (modname_arg.asString()) |str_obj|
+        str_obj.asSlice()
+    else {
+        return vm.raiseString("bad argument #1 to 'require' (string expected)");
+    };
+
+    const hidden_package_key = try vm.gc().allocString("__moonquakes_package");
+    var package_table: ?*TableObject = null;
+    if (vm.globals().get(TValue.fromString(hidden_package_key))) |v| {
+        package_table = v.asTable();
+    }
+    if (package_table == null) {
+        const package_key = try vm.gc().allocString("package");
+        if (vm.globals().get(TValue.fromString(package_key))) |v| {
+            package_table = v.asTable();
+        }
+    }
+
+    var loaded_table: ?*TableObject = null;
+    if (package_table) |pkg| {
+        const loaded_key = try vm.gc().allocString("loaded");
+        if (pkg.get(TValue.fromString(loaded_key))) |v| {
+            loaded_table = v.asTable();
+        }
+    }
+
+    if (loaded_table == null) {
+        loaded_table = try vm.gc().allocTable();
+        if (package_table) |pkg| {
+            const loaded_key = try vm.gc().allocString("loaded");
+            try pkg.set(TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
+        }
+    }
+
+    const mod_key = try vm.gc().allocString(modname);
+    if (!vm.pushTempRoot(TValue.fromString(mod_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
+    if (loaded_table.?.get(TValue.fromString(mod_key))) |cached| {
+        if (cached.toBoolean()) {
+            if (nresults > 0) {
+                vm.stack[vm.base + func_reg] = cached;
+            }
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = .nil;
+            }
+            return;
+        }
+    }
+
+    if (package_table) |pkg| {
+        const searchers_key = try vm.gc().allocString("searchers");
+        if (pkg.get(TValue.fromString(searchers_key))) |searchers_val| {
+            if (searchers_val.asTable() == null) {
+                return vm.raiseString("'package.searchers' must be a table");
+            }
+        }
+    }
+
+    if (package_table) |pkg| {
+        const preload_key = try vm.gc().allocString("preload");
+        if (pkg.get(TValue.fromString(preload_key))) |preload_val| {
+            if (preload_val.asTable()) |preload| {
+                if (preload.get(TValue.fromString(mod_key))) |loader| {
+                    if (!loader.isNil()) {
+                        const preload_loader_data = try vm.gc().allocString(":preload:");
+                        const result = try call.callValue(vm, loader, &[_]TValue{
+                            TValue.fromString(mod_key),
+                            TValue.fromString(preload_loader_data),
+                        });
+
+                        if (result.asTable()) |res_table| {
+                            const xuxu_key = try vm.gc().allocString("xuxu");
+                            if (res_table.get(TValue.fromString(xuxu_key)) == null) {
+                                if (vm.globals().get(TValue.fromString(xuxu_key))) |global_xuxu| {
+                                    try res_table.set(TValue.fromString(xuxu_key), global_xuxu);
+                                }
+                            }
+                        }
+                        if (!result.isNil()) {
+                            try loaded_table.?.set(TValue.fromString(mod_key), result);
+                        }
+                        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
+                        if (require_result.isNil()) {
+                            require_result = TValue{ .boolean = true };
+                            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
+                        }
+
+                        if (nresults > 0) {
+                            vm.stack[vm.base + func_reg] = require_result;
+                        }
+                        if (nresults > 1) {
+                            vm.stack[vm.base + func_reg + 1] = TValue.fromString(preload_loader_data);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    const builtin_modules = [_][]const u8{ "debug", "string", "table", "math", "io", "os", "coroutine", "utf8", "package" };
+    for (builtin_modules) |builtin| {
+        if (std.mem.eql(u8, modname, builtin)) {
+            const builtin_key = try vm.gc().allocString(builtin);
+            if (vm.globals().get(TValue.fromString(builtin_key))) |global_val| {
+                try loaded_table.?.set(TValue.fromString(mod_key), global_val);
+                if (nresults > 0) {
+                    vm.stack[vm.base + func_reg] = global_val;
+                }
+                if (nresults > 1) {
+                    vm.stack[vm.base + func_reg + 1] = .nil;
+                }
+                return;
+            }
+        }
+    }
+
+    var err_buf: [262144]u8 = undefined;
+    var err_pos: usize = 0;
+
+    {
+        var line_buf: [256]u8 = undefined;
+        const preload_line = std.fmt.bufPrint(&line_buf, "\n\tno field package.preload['{s}']", .{modname}) catch "";
+        appendErrorDetail(&err_buf, &err_pos, preload_line);
+    }
+
+    const package_path = getPackageStringField(package_table, "path");
+    const base_path = switch (package_path) {
+        .missing => DEFAULT_PATH,
+        .path => |p| p,
+        .invalid_type => return vm.raiseString("package.path must be a string"),
+    };
+
+    var search_path_buf: [2048]u8 = undefined;
+    const search_path = buildRequireSearchPath(vm, base_path, package_path == .missing, &search_path_buf);
+
+    var path_buf: [1024]u8 = undefined;
+    var path_len: usize = 0;
+    if (searchPathImpl(modname, search_path, ".", "/", &path_buf, &path_len, &err_buf, &err_pos)) {
+        const result = try loadModuleFile(vm, path_buf[0..path_len], mod_key);
+        if (!result.isNil()) {
+            try loaded_table.?.set(TValue.fromString(mod_key), result);
+        }
+        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
+        if (require_result.isNil()) {
+            require_result = TValue{ .boolean = true };
+            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
+        }
+
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = require_result;
+        }
+        if (nresults > 1) {
+            const loader_data = try vm.gc().allocString(path_buf[0..path_len]);
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(loader_data);
+        }
+
+        const required_key = try vm.gc().allocString("REQUIRED");
+        if (vm.globals().get(TValue.fromString(required_key)) != null) {
+            try vm.globals().set(TValue.fromString(required_key), TValue.fromString(mod_key));
+        }
+        return;
+    }
+
+    const package_cpath = getPackageStringField(package_table, "cpath");
+    const cpath = switch (package_cpath) {
+        .missing => "",
+        .path => |p| p,
+        .invalid_type => return vm.raiseString("package.cpath must be a string"),
+    };
+    if (cpath.len > 0) {
+        _ = searchPathImpl(modname, cpath, ".", "/", &path_buf, &path_len, &err_buf, &err_pos);
+    }
+
+    var msg_buf: [262512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "module '{s}' not found:{s}", .{ modname, err_buf[0..err_pos] }) catch "module not found";
+    return vm.raiseString(msg);
+}
+
+/// package.loadlib(libname, funcname) - Dynamically links with C library libname
+/// Moonquakes does not support C library loading - returns nil + error
+pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs < 2) {
+        return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
+    }
+
+    const libname_arg = vm.stack[vm.base + func_reg + 1];
+    if (libname_arg.asString() == null) {
+        return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
+    }
+
+    const funcname_arg = vm.stack[vm.base + func_reg + 2];
+    if (funcname_arg.asString() == null) {
+        return vm.raiseString("bad argument #2 to 'loadlib' (string expected)");
+    }
+
+    vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        const err_str = try vm.gc().allocString("C libraries not supported");
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+    }
+    if (nresults > 2) {
+        const when_str = try vm.gc().allocString("absent");
+        vm.stack[vm.base + func_reg + 2] = TValue.fromString(when_str);
+    }
+}
+
+/// package.searchpath(name, path [, sep [, rep]]) - Searches for name in given path
+/// Returns first matching file path, or nil + error message
+pub fn nativePackageSearchpath(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
+    if (nargs < 2) {
+        return vm.raiseString("bad argument #1 to 'searchpath' (string expected)");
+    }
+
+    const name_arg = vm.stack[vm.base + func_reg + 1];
+    const path_arg = vm.stack[vm.base + func_reg + 2];
+
+    const name = if (name_arg.asString()) |s| s.asSlice() else {
+        return vm.raiseString("bad argument #1 to 'searchpath' (string expected)");
+    };
+    const path = if (path_arg.asString()) |s| s.asSlice() else {
+        return vm.raiseString("bad argument #2 to 'searchpath' (string expected)");
+    };
+
+    const sep: []const u8 = if (nargs >= 3) blk: {
+        const sep_arg = vm.stack[vm.base + func_reg + 3];
+        if (sep_arg.asString()) |s| {
+            break :blk s.asSlice();
+        }
+        break :blk ".";
+    } else ".";
+
+    const rep: []const u8 = if (nargs >= 4) blk: {
+        const rep_arg = vm.stack[vm.base + func_reg + 4];
+        if (rep_arg.asString()) |s| {
+            break :blk s.asSlice();
+        }
+        break :blk "/";
+    } else "/";
+
+    var out_buf: [16384]u8 = undefined;
+    var out_len: usize = 0;
+    var err_buf: [262144]u8 = undefined;
+    var err_pos: usize = 0;
+
+    if (searchPathImpl(name, path, sep, rep, &out_buf, &out_len, &err_buf, &err_pos)) {
+        const path_str = try vm.gc().allocString(out_buf[0..out_len]);
+        vm.stack[vm.base + func_reg] = TValue.fromString(path_str);
+        if (nresults > 1) {
+            vm.stack[vm.base + func_reg + 1] = .nil;
+        }
+    } else {
+        vm.stack[vm.base + func_reg] = .nil;
+        if (nresults > 1) {
+            const err_str = try vm.gc().allocString(err_buf[0..err_pos]);
+            vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
+        }
+    }
+}
