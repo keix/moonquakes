@@ -63,6 +63,45 @@ const CoroutineResult = union(enum) {
     errored: TValue,
 };
 
+const CoroutineLuaExceptionResult = union(enum) {
+    disposition: mnemonics.LuaExceptionDisposition,
+    yielded: yield_state.YieldResult,
+};
+
+fn handleCoroutineLuaException(co_vm: *VM) CoroutineLuaExceptionResult {
+    const disposition = mnemonics.classifyLuaException(co_vm, null) catch |herr| switch (herr) {
+        error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
+    };
+    return .{ .disposition = disposition };
+}
+
+const CoroutineUnwindResult = union(enum) {
+    done,
+    yielded: yield_state.YieldResult,
+};
+
+fn unwindCoroutineErrorFrames(co_vm: *VM, err_obj: TValue) CoroutineUnwindResult {
+    while (co_vm.ci) |unwind_ci| {
+        mnemonics.popErrorFrame(co_vm, unwind_ci, err_obj) catch |err| switch (err) {
+            error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
+        };
+        if (co_vm.callstack_size == 0) {
+            co_vm.ci = null;
+            break;
+        }
+    }
+    return .done;
+}
+
+fn convertCoroutineVmRuntimeError(co_vm: *VM, inst: Instruction, err: anyerror) ?TValue {
+    var msg_buf: [128]u8 = undefined;
+    const msg = mnemonics.formatVmRuntimeErrorMessage(co_vm, inst, err, &msg_buf);
+    var full_msg_buf: [320]u8 = undefined;
+    const full_msg = mnemonics.runtimeErrorWithCurrentLocation(co_vm, inst, err, msg, &full_msg_buf);
+    const msg_obj = co_vm.gc().allocString(full_msg) catch return null;
+    return TValue.fromString(msg_obj);
+}
+
 /// Set up coroutine for first resume (initialize call frame)
 fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
     // Copy arguments to coroutine stack
@@ -97,11 +136,15 @@ fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_
 fn executeCoroutine(co_vm: *VM) CoroutineResult {
     // Execute instructions until we return from the main function
     while (co_vm.ci != null) {
-        if (co_vm.errors.pending_error_unwind and co_vm.errors.pending_error_unwind_ci != null and co_vm.ci == co_vm.errors.pending_error_unwind_ci.?) {
-            if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-            }) continue;
-            return .{ .errored = error_state.getRaisedValue(co_vm) };
+        if (error_state.hasPendingUnwindAtCurrentFrame(co_vm)) {
+            switch (handleCoroutineLuaException(co_vm)) {
+                .disposition => |d| switch (d) {
+                    .continue_loop => continue,
+                    .handled_at_boundary => continue,
+                    .unhandled => return .{ .errored = error_state.getRaisedValue(co_vm) },
+                },
+                .yielded => |yielded| return .{ .yielded = yielded },
+            }
         }
         const ci = co_vm.ci.?;
         if (ci.pending_compare_active) {
@@ -140,22 +183,17 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             if (err == error.HandledException) continue;
             // Handle LuaException
             if (err == error.LuaException) {
-                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-                }) continue;
-                while (co_vm.ci) |unwind_ci| {
-                    mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, error_state.getRaisedValue(co_vm)) catch |cerr| switch (cerr) {
-                        error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-                        else => {},
-                    };
-                    co_vm.closeUpvalues(unwind_ci.base);
-                    if (unwind_ci.previous != null) {
-                        mnemonics.popCallInfo(co_vm);
-                    } else {
-                        co_vm.ci = null;
-                        co_vm.callstack_size = 0;
-                        break;
-                    }
+                switch (handleCoroutineLuaException(co_vm)) {
+                    .disposition => |d| switch (d) {
+                        .continue_loop => continue,
+                        .handled_at_boundary => continue,
+                        .unhandled => {},
+                    },
+                    .yielded => |yielded| return .{ .yielded = yielded },
+                }
+                switch (unwindCoroutineErrorFrames(co_vm, error_state.getRaisedValue(co_vm))) {
+                    .done => {},
+                    .yielded => |yielded| return .{ .yielded = yielded },
                 }
                 // Unhandled exception - return error
                 return .{ .errored = error_state.getRaisedValue(co_vm) };
@@ -167,61 +205,19 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
                 return .{ .yielded = yield_state.currentResult(co_vm) };
             }
 
-            if (err == error.CallStackOverflow) {
-                const msg = if (co_vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow";
-                const msg_obj = co_vm.gc().allocString(msg) catch return .{ .errored = .nil };
-                error_state.setRaisedValue(co_vm, TValue.fromString(msg_obj));
-                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-                }) continue;
-                return .{ .errored = error_state.getRaisedValue(co_vm) };
-            }
-
             // Convert ordinary VM runtime errors into catchable Lua exceptions,
             // matching the main execution and call paths.
-            if (err == error.ArithmeticError or
-                err == error.DivideByZero or
-                err == error.ModuloByZero or
-                err == error.IntegerRepresentation or
-                err == error.OrderComparisonError or
-                err == error.LengthError or
-                err == error.NotATable or
-                err == error.NotAFunction or
-                err == error.InvalidTableKey or
-                err == error.InvalidTableOperation or
-                err == error.InvalidForLoopInit or
-                err == error.InvalidForLoopLimit or
-                err == error.InvalidForLoopStep or
-                err == error.NoCloseMetamethod or
-                err == error.FormatError)
-            {
-                var msg_buf: [128]u8 = undefined;
-                const msg = switch (err) {
-                    error.ArithmeticError => mnemonics.formatArithmeticError(co_vm, inst, &msg_buf),
-                    error.DivideByZero => "divide by zero",
-                    error.ModuloByZero => "attempt to perform 'n%0'",
-                    error.IntegerRepresentation => mnemonics.formatIntegerRepresentationError(co_vm, inst, &msg_buf),
-                    error.NotATable => mnemonics.formatIndexOnNonTableError(co_vm, inst, &msg_buf),
-                    error.NotAFunction => "attempt to call a non-function value",
-                    error.OrderComparisonError => "attempt to compare values",
-                    error.LengthError => "attempt to get length of a value",
-                    error.InvalidTableKey => "table index is nil or NaN",
-                    error.InvalidTableOperation => mnemonics.formatIndexOnNonTableError(co_vm, inst, &msg_buf),
-                    error.InvalidForLoopInit => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
-                    error.InvalidForLoopLimit => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
-                    error.InvalidForLoopStep => mnemonics.formatForLoopError(co_vm, inst, err, &msg_buf),
-                    error.NoCloseMetamethod => mnemonics.formatNoCloseMetamethodError(co_vm, inst, &msg_buf),
-                    error.FormatError => "bad argument to string format",
-                    else => "runtime error",
-                };
-                var full_msg_buf: [320]u8 = undefined;
-                const full_msg = mnemonics.runtimeErrorWithCurrentLocation(co_vm, inst, err, msg, &full_msg_buf);
-                const msg_obj = co_vm.gc().allocString(full_msg) catch return .{ .errored = .nil };
-                error_state.setRaisedValue(co_vm, TValue.fromString(msg_obj));
-                if (mnemonics.handleLuaException(co_vm) catch |herr| switch (herr) {
-                    error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-                }) continue;
-                return .{ .errored = error_state.getRaisedValue(co_vm) };
+            if (mnemonics.isVmRuntimeError(err)) {
+                const raised = convertCoroutineVmRuntimeError(co_vm, inst, err) orelse return .{ .errored = .nil };
+                error_state.setRaisedValue(co_vm, raised);
+                switch (handleCoroutineLuaException(co_vm)) {
+                    .disposition => |d| switch (d) {
+                        .continue_loop => continue,
+                        .handled_at_boundary => continue,
+                        .unhandled => return .{ .errored = error_state.getRaisedValue(co_vm) },
+                    },
+                    .yielded => |yielded| return .{ .yielded = yielded },
+                }
             }
 
             const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };

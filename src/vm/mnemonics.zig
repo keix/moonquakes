@@ -221,6 +221,32 @@ fn closeTbcForReturn(vm: *VM, ci: *CallInfo) !void {
     };
 }
 
+pub fn popErrorFrame(vm: *VM, ci: *CallInfo, err_obj: TValue) error{Yield}!void {
+    closeTBCVariables(vm, ci, 0, err_obj) catch |err| switch (err) {
+        error.Yield => return error.Yield,
+        else => {},
+    };
+    vm.closeUpvalues(ci.base);
+    popCallInfo(vm);
+}
+
+pub fn unwindErrorFramesIgnoringCloseErrors(vm: *VM, saved_depth: u8, err_obj: TValue) void {
+    while (vm.callstack_size > saved_depth) {
+        const unwind_ci = &vm.callstack[vm.callstack_size - 1];
+        popErrorFrame(vm, unwind_ci, err_obj) catch {};
+    }
+}
+
+pub fn unwindErrorFramesToProtectedTarget(vm: *VM, target_ci: ?*CallInfo, err_obj: TValue) error{Yield}!void {
+    while (vm.ci != null and vm.ci != target_ci) {
+        const unwind_ci = vm.ci.?;
+        popErrorFrame(vm, unwind_ci, err_obj) catch {
+            error_state.setPendingUnwind(vm, unwind_ci);
+            return error.Yield;
+        };
+    }
+}
+
 fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
     try table.set(key, value);
     vm.gc().barrierBackValue(&table.header, value);
@@ -515,7 +541,7 @@ pub const formatForLoopError = error_format.formatForLoopError;
 pub const formatNoCloseMetamethodError = error_format.formatNoCloseMetamethodError;
 const buildCallNotFunctionMessage = error_format.buildCallNotFunctionMessage;
 
-fn isVmRuntimeError(err: anyerror) bool {
+pub fn isVmRuntimeError(err: anyerror) bool {
     return err == error.CallStackOverflow or
         err == error.ArithmeticError or
         err == error.DivideByZero or
@@ -534,7 +560,7 @@ fn isVmRuntimeError(err: anyerror) bool {
         err == error.FormatError;
 }
 
-fn formatVmRuntimeErrorMessage(vm: *VM, inst: Instruction, err: anyerror, msg_buf: *[128]u8) []const u8 {
+pub fn formatVmRuntimeErrorMessage(vm: *VM, inst: Instruction, err: anyerror, msg_buf: *[128]u8) []const u8 {
     return switch (err) {
         error.CallStackOverflow => if (vm.errors.error_handling_depth > 0) "error in error handling" else "stack overflow",
         error.ArithmeticError => formatArithmeticError(vm, inst, msg_buf),
@@ -556,15 +582,28 @@ fn formatVmRuntimeErrorMessage(vm: *VM, inst: Instruction, err: anyerror, msg_bu
     };
 }
 
+pub const LuaExceptionDisposition = enum {
+    continue_loop,
+    handled_at_boundary,
+    unhandled,
+};
+
+pub fn classifyLuaException(vm: *VM, target_depth: ?u8) error{Yield}!LuaExceptionDisposition {
+    if (!(try handleLuaException(vm))) return .unhandled;
+    if (target_depth) |depth| {
+        return if (vm.callstack_size <= depth) .handled_at_boundary else .continue_loop;
+    }
+    return .continue_loop;
+}
+
 fn continueIfLuaExceptionHandled(vm: *VM, err: anyerror) error{Yield}!bool {
     if (err != error.LuaException) return false;
-    return try handleLuaException(vm);
+    return (try classifyLuaException(vm, null)) == .continue_loop;
 }
 
 fn continueMetamethodIfLuaExceptionHandled(vm: *VM, err: anyerror, saved_depth: u8) error{Yield}!bool {
     if (err != error.LuaException or error_state.isClosingMetamethod(vm)) return false;
-    if (!(try handleLuaException(vm))) return false;
-    return vm.callstack_size > saved_depth;
+    return (try classifyLuaException(vm, saved_depth)) == .continue_loop;
 }
 
 fn metamethodEventName(comptime event: MetaEvent) []const u8 {
@@ -862,12 +901,7 @@ fn executeSyncMMWithDebug(
                 continue;
             }
             if (err == error.LuaException) {
-                while (vm.callstack_size > saved_depth) {
-                    const unwind_ci = &vm.callstack[vm.callstack_size - 1];
-                    closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch {};
-                    vm.closeUpvalues(unwind_ci.base);
-                    popCallInfo(vm);
-                }
+                unwindErrorFramesIgnoringCloseErrors(vm, saved_depth, vm.errors.lua_error_value);
                 vm.ci = saved_ci;
                 vm.base = saved_base;
                 vm.top = saved_top;
@@ -1120,18 +1154,7 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             const protected_error_handler = ci.error_handler;
             const target_ci = ci.previous;
             traceback_state.captureSnapshot(vm, target_ci);
-            while (vm.ci != null and vm.ci != target_ci) {
-                const unwind_ci = vm.ci.?;
-                closeTBCVariables(vm, unwind_ci, 0, vm.errors.lua_error_value) catch |cerr| switch (cerr) {
-                    error.Yield => {
-                        error_state.setPendingUnwind(vm, unwind_ci);
-                        return error.Yield;
-                    },
-                    else => {},
-                };
-                vm.closeUpvalues(unwind_ci.base);
-                popCallInfo(vm);
-            }
+            try unwindErrorFramesToProtectedTarget(vm, target_ci, vm.errors.lua_error_value);
 
             var handled_error = vm.errors.lua_error_value;
             const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil();
@@ -1288,7 +1311,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
         if (vm.gc().hasPendingFinalizers()) {
             vm.gc().drainFinalizers();
         }
-        if (vm.errors.pending_error_unwind and vm.errors.pending_error_unwind_ci != null and vm.ci == vm.errors.pending_error_unwind_ci.?) {
+        if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
             if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
             return error.LuaException;
         }

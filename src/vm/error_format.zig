@@ -414,9 +414,7 @@ pub fn buildCallNotFunctionMessage(vm: *VM, ci: *const CallInfo, call_reg: u8, c
         }
     }
     if (ctx_opt) |ctx| {
-        if (ctx.kind == .upvalue_name and std.mem.eql(u8, ctx.name, "_ENV")) {
-        } else if ((ctx.kind == .global_name or ctx.kind == .field_name) and std.mem.eql(u8, ty, "table")) {
-        } else {
+        if (ctx.kind == .upvalue_name and std.mem.eql(u8, ctx.name, "_ENV")) {} else if ((ctx.kind == .global_name or ctx.kind == .field_name) and std.mem.eql(u8, ty, "table")) {} else {
             const kind = switch (ctx.kind) {
                 .global_name => "global",
                 .field_name => "field",

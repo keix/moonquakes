@@ -61,6 +61,12 @@ pub fn clearPendingUnwind(vm: *VM) void {
     vm.errors.pending_error_unwind_ci = null;
 }
 
+pub fn hasPendingUnwindAtCurrentFrame(vm: *const VM) bool {
+    return vm.errors.pending_error_unwind and
+        vm.errors.pending_error_unwind_ci != null and
+        vm.ci == vm.errors.pending_error_unwind_ci.?;
+}
+
 pub fn beginCloseMetamethod(vm: *VM) void {
     vm.errors.close_metamethod_depth +|= 1;
 }
