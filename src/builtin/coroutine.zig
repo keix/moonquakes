@@ -68,6 +68,8 @@ const CoroutineLuaExceptionResult = union(enum) {
     yielded: yield_state.YieldResult,
 };
 
+// Coroutine execution keeps shared LuaException semantics, then converts them
+// into the resume protocol's yielded/errored shape.
 fn handleCoroutineLuaException(co_vm: *VM) CoroutineLuaExceptionResult {
     const disposition = mnemonics.classifyLuaException(co_vm, null) catch |herr| switch (herr) {
         error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },

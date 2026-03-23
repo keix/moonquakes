@@ -85,6 +85,8 @@ fn cleanupRunState(vm: *VM, saved_depth: u8, saved_base: u32, saved_top: u32) vo
     vm.top = saved_top;
 }
 
+// Reentrant call helpers translate shared LuaException semantics into the
+// HandledException/LuaException boundary used by callValue*.
 fn handleLuaExceptionAtDepth(vm: *VM, saved_depth: u8) error{Yield}!mnemonics.LuaExceptionDisposition {
     return try mnemonics.classifyLuaException(vm, saved_depth);
 }

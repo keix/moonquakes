@@ -230,6 +230,8 @@ pub fn popErrorFrame(vm: *VM, ci: *CallInfo, err_obj: TValue) error{Yield}!void 
     popCallInfo(vm);
 }
 
+// Unwind policy is caller-owned: some paths ignore close-time errors, while
+// protected unwinds must preserve Yield so they can resume later.
 pub fn unwindErrorFramesIgnoringCloseErrors(vm: *VM, saved_depth: u8, err_obj: TValue) void {
     while (vm.callstack_size > saved_depth) {
         const unwind_ci = &vm.callstack[vm.callstack_size - 1];
@@ -588,6 +590,8 @@ pub const LuaExceptionDisposition = enum {
     unhandled,
 };
 
+// Shared semantic classification only. Each caller still maps these outcomes
+// into its own control-flow shape.
 pub fn classifyLuaException(vm: *VM, target_depth: ?u8) error{Yield}!LuaExceptionDisposition {
     if (!(try handleLuaException(vm))) return .unhandled;
     if (target_depth) |depth| {
