@@ -1,3 +1,8 @@
+//! Table-library builtin functions and table-manipulation helpers.
+//!
+//! Shared helper logic stays near the top of the file.
+//! Dispatcher entrypoints are grouped below.
+
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
@@ -69,6 +74,70 @@ fn setAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue, value
         return;
     }
     return rawSetWithBarrier(vm, table, key, value);
+}
+
+/// Compare two values for sorting.
+/// Returns true if `a` is less than `b` according to sort order.
+fn lessForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
+    if (comp) |comp_fn| {
+        const result = try callValueManaged(vm, comp_fn, &[_]TValue{ a, b });
+        const ab = result.toBoolean();
+        // Lua rejects comparators that say x < x.
+        if (ab and a.eql(b)) return error.InvalidOrderFunction;
+        return ab;
+    }
+
+    // Default comparison: numbers, strings, then __lt metamethod.
+    if (a.toNumber()) |a_num| {
+        if (b.toNumber()) |b_num| {
+            return a_num < b_num;
+        }
+    }
+    if (a.asString()) |a_str| {
+        if (b.asString()) |b_str| {
+            const cmp = std.mem.order(u8, a_str.asSlice(), b_str.asSlice());
+            return cmp == .lt;
+        }
+    }
+
+    if (metamethod.getBinMetamethod(a, b, .lt, &vm.gc().mm_keys, &vm.gc().shared_mt)) |lt_mm| {
+        const result = try callValueManaged(vm, lt_mm, &[_]TValue{ a, b });
+        return result.toBoolean();
+    }
+
+    return vm.raiseString("attempt to compare values");
+}
+
+fn quickSort(vm: anytype, items: []TValue, lo: i64, hi: i64, comp: ?TValue) !void {
+    var left = lo;
+    var right = hi;
+    while (left < right) {
+        var i = left;
+        var j = right;
+        const pivot = items[@as(usize, @intCast(left + @divTrunc(right - left, 2)))];
+
+        while (i <= j) {
+            while (i <= right and try lessForSort(vm, items[@as(usize, @intCast(i))], pivot, comp)) : (i += 1) {}
+            while (j >= left and try lessForSort(vm, pivot, items[@as(usize, @intCast(j))], comp)) : (j -= 1) {}
+
+            if (i <= j) {
+                std.mem.swap(TValue, &items[@as(usize, @intCast(i))], &items[@as(usize, @intCast(j))]);
+                i += 1;
+                j -= 1;
+            }
+        }
+
+        const left_len: i64 = if (j >= left) (j - left + 1) else 0;
+        const right_len: i64 = if (i <= right) (right - i + 1) else 0;
+
+        if (left_len < right_len) {
+            if (left_len > 1) try quickSort(vm, items, left, j, comp);
+            left = i;
+        } else {
+            if (right_len > 1) try quickSort(vm, items, i, right, comp);
+            right = j;
+        }
+    }
 }
 
 /// table.insert(list, [pos,] value) - Inserts element into table
@@ -244,70 +313,6 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     // table.sort returns nothing
-}
-
-/// Compare two values for sorting.
-/// Returns true if `a` is less than `b` according to sort order.
-fn lessForSort(vm: anytype, a: TValue, b: TValue, comp: ?TValue) !bool {
-    if (comp) |comp_fn| {
-        const result = try callValueManaged(vm, comp_fn, &[_]TValue{ a, b });
-        const ab = result.toBoolean();
-        // Lua rejects comparators that say x < x.
-        if (ab and a.eql(b)) return error.InvalidOrderFunction;
-        return ab;
-    }
-
-    // Default comparison: numbers, strings, then __lt metamethod.
-    if (a.toNumber()) |a_num| {
-        if (b.toNumber()) |b_num| {
-            return a_num < b_num;
-        }
-    }
-    if (a.asString()) |a_str| {
-        if (b.asString()) |b_str| {
-            const cmp = std.mem.order(u8, a_str.asSlice(), b_str.asSlice());
-            return cmp == .lt;
-        }
-    }
-
-    if (metamethod.getBinMetamethod(a, b, .lt, &vm.gc().mm_keys, &vm.gc().shared_mt)) |lt_mm| {
-        const result = try callValueManaged(vm, lt_mm, &[_]TValue{ a, b });
-        return result.toBoolean();
-    }
-
-    return vm.raiseString("attempt to compare values");
-}
-
-fn quickSort(vm: anytype, items: []TValue, lo: i64, hi: i64, comp: ?TValue) !void {
-    var left = lo;
-    var right = hi;
-    while (left < right) {
-        var i = left;
-        var j = right;
-        const pivot = items[@as(usize, @intCast(left + @divTrunc(right - left, 2)))];
-
-        while (i <= j) {
-            while (i <= right and try lessForSort(vm, items[@as(usize, @intCast(i))], pivot, comp)) : (i += 1) {}
-            while (j >= left and try lessForSort(vm, pivot, items[@as(usize, @intCast(j))], comp)) : (j -= 1) {}
-
-            if (i <= j) {
-                std.mem.swap(TValue, &items[@as(usize, @intCast(i))], &items[@as(usize, @intCast(j))]);
-                i += 1;
-                j -= 1;
-            }
-        }
-
-        const left_len: i64 = if (j >= left) (j - left + 1) else 0;
-        const right_len: i64 = if (i <= right) (right - i + 1) else 0;
-
-        if (left_len < right_len) {
-            if (left_len > 1) try quickSort(vm, items, left, j, comp);
-            left = i;
-        } else {
-            if (right_len > 1) try quickSort(vm, items, i, right, comp);
-            right = j;
-        }
-    }
 }
 
 /// table.concat(list [, sep [, start [, end]]]) - Concatenates table elements
