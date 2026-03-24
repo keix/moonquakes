@@ -1,3 +1,24 @@
+// Mnemonic dispatch and opcode-adjacent execution helpers.
+//
+// This file owns the main instruction execution loop for Lua bytecode and the
+// helper routines that are still tightly coupled to that loop's execution ABI:
+// CallInfo frame layout, ExecuteResult control flow, metamethod dispatch
+// scheduling, and opcode-local resume state such as pending compare/concat
+// continuations.
+//
+// The broader v0.3.x cleanup has already moved shared concerns out of this
+// file where they naturally stand on their own:
+// - traceback formatting and naming live in dedicated modules
+// - field-cache, hook, and error-state mechanics live outside the loop
+// - protected-call bootstrap helpers live in protected_call.zig
+// - reusable error-semantics helpers are exposed as the semantic core that
+//   call.zig and coroutine.zig map into their own caller-specific control flow
+//
+// What remains here is intentionally the part that still speaks in terms of
+// the execution loop itself. As a rule, pure formatting, generic state
+// tracking, and caller-agnostic error semantics should move out first; helpers
+// that directly manipulate frame-local pending state or schedule LoopContinue
+// behavior stay here unless a smaller, clearly safer boundary emerges.
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const opcodes = @import("../compiler/opcodes.zig");
@@ -33,6 +54,7 @@ const VM = vm_mod.VM;
 const error_state = @import("error_state.zig");
 const field_cache = @import("field_cache.zig");
 const hook_state = @import("hook.zig");
+const protected_call = @import("protected_call.zig");
 const traceback_state = @import("traceback.zig");
 const vm_gc = @import("gc.zig");
 const interrupt = @import("../interrupt.zig");
@@ -100,113 +122,6 @@ fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32
         .io_lines_iterator => @min(native_multret_cap, stack_room),
         else => 1,
     };
-}
-
-// Bootstrap frame used by protected calls (pcall/xpcall):
-// CALL R0, ... ; RETURN R0, ...
-var protected_call_bootstrap_code = [_]Instruction{
-    Instruction.initABC(.CALL, 0, 0, 0),
-    Instruction.initABC(.RETURN, 0, 0, 0),
-};
-var protected_call_bootstrap_lineinfo = [_]u32{ 1, 1 };
-var protected_call_bootstrap_proto = object.ProtoObject{
-    .header = object.GCObject.init(.proto, null),
-    .k = &.{},
-    .code = protected_call_bootstrap_code[0..],
-    .protos = &.{},
-    .numparams = 0,
-    .is_vararg = true,
-    .maxstacksize = 2,
-    .nups = 0,
-    .upvalues = &.{},
-    .allocator = std.heap.page_allocator,
-    .source = "[protected call bootstrap]",
-    .lineinfo = protected_call_bootstrap_lineinfo[0..],
-};
-
-// Push a synthetic protected frame that runs CALL/RETURN around the user target.
-// This gives pcall/xpcall a normal Lua frame to unwind into on failure.
-fn dispatchProtectedCall(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_results: u32, handler: ?TValue, ret_base: u32) !ExecuteResult {
-    if (total_args == 0) {
-        vm.stack[vm.base + a] = .{ .boolean = false };
-        vm.stack[vm.base + a + 1] = TValue.fromString(try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)"));
-        vm.top = if (total_results == 0) vm.base + a + 2 else vm.base + ci.func.maxstacksize;
-        return .Continue;
-    }
-
-    const call_base = vm.base + a + 1;
-    const user_nresults: u32 = if (total_results > 0) total_results - 1 else 0;
-    const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
-
-    const new_ci = try pushCallInfoVararg(
-        vm,
-        &protected_call_bootstrap_proto,
-        null,
-        call_base,
-        ret_base,
-        pcall_nresults,
-        0,
-        0,
-    );
-    new_ci.is_protected = true;
-    if (handler) |h| new_ci.error_handler = h;
-
-    vm.top = call_base + total_args;
-    return .LoopContinue;
-}
-
-// xpcall inserts an error handler before the real call target.
-// Normalize the register layout so the protected bootstrap sees func(...) only.
-fn prepareXpcall(vm: *VM, a: u8, total_args: u32, fail_base: u32) !struct { total_args: u32, handler: TValue } {
-    if (total_args < 2) {
-        vm.stack[fail_base] = .{ .boolean = false };
-        vm.stack[fail_base + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
-        return error.InvalidXpcallHandler;
-    }
-
-    const handler = vm.stack[vm.base + a + 2];
-    const inner_total_args = total_args - 1;
-    if (inner_total_args > 1) {
-        var i: u32 = 0;
-        const shift_count = inner_total_args - 1;
-        while (i < shift_count) : (i += 1) {
-            vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 3 + i];
-        }
-    }
-
-    return .{ .total_args = inner_total_args, .handler = handler };
-}
-
-// Tail-called pcall/xpcall reuses the current frame instead of pushing a new
-// CallInfo, but it still needs the same protected bootstrap semantics.
-fn reuseCurrentFrameForProtectedCall(current_ci: *CallInfo, ret_base: u32, total_results: u32, handler: ?TValue, new_base: u32) void {
-    const pcall_nresults: i16 = if (total_results > 0)
-        @intCast(total_results - 1)
-    else
-        -1;
-    current_ci.func = &protected_call_bootstrap_proto;
-    current_ci.closure = null;
-    current_ci.pc = protected_call_bootstrap_proto.code.ptr;
-    current_ci.base = new_base;
-    current_ci.ret_base = ret_base;
-    current_ci.nresults = pcall_nresults;
-    current_ci.was_tail_called = true;
-    current_ci.vararg_base = 0;
-    current_ci.vararg_count = 0;
-    current_ci.is_protected = true;
-    current_ci.error_handler = handler orelse .nil;
-    current_ci.tbc_bitmap = 0;
-    current_ci.pending_return_a = null;
-    current_ci.pending_return_count = null;
-    current_ci.pending_return_reexec = false;
-    current_ci.pending_compare_active = false;
-    current_ci.pending_compare_negate = 0;
-    current_ci.pending_compare_invert = false;
-    current_ci.pending_compare_result_slot = 0;
-    current_ci.pending_concat_active = false;
-    current_ci.pending_concat_a = 0;
-    current_ci.pending_concat_b = 0;
-    current_ci.pending_concat_i = -1;
 }
 
 // Return/tailcall paths need identical TBC cleanup semantics: propagate errors,
@@ -2527,10 +2442,10 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         };
                         const total_results: u32 = if (c > 0) c - 1 else 0;
                         if (nc.func.id == .pcall) {
-                            return try dispatchProtectedCall(vm, ci, a, total_args, total_results, null, vm.base + a);
+                            return try protected_call.dispatch(vm, ci, a, total_args, total_results, null, vm.base + a);
                         }
 
-                        const prepared = prepareXpcall(vm, a, total_args, vm.base + a) catch |err| switch (err) {
+                        const prepared = protected_call.prepareXpcall(vm, a, total_args, vm.base + a) catch |err| switch (err) {
                             error.InvalidXpcallHandler => {
                                 const frame_max = vm.base + ci.func.maxstacksize;
                                 vm.top = if (c == 0) vm.base + a + 2 else frame_max;
@@ -2538,7 +2453,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             },
                             else => return err,
                         };
-                        return try dispatchProtectedCall(vm, ci, a, prepared.total_args, total_results, prepared.handler, vm.base + a);
+                        return try protected_call.dispatch(vm, ci, a, prepared.total_args, total_results, prepared.handler, vm.base + a);
                     }
                     const nargs: u32 = if (b > 0) b - 1 else blk: {
                         const arg_start = vm.base + a + 1;
@@ -2547,7 +2462,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                     // Remember frame extent before call
                     const frame_max = vm.base + ci.func.maxstacksize;
                     const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
-                    const nresults: u32 = if (c == 0 and ci.is_protected and ci.func == &protected_call_bootstrap_proto)
+                    const nresults: u32 = if (c == 0 and ci.is_protected and protected_call.isBootstrapProto(ci.func))
                         (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
                     else
                         nativeDesiredResultsForCall(nc.func.id, c, stack_room);
@@ -2891,7 +2806,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                         var handler: ?TValue = null;
                         var effective_total_args = total_args_call;
                         if (nc.func.id == .xpcall) {
-                            const prepared = prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
+                            const prepared = protected_call.prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
                                 error.InvalidXpcallHandler => {
                                     popCallInfo(vm);
                                     vm.top = ret_base + 2;
@@ -2903,7 +2818,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
                             effective_total_args = prepared.total_args;
                         }
                         const new_base = vm.base + a + 1;
-                        reuseCurrentFrameForProtectedCall(current_ci, ret_base, total_results, handler, new_base);
+                        protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
                         vm.base = new_base;
                         vm.top = new_base + effective_total_args;
                         return .LoopContinue;
@@ -3916,7 +3831,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             const b = inst.getB();
             const c = inst.getC();
             const total_results: u32 = if (c > 0) c - 1 else 0;
-            return try dispatchProtectedCall(vm, ci, a, b, total_results, null, vm.base + a);
+            return try protected_call.dispatch(vm, ci, a, b, total_results, null, vm.base + a);
         },
         // All opcodes now implemented - no else branch needed
     }
