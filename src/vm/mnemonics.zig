@@ -61,9 +61,43 @@ const interrupt = @import("../interrupt.zig");
 
 pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
 pub const BitwiseOp = enum { band, bor, bxor };
+pub const LuaExceptionDisposition = enum {
+    continue_loop,
+    handled_at_boundary,
+    unhandled,
+};
+
+const CompareMMDispatch = union(enum) {
+    value: bool,
+    deferred,
+    missing,
+};
+
+const BitwiseMetaEvent = enum {
+    band,
+    bor,
+    bxor,
+    shl,
+    shr,
+    bnot,
+
+    fn toKey(self: BitwiseMetaEvent) []const u8 {
+        return switch (self) {
+            .band => "__band",
+            .bor => "__bor",
+            .bxor => "__bxor",
+            .shl => "__shl",
+            .shr => "__shr",
+            .bnot => "__bnot",
+        };
+    }
+};
 
 const native_multret_cap: u32 = 256;
+const CallNameKind = name_resolver.CallNameKind;
+const CallNameContext = name_resolver.CallNameContext;
 
+// Shared arithmetic vocabulary used by opcode helpers and metamethod fallback.
 fn arithOpToMetaEvent(comptime op: ArithOp) MetaEvent {
     return switch (op) {
         .add => .add,
@@ -136,6 +170,7 @@ fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32
     };
 }
 
+// Shared frame/error cleanup helpers used by the main loop and caller adapters.
 // Return/tailcall paths need identical TBC cleanup semantics: propagate errors,
 // but remember when __close yielded so the return instruction can re-execute.
 fn closeTbcForReturn(vm: *VM, ci: *CallInfo) !void {
@@ -436,13 +471,12 @@ fn shrInt(value: i64, shift: i64) i64 {
     return @bitCast(res);
 }
 
+// Shared debug/name-resolution aliases used by runtime error formatting.
 pub fn eqOp(a: TValue, b: TValue) bool {
     return a.eql(b);
 }
 
-const CallNameKind = name_resolver.CallNameKind;
-const CallNameContext = name_resolver.CallNameContext;
-
+// Name-resolution aliases shared by hook handling and runtime error formatting.
 const currentInstructionIndex = name_resolver.currentInstructionIndex;
 const findNearestOpcodeBack = name_resolver.findNearestOpcodeBack;
 const findRegisterProducerBack = name_resolver.findRegisterProducerBack;
@@ -453,6 +487,7 @@ const resolveRegisterNameContext = name_resolver.resolveRegisterNameContext;
 const findUnaryOperatorLineInSource = name_resolver.findUnaryOperatorLineInSource;
 const findCallOpenParenLineInSource = name_resolver.findCallOpenParenLineInSource;
 
+// Diagnostics / error-format aliases shared by runtime error construction.
 const runtimeErrorLine = diagnostics.runtimeErrorLine;
 const runtimeErrorWithLocation = diagnostics.runtimeErrorWithLocation;
 const raiseWithLocation = diagnostics.raiseWithLocation;
@@ -470,6 +505,7 @@ pub const formatForLoopError = error_format.formatForLoopError;
 pub const formatNoCloseMetamethodError = error_format.formatNoCloseMetamethodError;
 const buildCallNotFunctionMessage = error_format.buildCallNotFunctionMessage;
 
+// Shared runtime-error classification used by execute(), call.zig, and coroutine.zig.
 pub fn isVmRuntimeError(err: anyerror) bool {
     return err == error.CallStackOverflow or
         err == error.ArithmeticError or
@@ -510,12 +546,6 @@ pub fn formatVmRuntimeErrorMessage(vm: *VM, inst: Instruction, err: anyerror, ms
         else => "runtime error",
     };
 }
-
-pub const LuaExceptionDisposition = enum {
-    continue_loop,
-    handled_at_boundary,
-    unhandled,
-};
 
 // Shared semantic classification only. Each caller still maps these outcomes
 // into its own control-flow shape.
@@ -4722,12 +4752,6 @@ fn getLeMM(vm: *VM, val: TValue) ?TValue {
     return mt.get(TValue.fromString(vm.gc().mm_keys.get(.le)));
 }
 
-const CompareMMDispatch = union(enum) {
-    value: bool,
-    deferred,
-    missing,
-};
-
 fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_abs: u32, mm_name: []const u8) !ExecuteResult {
     const temp = vm.top;
 
@@ -4910,27 +4934,6 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     return null;
 }
-
-/// Bitwise metamethod event types
-const BitwiseMetaEvent = enum {
-    band,
-    bor,
-    bxor,
-    shl,
-    shr,
-    bnot,
-
-    fn toKey(self: BitwiseMetaEvent) []const u8 {
-        return switch (self) {
-            .band => "__band",
-            .bor => "__bor",
-            .bxor => "__bxor",
-            .shl => "__shl",
-            .shr => "__shr",
-            .bnot => "__bnot",
-        };
-    }
-};
 
 /// Try to get bitwise metamethod from a value
 fn getBitwiseMM(vm: *VM, val: TValue, comptime event: BitwiseMetaEvent) !?TValue {
