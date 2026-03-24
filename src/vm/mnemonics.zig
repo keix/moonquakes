@@ -1292,6 +1292,641 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     return executeWithArgs(vm, proto, &.{});
 }
 
+fn raiseCallNotFunction(vm: *VM, ci: *CallInfo, inst: Instruction, a: u8, func_val: TValue) !ExecuteResult {
+    var msg_buf: [192]u8 = undefined;
+    const msg = buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf);
+    try raiseWithLocation(vm, ci, inst, error.NotAFunction, msg);
+    return error.LuaException;
+}
+
+// Stack:
+//   R[A](R[A+1], ..., R[A+B-1]) -> R[A], ...
+//
+// Semantics:
+//   - closure/native fast paths
+//   - protected pcall/xpcall bootstrap handling
+//   - __call slow path for non-callable values
+//
+// Notes:
+//   - may push a new CallInfo and return .LoopContinue
+//   - may raise LuaException for non-callable values
+fn opCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+
+    const func_val = vm.stack[vm.base + a];
+    // Fast path: native closure
+    if (func_val.isObject()) {
+        const obj = func_val.object;
+        if (obj.type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, obj);
+            if (nc.func.id == .pcall or nc.func.id == .xpcall) {
+                const total_args: u32 = if (b > 0) b - 1 else blk: {
+                    const arg_start = vm.base + a + 1;
+                    break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
+                };
+                const total_results: u32 = if (c > 0) c - 1 else 0;
+                if (nc.func.id == .pcall) {
+                    return try protected_call.dispatch(vm, ci, a, total_args, total_results, null, vm.base + a);
+                }
+
+                const prepared = protected_call.prepareXpcall(vm, a, total_args, vm.base + a) catch |err| switch (err) {
+                    error.InvalidXpcallHandler => {
+                        const frame_max = vm.base + ci.func.maxstacksize;
+                        vm.top = if (c == 0) vm.base + a + 2 else frame_max;
+                        return .Continue;
+                    },
+                    else => return err,
+                };
+                return try protected_call.dispatch(vm, ci, a, prepared.total_args, total_results, prepared.handler, vm.base + a);
+            }
+            const nargs: u32 = if (b > 0) b - 1 else blk: {
+                const arg_start = vm.base + a + 1;
+                break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
+            };
+            const frame_max = vm.base + ci.func.maxstacksize;
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
+            const nresults: u32 = if (c == 0 and ci.is_protected and protected_call.isBootstrapProto(ci.func))
+                (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
+            else
+                nativeDesiredResultsForCall(nc.func.id, c, stack_room);
+            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
+            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+            for (0..native_call_arg_count) |i| {
+                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            }
+            vm.top = vm.base + a + 1 + nargs;
+            try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
+            try vm.callNative(nc.func.id, a, nargs, nresults);
+
+            const result_base = vm.base + a;
+            if (nresults > 0 and vm.top == result_base) {
+                for (vm.stack[result_base .. result_base + nresults]) |*slot| {
+                    slot.* = .nil;
+                }
+                vm.top = result_base + nresults;
+            }
+
+            const result_end = if (nresults == 0) vm.top else result_base + nresults;
+            if (result_end < frame_max) {
+                for (vm.stack[result_end..frame_max]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
+            switch (nc.func.id) {
+                .select => {
+                    var idx_u: u32 = 1;
+                    if (native_call_arg_count > 0) {
+                        const idx_val = native_call_args[0].toInteger() orelse 1;
+                        if (idx_val >= 1) idx_u = @intCast(idx_val);
+                    }
+                    const arg_count: u32 = @intCast(native_call_arg_count);
+                    const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                    const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                    const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
+                },
+                .math_sin => {
+                    const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                    const out = TValue{ .number = std.math.sin(arg) };
+                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
+                },
+                else => {
+                    const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
+                    const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                    try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
+                },
+            }
+            return .LoopContinue;
+        }
+    }
+
+    // Fast path: Lua closure
+    if (func_val.asClosure()) |closure| {
+        const func_proto = closure.proto;
+
+        const nargs: u32 = if (b > 0) b - 1 else blk: {
+            const arg_start = vm.base + a + 1;
+            break :blk vm.top - arg_start;
+        };
+
+        const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
+
+        const new_base = vm.base + a;
+        const ret_base = vm.base + a;
+
+        if (!func_proto.is_vararg and nargs == func_proto.numparams) {
+            if (nargs > 0) {
+                var i: u32 = 0;
+                while (i < nargs) : (i += 1) {
+                    vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
+                }
+            }
+            _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
+            try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
+            vm.top = new_base + func_proto.maxstacksize;
+            return .LoopContinue;
+        }
+
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+
+        if (func_proto.is_vararg and nargs > func_proto.numparams) {
+            vararg_count = nargs - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
+
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
+            }
+        }
+
+        const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+        if (params_to_copy > 0) {
+            for (0..params_to_copy) |i| {
+                vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
+            }
+        }
+
+        if (nargs < func_proto.numparams) {
+            for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+
+        _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
+        try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
+
+        const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+        vm.top = frame_top;
+        return .LoopContinue;
+    }
+
+    const nargs: u32 = if (b > 0) b - 1 else blk: {
+        const arg_start = vm.base + a + 1;
+        break :blk vm.top - arg_start;
+    };
+    const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
+
+    if (try dispatchCallMM(vm, func_val, a, nargs, nresults)) |result| {
+        return result;
+    }
+
+    return raiseCallNotFunction(vm, ci, inst, a, func_val);
+}
+
+// Stack:
+//   return R[A](R[A+1], ..., R[A+B-1]) in the current frame
+//
+// Semantics:
+//   - closes TBC variables before reusing the frame
+//   - resolves __call chains for non-callable values
+//   - reuses the current CallInfo for closure and protected-call tail paths
+fn opTailCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const b = inst.getB();
+    const k = inst.getk();
+
+    const func_val = vm.stack[vm.base + a];
+    const original_func_val = func_val;
+    const current_ci = vm.ci.?;
+    var nargs: u32 = if (b > 0) b - 1 else blk: {
+        const arg_start = vm.base + a + 1;
+        break :blk vm.top - arg_start;
+    };
+    var tail_func = func_val;
+
+    if (k) {
+        try closeTbcForReturn(vm, current_ci);
+    }
+
+    vm.closeUpvalues(current_ci.base);
+
+    var call_chain_depth: u16 = 0;
+    while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
+        if (call_chain_depth >= 2000) {
+            return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+        }
+        call_chain_depth += 1;
+
+        const table = tail_func.asTable() orelse {
+            return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+        };
+        const mt = table.metatable orelse {
+            return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+        };
+        const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
+            return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+        };
+
+        if (call_mm.asTable() != null or
+            call_mm.asClosure() != null or
+            (call_mm.isObject() and call_mm.object.type == .native_closure))
+        {
+            try ensureStackTop(vm, vm.base + a + nargs + 2);
+
+            var i: u32 = nargs;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 1 + i];
+            }
+
+            vm.stack[vm.base + a + 1] = tail_func;
+            vm.stack[vm.base + a] = call_mm;
+            tail_func = call_mm;
+            nargs += 1;
+            if (b == 0) {
+                vm.top = @max(vm.top, vm.base + a + 1 + nargs);
+            }
+        } else {
+            return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+        }
+    }
+
+    if (tail_func.asClosure()) |closure| {
+        const func_proto = closure.proto;
+        const ret_base = current_ci.ret_base;
+        const nresults = current_ci.nresults;
+        const new_base = current_ci.base;
+
+        var vararg_base: u32 = 0;
+        var vararg_count: u32 = 0;
+
+        if (func_proto.is_vararg and nargs > func_proto.numparams) {
+            vararg_count = nargs - func_proto.numparams;
+            const min_vararg_base = new_base + func_proto.maxstacksize;
+            vararg_base = @max(min_vararg_base, vm.top) + 32;
+            try ensureStackTop(vm, vararg_base + vararg_count);
+
+            const src_start = vm.base + a + 1 + func_proto.numparams;
+            var i: u32 = vararg_count;
+            while (i > 0) {
+                i -= 1;
+                vm.stack[vararg_base + i] = vm.stack[src_start + i];
+            }
+        }
+
+        const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+        if (params_to_copy > 0) {
+            for (0..params_to_copy) |i| {
+                vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
+            }
+        }
+
+        if (nargs < func_proto.numparams) {
+            for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+
+        current_ci.func = func_proto;
+        current_ci.closure = closure;
+        current_ci.pc = func_proto.code.ptr;
+        current_ci.base = new_base;
+        current_ci.ret_base = ret_base;
+        current_ci.nresults = nresults;
+        current_ci.was_tail_called = true;
+        current_ci.vararg_base = vararg_base;
+        current_ci.vararg_count = vararg_count;
+        current_ci.is_protected = false;
+        current_ci.error_handler = .nil;
+        current_ci.tbc_bitmap = 0;
+        current_ci.pending_return_a = null;
+        current_ci.pending_return_count = null;
+        current_ci.pending_return_reexec = false;
+        current_ci.pending_compare_active = false;
+        current_ci.pending_compare_negate = 0;
+        current_ci.pending_compare_invert = false;
+        current_ci.pending_compare_result_slot = 0;
+        current_ci.pending_concat_active = false;
+        current_ci.pending_concat_a = 0;
+        current_ci.pending_concat_b = 0;
+        current_ci.pending_concat_i = -1;
+
+        vm.base = new_base;
+        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+        try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
+
+        return .LoopContinue;
+    }
+
+    if (tail_func.isObject()) {
+        const obj = tail_func.object;
+        if (obj.type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, obj);
+            const ret_base = current_ci.ret_base;
+            const nresults = current_ci.nresults;
+            if (nc.func.id == .pcall or nc.func.id == .xpcall) {
+                const total_args_call: u32 = nargs + 1;
+                const total_results: u32 = if (nresults < 0) 0 else @intCast(nresults);
+                var handler: ?TValue = null;
+                var effective_total_args = total_args_call;
+                if (nc.func.id == .xpcall) {
+                    const prepared = protected_call.prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
+                        error.InvalidXpcallHandler => {
+                            popCallInfo(vm);
+                            vm.top = ret_base + 2;
+                            return .LoopContinue;
+                        },
+                        else => return err,
+                    };
+                    handler = prepared.handler;
+                    effective_total_args = prepared.total_args;
+                }
+                const new_base = vm.base + a + 1;
+                protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
+                vm.base = new_base;
+                vm.top = new_base + effective_total_args;
+                return .LoopContinue;
+            }
+
+            vm.top = vm.base + a + 1 + nargs;
+            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
+            const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
+            const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
+            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
+            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+            for (0..native_call_arg_count) |i| {
+                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            }
+            try vm.callNative(nc.func.id, a, nargs, native_nresults);
+            switch (nc.func.id) {
+                .select => {
+                    var idx_u: u32 = 1;
+                    if (native_call_arg_count > 0) {
+                        const idx_val = native_call_args[0].toInteger() orelse 1;
+                        if (idx_val >= 1) idx_u = @intCast(idx_val);
+                    }
+                    const arg_count: u32 = @intCast(native_call_arg_count);
+                    const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+                    const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
+                    const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
+                },
+                .math_sin => {
+                    const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
+                    const out = TValue{ .number = std.math.sin(arg) };
+                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
+                },
+                else => {
+                    const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
+                    const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+                    try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
+                },
+            }
+
+            if (current_ci.previous != null) {
+                const actual_nresults: u32 = if (nresults < 0) blk: {
+                    if (native_nresults > 0) {
+                        break :blk native_nresults;
+                    } else {
+                        const result_base = vm.base + a;
+                        break :blk if (vm.top > result_base) vm.top - result_base else 0;
+                    }
+                } else @intCast(nresults);
+
+                for (0..actual_nresults) |i| {
+                    vm.stack[ret_base + i] = vm.stack[vm.base + a + i];
+                }
+
+                popCallInfo(vm);
+                vm.top = ret_base + actual_nresults;
+                return .LoopContinue;
+            }
+
+            return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
+        }
+    }
+
+    return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
+}
+
+// Stack:
+//   return R[A], ..., R[A+B-2]
+//
+// Semantics:
+//   - closes TBC variables before returning
+//   - propagates protected-call success tuples as (true, ...)
+//   - preserves MULTRET semantics when B == 0
+fn opReturn(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const b = inst.getB();
+
+    if (vm.ci.?.previous != null) {
+        const returning_ci = vm.ci.?;
+        const nresults = returning_ci.nresults;
+        const dst_base = returning_ci.ret_base;
+        const is_protected = returning_ci.is_protected;
+        if (b == 0) {
+            if (returning_ci.pending_return_count == null or returning_ci.pending_return_a == null or returning_ci.pending_return_a.? != a) {
+                returning_ci.pending_return_a = a;
+                returning_ci.pending_return_count = vm.top - (returning_ci.base + a);
+            }
+        }
+
+        try closeTbcForReturn(vm, returning_ci);
+        if (vm.open_upvalues != null) {
+            vm.closeUpvalues(returning_ci.base);
+        }
+        const ret_count: u32 = if (b == 0)
+            returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
+        else if (b == 1)
+            0
+        else
+            b - 1;
+        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
+        popCallInfo(vm);
+
+        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
+        if (is_protected) {
+            const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
+            const copy_count: u32 = if (nresults < 0) ret_count else @min(ret_count, expected);
+            vm.stack[dst_base] = .{ .boolean = true };
+            if (copy_count > 0) {
+                for (0..copy_count) |i| {
+                    vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
+                }
+            }
+            if (nresults >= 0 and expected > copy_count) {
+                for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
+            return .LoopContinue;
+        }
+
+        if (ret_count == 0) {
+            if (nresults > 0) {
+                const n: usize = @intCast(nresults);
+                for (vm.stack[dst_base..][0..n]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = if (nresults < 0) dst_base else caller_frame_max;
+        } else if (nresults < 0) {
+            for (0..ret_count) |i| {
+                vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
+            }
+            vm.top = dst_base + ret_count;
+        } else {
+            const n: u32 = @intCast(nresults);
+            const copy_count = @min(ret_count, n);
+            for (0..copy_count) |i| {
+                vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
+            }
+            if (n > copy_count) {
+                for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = caller_frame_max;
+        }
+
+        return .LoopContinue;
+    }
+
+    const top_ci = vm.ci.?;
+    if (b == 0) {
+        if (top_ci.pending_return_count == null or top_ci.pending_return_a == null or top_ci.pending_return_a.? != a) {
+            top_ci.pending_return_a = a;
+            top_ci.pending_return_count = vm.top - (vm.base + a);
+        }
+    }
+    try closeTbcForReturn(vm, top_ci);
+    const ret_count: u32 = if (b == 0)
+        top_ci.pending_return_count orelse (vm.top - (vm.base + a))
+    else if (b == 1)
+        0
+    else
+        b - 1;
+    try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
+
+    if (ret_count == 0) {
+        return .{ .ReturnVM = .none };
+    } else if (ret_count == 1) {
+        return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
+    } else {
+        const values = vm.stack[vm.base + a .. vm.base + a + ret_count];
+        return .{ .ReturnVM = .{ .multiple = values } };
+    }
+}
+
+// Stack:
+//   return with zero values
+//
+// Semantics:
+//   - closes TBC variables before returning
+//   - protected frames return just the success flag
+//   - fixed-result callers are nil-filled by caller expectations
+fn opReturn0(vm: *VM, ci: *CallInfo) !ExecuteResult {
+    _ = ci;
+    if (vm.ci.?.previous != null) {
+        const returning_ci = vm.ci.?;
+        const nresults = returning_ci.nresults;
+        const dst_base = returning_ci.ret_base;
+        const is_protected = returning_ci.is_protected;
+
+        try closeTbcForReturn(vm, returning_ci);
+        if (vm.open_upvalues != null) {
+            vm.closeUpvalues(returning_ci.base);
+        }
+        try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
+        popCallInfo(vm);
+
+        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
+        if (is_protected) {
+            vm.stack[dst_base] = .{ .boolean = true };
+            vm.top = if (nresults < 0) dst_base + 1 else caller_frame_max;
+            return .LoopContinue;
+        }
+
+        if (nresults > 0) {
+            const n: usize = @intCast(nresults);
+            for (vm.stack[dst_base..][0..n]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+
+        vm.top = if (nresults < 0) dst_base else caller_frame_max;
+        return .LoopContinue;
+    }
+
+    const top_ci = vm.ci.?;
+    try closeTbcForReturn(vm, top_ci);
+    try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
+    return .{ .ReturnVM = .none };
+}
+
+// Stack:
+//   return R[A]
+//
+// Semantics:
+//   - closes TBC variables before returning
+//   - protected frames return (true, value)
+//   - fixed-result callers receive nil fill beyond the first result
+fn opReturn1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+
+    if (vm.ci.?.previous != null) {
+        const returning_ci = vm.ci.?;
+        const nresults = returning_ci.nresults;
+        const dst_base = returning_ci.ret_base;
+        const is_protected = returning_ci.is_protected;
+
+        try closeTbcForReturn(vm, returning_ci);
+        if (vm.open_upvalues != null) {
+            vm.closeUpvalues(returning_ci.base);
+        }
+        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
+        popCallInfo(vm);
+
+        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
+        if (is_protected) {
+            vm.stack[dst_base] = .{ .boolean = true };
+            if (nresults != 0) {
+                vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
+            }
+            vm.top = if (nresults < 0) dst_base + 2 else caller_frame_max;
+            return .LoopContinue;
+        }
+
+        if (nresults < 0) {
+            vm.stack[dst_base] = vm.stack[returning_ci.base + a];
+            vm.top = dst_base + 1;
+        } else if (nresults > 0) {
+            vm.stack[dst_base] = vm.stack[returning_ci.base + a];
+            if (nresults > 1) {
+                const n: usize = @intCast(nresults - 1);
+                for (vm.stack[dst_base + 1 ..][0..n]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = caller_frame_max;
+        } else {
+            vm.top = caller_frame_max;
+        }
+
+        return .LoopContinue;
+    }
+
+    const top_ci = vm.ci.?;
+    try closeTbcForReturn(vm, top_ci);
+    try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
+    return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
+}
+
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
@@ -2424,707 +3059,13 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
             return .Continue;
         },
         // [MM_CALL] Fast path: closure/native call. Slow path: __call metamethod.
-        .CALL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-
-            const func_val = vm.stack[vm.base + a];
-            // Fast path: native closure
-            if (func_val.isObject()) {
-                const obj = func_val.object;
-                if (obj.type == .native_closure) {
-                    const nc = object.getObject(NativeClosureObject, obj);
-                    if (nc.func.id == .pcall or nc.func.id == .xpcall) {
-                        const total_args: u32 = if (b > 0) b - 1 else blk: {
-                            const arg_start = vm.base + a + 1;
-                            break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
-                        };
-                        const total_results: u32 = if (c > 0) c - 1 else 0;
-                        if (nc.func.id == .pcall) {
-                            return try protected_call.dispatch(vm, ci, a, total_args, total_results, null, vm.base + a);
-                        }
-
-                        const prepared = protected_call.prepareXpcall(vm, a, total_args, vm.base + a) catch |err| switch (err) {
-                            error.InvalidXpcallHandler => {
-                                const frame_max = vm.base + ci.func.maxstacksize;
-                                vm.top = if (c == 0) vm.base + a + 2 else frame_max;
-                                return .Continue;
-                            },
-                            else => return err,
-                        };
-                        return try protected_call.dispatch(vm, ci, a, prepared.total_args, total_results, prepared.handler, vm.base + a);
-                    }
-                    const nargs: u32 = if (b > 0) b - 1 else blk: {
-                        const arg_start = vm.base + a + 1;
-                        break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
-                    };
-                    // Remember frame extent before call
-                    const frame_max = vm.base + ci.func.maxstacksize;
-                    const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
-                    const nresults: u32 = if (c == 0 and ci.is_protected and protected_call.isBootstrapProto(ci.func))
-                        (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
-                    else
-                        nativeDesiredResultsForCall(nc.func.id, c, stack_room);
-                    var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-                    const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-                    for (0..native_call_arg_count) |i| {
-                        native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
-                    }
-                    // Ensure vm.top is past all arguments so native functions can use temp registers safely
-                    vm.top = vm.base + a + 1 + nargs;
-                    try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
-                    try vm.callNative(nc.func.id, a, nargs, nresults);
-
-                    // 0-RETURN HANDLING: Some natives (select, string.byte) return 0 values
-                    // by setting vm.top = vm.base + a. When the caller expects fixed results
-                    // (nresults > 0), fill those slots with nil and advance vm.top.
-                    // This handles cases like: local x = select(10, 1,2,3) -> x = nil
-                    const result_base = vm.base + a;
-                    if (nresults > 0 and vm.top == result_base) {
-                        // Native returned 0 values but caller expects nresults
-                        for (vm.stack[result_base .. result_base + nresults]) |*slot| {
-                            slot.* = .nil;
-                        }
-                        vm.top = result_base + nresults;
-                    }
-
-                    // GC SAFETY: Clear stale pointers beyond result area
-                    const result_end = if (nresults == 0) vm.top else result_base + nresults;
-                    if (result_end < frame_max) {
-                        for (vm.stack[result_end..frame_max]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    // For MULTRET (C=0), caller depends on vm.top to know result count.
-                    // For fixed results (C>0), keep conservative frame top.
-                    vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-                    switch (nc.func.id) {
-                        .select => {
-                            var idx_u: u32 = 1;
-                            if (native_call_arg_count > 0) {
-                                const idx_val = native_call_args[0].toInteger() orelse 1;
-                                if (idx_val >= 1) idx_u = @intCast(idx_val);
-                            }
-                            const arg_count: u32 = @intCast(native_call_arg_count);
-                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
-                        },
-                        .math_sin => {
-                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                            const out = TValue{ .number = std.math.sin(arg) };
-                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
-                        },
-                        else => {
-                            const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
-                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
-                        },
-                    }
-                    return .LoopContinue;
-                }
-            }
-
-            // Fast path: Lua closure
-            if (func_val.asClosure()) |closure| {
-                const func_proto = closure.proto;
-
-                const nargs: u32 = if (b > 0) b - 1 else blk: {
-                    const arg_start = vm.base + a + 1;
-                    break :blk vm.top - arg_start;
-                };
-
-                const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
-
-                const new_base = vm.base + a;
-                const ret_base = vm.base + a;
-
-                // Hot fast path: fixed-arity, non-vararg call with exact argument count.
-                // Common in recursive numeric code (e.g. fib): skip vararg bookkeeping and
-                // nil-filling logic, only shift arguments over callee slot.
-                if (!func_proto.is_vararg and nargs == func_proto.numparams) {
-                    if (nargs > 0) {
-                        var i: u32 = 0;
-                        while (i < nargs) : (i += 1) {
-                            vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
-                        }
-                    }
-                    _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-                    try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-                    vm.top = new_base + func_proto.maxstacksize;
-                    return .LoopContinue;
-                }
-
-                // Calculate vararg info before shifting arguments
-                var vararg_base: u32 = 0;
-                var vararg_count: u32 = 0;
-
-                if (func_proto.is_vararg and nargs > func_proto.numparams) {
-                    // Store varargs beyond the frame to avoid collision with nested calls.
-                    // We use vm.top (the current stack extent) plus a buffer to ensure
-                    // varargs are safe from being overwritten by any nested function's
-                    // frame, which could extend beyond the caller's maxstacksize.
-                    vararg_count = nargs - func_proto.numparams;
-                    // Use max of (new_base + maxstacksize) and (vm.top) to find a safe location
-                    // Add extra buffer for nested call frames
-                    const min_vararg_base = new_base + func_proto.maxstacksize;
-                    vararg_base = @max(min_vararg_base, vm.top) + 32; // 32-slot buffer for nested calls
-                    try ensureStackTop(vm, vararg_base + vararg_count);
-
-                    // Copy varargs to their storage location (after maxstacksize)
-                    // Varargs are at positions: new_base + 1 + numparams .. new_base + 1 + nargs
-                    // IMPORTANT: Copy backwards to handle overlapping regions (dest > src)
-                    var i: u32 = vararg_count;
-                    while (i > 0) {
-                        i -= 1;
-                        vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
-                    }
-                }
-
-                // Shift arguments down by 1 slot (overwrite function value)
-                // Note: regions overlap, so copy forward (src > dst)
-                // Only copy fixed parameters, not varargs
-                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
-                if (params_to_copy > 0) {
-                    for (0..params_to_copy) |i| {
-                        vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
-                    }
-                }
-
-                // Fill remaining parameter slots with nil
-                if (nargs < func_proto.numparams) {
-                    for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
-                        slot.* = .nil;
-                    }
-                }
-
-                _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
-                try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-
-                // Extend top to include vararg storage if needed
-                const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                vm.top = frame_top;
-                return .LoopContinue;
-            }
-
-            // Slow path: try __call metamethod
-            const nargs: u32 = if (b > 0) b - 1 else blk: {
-                const arg_start = vm.base + a + 1;
-                break :blk vm.top - arg_start;
-            };
-            const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
-
-            if (try dispatchCallMM(vm, func_val, a, nargs, nresults)) |result| {
-                return result;
-            }
-
-            var msg_buf: [192]u8 = undefined;
-            const msg = buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf);
-            try raiseWithLocation(vm, ci, inst, error.NotAFunction, msg);
-            return error.LuaException;
-        },
+        .CALL => return try opCall(vm, ci, inst),
         // TAILCALL: Tail call optimization - reuse current frame
         // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
-        .TAILCALL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const k = inst.getk();
-
-            const func_val = vm.stack[vm.base + a];
-            const original_func_val = func_val;
-            const current_ci = vm.ci.?;
-            var nargs: u32 = if (b > 0) b - 1 else blk: {
-                const arg_start = vm.base + a + 1;
-                break :blk vm.top - arg_start;
-            };
-            var tail_func = func_val;
-
-            // Close TBC variables if k flag is set
-            if (k) {
-                try closeTbcForReturn(vm, current_ci);
-            }
-
-            // Close upvalues before tail call
-            vm.closeUpvalues(current_ci.base);
-
-            // Slow path: resolve __call chain (table -> __call -> table -> ... -> function)
-            // by repeatedly rewriting stack as callable(self, args...).
-            var call_chain_depth: u16 = 0;
-            while (tail_func.asClosure() == null and !(tail_func.isObject() and tail_func.object.type == .native_closure)) {
-                if (call_chain_depth >= 2000) {
-                    var msg_buf: [192]u8 = undefined;
-                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-                    return error.LuaException;
-                }
-                call_chain_depth += 1;
-
-                const table = tail_func.asTable() orelse {
-                    var msg_buf: [192]u8 = undefined;
-                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-                    return error.LuaException;
-                };
-                const mt = table.metatable orelse {
-                    var msg_buf: [192]u8 = undefined;
-                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-                    return error.LuaException;
-                };
-                const call_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.call))) orelse {
-                    var msg_buf: [192]u8 = undefined;
-                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-                    return error.LuaException;
-                };
-
-                if (call_mm.asTable() != null or
-                    call_mm.asClosure() != null or
-                    (call_mm.isObject() and call_mm.object.type == .native_closure))
-                {
-                    // Need one extra argument slot to prepend current callable as self.
-                    try ensureStackTop(vm, vm.base + a + nargs + 2);
-
-                    // Shift existing args right by 1: [a+1..a+nargs] -> [a+2..a+nargs+1]
-                    var i: u32 = nargs;
-                    while (i > 0) {
-                        i -= 1;
-                        vm.stack[vm.base + a + 2 + i] = vm.stack[vm.base + a + 1 + i];
-                    }
-
-                    vm.stack[vm.base + a + 1] = tail_func;
-                    vm.stack[vm.base + a] = call_mm;
-                    tail_func = call_mm;
-                    nargs += 1;
-                    if (b == 0) {
-                        vm.top = @max(vm.top, vm.base + a + 1 + nargs);
-                    }
-                } else {
-                    var msg_buf: [192]u8 = undefined;
-                    const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-                    try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-                    return error.LuaException;
-                }
-            }
-
-            // Handle Lua closure tail call
-            if (tail_func.asClosure()) |closure| {
-                const func_proto = closure.proto;
-
-                // For tail call, we reuse the current frame's ret_base and nresults
-                const ret_base = current_ci.ret_base;
-                const nresults = current_ci.nresults;
-
-                // Calculate new base - move everything to current frame's base
-                const new_base = current_ci.base;
-
-                // Calculate vararg info
-                var vararg_base: u32 = 0;
-                var vararg_count: u32 = 0;
-
-                if (func_proto.is_vararg and nargs > func_proto.numparams) {
-                    vararg_count = nargs - func_proto.numparams;
-                    // Store varargs beyond the frame with buffer for nested calls
-                    const min_vararg_base = new_base + func_proto.maxstacksize;
-                    vararg_base = @max(min_vararg_base, vm.top) + 32;
-                    try ensureStackTop(vm, vararg_base + vararg_count);
-
-                    // Copy varargs to storage location
-                    // Always copy backwards since dest > src
-                    const src_start = vm.base + a + 1 + func_proto.numparams;
-                    var i: u32 = vararg_count;
-                    while (i > 0) {
-                        i -= 1;
-                        vm.stack[vararg_base + i] = vm.stack[src_start + i];
-                    }
-                }
-
-                // Copy arguments to new_base (overwriting current frame's locals)
-                // Source: vm.base + a + 1 (first arg after function)
-                // Dest: new_base (start of frame)
-                const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
-                if (params_to_copy > 0) {
-                    // Copy forward since destination might overlap with source
-                    for (0..params_to_copy) |i| {
-                        vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
-                    }
-                }
-
-                // Fill remaining parameter slots with nil
-                if (nargs < func_proto.numparams) {
-                    for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
-                        slot.* = .nil;
-                    }
-                }
-
-                // Reuse current CallInfo instead of pushing new one
-                current_ci.func = func_proto;
-                current_ci.closure = closure;
-                current_ci.pc = func_proto.code.ptr;
-                current_ci.base = new_base;
-                current_ci.ret_base = ret_base;
-                current_ci.nresults = nresults;
-                current_ci.was_tail_called = true;
-                current_ci.vararg_base = vararg_base;
-                current_ci.vararg_count = vararg_count;
-                current_ci.is_protected = false;
-                current_ci.error_handler = .nil;
-                current_ci.tbc_bitmap = 0; // Reset TBC tracking
-                current_ci.pending_return_a = null;
-                current_ci.pending_return_count = null;
-                current_ci.pending_return_reexec = false;
-                current_ci.pending_compare_active = false;
-                current_ci.pending_compare_negate = 0;
-                current_ci.pending_compare_invert = false;
-                current_ci.pending_compare_result_slot = 0;
-                current_ci.pending_concat_active = false;
-                current_ci.pending_concat_a = 0;
-                current_ci.pending_concat_b = 0;
-                current_ci.pending_concat_i = -1;
-
-                vm.base = new_base;
-                vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-                try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-
-                return .LoopContinue;
-            }
-
-            // Handle native closure tail call (fall back to regular call + return)
-            if (tail_func.isObject()) {
-                const obj = tail_func.object;
-                if (obj.type == .native_closure) {
-                    const nc = object.getObject(NativeClosureObject, obj);
-
-                    // For native tail calls, we call normally but adjust return handling
-                    const ret_base = current_ci.ret_base;
-                    const nresults = current_ci.nresults;
-                    if (nc.func.id == .pcall or nc.func.id == .xpcall) {
-                        const total_args_call: u32 = nargs + 1;
-                        const total_results: u32 = if (nresults < 0) 0 else @intCast(nresults);
-                        var handler: ?TValue = null;
-                        var effective_total_args = total_args_call;
-                        if (nc.func.id == .xpcall) {
-                            const prepared = protected_call.prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
-                                error.InvalidXpcallHandler => {
-                                    popCallInfo(vm);
-                                    vm.top = ret_base + 2;
-                                    return .LoopContinue;
-                                },
-                                else => return err,
-                            };
-                            handler = prepared.handler;
-                            effective_total_args = prepared.total_args;
-                        }
-                        const new_base = vm.base + a + 1;
-                        protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
-                        vm.base = new_base;
-                        vm.top = new_base + effective_total_args;
-                        return .LoopContinue;
-                    }
-
-                    vm.top = vm.base + a + 1 + nargs;
-
-                    // For MULTRET (nresults < 0), use nativeDesiredResultsForCall to determine
-                    // how many results the native function returns
-                    const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
-                    const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
-                    const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
-                    var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-                    const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-                    for (0..native_call_arg_count) |i| {
-                        native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
-                    }
-                    try vm.callNative(nc.func.id, a, nargs, native_nresults);
-                    switch (nc.func.id) {
-                        .select => {
-                            var idx_u: u32 = 1;
-                            if (native_call_arg_count > 0) {
-                                const idx_val = native_call_args[0].toInteger() orelse 1;
-                                if (idx_val >= 1) idx_u = @intCast(idx_val);
-                            }
-                            const arg_count: u32 = @intCast(native_call_arg_count);
-                            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
-                        },
-                        .math_sin => {
-                            const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                            const out = TValue{ .number = std.math.sin(arg) };
-                            try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
-                        },
-                        else => {
-                            const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
-                            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                            try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
-                        },
-                    }
-
-                    // Pop current frame and copy results
-                    if (current_ci.previous != null) {
-                        // For MULTRET, determine actual result count:
-                        // - If native_nresults > 0, use that count
-                        // - If native_nresults == 0, native set vm.top, calculate from that
-                        // For fixed results, copy the requested amount
-                        const actual_nresults: u32 = if (nresults < 0) blk: {
-                            if (native_nresults > 0) {
-                                break :blk native_nresults;
-                            } else {
-                                // Native function set vm.top to indicate result count
-                                const result_base = vm.base + a;
-                                break :blk if (vm.top > result_base) vm.top - result_base else 0;
-                            }
-                        } else @intCast(nresults);
-
-                        // Copy results from vm.base + a to ret_base
-                        for (0..actual_nresults) |i| {
-                            vm.stack[ret_base + i] = vm.stack[vm.base + a + i];
-                        }
-
-                        popCallInfo(vm);
-                        vm.top = ret_base + actual_nresults;
-                        return .LoopContinue;
-                    }
-
-                    // Top-level native tail call - return to VM
-                    return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
-                }
-            }
-
-            var msg_buf: [192]u8 = undefined;
-            const msg = buildCallNotFunctionMessage(vm, current_ci, a, original_func_val, &msg_buf);
-            try raiseWithLocation(vm, current_ci, inst, error.NotAFunction, msg);
-            return error.LuaException;
-        },
-        .RETURN => {
-            const a = inst.getA();
-            const b = inst.getB();
-
-            if (vm.ci.?.previous != null) {
-                const returning_ci = vm.ci.?;
-                const nresults = returning_ci.nresults;
-                const dst_base = returning_ci.ret_base;
-                const is_protected = returning_ci.is_protected;
-                if (b == 0) {
-                    if (returning_ci.pending_return_count == null or returning_ci.pending_return_a == null or returning_ci.pending_return_a.? != a) {
-                        returning_ci.pending_return_a = a;
-                        returning_ci.pending_return_count = vm.top - (returning_ci.base + a);
-                    }
-                }
-
-                // Close TBC variables before returning (Lua 5.4)
-                try closeTbcForReturn(vm, returning_ci);
-                if (vm.open_upvalues != null) {
-                    vm.closeUpvalues(returning_ci.base);
-                }
-                const ret_count: u32 = if (b == 0)
-                    returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
-                else if (b == 1)
-                    0
-                else
-                    b - 1;
-                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
-                popCallInfo(vm);
-
-                // Get caller's frame extent for vm.top restoration
-                // After popCallInfo, vm.ci points to the caller's frame
-                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-                // Calculate actual return count
-                // B=0 means variable returns (from R[A] to top)
-                // B>0 means B-1 fixed returns
-
-                // Protected frame: prepend true and shift results by 1
-                if (is_protected) {
-                    const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
-                    const copy_count: u32 = if (nresults < 0) ret_count else @min(ret_count, expected);
-                    vm.stack[dst_base] = .{ .boolean = true };
-                    if (copy_count > 0) {
-                        for (0..copy_count) |i| {
-                            vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
-                        }
-                    }
-                    if (nresults >= 0 and expected > copy_count) {
-                        for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
-                    return .LoopContinue;
-                }
-
-                if (ret_count == 0) {
-                    // No return values - fill expected slots with nil or update top
-                    if (nresults > 0) {
-                        const n: usize = @intCast(nresults);
-                        for (vm.stack[dst_base..][0..n]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    // For variable results (nresults < 0), vm.top must indicate no results
-                    // For fixed results (nresults >= 0), restore to caller's frame extent
-                    vm.top = if (nresults < 0) dst_base else caller_frame_max;
-                } else if (nresults < 0) {
-                    // Variable results - copy all return values
-                    // Note: regions may overlap, copy forward (src >= dst)
-                    for (0..ret_count) |i| {
-                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                    }
-                    // vm.top must indicate result count for variable results
-                    vm.top = dst_base + ret_count;
-                } else {
-                    // Fixed results - copy available values, fill rest with nil
-                    const n: u32 = @intCast(nresults);
-                    const copy_count = @min(ret_count, n);
-                    for (0..copy_count) |i| {
-                        vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-                    }
-                    if (n > copy_count) {
-                        for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    // GC SAFETY: Restore vm.top to caller's frame extent
-                    // This ensures all caller's local variables are marked during GC
-                    vm.top = caller_frame_max;
-                }
-
-                return .LoopContinue;
-            }
-
-            // Top-level return (no previous call frame)
-            // Close TBC variables before returning
-            const top_ci = vm.ci.?;
-            if (b == 0) {
-                if (top_ci.pending_return_count == null or top_ci.pending_return_a == null or top_ci.pending_return_a.? != a) {
-                    top_ci.pending_return_a = a;
-                    top_ci.pending_return_count = vm.top - (vm.base + a);
-                }
-            }
-            try closeTbcForReturn(vm, top_ci);
-            const ret_count: u32 = if (b == 0)
-                top_ci.pending_return_count orelse (vm.top - (vm.base + a))
-            else if (b == 1)
-                0
-            else
-                b - 1;
-            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
-
-            if (ret_count == 0) {
-                return .{ .ReturnVM = .none };
-            } else if (ret_count == 1) {
-                return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
-            } else {
-                const values = vm.stack[vm.base + a .. vm.base + a + ret_count];
-                return .{ .ReturnVM = .{ .multiple = values } };
-            }
-        },
-        .RETURN0 => {
-            if (vm.ci.?.previous != null) {
-                const returning_ci = vm.ci.?;
-                const nresults = returning_ci.nresults;
-                const dst_base = returning_ci.ret_base;
-                const is_protected = returning_ci.is_protected;
-
-                // Close TBC variables before returning (Lua 5.4)
-                try closeTbcForReturn(vm, returning_ci);
-                if (vm.open_upvalues != null) {
-                    vm.closeUpvalues(returning_ci.base);
-                }
-                try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
-                popCallInfo(vm);
-
-                // Get caller's frame extent for vm.top restoration
-                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-                // Protected frame: return (true) with no additional values
-                if (is_protected) {
-                    vm.stack[dst_base] = .{ .boolean = true };
-                    vm.top = if (nresults < 0) dst_base + 1 else caller_frame_max;
-                    return .LoopContinue;
-                }
-
-                // Fill expected result slots with nil
-                if (nresults > 0) {
-                    const n: usize = @intCast(nresults);
-                    for (vm.stack[dst_base..][0..n]) |*slot| {
-                        slot.* = .nil;
-                    }
-                }
-
-                // GC SAFETY: For variable results, vm.top indicates no results (dst_base)
-                // For fixed results, restore to caller's frame extent
-                vm.top = if (nresults < 0) dst_base else caller_frame_max;
-
-                return .LoopContinue;
-            }
-
-            // Top-level return - close TBC variables
-            const top_ci = vm.ci.?;
-            try closeTbcForReturn(vm, top_ci);
-            try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
-            return .{ .ReturnVM = .none };
-        },
-        .RETURN1 => {
-            const a = inst.getA();
-
-            if (vm.ci.?.previous != null) {
-                const returning_ci = vm.ci.?;
-                const nresults = returning_ci.nresults;
-                const dst_base = returning_ci.ret_base;
-                const is_protected = returning_ci.is_protected;
-
-                // Close TBC variables before returning (Lua 5.4)
-                try closeTbcForReturn(vm, returning_ci);
-                if (vm.open_upvalues != null) {
-                    vm.closeUpvalues(returning_ci.base);
-                }
-                try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
-                popCallInfo(vm);
-
-                // Get caller's frame extent for vm.top restoration
-                const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-                // Protected frame: return (true, value)
-                if (is_protected) {
-                    vm.stack[dst_base] = .{ .boolean = true };
-                    if (nresults != 0) {
-                        vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
-                    }
-                    vm.top = if (nresults < 0) dst_base + 2 else caller_frame_max;
-                    return .LoopContinue;
-                }
-
-                if (nresults < 0) {
-                    vm.stack[dst_base] = vm.stack[returning_ci.base + a];
-                    vm.top = dst_base + 1;
-                } else if (nresults > 0) {
-                    // Copy single return value, fill rest with nil
-                    vm.stack[dst_base] = vm.stack[returning_ci.base + a];
-                    if (nresults > 1) {
-                        const n: usize = @intCast(nresults - 1);
-                        for (vm.stack[dst_base + 1 ..][0..n]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    // GC SAFETY: Restore vm.top to caller's frame extent
-                    vm.top = caller_frame_max;
-                } else {
-                    // nresults == 0: caller doesn't want any results
-                    vm.top = caller_frame_max;
-                }
-
-                return .LoopContinue;
-            }
-
-            // Top-level return - close TBC variables
-            const top_ci = vm.ci.?;
-            try closeTbcForReturn(vm, top_ci);
-            try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
-            return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
-        },
+        .TAILCALL => return try opTailCall(vm, ci, inst),
+        .RETURN => return try opReturn(vm, ci, inst),
+        .RETURN0 => return try opReturn0(vm, ci),
+        .RETURN1 => return try opReturn1(vm, ci, inst),
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
         .GETTABUP => {
             const a = inst.getA();
