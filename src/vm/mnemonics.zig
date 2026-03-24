@@ -2713,6 +2713,595 @@ fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
 }
 
+fn opGETTABUP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+
+    const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
+        if (b < closure.upvalues.len) {
+            break :blk closure.upvalues[b].get().asTable() orelse vm.globals();
+        }
+        break :blk vm.globals();
+    } else vm.globals();
+
+    const key_val = ci.func.k[c];
+    if (key_val.asString()) |key| {
+        field_cache.rememberFieldAccess(vm, a, key, true, false);
+        if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
+            return result;
+        }
+    } else {
+        return error.InvalidTableKey;
+    }
+    return .Continue;
+}
+
+fn opSETTABUP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+
+    const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
+        if (a < closure.upvalues.len) {
+            break :blk closure.upvalues[a].get().asTable() orelse vm.globals();
+        }
+        break :blk vm.globals();
+    } else vm.globals();
+
+    const key_val = ci.func.k[b];
+    const value = vm.stack[vm.base + c];
+    if (key_val.asString()) |key| {
+        if (try dispatchNewindexMM(vm, env_table, key, TValue.fromTable(env_table), value)) |result| {
+            return result;
+        }
+    } else {
+        return error.InvalidTableKey;
+    }
+    return .Continue;
+}
+
+fn opGETUPVAL(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    if (ci.closure) |closure| {
+        if (b < closure.upvalues.len) {
+            vm.stack[vm.base + a] = closure.upvalues[b].get();
+        } else {
+            vm.stack[vm.base + a] = .nil;
+        }
+    } else {
+        vm.stack[vm.base + a] = .nil;
+    }
+    return .Continue;
+}
+
+fn opSETUPVAL(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    if (ci.closure) |closure| {
+        if (b < closure.upvalues.len) {
+            upvalueSetWithBarrier(vm, closure.upvalues[b], vm.stack[vm.base + a]);
+        }
+    }
+    return .Continue;
+}
+
+fn opGETTABLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + b];
+    const key_val = vm.stack[vm.base + c];
+    if (key_val.asString()) |key| {
+        field_cache.rememberFieldAccess(vm, a, key, if (table_val.asTable()) |t| t == vm.globals() else false, false);
+    }
+
+    if (table_val.asTable()) |table| {
+        if (key_val.isNil()) {
+            vm.stack[vm.base + a] = TValue.nil;
+        } else if (key_val.asString()) |key| {
+            if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
+                return result;
+            }
+        } else {
+            if (try dispatchIndexMMValue(vm, table, key_val, table_val, a)) |result| {
+                return result;
+            }
+        }
+    } else {
+        if (try dispatchSharedIndexMMValue(vm, table_val, key_val, a)) |result| {
+            return result;
+        }
+    }
+    return .Continue;
+}
+
+fn opSETTABLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + a];
+    const key_val = vm.stack[vm.base + b];
+    const value = vm.stack[vm.base + c];
+
+    if (table_val.asTable()) |table| {
+        if (key_val.asString()) |key| {
+            if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
+                return result;
+            }
+        } else {
+            if (try dispatchNewindexMMValue(vm, table, key_val, table_val, value)) |result| {
+                return result;
+            }
+        }
+    } else {
+        const key = TValue{ .integer = @intCast(c) };
+        if (try dispatchSharedIndexMMValue(vm, table_val, key, a)) |result| {
+            return result;
+        }
+    }
+    return .Continue;
+}
+
+fn opGETI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + b];
+
+    if (table_val.asTable()) |table| {
+        const key = TValue{ .integer = @intCast(c) };
+        if (table.get(key)) |value| {
+            vm.stack[vm.base + a] = value;
+        } else {
+            if (try dispatchIndexMMValue(vm, table, key, table_val, a)) |result| {
+                return result;
+            }
+        }
+    } else {
+        return error.InvalidTableOperation;
+    }
+    return .Continue;
+}
+
+fn opSETI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + a];
+    const value = vm.stack[vm.base + c];
+
+    if (table_val.asTable()) |table| {
+        const key = TValue{ .integer = @intCast(b) };
+        if (try dispatchNewindexMMValue(vm, table, key, table_val, value)) |result| {
+            return result;
+        }
+    } else {
+        return error.InvalidTableOperation;
+    }
+    return .Continue;
+}
+
+fn opGETFIELD(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + b];
+    const key_val = ci.func.k[c];
+
+    if (table_val.asTable()) |table| {
+        if (key_val.asString()) |key| {
+            field_cache.rememberFieldAccess(vm, a, key, false, false);
+            if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
+                return result;
+            }
+        } else {
+            return error.InvalidTableOperation;
+        }
+    } else {
+        if (key_val.asString()) |key| {
+            if (!table_val.isNil()) {
+                field_cache.rememberFieldAccess(vm, a, key, false, false);
+            }
+            if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
+                return result;
+            }
+        } else {
+            return error.InvalidTableOperation;
+        }
+    }
+    return .Continue;
+}
+
+fn opSETFIELD(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const table_val = vm.stack[vm.base + a];
+    const key_val = ci.func.k[b];
+    const value = vm.stack[vm.base + c];
+
+    if (table_val.asTable()) |table| {
+        if (key_val.asString()) |key| {
+            if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
+                return result;
+            }
+        } else {
+            return error.InvalidTableOperation;
+        }
+    } else {
+        return error.InvalidTableOperation;
+    }
+    return .Continue;
+}
+
+fn opNEWTABLE(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const table = try vm.gc().allocTable();
+    vm.stack[vm.base + a] = TValue.fromTable(table);
+    return .Continue;
+}
+
+fn opSELF(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const obj = vm.stack[vm.base + b];
+
+    vm.stack[vm.base + a + 1] = obj;
+
+    const key_val = ci.func.k[c];
+    if (obj.asTable()) |table| {
+        if (key_val.asString()) |key| {
+            field_cache.rememberFieldAccess(vm, a, key, false, true);
+            if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
+                return result;
+            }
+        } else {
+            return error.InvalidTableOperation;
+        }
+    } else {
+        if (key_val.asString()) |key| {
+            field_cache.rememberFieldAccess(vm, a, key, false, true);
+            if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
+                return result;
+            }
+        } else {
+            return error.InvalidTableOperation;
+        }
+    }
+    return .Continue;
+}
+
+fn opEQK(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const left = vm.stack[vm.base + b];
+    const right = ci.func.k[c];
+
+    const is_true = if (left.asTable() == null)
+        eqOp(left, right)
+    else
+        try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opEQI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+    const left = vm.stack[vm.base + b];
+    const right = TValue{ .integer = @as(i64, imm) };
+
+    const is_true = if (left.asTable() == null)
+        eqOp(left, right)
+    else
+        try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opLTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+    const left = vm.stack[vm.base + b];
+    const right = TValue{ .integer = @as(i64, imm) };
+
+    const is_true = if (left.isInteger() or left.isNumber())
+        try ltOp(left, right)
+    else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opLEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+    const left = vm.stack[vm.base + b];
+    const right = TValue{ .integer = @as(i64, imm) };
+
+    const is_true = if (left.isInteger() or left.isNumber())
+        try leOp(left, right)
+    else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opGTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+    const left = TValue{ .integer = @as(i64, imm) };
+    const right = vm.stack[vm.base + b];
+
+    const is_true = if (right.isInteger() or right.isNumber())
+        try ltOp(left, right)
+    else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opGEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+    const left = TValue{ .integer = @as(i64, imm) };
+    const right = vm.stack[vm.base + b];
+
+    const is_true = if (right.isInteger() or right.isNumber())
+        try leOp(left, right)
+    else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and a == 0) or (!is_true and a != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opCLOSE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    try closeTBCVariables(vm, vm.ci.?, a, .nil);
+    vm.closeUpvalues(vm.base + a);
+    return .Continue;
+}
+
+fn opTBC(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const val = vm.stack[vm.base + a];
+
+    if (val.isNil() or (val.isBoolean() and !val.toBoolean())) {
+        return .Continue;
+    }
+    if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt) == null) {
+        return error.NoCloseMetamethod;
+    }
+    ci.markTBC(a);
+    return .Continue;
+}
+
+fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const FIELDS_PER_FLUSH: u32 = 50;
+
+    const a = inst.getA();
+    const b = inst.getB();
+    const c_raw = inst.getC();
+    const k = inst.getk();
+
+    const start_index: i64 = if (k) blk: {
+        const extraarg_inst = try ci.fetchExtraArg();
+        const ax = extraarg_inst.getAx();
+        if (c_raw == 0) {
+            break :blk @as(i64, ax);
+        } else {
+            break :blk @as(i64, (ax - 1) * FIELDS_PER_FLUSH) + 1;
+        }
+    } else @as(i64, (c_raw - 1) * FIELDS_PER_FLUSH) + 1;
+
+    const table_val = vm.stack[vm.base + a];
+    const table = table_val.asTable() orelse return error.InvalidTableOperation;
+    const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
+
+    for (0..n) |i| {
+        const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+        const index: i64 = start_index + @as(i64, @intCast(i));
+        const key = TValue{ .integer = index };
+        try tableSetWithBarrier(vm, table, key, value);
+    }
+
+    return .Continue;
+}
+
+fn opCLOSURE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const bx = inst.getBx();
+
+    const child_proto = ci.func.protos[bx];
+    var upvals_buf: [256]*UpvalueObject = undefined;
+    const nups = child_proto.nups;
+
+    for (child_proto.upvalues[0..nups], 0..) |upvaldesc, i| {
+        if (upvaldesc.instack) {
+            const stack_slot = &vm.stack[vm.base + upvaldesc.idx];
+            upvals_buf[i] = try vm.getOrCreateUpvalue(stack_slot);
+        } else {
+            if (ci.closure) |enclosing| {
+                upvals_buf[i] = enclosing.upvalues[upvaldesc.idx];
+            } else {
+                upvals_buf[i] = try vm.gc().allocUpvalue(&vm.stack[0], vm.thread);
+            }
+        }
+    }
+
+    const closure = try vm.gc().allocClosure(child_proto);
+    @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
+
+    vm.stack[vm.base + a] = TValue.fromClosure(closure);
+    return .Continue;
+}
+
+fn execMMBINCommon(vm: *VM, dest_reg: u8, left: TValue, right: TValue, event: MetaEvent) !ExecuteResult {
+    const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+        return error.ArithmeticError;
+    };
+
+    const temp = vm.top;
+    vm.stack[temp] = mm;
+    vm.stack[temp + 1] = left;
+    vm.stack[temp + 2] = right;
+    vm.top = temp + 3;
+
+    if (mm.asClosure()) |closure| {
+        const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + dest_reg), 1);
+        markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
+        return .LoopContinue;
+    }
+
+    if (mm.isObject() and mm.object.type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.object);
+        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
+        vm.stack[vm.base + dest_reg] = vm.stack[temp];
+        vm.top = temp;
+        return .Continue;
+    }
+
+    return error.NotAFunction;
+}
+
+fn opMMBIN(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const va = vm.stack[vm.base + a];
+    const vb = vm.stack[vm.base + b];
+    const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+    return try execMMBINCommon(vm, a, va, vb, event);
+}
+
+fn opMMBINI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const sb = @as(i8, @bitCast(inst.getB()));
+    const c = inst.getC();
+    const k = inst.getk();
+    const va = vm.stack[vm.base + a];
+    const vb = TValue{ .integer = @as(i64, sb) };
+    const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+    const left = if (k) vb else va;
+    const right = if (k) va else vb;
+    return try execMMBINCommon(vm, a, left, right, event);
+}
+
+fn opMMBINK(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const k = inst.getk();
+    const va = vm.stack[vm.base + a];
+    const vb = ci.func.k[b];
+    const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
+    const left = if (k) vb else va;
+    const right = if (k) va else vb;
+    return try execMMBINCommon(vm, a, left, right, event);
+}
+
+fn opVARARG(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const c = inst.getC();
+
+    const vararg_base = ci.vararg_base;
+    const vararg_count = ci.vararg_count;
+
+    if (c == 0) {
+        for (0..vararg_count) |i| {
+            vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+        }
+        vm.top = vm.base + a + vararg_count;
+    } else {
+        const want: u32 = c - 1;
+        for (0..want) |i| {
+            if (i < vararg_count) {
+                vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
+            } else {
+                vm.stack[vm.base + a + i] = .nil;
+            }
+        }
+    }
+    return .Continue;
+}
+
+fn opVARARGPREP(inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    _ = a;
+    return .Continue;
+}
+
+fn opEXTRAARG() !ExecuteResult {
+    return error.UnknownOpcode;
+}
+
+fn opPCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const total_results: u32 = if (c > 0) c - 1 else 0;
+    return try protected_call.dispatch(vm, ci, a, b, total_results, null, vm.base + a);
+}
+
 /// Execute a single instruction.
 /// Called by VM's execute() loop after fetch.
 pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
@@ -2910,713 +3499,54 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .RETURN0 => return try opRETURN0(vm, ci),
         .RETURN1 => return try opRETURN1(vm, ci, inst),
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
-        .GETTABUP => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-
-            // Get environment table from upvalue or fall back to globals
-            const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
-                if (b < closure.upvalues.len) {
-                    break :blk closure.upvalues[b].get().asTable() orelse vm.globals();
-                }
-                break :blk vm.globals();
-            } else vm.globals();
-
-            const key_val = ci.func.k[c];
-            if (key_val.asString()) |key| {
-                field_cache.rememberFieldAccess(vm, a, key, true, false);
-                if (try dispatchIndexMM(vm, env_table, key, TValue.fromTable(env_table), a)) |result| {
-                    return result;
-                }
-            } else {
-                return error.InvalidTableKey;
-            }
-            return .Continue;
-        },
+        .GETTABUP => return try opGETTABUP(vm, ci, inst),
         // [MM_NEWINDEX] Fast path: upvalue table write. Slow path: __newindex metamethod.
-        .SETTABUP => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-
-            // Get environment table from upvalue or fall back to globals
-            const env_table: *object.TableObject = if (ci.closure) |closure| blk: {
-                if (a < closure.upvalues.len) {
-                    break :blk closure.upvalues[a].get().asTable() orelse vm.globals();
-                }
-                break :blk vm.globals();
-            } else vm.globals();
-
-            const key_val = ci.func.k[b];
-            const value = vm.stack[vm.base + c];
-            if (key_val.asString()) |key| {
-                if (try dispatchNewindexMM(vm, env_table, key, TValue.fromTable(env_table), value)) |result| {
-                    return result;
-                }
-            } else {
-                return error.InvalidTableKey;
-            }
-            return .Continue;
-        },
-        .GETUPVAL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            if (ci.closure) |closure| {
-                if (b < closure.upvalues.len) {
-                    vm.stack[vm.base + a] = closure.upvalues[b].get();
-                } else {
-                    vm.stack[vm.base + a] = .nil;
-                }
-            } else {
-                vm.stack[vm.base + a] = .nil;
-            }
-            return .Continue;
-        },
-        .SETUPVAL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            if (ci.closure) |closure| {
-                if (b < closure.upvalues.len) {
-                    upvalueSetWithBarrier(vm, closure.upvalues[b], vm.stack[vm.base + a]);
-                }
-            }
-            return .Continue;
-        },
+        .SETTABUP => return try opSETTABUP(vm, ci, inst),
+        .GETUPVAL => return opGETUPVAL(vm, ci, inst),
+        .SETUPVAL => return opSETUPVAL(vm, ci, inst),
         // [MM_INDEX] Fast path: table read by key. Slow path: __index metamethod.
-        .GETTABLE => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + b];
-            const key_val = vm.stack[vm.base + c];
-            if (key_val.asString()) |key| {
-                field_cache.rememberFieldAccess(vm, a, key, if (table_val.asTable()) |t| t == vm.globals() else false, false);
-            }
-
-            if (table_val.asTable()) |table| {
-                if (key_val.isNil()) {
-                    // t[nil] always returns nil (nil is not a valid table key)
-                    vm.stack[vm.base + a] = TValue.nil;
-                } else if (key_val.asString()) |key| {
-                    if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    // Integer, number, boolean, etc. - use TValue key directly
-                    if (try dispatchIndexMMValue(vm, table, key_val, table_val, a)) |result| {
-                        return result;
-                    }
-                }
-            } else {
-                // Non-table value: check for shared metatable with __index
-                if (try dispatchSharedIndexMMValue(vm, table_val, key_val, a)) |result| {
-                    return result;
-                }
-            }
-            return .Continue;
-        },
+        .GETTABLE => return try opGETTABLE(vm, ci, inst),
         // [MM_NEWINDEX] Fast path: table write by key. Slow path: __newindex metamethod.
-        .SETTABLE => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + a];
-            const key_val = vm.stack[vm.base + b];
-            const value = vm.stack[vm.base + c];
-
-            if (table_val.asTable()) |table| {
-                if (key_val.asString()) |key| {
-                    if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
-                        return result;
-                    }
-                } else {
-                    // Integer, number, boolean, etc.
-                    if (try dispatchNewindexMMValue(vm, table, key_val, table_val, value)) |result| {
-                        return result;
-                    }
-                }
-            } else {
-                const key = TValue{ .integer = @intCast(c) };
-                if (try dispatchSharedIndexMMValue(vm, table_val, key, a)) |result| {
-                    return result;
-                }
-            }
-            return .Continue;
-        },
+        .SETTABLE => return try opSETTABLE(vm, ci, inst),
         // [MM_INDEX] Fast path: table read by integer index. Slow path: __index metamethod.
-        .GETI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + b];
-
-            if (table_val.asTable()) |table| {
-                const key = TValue{ .integer = @intCast(c) };
-                // Fast path: direct lookup
-                if (table.get(key)) |value| {
-                    vm.stack[vm.base + a] = value;
-                } else {
-                    if (try dispatchIndexMMValue(vm, table, key, table_val, a)) |result| {
-                        return result;
-                    }
-                }
-            } else {
-                return error.InvalidTableOperation;
-            }
-            return .Continue;
-        },
+        .GETI => return try opGETI(vm, inst),
         // [MM_NEWINDEX] Fast path: table write by integer index. Slow path: __newindex metamethod.
-        .SETI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + a];
-            const value = vm.stack[vm.base + c];
-
-            if (table_val.asTable()) |table| {
-                const key = TValue{ .integer = @intCast(b) };
-                if (try dispatchNewindexMMValue(vm, table, key, table_val, value)) |result| {
-                    return result;
-                }
-            } else {
-                return error.InvalidTableOperation;
-            }
-            return .Continue;
-        },
+        .SETI => return try opSETI(vm, inst),
         // [MM_INDEX] Fast path: table read by field. Slow path: __index metamethod.
-        .GETFIELD => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + b];
-            const key_val = ci.func.k[c];
-
-            if (table_val.asTable()) |table| {
-                if (key_val.asString()) |key| {
-                    field_cache.rememberFieldAccess(vm, a, key, false, false);
-                    if (try dispatchIndexMM(vm, table, key, table_val, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    return error.InvalidTableOperation;
-                }
-            } else {
-                // Non-table value: check for shared metatable with __index
-                if (key_val.asString()) |key| {
-                    if (!table_val.isNil()) {
-                        field_cache.rememberFieldAccess(vm, a, key, false, false);
-                    }
-                    if (try dispatchSharedIndexMM(vm, table_val, key, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    return error.InvalidTableOperation;
-                }
-            }
-            return .Continue;
-        },
+        .GETFIELD => return try opGETFIELD(vm, ci, inst),
         // [MM_NEWINDEX] Fast path: table write by field. Slow path: __newindex metamethod.
-        .SETFIELD => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const table_val = vm.stack[vm.base + a];
-            const key_val = ci.func.k[b];
-            const value = vm.stack[vm.base + c];
-
-            if (table_val.asTable()) |table| {
-                if (key_val.asString()) |key| {
-                    if (try dispatchNewindexMM(vm, table, key, table_val, value)) |result| {
-                        return result;
-                    }
-                } else {
-                    return error.InvalidTableOperation;
-                }
-            } else {
-                return error.InvalidTableOperation;
-            }
-            return .Continue;
-        },
-        .NEWTABLE => {
-            const a = inst.getA();
-            const table = try vm.gc().allocTable();
-            vm.stack[vm.base + a] = TValue.fromTable(table);
-            return .Continue;
-        },
+        .SETFIELD => return try opSETFIELD(vm, ci, inst),
+        .NEWTABLE => return try opNEWTABLE(vm, inst),
         // [MM_INDEX] SELF: Prepare for method call. R[A+1] := R[B]; R[A] := R[B][K[C]]
-        .SELF => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const obj = vm.stack[vm.base + b];
-
-            // R[A+1] := R[B] (copy object for self parameter)
-            vm.stack[vm.base + a + 1] = obj;
-
-            // R[A] := R[B][K[C]] (get method from object)
-            const key_val = ci.func.k[c];
-            if (obj.asTable()) |table| {
-                if (key_val.asString()) |key| {
-                    field_cache.rememberFieldAccess(vm, a, key, false, true);
-                    if (try dispatchIndexMM(vm, table, key, obj, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    return error.InvalidTableOperation;
-                }
-            } else {
-                // Non-table value: check for shared metatable with __index
-                if (key_val.asString()) |key| {
-                    field_cache.rememberFieldAccess(vm, a, key, false, true);
-                    if (try dispatchSharedIndexMM(vm, obj, key, a)) |result| {
-                        return result;
-                    }
-                } else {
-                    return error.InvalidTableOperation;
-                }
-            }
-            return .Continue;
-        },
+        .SELF => return try opSELF(vm, ci, inst),
         // [MM_EQ] Fast path: equality with constant. Slow path: __eq metamethod.
-        .EQK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const left = vm.stack[vm.base + b];
-            const right = ci.func.k[c];
-
-            // Fast path: left is not a table (constant right can't be a table)
-            const is_true = if (left.asTable() == null)
-                eqOp(left, right)
-            else
-                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .EQK => return try opEQK(vm, ci, inst),
         // [MM_EQ] Fast path: equality with immediate. Slow path: __eq metamethod.
-        .EQI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-            const left = vm.stack[vm.base + b];
-            const right = TValue{ .integer = @as(i64, imm) };
-
-            // Fast path: left is not a table (immediate right is always integer)
-            const is_true = if (left.asTable() == null)
-                eqOp(left, right)
-            else
-                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .EQI => return try opEQI(vm, ci, inst),
         // [MM_LT] Fast path: less-than with immediate. Slow path: __lt metamethod.
-        .LTI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-            const left = vm.stack[vm.base + b];
-            const right = TValue{ .integer = @as(i64, imm) };
-
-            // Fast path: left is a number
-            const is_true = if (left.isInteger() or left.isNumber())
-                try ltOp(left, right)
-            else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
-                .value => |mm_res| mm_res,
-                .deferred => return .LoopContinue,
-                .missing => {
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
-                },
-            };
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .LTI => return try opLTI(vm, ci, inst),
         // [MM_LE] Fast path: less-or-equal with immediate. Slow path: __le metamethod.
-        .LEI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-            const left = vm.stack[vm.base + b];
-            const right = TValue{ .integer = @as(i64, imm) };
-
-            // Fast path: left is a number
-            const is_true = if (left.isInteger() or left.isNumber())
-                try leOp(left, right)
-            else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
-                .value => |mm_res| mm_res,
-                .deferred => return .LoopContinue,
-                .missing => {
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
-                },
-            };
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .LEI => return try opLEI(vm, ci, inst),
         // [MM_LT] Fast path: greater-than with immediate. Slow path: __lt metamethod (reversed).
-        .GTI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-            const left = TValue{ .integer = @as(i64, imm) };
-            const right = vm.stack[vm.base + b];
-
-            // Fast path: right is a number (GTI is imm < R[B])
-            const is_true = if (right.isInteger() or right.isNumber())
-                try ltOp(left, right)
-            else switch (try dispatchLtMMForOpcode(vm, ci, left, right, a)) {
-                .value => |mm_res| mm_res,
-                .deferred => return .LoopContinue,
-                .missing => {
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
-                },
-            };
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .GTI => return try opGTI(vm, ci, inst),
         // [MM_LE] Fast path: greater-or-equal with immediate. Slow path: __le metamethod (reversed).
-        .GEI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-            const left = TValue{ .integer = @as(i64, imm) };
-            const right = vm.stack[vm.base + b];
-
-            // Fast path: right is a number (GEI is imm <= R[B])
-            const is_true = if (right.isInteger() or right.isNumber())
-                try leOp(left, right)
-            else switch (try dispatchLeMMForOpcode(vm, ci, left, right, a)) {
-                .value => |mm_res| mm_res,
-                .deferred => return .LoopContinue,
-                .missing => {
-                    _ = try raiseOrderComparison(vm, left, right);
-                    unreachable;
-                },
-            };
-
-            if ((is_true and a == 0) or (!is_true and a != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
-        .CLOSE => {
-            const a = inst.getA();
-            // First, call __close on any TBC variables from top down to 'a'
-            try closeTBCVariables(vm, ci, a, .nil);
-            // Then close upvalues
-            vm.closeUpvalues(vm.base + a);
-            return .Continue;
-        },
-        .TBC => {
-            // TBC A: Mark R[A] as to-be-closed
-            // The value must have a __close metamethod or be false/nil
-            const a = inst.getA();
-            const val = vm.stack[vm.base + a];
-
-            // nil and false don't need __close (they're valid but do nothing)
-            if (val.isNil() or (val.isBoolean() and !val.toBoolean())) {
-                // No need to mark, these are valid but won't call __close
-                return .Continue;
-            }
-
-            // Non-false/non-nil values must provide __close at TBC time.
-            if (metamethod.getMetamethod(val, .close, &vm.gc().mm_keys, &vm.gc().shared_mt) == null) {
-                return error.NoCloseMetamethod;
-            }
-
-            // Mark this register as to-be-closed
-            ci.markTBC(a);
-            return .Continue;
-        },
-        .SETLIST => {
-            // SETLIST A B C k: R[A][(C-1)*FPF+i] := R[A+i], 1 <= i <= B
-            // FPF (Fields Per Flush) = 50 in Lua 5.4
-            // Special case: when k=1 and C=0, EXTRAARG contains direct start index
-            const FIELDS_PER_FLUSH: u32 = 50;
-
-            const a = inst.getA();
-            const b = inst.getB();
-            const c_raw = inst.getC();
-            const k = inst.getk();
-
-            // Calculate starting index
-            const start_index: i64 = if (k) blk: {
-                const extraarg_inst = try ci.fetchExtraArg();
-                const ax = extraarg_inst.getAx();
-                if (c_raw == 0) {
-                    // Direct index mode: EXTRAARG is the start index
-                    break :blk @as(i64, ax);
-                } else {
-                    // Large batch mode: EXTRAARG is the batch number
-                    break :blk @as(i64, (ax - 1) * FIELDS_PER_FLUSH) + 1;
-                }
-            } else @as(i64, (c_raw - 1) * FIELDS_PER_FLUSH) + 1;
-
-            // Get table from R[A]
-            const table_val = vm.stack[vm.base + a];
-            const table = table_val.asTable() orelse return error.InvalidTableOperation;
-
-            // Calculate number of values to set
-            // B=0 means use top - (base + a + 1) values
-            const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
-
-            // Set values R[A+1], R[A+2], ..., R[A+n] into table
-            for (0..n) |i| {
-                const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
-                const index: i64 = start_index + @as(i64, @intCast(i));
-
-                // Use integer key directly (Lua 5.4 semantics)
-                const key = TValue{ .integer = index };
-
-                // Set value in table (handles __newindex if needed)
-                // Note: SETLIST uses raw set, not dispatchNewindexMM
-                try tableSetWithBarrier(vm, table, key, value);
-            }
-
-            return .Continue;
-        },
-        .CLOSURE => {
-            const a = inst.getA();
-            const bx = inst.getBx();
-
-            const child_proto = ci.func.protos[bx];
-
-            var upvals_buf: [256]*UpvalueObject = undefined;
-            const nups = child_proto.nups;
-
-            for (child_proto.upvalues[0..nups], 0..) |upvaldesc, i| {
-                if (upvaldesc.instack) {
-                    const stack_slot = &vm.stack[vm.base + upvaldesc.idx];
-                    upvals_buf[i] = try vm.getOrCreateUpvalue(stack_slot);
-                } else {
-                    if (ci.closure) |enclosing| {
-                        upvals_buf[i] = enclosing.upvalues[upvaldesc.idx];
-                    } else {
-                        upvals_buf[i] = try vm.gc().allocUpvalue(&vm.stack[0], vm.thread);
-                    }
-                }
-            }
-
-            const closure = try vm.gc().allocClosure(child_proto);
-            @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
-
-            vm.stack[vm.base + a] = TValue.fromClosure(closure);
-            return .Continue;
-        },
+        .GEI => return try opGEI(vm, ci, inst),
+        .CLOSE => return try opCLOSE(vm, ci, inst),
+        .TBC => return try opTBC(vm, ci, inst),
+        .SETLIST => return try opSETLIST(vm, ci, inst),
+        .CLOSURE => return try opCLOSURE(vm, ci, inst),
         // Metamethod dispatch opcodes
         // These are emitted after arithmetic operations for metamethod fallback
-        .MMBIN => {
-            // MMBIN A B C: metamethod for binary operation R[A] op R[B]
-            // C encodes the metamethod event (add, sub, mul, etc.)
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-
-            const va = vm.stack[vm.base + a];
-            const vb = vm.stack[vm.base + b];
-
-            // Decode metamethod event from C
-            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
-
-            // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(va, vb, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
-                // No metamethod found - arithmetic error
-                return error.ArithmeticError;
-            };
-
-            // Call the metamethod: mm(va, vb) -> result at a
-            // Set up call: function at temp, args at temp+1, temp+2
-            const temp = vm.top;
-            vm.stack[temp] = mm;
-            vm.stack[temp + 1] = va;
-            vm.stack[temp + 2] = vb;
-            vm.top = temp + 3;
-
-            // If metamethod is a closure, push call frame
-            if (mm.asClosure()) |closure| {
-                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
-                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
-                return .LoopContinue;
-            }
-
-            // For native closures, call directly
-            if (mm.isObject() and mm.object.type == .native_closure) {
-                const nc = object.getObject(NativeClosureObject, mm.object);
-                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-                // Result is at temp, move to a
-                vm.stack[vm.base + a] = vm.stack[temp];
-                vm.top = temp;
-                return .Continue;
-            }
-
-            return error.NotAFunction;
-        },
-        .MMBINI => {
-            // MMBINI A sB C k: metamethod for binary op with immediate
-            // A = register operand, sB = signed immediate, C = metamethod event
-            // k = operand order: k=0 means R[A] op sB, k=1 means sB op R[A]
-            const a = inst.getA();
-            const sb = @as(i8, @bitCast(inst.getB()));
-            const c = inst.getC();
-            const k = inst.getk();
-
-            const va = vm.stack[vm.base + a];
-            const vb = TValue{ .integer = @as(i64, sb) };
-
-            // Decode metamethod event from C
-            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
-
-            // Determine operand order based on k flag
-            const left = if (k) vb else va;
-            const right = if (k) va else vb;
-
-            // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
-                return error.ArithmeticError;
-            };
-
-            // Call the metamethod: mm(left, right) -> result at a
-            const temp = vm.top;
-            vm.stack[temp] = mm;
-            vm.stack[temp + 1] = left;
-            vm.stack[temp + 2] = right;
-            vm.top = temp + 3;
-
-            if (mm.asClosure()) |closure| {
-                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
-                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
-                return .LoopContinue;
-            }
-
-            if (mm.isObject() and mm.object.type == .native_closure) {
-                const nc = object.getObject(NativeClosureObject, mm.object);
-                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-                vm.stack[vm.base + a] = vm.stack[temp];
-                vm.top = temp;
-                return .Continue;
-            }
-
-            return error.NotAFunction;
-        },
-        .MMBINK => {
-            // MMBINK A B C k: metamethod for binary op with constant
-            // A = register operand, B = constant index, C = metamethod event
-            // k = operand order: k=0 means R[A] op K[B], k=1 means K[B] op R[A]
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const k = inst.getk();
-
-            const va = vm.stack[vm.base + a];
-            const vb = ci.func.k[b];
-
-            // Decode metamethod event from C
-            const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
-
-            // Determine operand order based on k flag
-            const left = if (k) vb else va;
-            const right = if (k) va else vb;
-
-            // Try to get metamethod from either operand
-            const mm = metamethod.getBinMetamethod(left, right, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
-                return error.ArithmeticError;
-            };
-
-            // Call the metamethod: mm(left, right) -> result at a
-            const temp = vm.top;
-            vm.stack[temp] = mm;
-            vm.stack[temp + 1] = left;
-            vm.stack[temp + 2] = right;
-            vm.top = temp + 3;
-
-            if (mm.asClosure()) |closure| {
-                const new_ci = try pushCallInfo(vm, closure.proto, closure, temp, @intCast(vm.base + a), 1);
-                markMetamethodFrame(new_ci, metamethodEventNameRuntime(event));
-                return .LoopContinue;
-            }
-
-            if (mm.isObject() and mm.object.type == .native_closure) {
-                const nc = object.getObject(NativeClosureObject, mm.object);
-                try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-                vm.stack[vm.base + a] = vm.stack[temp];
-                vm.top = temp;
-                return .Continue;
-            }
-
-            return error.NotAFunction;
-        },
-        .VARARG => {
-            // VARARG A C: Load varargs into R[A], R[A+1], ..., R[A+C-2]
-            // If C=0, load all varargs and set top
-            const a = inst.getA();
-            const c = inst.getC();
-
-            const vararg_base = ci.vararg_base;
-            const vararg_count = ci.vararg_count;
-
-            if (c == 0) {
-                // Load all varargs, set top accordingly
-                for (0..vararg_count) |i| {
-                    vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
-                }
-                vm.top = vm.base + a + vararg_count;
-            } else {
-                // Load exactly c-1 values
-                const want: u32 = c - 1;
-                for (0..want) |i| {
-                    if (i < vararg_count) {
-                        vm.stack[vm.base + a + i] = vm.stack[vararg_base + i];
-                    } else {
-                        // Fill with nil if not enough varargs
-                        vm.stack[vm.base + a + i] = .nil;
-                    }
-                }
-            }
-            return .Continue;
-        },
-        .VARARGPREP => {
-            // VARARGPREP A: Prepare vararg function with A fixed parameters
-            // In our implementation, CALL already handles vararg setup,
-            // so this is mostly a no-op for verification
-            const a = inst.getA();
-            _ = a; // numparams - could verify ci.func.numparams == a
-            return .Continue;
-        },
-        .EXTRAARG => {
-            return error.UnknownOpcode;
-        },
+        .MMBIN => return try opMMBIN(vm, inst),
+        .MMBINI => return try opMMBINI(vm, inst),
+        .MMBINK => return try opMMBINK(vm, ci, inst),
+        .VARARG => return try opVARARG(vm, ci, inst),
+        .VARARGPREP => return opVARARGPREP(inst),
+        .EXTRAARG => return try opEXTRAARG(),
 
         // --- Extended opcodes ---
         // Protected call: catches runtime errors and returns (true, results...) or (false, error)
-        .PCALL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const total_results: u32 = if (c > 0) c - 1 else 0;
-            return try protected_call.dispatch(vm, ci, a, b, total_results, null, vm.base + a);
-        },
+        .PCALL => return try opPCALL(vm, ci, inst),
         // All opcodes now implemented - no else branch needed
     }
 }
