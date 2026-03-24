@@ -64,7 +64,7 @@ pub const BitwiseOp = enum { band, bor, bxor };
 
 const native_multret_cap: u32 = 256;
 
-fn opToMetaEvent(comptime op: ArithOp) MetaEvent {
+fn arithOpToMetaEvent(comptime op: ArithOp) MetaEvent {
     return switch (op) {
         .add => .add,
         .sub => .sub,
@@ -1304,21 +1304,21 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     return executeWithArgs(vm, proto, &.{});
 }
 
-fn opMove(vm: *VM, inst: Instruction) ExecuteResult {
+fn opMOVE(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     vm.stack[vm.base + a] = vm.stack[vm.base + b];
     return .Continue;
 }
 
-fn opLoadK(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+fn opLOADK(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const bx = inst.getBx();
     vm.stack[vm.base + a] = ci.func.k[bx];
     return .Continue;
 }
 
-fn opLoadKx(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opLOADKX(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const extraarg_inst = try ci.fetchExtraArg();
     const ax = extraarg_inst.getAx();
@@ -1326,40 +1326,40 @@ fn opLoadKx(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opLoadI(vm: *VM, inst: Instruction) ExecuteResult {
+fn opLOADI(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
     vm.stack[vm.base + a] = .{ .integer = @as(i64, sbx) };
     return .Continue;
 }
 
-fn opLoadF(vm: *VM, inst: Instruction) ExecuteResult {
+fn opLOADF(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
     vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(sbx)) };
     return .Continue;
 }
 
-fn opLoadFalse(vm: *VM, inst: Instruction) ExecuteResult {
+fn opLOADFALSE(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     vm.stack[vm.base + a] = .{ .boolean = false };
     return .Continue;
 }
 
-fn opLFalseSkip(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+fn opLFALSESKIP(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     vm.stack[vm.base + a] = .{ .boolean = false };
     ci.skip();
     return .Continue;
 }
 
-fn opLoadTrue(vm: *VM, inst: Instruction) ExecuteResult {
+fn opLOADTRUE(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     vm.stack[vm.base + a] = .{ .boolean = true };
     return .Continue;
 }
 
-fn opLoadNil(vm: *VM, inst: Instruction) ExecuteResult {
+fn opLOADNIL(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     var i: u8 = 0;
@@ -1369,7 +1369,7 @@ fn opLoadNil(vm: *VM, inst: Instruction) ExecuteResult {
     return .Continue;
 }
 
-fn opAddI(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opADDI(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -1386,7 +1386,7 @@ fn opAddI(vm: *VM, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opShlI(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opSHLI(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -1408,7 +1408,7 @@ fn opShlI(vm: *VM, inst: Instruction) !ExecuteResult {
     return error.ArithmeticError;
 }
 
-fn opShrI(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opSHRI(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -1430,7 +1430,7 @@ fn opShrI(vm: *VM, inst: Instruction) !ExecuteResult {
     return error.ArithmeticError;
 }
 
-fn opArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1451,7 +1451,7 @@ fn opArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !Ex
             const nb_opt = vb.toNumber();
             const nc_opt = vc.toNumber();
             if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, opToMetaEvent(op))) |result| return result;
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, arithOpToMetaEvent(op))) |result| return result;
                 return error.ArithmeticError;
             }
             const nb = nb_opt.?;
@@ -1468,7 +1468,7 @@ fn opArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !Ex
             const nb_opt = vb.toNumber();
             const nc_opt = vc.toNumber();
             if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, opToMetaEvent(op))) |result| return result;
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, arithOpToMetaEvent(op))) |result| return result;
                 return error.ArithmeticError;
             }
             const nb = nb_opt.?;
@@ -1513,7 +1513,7 @@ fn opArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !Ex
     }
 }
 
-fn opBitwiseK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
+fn execBitwiseK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1554,7 +1554,7 @@ fn opBitwiseK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: BitwiseOp)
     return conv_err orelse error.ArithmeticError;
 }
 
-fn opBitwise(vm: *VM, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
+fn execBitwise(vm: *VM, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
     bitwiseBinary(vm, inst, op) catch |err| {
         const a = inst.getA();
         const b = inst.getB();
@@ -1571,7 +1571,7 @@ fn opBitwise(vm: *VM, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult 
     return .Continue;
 }
 
-fn opShift(vm: *VM, inst: Instruction, comptime is_left: bool) !ExecuteResult {
+fn execShift(vm: *VM, inst: Instruction, comptime is_left: bool) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1609,7 +1609,7 @@ fn opShift(vm: *VM, inst: Instruction, comptime is_left: bool) !ExecuteResult {
     return conv_err orelse error.ArithmeticError;
 }
 
-fn opUnm(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opUNM(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const vb = vm.stack[vm.base + b];
@@ -1626,7 +1626,7 @@ fn opUnm(vm: *VM, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opNot(vm: *VM, inst: Instruction) ExecuteResult {
+fn opNOT(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const vb = &vm.stack[vm.base + b];
@@ -1634,7 +1634,7 @@ fn opNot(vm: *VM, inst: Instruction) ExecuteResult {
     return .Continue;
 }
 
-fn opBNot(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opBNOT(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const vb = vm.stack[vm.base + b];
@@ -1655,7 +1655,7 @@ fn opBNot(vm: *VM, inst: Instruction) !ExecuteResult {
     return conv_err orelse error.ArithmeticError;
 }
 
-fn opLen(vm: *VM, inst: Instruction) !ExecuteResult {
+fn opLEN(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const vb = &vm.stack[vm.base + b];
@@ -1679,7 +1679,7 @@ fn opLen(vm: *VM, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opConcat(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1769,7 +1769,7 @@ fn opConcat(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opEq(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const negate = inst.getA();
     const b = inst.getB();
@@ -1788,7 +1788,7 @@ fn opEq(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opLt(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1814,7 +1814,7 @@ fn opLt(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opLe(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -1841,13 +1841,13 @@ fn opLe(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opJmp(ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opJMP(ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const sj = inst.getsJ();
     try ci.jumpRel(sj);
     return .Continue;
 }
 
-fn opTest(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const k = inst.getk();
@@ -1858,7 +1858,7 @@ fn opTest(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     return .Continue;
 }
 
-fn opTestSet(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const k = inst.getk();
@@ -1871,7 +1871,7 @@ fn opTestSet(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     return .Continue;
 }
 
-fn opForPrep(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opFORPREP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
     const v_init = vm.stack[vm.base + a];
@@ -1947,7 +1947,7 @@ fn opForPrep(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opForLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
     const idx = &vm.stack[vm.base + a];
@@ -1996,13 +1996,13 @@ fn opForLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return .Continue;
 }
 
-fn opTForPrep(ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opTFORPREP(ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const sbx = inst.getSBx();
     try ci.jumpRel(sbx);
     return .Continue;
 }
 
-fn opTForCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opTFORCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const c = inst.getC();
 
@@ -2064,7 +2064,7 @@ fn opTForCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     return error.NotAFunction;
 }
 
-fn opTForLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opTFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const sbx = inst.getSBx();
@@ -2096,7 +2096,7 @@ fn raiseCallNotFunction(vm: *VM, ci: *CallInfo, inst: Instruction, a: u8, func_v
 // Notes:
 //   - may push a new CallInfo and return .LoopContinue
 //   - may raise LuaException for non-callable values
-fn opCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -2273,7 +2273,7 @@ fn opCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - closes TBC variables before reusing the frame
 //   - resolves __call chains for non-callable values
 //   - reuses the current CallInfo for closure and protected-call tail paths
-fn opTailCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const b = inst.getB();
@@ -2500,7 +2500,7 @@ fn opTailCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - closes TBC variables before returning
 //   - propagates protected-call success tuples as (true, ...)
 //   - preserves MULTRET semantics when B == 0
-fn opReturn(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const b = inst.getB();
@@ -2613,7 +2613,7 @@ fn opReturn(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - closes TBC variables before returning
 //   - protected frames return just the success flag
 //   - fixed-result callers are nil-filled by caller expectations
-fn opReturn0(vm: *VM, ci: *CallInfo) !ExecuteResult {
+fn opRETURN0(vm: *VM, ci: *CallInfo) !ExecuteResult {
     _ = ci;
     if (vm.ci.?.previous != null) {
         const returning_ci = vm.ci.?;
@@ -2660,7 +2660,7 @@ fn opReturn0(vm: *VM, ci: *CallInfo) !ExecuteResult {
 //   - closes TBC variables before returning
 //   - protected frames return (true, value)
 //   - fixed-result callers receive nil fill beyond the first result
-fn opReturn1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
 
@@ -2826,36 +2826,36 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     }
 
     switch (inst.getOpCode()) {
-        .MOVE => return opMove(vm, inst),
-        .LOADK => return opLoadK(vm, ci, inst),
-        .LOADKX => return try opLoadKx(vm, ci, inst),
-        .LOADI => return opLoadI(vm, inst),
-        .LOADF => return opLoadF(vm, inst),
-        .LOADFALSE => return opLoadFalse(vm, inst),
-        .LFALSESKIP => return opLFalseSkip(vm, ci, inst),
-        .LOADTRUE => return opLoadTrue(vm, inst),
-        .LOADNIL => return opLoadNil(vm, inst),
+        .MOVE => return opMOVE(vm, inst),
+        .LOADK => return opLOADK(vm, ci, inst),
+        .LOADKX => return try opLOADKX(vm, ci, inst),
+        .LOADI => return opLOADI(vm, inst),
+        .LOADF => return opLOADF(vm, inst),
+        .LOADFALSE => return opLOADFALSE(vm, inst),
+        .LFALSESKIP => return opLFALSESKIP(vm, ci, inst),
+        .LOADTRUE => return opLOADTRUE(vm, inst),
+        .LOADNIL => return opLOADNIL(vm, inst),
         // [MM_ARITH] Fast path: integer add with immediate. Slow path: __add metamethod.
-        .ADDI => return try opAddI(vm, inst),
-        .SHLI => return try opShlI(vm, inst),
-        .SHRI => return try opShrI(vm, inst),
+        .ADDI => return try opADDI(vm, inst),
+        .SHLI => return try opSHLI(vm, inst),
+        .SHRI => return try opSHRI(vm, inst),
         // [MM_ARITH] Fast path: add with constant. Slow path: __add metamethod.
-        .ADDK => return try opArithK(vm, ci, inst, .add),
+        .ADDK => return try execArithK(vm, ci, inst, .add),
         // [MM_ARITH] Fast path: subtract with constant. Slow path: __sub metamethod.
-        .SUBK => return try opArithK(vm, ci, inst, .sub),
+        .SUBK => return try execArithK(vm, ci, inst, .sub),
         // [MM_ARITH] Fast path: multiply with constant. Slow path: __mul metamethod.
-        .MULK => return try opArithK(vm, ci, inst, .mul),
+        .MULK => return try execArithK(vm, ci, inst, .mul),
         // [MM_ARITH] Fast path: divide with constant. Slow path: __div metamethod.
-        .DIVK => return try opArithK(vm, ci, inst, .div),
+        .DIVK => return try execArithK(vm, ci, inst, .div),
         // [MM_ARITH] Fast path: integer divide with constant. Slow path: __idiv metamethod.
-        .IDIVK => return try opArithK(vm, ci, inst, .idiv),
+        .IDIVK => return try execArithK(vm, ci, inst, .idiv),
         // [MM_ARITH] Fast path: modulo with constant. Slow path: __mod metamethod.
-        .MODK => return try opArithK(vm, ci, inst, .mod),
+        .MODK => return try execArithK(vm, ci, inst, .mod),
         // [MM_ARITH] Fast path: power with constant. Slow path: __pow metamethod.
-        .POWK => return try opArithK(vm, ci, inst, .pow),
-        .BANDK => return try opBitwiseK(vm, ci, inst, .band),
-        .BORK => return try opBitwiseK(vm, ci, inst, .bor),
-        .BXORK => return try opBitwiseK(vm, ci, inst, .bxor),
+        .POWK => return try execArithK(vm, ci, inst, .pow),
+        .BANDK => return try execBitwiseK(vm, ci, inst, .band),
+        .BORK => return try execBitwiseK(vm, ci, inst, .bor),
+        .BXORK => return try execBitwiseK(vm, ci, inst, .bxor),
         // [MM_ARITH] Fast path: register add. Slow path: __add metamethod.
         .ADD => return try dispatchArithMM(vm, inst, .add, .add),
         // [MM_ARITH] Fast path: register subtract. Slow path: __sub metamethod.
@@ -2870,45 +2870,45 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         .MOD => return try dispatchArithMM(vm, inst, .mod, .mod),
         // [MM_ARITH] Fast path: register power. Slow path: __pow metamethod.
         .POW => return try dispatchArithMM(vm, inst, .pow, .pow),
-        .BAND => return try opBitwise(vm, inst, .band),
-        .BOR => return try opBitwise(vm, inst, .bor),
-        .BXOR => return try opBitwise(vm, inst, .bxor),
-        .SHL => return try opShift(vm, inst, true),
-        .SHR => return try opShift(vm, inst, false),
+        .BAND => return try execBitwise(vm, inst, .band),
+        .BOR => return try execBitwise(vm, inst, .bor),
+        .BXOR => return try execBitwise(vm, inst, .bxor),
+        .SHL => return try execShift(vm, inst, true),
+        .SHR => return try execShift(vm, inst, false),
         // [MM_ARITH] Fast path: unary minus. Slow path: __unm metamethod.
-        .UNM => return try opUnm(vm, inst),
-        .NOT => return opNot(vm, inst),
-        .BNOT => return try opBNot(vm, inst),
+        .UNM => return try opUNM(vm, inst),
+        .NOT => return opNOT(vm, inst),
+        .BNOT => return try opBNOT(vm, inst),
         // [MM_LEN] Fast path: string/table length. Slow path: __len metamethod.
-        .LEN => return try opLen(vm, inst),
+        .LEN => return try opLEN(vm, inst),
         // [MM_CONCAT] Fast path: string/number concat. Slow path: __concat metamethod.
-        .CONCAT => return try opConcat(vm, ci, inst),
+        .CONCAT => return try opCONCAT(vm, ci, inst),
         // [MM_EQ] Fast path: primitive equality. Slow path: __eq metamethod.
-        .EQ => return try opEq(vm, ci, inst),
+        .EQ => return try opEQ(vm, ci, inst),
         // [MM_LT] Fast path: numeric less-than. Slow path: __lt metamethod.
-        .LT => return try opLt(vm, ci, inst),
+        .LT => return try opLT(vm, ci, inst),
         // [MM_LE] Fast path: numeric less-or-equal. Slow path: __le metamethod.
-        .LE => return try opLe(vm, ci, inst),
-        .JMP => return try opJmp(ci, inst),
-        .TEST => return opTest(vm, ci, inst),
-        .TESTSET => return opTestSet(vm, ci, inst),
-        .FORPREP => return try opForPrep(vm, ci, inst),
-        .FORLOOP => return try opForLoop(vm, ci, inst),
+        .LE => return try opLE(vm, ci, inst),
+        .JMP => return try opJMP(ci, inst),
+        .TEST => return opTEST(vm, ci, inst),
+        .TESTSET => return opTESTSET(vm, ci, inst),
+        .FORPREP => return try opFORPREP(vm, ci, inst),
+        .FORLOOP => return try opFORLOOP(vm, ci, inst),
         // Generic for loop: TFORPREP A sBx - jump forward to TFORCALL/TFORLOOP
-        .TFORPREP => return try opTForPrep(ci, inst),
+        .TFORPREP => return try opTFORPREP(ci, inst),
         // Generic for loop: TFORCALL A C - call iterator R(A)(R(A+1), R(A+2)),
         // store C results at R(A+4)... (R(A+3) is to-be-closed state)
-        .TFORCALL => return try opTForCall(vm, ci, inst),
+        .TFORCALL => return try opTFORCALL(vm, ci, inst),
         // Generic for loop: TFORLOOP A sBx - if R(A+4) != nil, R(A+2) = R(A+4), jump back
-        .TFORLOOP => return try opTForLoop(vm, ci, inst),
+        .TFORLOOP => return try opTFORLOOP(vm, ci, inst),
         // [MM_CALL] Fast path: closure/native call. Slow path: __call metamethod.
-        .CALL => return try opCall(vm, ci, inst),
+        .CALL => return try opCALL(vm, ci, inst),
         // TAILCALL: Tail call optimization - reuse current frame
         // TAILCALL A B C k: return R[A](R[A+1], ..., R[A+B-1])
-        .TAILCALL => return try opTailCall(vm, ci, inst),
-        .RETURN => return try opReturn(vm, ci, inst),
-        .RETURN0 => return try opReturn0(vm, ci),
-        .RETURN1 => return try opReturn1(vm, ci, inst),
+        .TAILCALL => return try opTAILCALL(vm, ci, inst),
+        .RETURN => return try opRETURN(vm, ci, inst),
+        .RETURN0 => return try opRETURN0(vm, ci),
+        .RETURN1 => return try opRETURN1(vm, ci, inst),
         // [MM_INDEX] Fast path: upvalue table read. Slow path: __index metamethod.
         .GETTABUP => {
             const a = inst.getA();
