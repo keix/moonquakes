@@ -64,6 +64,18 @@ pub const BitwiseOp = enum { band, bor, bxor };
 
 const native_multret_cap: u32 = 256;
 
+fn opToMetaEvent(comptime op: ArithOp) MetaEvent {
+    return switch (op) {
+        .add => .add,
+        .sub => .sub,
+        .mul => .mul,
+        .div => .div,
+        .idiv => .idiv,
+        .mod => .mod,
+        .pow => .pow,
+    };
+}
+
 fn formatConcatNumber(buf: []u8, n: f64) []const u8 {
     const rendered = std.fmt.bufPrint(buf, "{d}", .{n}) catch return buf[0..0];
 
@@ -1292,6 +1304,780 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
     return executeWithArgs(vm, proto, &.{});
 }
 
+fn opMove(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    vm.stack[vm.base + a] = vm.stack[vm.base + b];
+    return .Continue;
+}
+
+fn opLoadK(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const bx = inst.getBx();
+    vm.stack[vm.base + a] = ci.func.k[bx];
+    return .Continue;
+}
+
+fn opLoadKx(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const extraarg_inst = try ci.fetchExtraArg();
+    const ax = extraarg_inst.getAx();
+    vm.stack[vm.base + a] = ci.func.k[ax];
+    return .Continue;
+}
+
+fn opLoadI(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const sbx = inst.getSBx();
+    vm.stack[vm.base + a] = .{ .integer = @as(i64, sbx) };
+    return .Continue;
+}
+
+fn opLoadF(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const sbx = inst.getSBx();
+    vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(sbx)) };
+    return .Continue;
+}
+
+fn opLoadFalse(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    vm.stack[vm.base + a] = .{ .boolean = false };
+    return .Continue;
+}
+
+fn opLFalseSkip(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    vm.stack[vm.base + a] = .{ .boolean = false };
+    ci.skip();
+    return .Continue;
+}
+
+fn opLoadTrue(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    vm.stack[vm.base + a] = .{ .boolean = true };
+    return .Continue;
+}
+
+fn opLoadNil(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    var i: u8 = 0;
+    while (i <= b) : (i += 1) {
+        vm.stack[vm.base + a + i] = .nil;
+    }
+    return .Continue;
+}
+
+fn opAddI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const vb = &vm.stack[vm.base + b];
+    const imm = @as(i8, @bitCast(@as(u8, sc)));
+
+    if (vb.isInteger()) {
+        vm.stack[vm.base + a] = .{ .integer = vb.integer +% @as(i64, imm) };
+    } else if (vb.toNumber()) |n| {
+        vm.stack[vm.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
+    } else {
+        return error.ArithmeticError;
+    }
+    return .Continue;
+}
+
+fn opShlI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const vb = vm.stack[vm.base + b];
+
+    if (vb.isInteger()) {
+        const shift: i64 = @intCast(sc);
+        vm.stack[vm.base + a] = .{ .integer = shlInt(vb.integer, shift) };
+        return .Continue;
+    } else if (vb.toNumber()) |n| {
+        if (@floor(n) == n) {
+            const shift: i64 = @intCast(sc);
+            vm.stack[vm.base + a] = .{ .integer = shlInt(@intFromFloat(n), shift) };
+            return .Continue;
+        }
+    }
+    const shift_val = TValue{ .integer = @as(i64, sc) };
+    if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shl)) |result| return result;
+    return error.ArithmeticError;
+}
+
+fn opShrI(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const sc = inst.getC();
+    const vb = vm.stack[vm.base + b];
+
+    if (vb.isInteger()) {
+        const shift: i64 = @intCast(sc);
+        vm.stack[vm.base + a] = .{ .integer = shrInt(vb.integer, shift) };
+        return .Continue;
+    } else if (vb.toNumber()) |n| {
+        if (@floor(n) == n) {
+            const shift: i64 = @intCast(sc);
+            vm.stack[vm.base + a] = .{ .integer = shrInt(@intFromFloat(n), shift) };
+            return .Continue;
+        }
+    }
+    const shift_val = TValue{ .integer = @as(i64, sc) };
+    if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shr)) |result| return result;
+    return error.ArithmeticError;
+}
+
+fn opArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = &vm.stack[vm.base + b];
+    const vc = &ci.func.k[c];
+
+    switch (op) {
+        .add, .sub, .mul => {
+            if (vb.isInteger() and vc.isInteger()) {
+                vm.stack[vm.base + a] = .{ .integer = switch (op) {
+                    .add => vb.integer +% vc.integer,
+                    .sub => vb.integer -% vc.integer,
+                    .mul => vb.integer *% vc.integer,
+                    else => unreachable,
+                } };
+                return .Continue;
+            }
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, opToMetaEvent(op))) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
+            vm.stack[vm.base + a] = .{ .number = switch (op) {
+                .add => nb + nc,
+                .sub => nb - nc,
+                .mul => nb * nc,
+                else => unreachable,
+            } };
+            return .Continue;
+        },
+        .div, .pow => {
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, opToMetaEvent(op))) |result| return result;
+                return error.ArithmeticError;
+            }
+            const nb = nb_opt.?;
+            const nc = nc_opt.?;
+            vm.stack[vm.base + a] = .{ .number = switch (op) {
+                .div => nb / nc,
+                .pow => std.math.pow(f64, nb, nc),
+                else => unreachable,
+            } };
+            return .Continue;
+        },
+        .idiv => {
+            if (vb.isInteger() and vc.isInteger()) {
+                const res = try idivInt(vb.integer, vc.integer);
+                vm.stack[vm.base + a] = .{ .integer = res };
+                return .Continue;
+            }
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .idiv)) |result| return result;
+                return error.ArithmeticError;
+            }
+            vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb_opt.?, nc_opt.?) };
+            return .Continue;
+        },
+        .mod => {
+            if (vb.isInteger() and vc.isInteger()) {
+                const res = try modInt(vb.integer, vc.integer);
+                vm.stack[vm.base + a] = .{ .integer = res };
+                return .Continue;
+            }
+            const nb_opt = vb.toNumber();
+            const nc_opt = vc.toNumber();
+            if (nb_opt == null or nc_opt == null) {
+                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mod)) |result| return result;
+                return error.ArithmeticError;
+            }
+            vm.stack[vm.base + a] = .{ .number = luaMod(nb_opt.?, nc_opt.?) };
+            return .Continue;
+        },
+    }
+}
+
+fn opBitwiseK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = &vm.stack[vm.base + b];
+    const vc = &ci.func.k[c];
+
+    var conv_err: ?anyerror = null;
+    var ib_opt: ?i64 = null;
+    var ic_opt: ?i64 = null;
+    if (toIntForBitwise(vb)) |ib| {
+        ib_opt = ib;
+    } else |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, b);
+        }
+        conv_err = err;
+    }
+    if (toIntForBitwise(vc)) |ic| {
+        ic_opt = ic;
+    } else |err| {
+        conv_err = err;
+    }
+    if (ib_opt) |ib| {
+        if (ic_opt) |ic| {
+            vm.stack[vm.base + a] = .{ .integer = switch (op) {
+                .band => ib & ic,
+                .bor => ib | ic,
+                .bxor => ib ^ ic,
+            } };
+            return .Continue;
+        }
+    }
+    if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, switch (op) {
+        .band => .band,
+        .bor => .bor,
+        .bxor => .bxor,
+    })) |result| return result;
+    return conv_err orelse error.ArithmeticError;
+}
+
+fn opBitwise(vm: *VM, inst: Instruction, comptime op: BitwiseOp) !ExecuteResult {
+    bitwiseBinary(vm, inst, op) catch |err| {
+        const a = inst.getA();
+        const b = inst.getB();
+        const c = inst.getC();
+        if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, switch (op) {
+            .band => .band,
+            .bor => .bor,
+            .bxor => .bxor,
+        })) |result| {
+            return result;
+        }
+        return err;
+    };
+    return .Continue;
+}
+
+fn opShift(vm: *VM, inst: Instruction, comptime is_left: bool) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const vb = vm.stack[vm.base + b];
+    const vc = vm.stack[vm.base + c];
+
+    var conv_err: ?anyerror = null;
+    var value_opt: ?i64 = null;
+    var shift_opt: ?i64 = null;
+    if (toIntForBitwise(&vb)) |value| {
+        value_opt = value;
+    } else |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, b);
+        }
+        conv_err = err;
+    }
+    if (toIntForBitwise(&vc)) |shift| {
+        shift_opt = shift;
+    } else |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, c);
+        }
+        conv_err = err;
+    }
+    if (value_opt) |value| {
+        if (shift_opt) |shift| {
+            vm.stack[vm.base + a] = .{ .integer = if (is_left) shlInt(value, shift) else shrInt(value, shift) };
+            return .Continue;
+        }
+    }
+    if (try dispatchBitwiseMM(vm, vb, vc, a, if (is_left) .shl else .shr)) |result| {
+        return result;
+    }
+    return conv_err orelse error.ArithmeticError;
+}
+
+fn opUnm(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const vb = vm.stack[vm.base + b];
+    if (vb.isInteger()) {
+        vm.stack[vm.base + a] = .{ .integer = 0 -% vb.integer };
+    } else if (vb.toNumber()) |n| {
+        vm.stack[vm.base + a] = .{ .number = -n };
+    } else {
+        const mm = metamethod.getMetamethod(vb, .unm, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
+            return error.ArithmeticError;
+        };
+        return try callUnaryMetamethod(vm, mm, vb, a, "unm");
+    }
+    return .Continue;
+}
+
+fn opNot(vm: *VM, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const vb = &vm.stack[vm.base + b];
+    vm.stack[vm.base + a] = .{ .boolean = !vb.toBoolean() };
+    return .Continue;
+}
+
+fn opBNot(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const vb = vm.stack[vm.base + b];
+
+    var conv_err: ?anyerror = null;
+    if (toIntForBitwise(&vb)) |value| {
+        vm.stack[vm.base + a] = .{ .integer = ~value };
+        return .Continue;
+    } else |err| {
+        if (err == error.IntegerRepresentation) {
+            maybeSetIntReprContext(vm, b);
+        }
+        conv_err = err;
+    }
+    if (try dispatchBnotMM(vm, vb, a)) |result| {
+        return result;
+    }
+    return conv_err orelse error.ArithmeticError;
+}
+
+fn opLen(vm: *VM, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const vb = &vm.stack[vm.base + b];
+
+    if (vb.asString()) |str| {
+        vm.stack[vm.base + a] = .{ .integer = @as(i64, @intCast(str.asSlice().len)) };
+    } else if (vb.asTable()) |table| {
+        if (try dispatchLenMM(vm, table, vb.*, a)) |result| {
+            return result;
+        }
+        vm.stack[vm.base + a] = .{ .integer = table.rawLen() };
+    } else {
+        if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
+            return try callUnaryMetamethod(vm, mm, vb.*, a, "len");
+        }
+        const ty = callableValueTypeName(vb.*);
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "attempt to get length of a {s} value", .{ty}) catch "attempt to get length of value";
+        return vm.raiseString(msg);
+    }
+    return .Continue;
+}
+
+fn opConcat(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+
+    var all_primitive = true;
+    for (b..c + 1) |i| {
+        if (!canConcatPrimitive(vm.stack[vm.base + i])) {
+            all_primitive = false;
+            break;
+        }
+    }
+
+    if (all_primitive) {
+        var total_len: usize = 0;
+        for (b..c + 1) |i| {
+            const val = &vm.stack[vm.base + i];
+            if (val.asString()) |str| {
+                total_len += str.asSlice().len;
+            } else if (val.isInteger()) {
+                var buf: [32]u8 = undefined;
+                const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return error.ArithmeticError;
+                total_len += str.len;
+            } else if (val.isNumber()) {
+                var buf: [32]u8 = undefined;
+                const str = formatConcatNumber(&buf, val.number);
+                total_len += str.len;
+            }
+        }
+
+        const result_buf = try vm.gc().allocator.alloc(u8, total_len);
+        defer vm.gc().allocator.free(result_buf);
+        var offset: usize = 0;
+
+        for (b..c + 1) |i| {
+            const val = &vm.stack[vm.base + i];
+            if (val.asString()) |str| {
+                const str_slice = str.asSlice();
+                @memcpy(result_buf[offset .. offset + str_slice.len], str_slice);
+                offset += str_slice.len;
+            } else if (val.isInteger()) {
+                const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.integer}) catch return error.ArithmeticError;
+                offset += str.len;
+            } else if (val.isNumber()) {
+                const str = formatConcatNumber(result_buf[offset..], val.number);
+                offset += str.len;
+            }
+        }
+
+        const result_str = try vm.gc().allocString(result_buf);
+        vm.stack[vm.base + a] = TValue.fromString(result_str);
+        return .Continue;
+    }
+
+    var acc = vm.stack[vm.base + c];
+    vm.stack[vm.base + a] = acc;
+    var i: i16 = @as(i16, @intCast(c)) - 1;
+    while (i >= @as(i16, @intCast(b))) : (i -= 1) {
+        const left = vm.stack[vm.base + @as(u32, @intCast(i))];
+        if (canConcatPrimitive(left) and canConcatPrimitive(acc)) {
+            acc = try concatTwoSync(vm, left, acc);
+            vm.stack[vm.base + a] = acc;
+            continue;
+        }
+        const mm_res = try dispatchConcatMM(vm, left, acc, a) orelse {
+            const bad = if (!canConcatPrimitive(left)) left else acc;
+            const ty = callableValueTypeName(bad);
+            var msg_buf: [96]u8 = undefined;
+            const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
+            return vm.raiseString(msg);
+        };
+        switch (mm_res) {
+            .Continue => {
+                acc = vm.stack[vm.base + a];
+                continue;
+            },
+            .LoopContinue => {
+                ci.pending_concat_active = true;
+                ci.pending_concat_a = a;
+                ci.pending_concat_b = b;
+                ci.pending_concat_i = i - 1;
+                return .LoopContinue;
+            },
+            .ReturnVM => unreachable,
+        }
+    }
+    vm.stack[vm.base + a] = acc;
+    return .Continue;
+}
+
+fn opEq(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const negate = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const left = vm.stack[vm.base + b];
+    const right = vm.stack[vm.base + c];
+
+    const is_true = if (left.asTable() == null and right.asTable() == null)
+        eqOp(left, right)
+    else
+        try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
+
+    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+        vm.ci.?.skip();
+    }
+    return .Continue;
+}
+
+fn opLt(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const negate = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const left = vm.stack[vm.base + b];
+    const right = vm.stack[vm.base + c];
+
+    const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
+        try ltOp(left, right)
+    else if (left.asString() != null and right.asString() != null) blk: {
+        break :blk std.mem.order(u8, left.asString().?.asSlice(), right.asString().?.asSlice()) == .lt;
+    } else switch (try dispatchLtMMForOpcode(vm, ci, left, right, negate)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opLe(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const negate = inst.getA();
+    const b = inst.getB();
+    const c = inst.getC();
+    const left = vm.stack[vm.base + b];
+    const right = vm.stack[vm.base + c];
+
+    const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
+        try leOp(left, right)
+    else if (left.asString() != null and right.asString() != null) blk: {
+        const order = std.mem.order(u8, left.asString().?.asSlice(), right.asString().?.asSlice());
+        break :blk order == .lt or order == .eq;
+    } else switch (try dispatchLeMMForOpcode(vm, ci, left, right, negate)) {
+        .value => |mm_res| mm_res,
+        .deferred => return .LoopContinue,
+        .missing => {
+            _ = try raiseOrderComparison(vm, left, right);
+            unreachable;
+        },
+    };
+
+    if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opJmp(ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const sj = inst.getsJ();
+    try ci.jumpRel(sj);
+    return .Continue;
+}
+
+fn opTest(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const k = inst.getk();
+    const va = &vm.stack[vm.base + a];
+    if (va.toBoolean() != k) {
+        vm.ci.?.skip();
+    }
+    return .Continue;
+}
+
+fn opTestSet(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+    const a = inst.getA();
+    const b = inst.getB();
+    const k = inst.getk();
+    const vb = &vm.stack[vm.base + b];
+    if (vb.toBoolean() == k) {
+        vm.stack[vm.base + a] = vb.*;
+    } else {
+        ci.skip();
+    }
+    return .Continue;
+}
+
+fn opForPrep(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const sbx = inst.getSBx();
+    const v_init = vm.stack[vm.base + a];
+    const v_limit = vm.stack[vm.base + a + 1];
+    const v_step = vm.stack[vm.base + a + 2];
+
+    if (v_init.isInteger() and v_step.isInteger()) {
+        const ii = v_init.integer;
+        const is = v_step.integer;
+        if (is == 0) return error.InvalidForLoopStep;
+
+        var il: i64 = undefined;
+        if (v_limit.isInteger()) {
+            il = v_limit.integer;
+        } else {
+            const lnum = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
+            if (std.math.isNan(lnum)) return error.InvalidForLoopLimit;
+
+            if (std.math.isPositiveInf(lnum)) {
+                if (is < 0) {
+                    try ci.jumpRel(sbx);
+                    return .Continue;
+                }
+                il = std.math.maxInt(i64);
+            } else if (std.math.isNegativeInf(lnum)) {
+                if (is > 0) {
+                    try ci.jumpRel(sbx);
+                    return .Continue;
+                }
+                il = std.math.minInt(i64);
+            } else {
+                const adj = if (is > 0) @floor(lnum) else @ceil(lnum);
+                if (is > 0 and adj < @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                    try ci.jumpRel(sbx);
+                    return .Continue;
+                }
+                if (is < 0 and adj > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                    try ci.jumpRel(sbx);
+                    return .Continue;
+                }
+                if (adj >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
+                    il = std.math.maxInt(i64);
+                } else if (adj <= @as(f64, @floatFromInt(std.math.minInt(i64)))) {
+                    il = std.math.minInt(i64);
+                } else {
+                    il = @as(i64, @intFromFloat(adj));
+                }
+            }
+        }
+        vm.stack[vm.base + a + 1] = .{ .integer = il };
+
+        const sub_result = @subWithOverflow(ii, is);
+        if (sub_result[1] == 0) {
+            vm.stack[vm.base + a] = .{ .integer = sub_result[0] };
+        } else {
+            const should_run = if (is > 0) (ii <= il) else (ii >= il);
+            if (!should_run) {
+                try ci.jumpRel(sbx);
+                return .Continue;
+            }
+            vm.stack[vm.base + a] = .{ .integer = ii };
+            vm.stack[vm.base + a + 3] = .{ .integer = ii };
+            return .Continue;
+        }
+    } else {
+        const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
+        const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
+        if (s == 0) return error.InvalidForLoopStep;
+        vm.stack[vm.base + a] = .{ .number = i - s };
+    }
+
+    try ci.jumpRel(sbx);
+    return .Continue;
+}
+
+fn opForLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const sbx = inst.getSBx();
+    const idx = &vm.stack[vm.base + a];
+    const limit = &vm.stack[vm.base + a + 1];
+    const step = &vm.stack[vm.base + a + 2];
+
+    if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
+        const i = idx.integer;
+        const l = limit.integer;
+        const s = step.integer;
+
+        if (s > 0) {
+            if (i < l) {
+                const add_result = @addWithOverflow(i, s);
+                if (add_result[1] == 0 and add_result[0] <= l) {
+                    const new_i = add_result[0];
+                    idx.* = .{ .integer = new_i };
+                    vm.stack[vm.base + a + 3] = .{ .integer = new_i };
+                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                }
+            }
+        } else if (s < 0) {
+            if (i > l) {
+                const add_result = @addWithOverflow(i, s);
+                if (add_result[1] == 0 and add_result[0] >= l) {
+                    const new_i = add_result[0];
+                    idx.* = .{ .integer = new_i };
+                    vm.stack[vm.base + a + 3] = .{ .integer = new_i };
+                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+                }
+            }
+        }
+    } else {
+        const i = idx.toNumber() orelse return error.InvalidForLoopInit;
+        const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
+        const s = step.toNumber() orelse return error.InvalidForLoopStep;
+
+        const new_i = i + s;
+        const cont = if (s > 0) (new_i <= l) else (new_i >= l);
+        if (cont) {
+            idx.* = .{ .number = new_i };
+            vm.stack[vm.base + a + 3] = .{ .number = new_i };
+            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
+        }
+    }
+    return .Continue;
+}
+
+fn opTForPrep(ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const sbx = inst.getSBx();
+    try ci.jumpRel(sbx);
+    return .Continue;
+}
+
+fn opTForCall(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    const a = inst.getA();
+    const c = inst.getC();
+
+    const func_val = vm.stack[vm.base + a];
+    const state_val = vm.stack[vm.base + a + 1];
+    const control_val = vm.stack[vm.base + a + 2];
+
+    const call_reg: u8 = @intCast(a + 4);
+    vm.stack[vm.base + call_reg] = func_val;
+    vm.stack[vm.base + call_reg + 1] = state_val;
+    vm.stack[vm.base + call_reg + 2] = control_val;
+
+    const nresults: u32 = if (c > 0) c else 1;
+
+    if (func_val.isObject()) {
+        const obj = func_val.object;
+        if (obj.type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, obj);
+            const frame_max = vm.base + ci.func.maxstacksize;
+            vm.top = vm.base + call_reg + 3;
+            try vm.callNative(nc.func.id, call_reg, 2, nresults);
+            const result_end = vm.base + call_reg + nresults;
+            if (result_end < frame_max) {
+                for (vm.stack[result_end..frame_max]) |*slot| {
+                    slot.* = .nil;
+                }
+            }
+            vm.top = frame_max;
+            try hook_state.onReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
+            return .Continue;
+        }
+    }
+
+    if (func_val.asClosure()) |closure| {
+        const func_proto = closure.proto;
+        const new_base = vm.base + call_reg;
+
+        vm.stack[new_base] = state_val;
+        vm.stack[new_base + 1] = control_val;
+
+        if (2 < func_proto.numparams) {
+            for (vm.stack[new_base + 2 ..][0 .. func_proto.numparams - 2]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+
+        const nres: i16 = @intCast(nresults);
+        const iter_ci = try pushCallInfo(vm, func_proto, closure, new_base, new_base, nres);
+        iter_ci.debug_name = "for iterator";
+        iter_ci.debug_namewhat = "for iterator";
+        vm.top = new_base + func_proto.maxstacksize;
+        return .LoopContinue;
+    }
+
+    if (try dispatchCallMM(vm, func_val, call_reg, 2, @intCast(nresults))) |result| {
+        return result;
+    }
+
+    return error.NotAFunction;
+}
+
+fn opTForLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    _ = ci;
+    const a = inst.getA();
+    const sbx = inst.getSBx();
+
+    const first_var = vm.stack[vm.base + a + 4];
+
+    if (!first_var.isNil()) {
+        vm.stack[vm.base + a + 2] = first_var;
+        try vm.ci.?.jumpRel(sbx);
+    }
+    return .Continue;
+}
+
 fn raiseCallNotFunction(vm: *VM, ci: *CallInfo, inst: Instruction, a: u8, func_val: TValue) !ExecuteResult {
     var msg_buf: [192]u8 = undefined;
     const msg = buildCallNotFunctionMessage(vm, ci, a, func_val, &msg_buf);
@@ -2040,1024 +2826,81 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     }
 
     switch (inst.getOpCode()) {
-        .MOVE => {
-            const a = inst.getA();
-            const b = inst.getB();
-            vm.stack[vm.base + a] = vm.stack[vm.base + b];
-            return .Continue;
-        },
-        .LOADK => {
-            const a = inst.getA();
-            const bx = inst.getBx();
-            vm.stack[vm.base + a] = ci.func.k[bx];
-            return .Continue;
-        },
-        .LOADKX => {
-            const a = inst.getA();
-            const extraarg_inst = try ci.fetchExtraArg();
-            const ax = extraarg_inst.getAx();
-            vm.stack[vm.base + a] = ci.func.k[ax];
-            return .Continue;
-        },
-        .LOADI => {
-            const a = inst.getA();
-            const sbx = inst.getSBx();
-            vm.stack[vm.base + a] = .{ .integer = @as(i64, sbx) };
-            return .Continue;
-        },
-        .LOADF => {
-            const a = inst.getA();
-            const sbx = inst.getSBx();
-            vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(sbx)) };
-            return .Continue;
-        },
-        .LOADFALSE => {
-            const a = inst.getA();
-            vm.stack[vm.base + a] = .{ .boolean = false };
-            return .Continue;
-        },
-        .LFALSESKIP => {
-            const a = inst.getA();
-            vm.stack[vm.base + a] = .{ .boolean = false };
-            ci.skip();
-            return .Continue;
-        },
-        .LOADTRUE => {
-            const a = inst.getA();
-            vm.stack[vm.base + a] = .{ .boolean = true };
-            return .Continue;
-        },
-        .LOADNIL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            var i: u8 = 0;
-            while (i <= b) : (i += 1) {
-                vm.stack[vm.base + a + i] = .nil;
-            }
-            return .Continue;
-        },
+        .MOVE => return opMove(vm, inst),
+        .LOADK => return opLoadK(vm, ci, inst),
+        .LOADKX => return try opLoadKx(vm, ci, inst),
+        .LOADI => return opLoadI(vm, inst),
+        .LOADF => return opLoadF(vm, inst),
+        .LOADFALSE => return opLoadFalse(vm, inst),
+        .LFALSESKIP => return opLFalseSkip(vm, ci, inst),
+        .LOADTRUE => return opLoadTrue(vm, inst),
+        .LOADNIL => return opLoadNil(vm, inst),
         // [MM_ARITH] Fast path: integer add with immediate. Slow path: __add metamethod.
-        .ADDI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const imm = @as(i8, @bitCast(@as(u8, sc)));
-
-            // Wrapping arithmetic per Lua 5.4 semantics
-            if (vb.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer +% @as(i64, imm) };
-            } else if (vb.toNumber()) |n| {
-                vm.stack[vm.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
-            } else {
-                return error.ArithmeticError;
-            }
-            return .Continue;
-        },
-        .SHLI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const vb = vm.stack[vm.base + b];
-
-            if (vb.isInteger()) {
-                const shift: i64 = @intCast(sc);
-                vm.stack[vm.base + a] = .{ .integer = shlInt(vb.integer, shift) };
-                return .Continue;
-            } else if (vb.toNumber()) |n| {
-                if (@floor(n) == n) {
-                    const shift: i64 = @intCast(sc);
-                    vm.stack[vm.base + a] = .{ .integer = shlInt(@intFromFloat(n), shift) };
-                    return .Continue;
-                }
-            }
-            // Try metamethod
-            const shift_val = TValue{ .integer = @as(i64, sc) };
-            if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shl)) |result| return result;
-            return error.ArithmeticError;
-        },
-        .SHRI => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const sc = inst.getC();
-            const vb = vm.stack[vm.base + b];
-
-            if (vb.isInteger()) {
-                const shift: i64 = @intCast(sc);
-                vm.stack[vm.base + a] = .{ .integer = shrInt(vb.integer, shift) };
-                return .Continue;
-            } else if (vb.toNumber()) |n| {
-                if (@floor(n) == n) {
-                    const shift: i64 = @intCast(sc);
-                    vm.stack[vm.base + a] = .{ .integer = shrInt(@intFromFloat(n), shift) };
-                    return .Continue;
-                }
-            }
-            // Try metamethod
-            const shift_val = TValue{ .integer = @as(i64, sc) };
-            if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shr)) |result| return result;
-            return error.ArithmeticError;
-        },
+        .ADDI => return try opAddI(vm, inst),
+        .SHLI => return try opShlI(vm, inst),
+        .SHRI => return try opShrI(vm, inst),
         // [MM_ARITH] Fast path: add with constant. Slow path: __add metamethod.
-        .ADDK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            // Wrapping arithmetic per Lua 5.4 semantics
-            if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer +% vc.integer };
-            } else {
-                const nb_opt = vb.toNumber();
-                const nc_opt = vc.toNumber();
-                if (nb_opt == null or nc_opt == null) {
-                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .add)) |result| return result;
-                    return error.ArithmeticError;
-                }
-                const nb = nb_opt.?;
-                const nc = nc_opt.?;
-                vm.stack[vm.base + a] = .{ .number = nb + nc };
-            }
-            return .Continue;
-        },
+        .ADDK => return try opArithK(vm, ci, inst, .add),
         // [MM_ARITH] Fast path: subtract with constant. Slow path: __sub metamethod.
-        .SUBK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            // Wrapping arithmetic per Lua 5.4 semantics
-            if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer -% vc.integer };
-            } else {
-                const nb_opt = vb.toNumber();
-                const nc_opt = vc.toNumber();
-                if (nb_opt == null or nc_opt == null) {
-                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .sub)) |result| return result;
-                    return error.ArithmeticError;
-                }
-                const nb = nb_opt.?;
-                const nc = nc_opt.?;
-                vm.stack[vm.base + a] = .{ .number = nb - nc };
-            }
-            return .Continue;
-        },
+        .SUBK => return try opArithK(vm, ci, inst, .sub),
         // [MM_ARITH] Fast path: multiply with constant. Slow path: __mul metamethod.
-        .MULK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            // Wrapping arithmetic per Lua 5.4 semantics
-            if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = vb.integer *% vc.integer };
-            } else {
-                const nb_opt = vb.toNumber();
-                const nc_opt = vc.toNumber();
-                if (nb_opt == null or nc_opt == null) {
-                    if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mul)) |result| return result;
-                    return error.ArithmeticError;
-                }
-                const nb = nb_opt.?;
-                const nc = nc_opt.?;
-                vm.stack[vm.base + a] = .{ .number = nb * nc };
-            }
-            return .Continue;
-        },
+        .MULK => return try opArithK(vm, ci, inst, .mul),
         // [MM_ARITH] Fast path: divide with constant. Slow path: __div metamethod.
-        .DIVK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            const nb_opt = vb.toNumber();
-            const nc_opt = vc.toNumber();
-            if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .div)) |result| return result;
-                return error.ArithmeticError;
-            }
-            const nb = nb_opt.?;
-            const nc = nc_opt.?;
-            // Division by zero returns inf/-inf/nan per IEEE 754
-            vm.stack[vm.base + a] = .{ .number = nb / nc };
-            return .Continue;
-        },
+        .DIVK => return try opArithK(vm, ci, inst, .div),
         // [MM_ARITH] Fast path: integer divide with constant. Slow path: __idiv metamethod.
-        .IDIVK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            if (vb.isInteger() and vc.isInteger()) {
-                const res = try idivInt(vb.integer, vc.integer);
-                vm.stack[vm.base + a] = .{ .integer = res };
-                return .Continue;
-            }
-            const nb_opt = vb.toNumber();
-            const nc_opt = vc.toNumber();
-            if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .idiv)) |result| return result;
-                return error.ArithmeticError;
-            }
-            const nb = nb_opt.?;
-            const nc = nc_opt.?;
-            vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb, nc) };
-            return .Continue;
-        },
+        .IDIVK => return try opArithK(vm, ci, inst, .idiv),
         // [MM_ARITH] Fast path: modulo with constant. Slow path: __mod metamethod.
-        .MODK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            if (vb.isInteger() and vc.isInteger()) {
-                const res = try modInt(vb.integer, vc.integer);
-                vm.stack[vm.base + a] = .{ .integer = res };
-                return .Continue;
-            }
-            const nb_opt = vb.toNumber();
-            const nc_opt = vc.toNumber();
-            if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mod)) |result| return result;
-                return error.ArithmeticError;
-            }
-            const nb = nb_opt.?;
-            const nc = nc_opt.?;
-            vm.stack[vm.base + a] = .{ .number = luaMod(nb, nc) };
-            return .Continue;
-        },
+        .MODK => return try opArithK(vm, ci, inst, .mod),
         // [MM_ARITH] Fast path: power with constant. Slow path: __pow metamethod.
-        .POWK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            const nb_opt = vb.toNumber();
-            const nc_opt = vc.toNumber();
-            if (nb_opt == null or nc_opt == null) {
-                if (try dispatchArithKMM(vm, vb.*, vc.*, a, .pow)) |result| return result;
-                return error.ArithmeticError;
-            }
-            const nb = nb_opt.?;
-            const nc = nc_opt.?;
-            vm.stack[vm.base + a] = .{ .number = std.math.pow(f64, nb, nc) };
-            return .Continue;
-        },
-        .BANDK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            var conv_err: ?anyerror = null;
-            var ib_opt: ?i64 = null;
-            var ic_opt: ?i64 = null;
-            if (toIntForBitwise(vb)) |ib| {
-                ib_opt = ib;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            if (toIntForBitwise(vc)) |ic| {
-                ic_opt = ic;
-            } else |err| {
-                conv_err = err;
-            }
-            if (ib_opt) |ib| {
-                if (ic_opt) |ic| {
-                    vm.stack[vm.base + a] = .{ .integer = ib & ic };
-                    return .Continue;
-                }
-            }
-            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .band)) |result| return result;
-            return conv_err orelse error.ArithmeticError;
-        },
-        .BORK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            var conv_err: ?anyerror = null;
-            var ib_opt: ?i64 = null;
-            var ic_opt: ?i64 = null;
-            if (toIntForBitwise(vb)) |ib| {
-                ib_opt = ib;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            if (toIntForBitwise(vc)) |ic| {
-                ic_opt = ic;
-            } else |err| {
-                conv_err = err;
-            }
-            if (ib_opt) |ib| {
-                if (ic_opt) |ic| {
-                    vm.stack[vm.base + a] = .{ .integer = ib | ic };
-                    return .Continue;
-                }
-            }
-            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .bor)) |result| return result;
-            return conv_err orelse error.ArithmeticError;
-        },
-        .BXORK => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = &vm.stack[vm.base + b];
-            const vc = &ci.func.k[c];
-
-            var conv_err: ?anyerror = null;
-            var ib_opt: ?i64 = null;
-            var ic_opt: ?i64 = null;
-            if (toIntForBitwise(vb)) |ib| {
-                ib_opt = ib;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            if (toIntForBitwise(vc)) |ic| {
-                ic_opt = ic;
-            } else |err| {
-                conv_err = err;
-            }
-            if (ib_opt) |ib| {
-                if (ic_opt) |ic| {
-                    vm.stack[vm.base + a] = .{ .integer = ib ^ ic };
-                    return .Continue;
-                }
-            }
-            if (try dispatchBitwiseMM(vm, vb.*, vc.*, a, .bxor)) |result| return result;
-            return conv_err orelse error.ArithmeticError;
-        },
+        .POWK => return try opArithK(vm, ci, inst, .pow),
+        .BANDK => return try opBitwiseK(vm, ci, inst, .band),
+        .BORK => return try opBitwiseK(vm, ci, inst, .bor),
+        .BXORK => return try opBitwiseK(vm, ci, inst, .bxor),
         // [MM_ARITH] Fast path: register add. Slow path: __add metamethod.
-        .ADD => {
-            return try dispatchArithMM(vm, inst, .add, .add);
-        },
+        .ADD => return try dispatchArithMM(vm, inst, .add, .add),
         // [MM_ARITH] Fast path: register subtract. Slow path: __sub metamethod.
-        .SUB => {
-            return try dispatchArithMM(vm, inst, .sub, .sub);
-        },
+        .SUB => return try dispatchArithMM(vm, inst, .sub, .sub),
         // [MM_ARITH] Fast path: register multiply. Slow path: __mul metamethod.
-        .MUL => {
-            return try dispatchArithMM(vm, inst, .mul, .mul);
-        },
+        .MUL => return try dispatchArithMM(vm, inst, .mul, .mul),
         // [MM_ARITH] Fast path: register divide. Slow path: __div metamethod.
-        .DIV => {
-            return try dispatchArithMM(vm, inst, .div, .div);
-        },
+        .DIV => return try dispatchArithMM(vm, inst, .div, .div),
         // [MM_ARITH] Fast path: register integer divide. Slow path: __idiv metamethod.
-        .IDIV => {
-            return try dispatchArithMM(vm, inst, .idiv, .idiv);
-        },
+        .IDIV => return try dispatchArithMM(vm, inst, .idiv, .idiv),
         // [MM_ARITH] Fast path: register modulo. Slow path: __mod metamethod.
-        .MOD => {
-            return try dispatchArithMM(vm, inst, .mod, .mod);
-        },
+        .MOD => return try dispatchArithMM(vm, inst, .mod, .mod),
         // [MM_ARITH] Fast path: register power. Slow path: __pow metamethod.
-        .POW => {
-            return try dispatchArithMM(vm, inst, .pow, .pow);
-        },
-        .BAND => {
-            bitwiseBinary(vm, inst, .band) catch |err| {
-                const a = inst.getA();
-                const b = inst.getB();
-                const c = inst.getC();
-                if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .band)) |result| {
-                    return result;
-                }
-                return err;
-            };
-            return .Continue;
-        },
-        .BOR => {
-            bitwiseBinary(vm, inst, .bor) catch |err| {
-                const a = inst.getA();
-                const b = inst.getB();
-                const c = inst.getC();
-                if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .bor)) |result| {
-                    return result;
-                }
-                return err;
-            };
-            return .Continue;
-        },
-        .BXOR => {
-            bitwiseBinary(vm, inst, .bxor) catch |err| {
-                const a = inst.getA();
-                const b = inst.getB();
-                const c = inst.getC();
-                if (try dispatchBitwiseMM(vm, vm.stack[vm.base + b], vm.stack[vm.base + c], a, .bxor)) |result| {
-                    return result;
-                }
-                return err;
-            };
-            return .Continue;
-        },
-        .SHL => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = vm.stack[vm.base + b];
-            const vc = vm.stack[vm.base + c];
-
-            var conv_err: ?anyerror = null;
-            var value_opt: ?i64 = null;
-            var shift_opt: ?i64 = null;
-            if (toIntForBitwise(&vb)) |value| {
-                value_opt = value;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            if (toIntForBitwise(&vc)) |shift| {
-                shift_opt = shift;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, c);
-                }
-                conv_err = err;
-            }
-            if (value_opt) |value| {
-                if (shift_opt) |shift| {
-                    const result = shlInt(value, shift);
-                    vm.stack[vm.base + a] = .{ .integer = result };
-                    return .Continue;
-                }
-            }
-            // Try metamethod
-            if (try dispatchBitwiseMM(vm, vb, vc, a, .shl)) |result| {
-                return result;
-            }
-            return conv_err orelse error.ArithmeticError;
-        },
-        .SHR => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const vb = vm.stack[vm.base + b];
-            const vc = vm.stack[vm.base + c];
-
-            var conv_err: ?anyerror = null;
-            var value_opt: ?i64 = null;
-            var shift_opt: ?i64 = null;
-            if (toIntForBitwise(&vb)) |value| {
-                value_opt = value;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            if (toIntForBitwise(&vc)) |shift| {
-                shift_opt = shift;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, c);
-                }
-                conv_err = err;
-            }
-            if (value_opt) |value| {
-                if (shift_opt) |shift| {
-                    const result = shrInt(value, shift);
-                    vm.stack[vm.base + a] = .{ .integer = result };
-                    return .Continue;
-                }
-            }
-            // Try metamethod
-            if (try dispatchBitwiseMM(vm, vb, vc, a, .shr)) |result| {
-                return result;
-            }
-            return conv_err orelse error.ArithmeticError;
-        },
+        .POW => return try dispatchArithMM(vm, inst, .pow, .pow),
+        .BAND => return try opBitwise(vm, inst, .band),
+        .BOR => return try opBitwise(vm, inst, .bor),
+        .BXOR => return try opBitwise(vm, inst, .bxor),
+        .SHL => return try opShift(vm, inst, true),
+        .SHR => return try opShift(vm, inst, false),
         // [MM_ARITH] Fast path: unary minus. Slow path: __unm metamethod.
-        .UNM => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const vb = vm.stack[vm.base + b];
-            if (vb.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = 0 -% vb.integer };
-            } else if (vb.toNumber()) |n| {
-                vm.stack[vm.base + a] = .{ .number = -n };
-            } else {
-                // Try __unm metamethod
-                const mm = metamethod.getMetamethod(vb, .unm, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
-                    return error.ArithmeticError;
-                };
-                return try callUnaryMetamethod(vm, mm, vb, a, "unm");
-            }
-            return .Continue;
-        },
-        .NOT => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const vb = &vm.stack[vm.base + b];
-            vm.stack[vm.base + a] = .{ .boolean = !vb.toBoolean() };
-            return .Continue;
-        },
-        .BNOT => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const vb = vm.stack[vm.base + b];
-
-            var conv_err: ?anyerror = null;
-            if (toIntForBitwise(&vb)) |value| {
-                vm.stack[vm.base + a] = .{ .integer = ~value };
-                return .Continue;
-            } else |err| {
-                if (err == error.IntegerRepresentation) {
-                    maybeSetIntReprContext(vm, b);
-                }
-                conv_err = err;
-            }
-            // Try metamethod
-            if (try dispatchBnotMM(vm, vb, a)) |result| {
-                return result;
-            }
-            return conv_err orelse error.ArithmeticError;
-        },
+        .UNM => return try opUnm(vm, inst),
+        .NOT => return opNot(vm, inst),
+        .BNOT => return try opBNot(vm, inst),
         // [MM_LEN] Fast path: string/table length. Slow path: __len metamethod.
-        .LEN => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const vb = &vm.stack[vm.base + b];
-
-            if (vb.asString()) |str| {
-                // Strings: direct byte length (no metamethod)
-                vm.stack[vm.base + a] = .{ .integer = @as(i64, @intCast(str.asSlice().len)) };
-            } else if (vb.asTable()) |table| {
-                // Tables: try __len metamethod first
-                if (try dispatchLenMM(vm, table, vb.*, a)) |result| {
-                    return result;
-                }
-                vm.stack[vm.base + a] = .{ .integer = table.rawLen() };
-            } else {
-                if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
-                    return try callUnaryMetamethod(vm, mm, vb.*, a, "len");
-                }
-                const ty = callableValueTypeName(vb.*);
-                var msg_buf: [96]u8 = undefined;
-                const msg = std.fmt.bufPrint(&msg_buf, "attempt to get length of a {s} value", .{ty}) catch "attempt to get length of value";
-                return vm.raiseString(msg);
-            }
-            return .Continue;
-        },
+        .LEN => return try opLen(vm, inst),
         // [MM_CONCAT] Fast path: string/number concat. Slow path: __concat metamethod.
-        .CONCAT => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-
-            // Check if all values can be concatenated without metamethod
-            var all_primitive = true;
-            for (b..c + 1) |i| {
-                if (!canConcatPrimitive(vm.stack[vm.base + i])) {
-                    all_primitive = false;
-                    break;
-                }
-            }
-
-            // Fast path: all values are strings or numbers
-            if (all_primitive) {
-                var total_len: usize = 0;
-                for (b..c + 1) |i| {
-                    const val = &vm.stack[vm.base + i];
-                    if (val.asString()) |str| {
-                        total_len += str.asSlice().len;
-                    } else if (val.isInteger()) {
-                        var buf: [32]u8 = undefined;
-                        const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch {
-                            return error.ArithmeticError;
-                        };
-                        total_len += str.len;
-                    } else if (val.isNumber()) {
-                        var buf: [32]u8 = undefined;
-                        const str = formatConcatNumber(&buf, val.number);
-                        total_len += str.len;
-                    }
-                }
-
-                const result_buf = try vm.gc().allocator.alloc(u8, total_len);
-                defer vm.gc().allocator.free(result_buf);
-                var offset: usize = 0;
-
-                for (b..c + 1) |i| {
-                    const val = &vm.stack[vm.base + i];
-                    if (val.asString()) |str| {
-                        const str_slice = str.asSlice();
-                        @memcpy(result_buf[offset .. offset + str_slice.len], str_slice);
-                        offset += str_slice.len;
-                    } else if (val.isInteger()) {
-                        const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.integer}) catch {
-                            return error.ArithmeticError;
-                        };
-                        offset += str.len;
-                    } else if (val.isNumber()) {
-                        const str = formatConcatNumber(result_buf[offset..], val.number);
-                        offset += str.len;
-                    }
-                }
-
-                const result_str = try vm.gc().allocString(result_buf);
-                vm.stack[vm.base + a] = TValue.fromString(result_str);
-                return .Continue;
-            }
-
-            // Slow path: fold concatenation pairwise with metamethod fallback.
-            var acc = vm.stack[vm.base + c];
-            vm.stack[vm.base + a] = acc;
-            var i: i16 = @as(i16, @intCast(c)) - 1;
-            while (i >= @as(i16, @intCast(b))) : (i -= 1) {
-                const left = vm.stack[vm.base + @as(u32, @intCast(i))];
-                if (canConcatPrimitive(left) and canConcatPrimitive(acc)) {
-                    acc = try concatTwoSync(vm, left, acc);
-                    vm.stack[vm.base + a] = acc;
-                    continue;
-                }
-                const mm_res = try dispatchConcatMM(vm, left, acc, a) orelse {
-                    const bad = if (!canConcatPrimitive(left)) left else acc;
-                    const ty = callableValueTypeName(bad);
-                    var msg_buf: [96]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&msg_buf, "attempt to concatenate a {s} value", .{ty}) catch "attempt to concatenate values";
-                    return vm.raiseString(msg);
-                };
-                switch (mm_res) {
-                    .Continue => {
-                        acc = vm.stack[vm.base + a];
-                        continue;
-                    },
-                    .LoopContinue => {
-                        ci.pending_concat_active = true;
-                        ci.pending_concat_a = a;
-                        ci.pending_concat_b = b;
-                        ci.pending_concat_i = i - 1;
-                        return .LoopContinue;
-                    },
-                    .ReturnVM => unreachable,
-                }
-            }
-            vm.stack[vm.base + a] = acc;
-            return .Continue;
-        },
+        .CONCAT => return try opConcat(vm, ci, inst),
         // [MM_EQ] Fast path: primitive equality. Slow path: __eq metamethod.
-        .EQ => {
-            const negate = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const left = vm.stack[vm.base + b];
-            const right = vm.stack[vm.base + c];
-
-            // Fast path: neither is a table, no metamethod possible
-            const is_true = if (left.asTable() == null and right.asTable() == null)
-                eqOp(left, right)
-            else
-                try dispatchEqMM(vm, left, right) orelse eqOp(left, right);
-
-            if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .EQ => return try opEq(vm, ci, inst),
         // [MM_LT] Fast path: numeric less-than. Slow path: __lt metamethod.
-        .LT => {
-            const negate = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const left = vm.stack[vm.base + b];
-            const right = vm.stack[vm.base + c];
-
-            // Fast path: both are numbers
-            const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
-                try ltOp(left, right)
-                // Fast path: both are strings - lexicographic comparison
-            else if (left.asString() != null and right.asString() != null) blk: {
-                const left_str = left.asString().?.asSlice();
-                const right_str = right.asString().?.asSlice();
-                break :blk std.mem.order(u8, left_str, right_str) == .lt;
-            }
-                // Slow path: try metamethod
-                else switch (try dispatchLtMMForOpcode(vm, ci, left, right, negate)) {
-                    .value => |mm_res| mm_res,
-                    .deferred => return .LoopContinue,
-                    .missing => {
-                        _ = try raiseOrderComparison(vm, left, right);
-                        unreachable;
-                    },
-                };
-
-            if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
+        .LT => return try opLt(vm, ci, inst),
         // [MM_LE] Fast path: numeric less-or-equal. Slow path: __le metamethod.
-        .LE => {
-            const negate = inst.getA();
-            const b = inst.getB();
-            const c = inst.getC();
-            const left = vm.stack[vm.base + b];
-            const right = vm.stack[vm.base + c];
-
-            // Fast path: both are numbers
-            const is_true = if ((left.isInteger() or left.isNumber()) and (right.isInteger() or right.isNumber()))
-                try leOp(left, right)
-                // Fast path: both are strings - lexicographic comparison
-            else if (left.asString() != null and right.asString() != null) blk: {
-                const left_str = left.asString().?.asSlice();
-                const right_str = right.asString().?.asSlice();
-                const order = std.mem.order(u8, left_str, right_str);
-                break :blk order == .lt or order == .eq;
-            }
-                // Slow path: try metamethod
-                else switch (try dispatchLeMMForOpcode(vm, ci, left, right, negate)) {
-                    .value => |mm_res| mm_res,
-                    .deferred => return .LoopContinue,
-                    .missing => {
-                        _ = try raiseOrderComparison(vm, left, right);
-                        unreachable;
-                    },
-                };
-
-            if ((is_true and negate == 0) or (!is_true and negate != 0)) {
-                ci.skip();
-            }
-            return .Continue;
-        },
-        .JMP => {
-            const sj = inst.getsJ();
-            try ci.jumpRel(sj);
-            return .Continue;
-        },
-        .TEST => {
-            const a = inst.getA();
-            const k = inst.getk();
-            const va = &vm.stack[vm.base + a];
-            if (va.toBoolean() != k) {
-                ci.skip();
-            }
-            return .Continue;
-        },
-        .TESTSET => {
-            const a = inst.getA();
-            const b = inst.getB();
-            const k = inst.getk();
-            const vb = &vm.stack[vm.base + b];
-            if (vb.toBoolean() == k) {
-                vm.stack[vm.base + a] = vb.*;
-            } else {
-                ci.skip();
-            }
-            return .Continue;
-        },
-        .FORPREP => {
-            const a = inst.getA();
-            const sbx = inst.getSBx();
-            const v_init = vm.stack[vm.base + a];
-            const v_limit = vm.stack[vm.base + a + 1];
-            const v_step = vm.stack[vm.base + a + 2];
-
-            if (v_init.isInteger() and v_step.isInteger()) {
-                const ii = v_init.integer;
-                const is = v_step.integer;
-                if (is == 0) return error.InvalidForLoopStep;
-
-                var il: i64 = undefined;
-                if (v_limit.isInteger()) {
-                    il = v_limit.integer;
-                } else {
-                    const lnum = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
-                    if (std.math.isNan(lnum)) return error.InvalidForLoopLimit;
-
-                    if (std.math.isPositiveInf(lnum)) {
-                        if (is < 0) {
-                            // finite integer start cannot reach +inf with negative step
-                            try ci.jumpRel(sbx);
-                            return .Continue;
-                        }
-                        il = std.math.maxInt(i64);
-                    } else if (std.math.isNegativeInf(lnum)) {
-                        if (is > 0) {
-                            // finite integer start cannot reach -inf with positive step
-                            try ci.jumpRel(sbx);
-                            return .Continue;
-                        }
-                        il = std.math.minInt(i64);
-                    } else {
-                        const adj = if (is > 0) @floor(lnum) else @ceil(lnum);
-                        if (is > 0 and adj < @as(f64, @floatFromInt(std.math.minInt(i64)))) {
-                            // Finite limit is below i64 range: positive-step integer loop
-                            // can never reach it from any finite i64 start.
-                            try ci.jumpRel(sbx);
-                            return .Continue;
-                        }
-                        if (is < 0 and adj > @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
-                            // Finite limit is above i64 range: negative-step integer loop
-                            // can never reach it from any finite i64 start.
-                            try ci.jumpRel(sbx);
-                            return .Continue;
-                        }
-                        if (adj >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) {
-                            il = std.math.maxInt(i64);
-                        } else if (adj <= @as(f64, @floatFromInt(std.math.minInt(i64)))) {
-                            il = std.math.minInt(i64);
-                        } else {
-                            il = @as(i64, @intFromFloat(adj));
-                        }
-                    }
-                }
-                vm.stack[vm.base + a + 1] = .{ .integer = il };
-
-                const sub_result = @subWithOverflow(ii, is);
-                if (sub_result[1] == 0) {
-                    vm.stack[vm.base + a] = .{ .integer = sub_result[0] };
-                } else {
-                    // Integer overflow on (init - step): keep integer semantics
-                    // without falling back to imprecise float math near 2^63.
-                    const should_run = if (is > 0) (ii <= il) else (ii >= il);
-                    if (!should_run) {
-                        try ci.jumpRel(sbx);
-                        return .Continue;
-                    }
-                    vm.stack[vm.base + a] = .{ .integer = ii };
-                    vm.stack[vm.base + a + 3] = .{ .integer = ii };
-                    return .Continue;
-                }
-            } else {
-                const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
-                const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
-                if (s == 0) return error.InvalidForLoopStep;
-                vm.stack[vm.base + a] = .{ .number = i - s };
-            }
-
-            try ci.jumpRel(sbx);
-            return .Continue;
-        },
-        .FORLOOP => {
-            const a = inst.getA();
-            const sbx = inst.getSBx();
-            const idx = &vm.stack[vm.base + a];
-            const limit = &vm.stack[vm.base + a + 1];
-            const step = &vm.stack[vm.base + a + 2];
-
-            if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
-                const i = idx.integer;
-                const l = limit.integer;
-                const s = step.integer;
-
-                if (s > 0) {
-                    if (i < l) {
-                        const add_result = @addWithOverflow(i, s);
-                        if (add_result[1] == 0 and add_result[0] <= l) {
-                            const new_i = add_result[0];
-                            idx.* = .{ .integer = new_i };
-                            vm.stack[vm.base + a + 3] = .{ .integer = new_i };
-                            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-                        }
-                    }
-                } else if (s < 0) {
-                    if (i > l) {
-                        const add_result = @addWithOverflow(i, s);
-                        if (add_result[1] == 0 and add_result[0] >= l) {
-                            const new_i = add_result[0];
-                            idx.* = .{ .integer = new_i };
-                            vm.stack[vm.base + a + 3] = .{ .integer = new_i };
-                            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-                        }
-                    }
-                }
-            } else {
-                const i = idx.toNumber() orelse return error.InvalidForLoopInit;
-                const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
-                const s = step.toNumber() orelse return error.InvalidForLoopStep;
-
-                const new_i = i + s;
-                const cont = if (s > 0) (new_i <= l) else (new_i >= l);
-                if (cont) {
-                    idx.* = .{ .number = new_i };
-                    vm.stack[vm.base + a + 3] = .{ .number = new_i };
-                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-                }
-            }
-            return .Continue;
-        },
+        .LE => return try opLe(vm, ci, inst),
+        .JMP => return try opJmp(ci, inst),
+        .TEST => return opTest(vm, ci, inst),
+        .TESTSET => return opTestSet(vm, ci, inst),
+        .FORPREP => return try opForPrep(vm, ci, inst),
+        .FORLOOP => return try opForLoop(vm, ci, inst),
         // Generic for loop: TFORPREP A sBx - jump forward to TFORCALL/TFORLOOP
-        .TFORPREP => {
-            const sbx = inst.getSBx();
-            try ci.jumpRel(sbx);
-            return .Continue;
-        },
+        .TFORPREP => return try opTForPrep(ci, inst),
         // Generic for loop: TFORCALL A C - call iterator R(A)(R(A+1), R(A+2)),
         // store C results at R(A+4)... (R(A+3) is to-be-closed state)
-        .TFORCALL => {
-            const a = inst.getA();
-            const c = inst.getC();
-
-            const func_val = vm.stack[vm.base + a];
-            const state_val = vm.stack[vm.base + a + 1];
-            const control_val = vm.stack[vm.base + a + 2];
-
-            // Set up call at R(A+4): copy function and args
-            // Layout: R(A+4)=func, R(A+5)=state, R(A+6)=control, results go to R(A+4)...
-            const call_reg: u8 = @intCast(a + 4);
-            vm.stack[vm.base + call_reg] = func_val;
-            vm.stack[vm.base + call_reg + 1] = state_val;
-            vm.stack[vm.base + call_reg + 2] = control_val;
-
-            const nresults: u32 = if (c > 0) c else 1;
-
-            // Handle native closure
-            if (func_val.isObject()) {
-                const obj = func_val.object;
-                if (obj.type == .native_closure) {
-                    const nc = object.getObject(NativeClosureObject, obj);
-                    const frame_max = vm.base + ci.func.maxstacksize;
-                    vm.top = vm.base + call_reg + 3; // func + 2 args
-                    try vm.callNative(nc.func.id, call_reg, 2, nresults);
-                    // GC SAFETY: Clear stale slots and restore top
-                    const result_end = vm.base + call_reg + nresults;
-                    if (result_end < frame_max) {
-                        for (vm.stack[result_end..frame_max]) |*slot| {
-                            slot.* = .nil;
-                        }
-                    }
-                    vm.top = frame_max;
-                    try hook_state.onReturn(vm, nativeReturnHookName(nc.func.id), null, executeSyncMM);
-                    return .Continue;
-                }
-            }
-
-            // Handle Lua closure
-            if (func_val.asClosure()) |closure| {
-                const func_proto = closure.proto;
-                const new_base = vm.base + call_reg;
-
-                // Shift arguments: state and control move down
-                vm.stack[new_base] = state_val;
-                vm.stack[new_base + 1] = control_val;
-
-                // Fill remaining params with nil if needed
-                if (2 < func_proto.numparams) {
-                    for (vm.stack[new_base + 2 ..][0 .. func_proto.numparams - 2]) |*slot| {
-                        slot.* = .nil;
-                    }
-                }
-
-                const nres: i16 = @intCast(nresults);
-                const iter_ci = try pushCallInfo(vm, func_proto, closure, new_base, new_base, nres);
-                iter_ci.debug_name = "for iterator";
-                iter_ci.debug_namewhat = "for iterator";
-                vm.top = new_base + func_proto.maxstacksize;
-                return .LoopContinue;
-            }
-
-            // Slow path: iterator is a callable table (__call)
-            if (try dispatchCallMM(vm, func_val, call_reg, 2, @intCast(nresults))) |result| {
-                return result;
-            }
-
-            return error.NotAFunction;
-        },
+        .TFORCALL => return try opTForCall(vm, ci, inst),
         // Generic for loop: TFORLOOP A sBx - if R(A+4) != nil, R(A+2) = R(A+4), jump back
-        .TFORLOOP => {
-            const a = inst.getA();
-            const sbx = inst.getSBx();
-
-            const first_var = vm.stack[vm.base + a + 4];
-
-            if (!first_var.isNil()) {
-                // Update control variable
-                vm.stack[vm.base + a + 2] = first_var;
-                // Jump back to loop body
-                try ci.jumpRel(sbx);
-            }
-            // Otherwise fall through (loop ends)
-            return .Continue;
-        },
+        .TFORLOOP => return try opTForLoop(vm, ci, inst),
         // [MM_CALL] Fast path: closure/native call. Slow path: __call metamethod.
         .CALL => return try opCall(vm, ci, inst),
         // TAILCALL: Tail call optimization - reuse current frame
