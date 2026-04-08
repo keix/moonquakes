@@ -245,20 +245,7 @@ fn finishReturnToCaller(vm: *VM, ret: PreparedReturn) ExecuteResult {
     const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
 
     if (returning_ci.is_protected) {
-        const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
-        const copy_count: u32 = if (nresults < 0) ret.count else @min(ret.count, expected);
-        vm.stack[dst_base] = .{ .boolean = true };
-        if (copy_count > 0) {
-            for (0..copy_count) |i| {
-                vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + ret.a + i];
-            }
-        }
-        if (nresults >= 0 and expected > copy_count) {
-            for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
-                slot.* = .nil;
-            }
-        }
-        vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
+        protected_call.writeSuccessTupleFromStack(vm, dst_base, nresults, returning_ci.base + ret.a, ret.count, caller_frame_max);
         return .LoopContinue;
     }
 
@@ -1339,21 +1326,9 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
                 }
             }
 
-            // Place (false, error_value) in return slots
-            vm.stack[ret_base] = .{ .boolean = false };
-            vm.stack[ret_base + 1] = handled_error;
-            if (protected_nresults >= 0) {
-                const expected: u32 = @intCast(protected_nresults);
-                if (expected > 1) {
-                    var i: u32 = 1;
-                    while (i < expected) : (i += 1) {
-                        vm.stack[ret_base + 1 + i] = .nil;
-                    }
-                }
-            }
             error_state.clearRaisedValue(vm); // Clear after use
             const caller_frame_top: u32 = if (vm.ci) |caller_ci| vm.base + caller_ci.func.maxstacksize else ret_base + 2;
-            vm.top = if (protected_nresults < 0) ret_base + 2 else caller_frame_top;
+            protected_call.writeErrorTuple(vm, ret_base, protected_nresults, handled_error, caller_frame_top);
             error_state.clearPendingUnwind(vm);
             return true;
         }
@@ -3417,6 +3392,76 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - closes TBC variables before reusing the frame
 //   - resolves __call chains for non-callable values
 //   - reuses the current CallInfo for closure and protected-call tail paths
+fn reuseTailClosureFrame(vm: *VM, current_ci: *CallInfo, a: u8, nargs: u32, closure: *ClosureObject) !void {
+    const func_proto = closure.proto;
+    const ret_base = current_ci.ret_base;
+    const nresults = current_ci.nresults;
+    const new_base = current_ci.base;
+
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (func_proto.is_vararg and nargs > func_proto.numparams) {
+        vararg_count = nargs - func_proto.numparams;
+        const min_vararg_base = new_base + func_proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
+        try ensureStackTop(vm, vararg_base + vararg_count);
+
+        const src_start = vm.base + a + 1 + func_proto.numparams;
+        var i: u32 = vararg_count;
+        while (i > 0) {
+            i -= 1;
+            vm.stack[vararg_base + i] = vm.stack[src_start + i];
+        }
+    }
+
+    const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
+    if (params_to_copy > 0) {
+        for (0..params_to_copy) |i| {
+            vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
+        }
+    }
+
+    if (nargs < func_proto.numparams) {
+        for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
+            slot.* = .nil;
+        }
+    }
+
+    current_ci.reset(func_proto, closure, new_base, ret_base, nresults, current_ci.previous, vararg_base, vararg_count);
+    current_ci.was_tail_called = true;
+    vm.base = new_base;
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+    try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
+}
+
+fn startTailProtectedCall(vm: *VM, current_ci: *CallInfo, a: u8, nargs: u32, native_id: NativeFnId) !ExecuteResult {
+    const ret_base = current_ci.ret_base;
+    const nresults = current_ci.nresults;
+    const total_args_call: u32 = nargs + 1;
+    const total_results: u32 = if (nresults < 0) 0 else @intCast(nresults);
+    var handler: ?TValue = null;
+    var effective_total_args = total_args_call;
+
+    if (native_id == .xpcall) {
+        const prepared = protected_call.prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
+            error.InvalidXpcallHandler => {
+                popCallInfo(vm);
+                vm.top = ret_base + 2;
+                return .LoopContinue;
+            },
+            else => return err,
+        };
+        handler = prepared.handler;
+        effective_total_args = prepared.total_args;
+    }
+
+    const new_base = vm.base + a + 1;
+    protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
+    vm.base = new_base;
+    vm.top = new_base + effective_total_args;
+    return .LoopContinue;
+}
+
 fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
@@ -3480,59 +3525,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     if (tail_func.asClosure()) |closure| {
-        const func_proto = closure.proto;
-        const ret_base = current_ci.ret_base;
-        const nresults = current_ci.nresults;
-        const new_base = current_ci.base;
-
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-
-        if (func_proto.is_vararg and nargs > func_proto.numparams) {
-            vararg_count = nargs - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
-
-            const src_start = vm.base + a + 1 + func_proto.numparams;
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[src_start + i];
-            }
-        }
-
-        const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
-        if (params_to_copy > 0) {
-            for (0..params_to_copy) |i| {
-                vm.stack[new_base + i] = vm.stack[vm.base + a + 1 + i];
-            }
-        }
-
-        if (nargs < func_proto.numparams) {
-            for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
-                slot.* = .nil;
-            }
-        }
-
-        current_ci.func = func_proto;
-        current_ci.closure = closure;
-        current_ci.pc = func_proto.code.ptr;
-        current_ci.base = new_base;
-        current_ci.ret_base = ret_base;
-        current_ci.nresults = nresults;
-        current_ci.was_tail_called = true;
-        current_ci.vararg_base = vararg_base;
-        current_ci.vararg_count = vararg_count;
-        current_ci.is_protected = false;
-        current_ci.error_handler = .nil;
-        current_ci.tbc_bitmap = 0;
-        current_ci.clearContinuation();
-
-        vm.base = new_base;
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        try hook_state.onTailCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-
+        try reuseTailClosureFrame(vm, current_ci, a, nargs, closure);
         return .LoopContinue;
     }
 
@@ -3540,32 +3533,12 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         const obj = tail_func.object;
         if (obj.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, obj);
-            const ret_base = current_ci.ret_base;
-            const nresults = current_ci.nresults;
             if (nc.func.id == .pcall or nc.func.id == .xpcall) {
-                const total_args_call: u32 = nargs + 1;
-                const total_results: u32 = if (nresults < 0) 0 else @intCast(nresults);
-                var handler: ?TValue = null;
-                var effective_total_args = total_args_call;
-                if (nc.func.id == .xpcall) {
-                    const prepared = protected_call.prepareXpcall(vm, a, total_args_call, ret_base) catch |err| switch (err) {
-                        error.InvalidXpcallHandler => {
-                            popCallInfo(vm);
-                            vm.top = ret_base + 2;
-                            return .LoopContinue;
-                        },
-                        else => return err,
-                    };
-                    handler = prepared.handler;
-                    effective_total_args = prepared.total_args;
-                }
-                const new_base = vm.base + a + 1;
-                protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
-                vm.base = new_base;
-                vm.top = new_base + effective_total_args;
-                return .LoopContinue;
+                return try startTailProtectedCall(vm, current_ci, a, nargs, nc.func.id);
             }
 
+            const ret_base = current_ci.ret_base;
+            const nresults = current_ci.nresults;
             vm.top = vm.base + a + 1 + nargs;
             const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
             const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);

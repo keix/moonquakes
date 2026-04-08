@@ -27,19 +27,49 @@ pub fn isBootstrapProto(func: *const object.ProtoObject) bool {
     return func == &bootstrap_proto;
 }
 
+pub fn writeSuccessTupleFromStack(vm: *VM, ret_base: u32, nresults: i16, payload_base: u32, payload_count: u32, caller_frame_top: u32) void {
+    const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
+    const copy_count: u32 = if (nresults < 0) payload_count else @min(payload_count, expected);
+
+    vm.stack[ret_base] = .{ .boolean = true };
+    if (copy_count > 0) {
+        for (0..copy_count) |i| {
+            vm.stack[ret_base + 1 + i] = vm.stack[payload_base + i];
+        }
+    }
+    if (nresults >= 0 and expected > copy_count) {
+        for (vm.stack[ret_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
+            slot.* = .nil;
+        }
+    }
+    vm.top = if (nresults < 0) ret_base + 1 + copy_count else caller_frame_top;
+}
+
+pub fn writeErrorTuple(vm: *VM, ret_base: u32, nresults: i16, err_value: TValue, caller_frame_top: u32) void {
+    vm.stack[ret_base] = .{ .boolean = false };
+    vm.stack[ret_base + 1] = err_value;
+    if (nresults >= 0) {
+        const expected: u32 = @intCast(nresults);
+        if (expected > 1) {
+            var i: u32 = 1;
+            while (i < expected) : (i += 1) {
+                vm.stack[ret_base + 1 + i] = .nil;
+            }
+        }
+    }
+    vm.top = if (nresults < 0) ret_base + 2 else caller_frame_top;
+}
+
 // Push a synthetic protected frame around the user target so error unwinding
 // can land on an ordinary Lua frame.
 pub fn dispatch(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_results: u32, handler: ?TValue, ret_base: u32) !ExecuteResult {
+    const pcall_nresults: i16 = if (total_results > 0) @intCast(total_results - 1) else -1;
     if (total_args == 0) {
-        vm.stack[vm.base + a] = .{ .boolean = false };
-        vm.stack[vm.base + a + 1] = TValue.fromString(try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)"));
-        vm.top = if (total_results == 0) vm.base + a + 2 else vm.base + ci.func.maxstacksize;
+        writeErrorTuple(vm, vm.base + a, pcall_nresults, TValue.fromString(try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)")), vm.base + ci.func.maxstacksize);
         return .Continue;
     }
 
     const call_base = vm.base + a + 1;
-    const user_nresults: u32 = if (total_results > 0) total_results - 1 else 0;
-    const pcall_nresults: i16 = if (total_results > 0) @intCast(user_nresults) else -1;
 
     const new_ci = try frame.pushCallInfoVararg(
         vm,
