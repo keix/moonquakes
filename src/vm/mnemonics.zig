@@ -1088,6 +1088,97 @@ fn nativeReturnHookName(id: NativeFnId) ?[]const u8 {
     };
 }
 
+fn emitNativeReturnHook(
+    vm: *VM,
+    id: NativeFnId,
+    native_call_args: []const TValue,
+    result_base: u32,
+    result_end: u32,
+    fixed_result_count: u32,
+) !void {
+    switch (id) {
+        .select => {
+            var idx_u: u32 = 1;
+            if (native_call_args.len > 0) {
+                const idx_val = native_call_args[0].toInteger() orelse 1;
+                if (idx_val >= 1) idx_u = @intCast(idx_val);
+            }
+            const arg_count: u32 = @intCast(native_call_args.len);
+            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_args.len);
+            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
+            try hook_state.onReturnFromValues(vm, nativeReturnHookName(id), null, idx_u + 1, src_slice, executeSyncMM);
+        },
+        .math_sin => {
+            const arg = if (native_call_args.len > 0) native_call_args[0].toNumber() orelse 0 else 0;
+            const out = TValue{ .number = std.math.sin(arg) };
+            try hook_state.onReturnFromValues(vm, nativeReturnHookName(id), null, 2, &[_]TValue{out}, executeSyncMM);
+        },
+        else => {
+            const native_transfer_total: u32 = if (fixed_result_count == 0) result_end - result_base else fixed_result_count;
+            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
+            try hook_state.onReturnFromStack(vm, nativeReturnHookName(id), null, 2, result_base + 1, native_transfer_count, executeSyncMM);
+        },
+    }
+}
+
+fn pushMetamethodClosureCall(vm: *VM, closure: *ClosureObject, args: []const TValue, ret_abs: u32, mm_name: []const u8) !ExecuteResult {
+    const func_proto = closure.proto;
+    const new_base = vm.top;
+    const total_args: u32 = @intCast(args.len);
+
+    for (args, 0..) |arg, i| {
+        vm.stack[new_base + @as(u32, @intCast(i))] = arg;
+    }
+
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (func_proto.is_vararg and total_args > func_proto.numparams) {
+        vararg_count = total_args - func_proto.numparams;
+        const min_vararg_base = new_base + func_proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
+        try ensureStackTop(vm, vararg_base + vararg_count);
+        var i: u32 = vararg_count;
+        while (i > 0) {
+            i -= 1;
+            vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
+        }
+    }
+
+    var i: u32 = total_args;
+    while (i < func_proto.numparams) : (i += 1) {
+        vm.stack[new_base + i] = .nil;
+    }
+
+    const ci = try pushCallInfoVararg(
+        vm,
+        func_proto,
+        closure,
+        new_base,
+        ret_abs,
+        1,
+        vararg_base,
+        vararg_count,
+    );
+    markMetamethodFrame(ci, mm_name);
+    vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
+    return .LoopContinue;
+}
+
+fn callNativeClosureToAbs(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue, ret_abs: u32) !ExecuteResult {
+    const temp = vm.top;
+    vm.stack[temp] = mm;
+    for (args, 0..) |arg, i| {
+        vm.stack[temp + 1 + @as(u32, @intCast(i))] = arg;
+    }
+    vm.top = temp + 1 + @as(u32, @intCast(args.len));
+
+    try vm.callNative(nc.func.id, @intCast(temp - vm.base), @intCast(args.len), 1);
+    vm.stack[ret_abs] = vm.stack[temp];
+    vm.top = temp;
+    return .Continue;
+}
+
 /// Close to-be-closed variables from the current frame
 /// Calls __close metamethod on TBC variables from highest to 'from_reg'
 pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) anyerror!void {
@@ -3280,30 +3371,7 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
             vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
-            switch (nc.func.id) {
-                .select => {
-                    var idx_u: u32 = 1;
-                    if (native_call_arg_count > 0) {
-                        const idx_val = native_call_args[0].toInteger() orelse 1;
-                        if (idx_val >= 1) idx_u = @intCast(idx_val);
-                    }
-                    const arg_count: u32 = @intCast(native_call_arg_count);
-                    const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                    const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                    const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
-                },
-                .math_sin => {
-                    const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                    const out = TValue{ .number = std.math.sin(arg) };
-                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
-                },
-                else => {
-                    const native_transfer_total: u32 = if (nresults == 0) result_end - result_base else nresults;
-                    const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                    try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
-                },
-            }
+            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, nresults);
             return .LoopContinue;
         }
     }
@@ -3549,37 +3617,15 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
             }
             try vm.callNative(nc.func.id, a, nargs, native_nresults);
-            switch (nc.func.id) {
-                .select => {
-                    var idx_u: u32 = 1;
-                    if (native_call_arg_count > 0) {
-                        const idx_val = native_call_args[0].toInteger() orelse 1;
-                        if (idx_val >= 1) idx_u = @intCast(idx_val);
-                    }
-                    const arg_count: u32 = @intCast(native_call_arg_count);
-                    const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-                    const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_arg_count);
-                    const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, idx_u + 1, src_slice, executeSyncMM);
-                },
-                .math_sin => {
-                    const arg = if (native_call_arg_count > 0) native_call_args[0].toNumber() orelse 0 else 0;
-                    const out = TValue{ .number = std.math.sin(arg) };
-                    try hook_state.onReturnFromValues(vm, nativeReturnHookName(nc.func.id), null, 2, &[_]TValue{out}, executeSyncMM);
-                },
-                else => {
-                    const native_transfer_total: u32 = if (native_nresults > 0) native_nresults else if (vm.top > vm.base + a) vm.top - (vm.base + a) else 0;
-                    const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-                    try hook_state.onReturnFromStack(vm, nativeReturnHookName(nc.func.id), null, 2, vm.base + a + 1, native_transfer_count, executeSyncMM);
-                },
-            }
+            const result_base = vm.base + a;
+            const result_end = if (native_nresults > 0) result_base + native_nresults else if (vm.top > result_base) vm.top else result_base;
+            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, native_nresults);
 
             if (current_ci.previous != null) {
                 const actual_nresults: u32 = if (nresults < 0) blk: {
                     if (native_nresults > 0) {
                         break :blk native_nresults;
                     } else {
-                        const result_base = vm.base + a;
                         break :blk if (vm.top > result_base) vm.top - result_base else 0;
                     }
                 } else @intCast(nresults);
@@ -3892,70 +3938,13 @@ fn canDoArith(a: TValue, b: TValue) bool {
 
 /// Call a binary metamethod and store result
 fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg: u8, mm_name: []const u8) !ExecuteResult {
-    // Set up call: like CALL instruction
-    // func at temp, args at temp+1, temp+2
-    // But for call frame, we copy args to start at new_base
-    const temp = vm.top;
-
-    // If metamethod is a closure, push call frame
     if (mm.asClosure()) |closure| {
-        const func_proto = closure.proto;
-        const new_base = temp;
-        const total_args: u32 = 2;
-
-        // Set up parameters at new_base (like CALL does)
-        vm.stack[new_base] = arg1; // First parameter at R[0]
-        vm.stack[new_base + 1] = arg2; // Second parameter at R[1]
-
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-        if (func_proto.is_vararg and total_args > func_proto.numparams) {
-            vararg_count = total_args - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
-            }
-        }
-
-        // Fill remaining fixed parameters with nil if needed
-        var i: u32 = total_args;
-        while (i < func_proto.numparams) : (i += 1) {
-            vm.stack[new_base + i] = .nil;
-        }
-
-        const ci = try pushCallInfoVararg(
-            vm,
-            func_proto,
-            closure,
-            new_base,
-            @intCast(vm.base + result_reg),
-            1,
-            vararg_base,
-            vararg_count,
-        );
-        markMetamethodFrame(ci, mm_name);
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        return .LoopContinue;
+        return try pushMetamethodClosureCall(vm, closure, &[_]TValue{ arg1, arg2 }, @intCast(vm.base + result_reg), mm_name);
     }
 
-    // For native closures, call directly
     if (mm.isObject() and mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, mm.object);
-        // Set up: function at temp, args at temp+1, temp+2
-        vm.stack[temp] = mm;
-        vm.stack[temp + 1] = arg1;
-        vm.stack[temp + 2] = arg2;
-        vm.top = temp + 3;
-
-        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-        // Result is at temp, move to result_reg
-        vm.stack[vm.base + result_reg] = vm.stack[temp];
-        vm.top = temp;
-        return .Continue;
+        return try callNativeClosureToAbs(vm, mm, nc, &[_]TValue{ arg1, arg2 }, @intCast(vm.base + result_reg));
     }
 
     return error.NotAFunction;
@@ -3963,65 +3952,13 @@ fn callBinMetamethod(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, result_reg
 
 /// Call a unary metamethod and store result
 fn callUnaryMetamethod(vm: *VM, mm: TValue, arg: TValue, result_reg: u8, mm_name: []const u8) !ExecuteResult {
-    const temp = vm.top;
-
-    // If metamethod is a closure, push call frame
     if (mm.asClosure()) |closure| {
-        const func_proto = closure.proto;
-        const new_base = temp;
-        const total_args: u32 = 2;
-
-        // Lua passes unary metamethod operand twice for compatibility.
-        vm.stack[new_base] = arg;
-        vm.stack[new_base + 1] = arg;
-
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-        if (func_proto.is_vararg and total_args > func_proto.numparams) {
-            vararg_count = total_args - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
-            }
-        }
-
-        // Fill remaining fixed parameters with nil if needed
-        var i: u32 = total_args;
-        while (i < func_proto.numparams) : (i += 1) {
-            vm.stack[new_base + i] = .nil;
-        }
-
-        const ci = try pushCallInfoVararg(
-            vm,
-            func_proto,
-            closure,
-            new_base,
-            @intCast(vm.base + result_reg),
-            1,
-            vararg_base,
-            vararg_count,
-        );
-        markMetamethodFrame(ci, mm_name);
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        return .LoopContinue;
+        return try pushMetamethodClosureCall(vm, closure, &[_]TValue{ arg, arg }, @intCast(vm.base + result_reg), mm_name);
     }
 
-    // For native closures, call directly
     if (mm.isObject() and mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, mm.object);
-        vm.stack[temp] = mm;
-        vm.stack[temp + 1] = arg;
-        vm.stack[temp + 2] = arg;
-        vm.top = temp + 3;
-
-        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-        vm.stack[vm.base + result_reg] = vm.stack[temp];
-        vm.top = temp;
-        return .Continue;
+        return try callNativeClosureToAbs(vm, mm, nc, &[_]TValue{ arg, arg }, @intCast(vm.base + result_reg));
     }
 
     return error.NotAFunction;
@@ -4717,61 +4654,13 @@ fn getLeMM(vm: *VM, val: TValue) ?TValue {
 }
 
 fn callBinMetamethodToAbs(vm: *VM, mm: TValue, arg1: TValue, arg2: TValue, ret_abs: u32, mm_name: []const u8) !ExecuteResult {
-    const temp = vm.top;
-
     if (mm.asClosure()) |closure| {
-        const func_proto = closure.proto;
-        const new_base = temp;
-        const total_args: u32 = 2;
-
-        vm.stack[new_base] = arg1;
-        vm.stack[new_base + 1] = arg2;
-
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-        if (func_proto.is_vararg and total_args > func_proto.numparams) {
-            vararg_count = total_args - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
-            }
-        }
-
-        var i: u32 = total_args;
-        while (i < func_proto.numparams) : (i += 1) {
-            vm.stack[new_base + i] = .nil;
-        }
-
-        const ci = try pushCallInfoVararg(
-            vm,
-            func_proto,
-            closure,
-            new_base,
-            ret_abs,
-            1,
-            vararg_base,
-            vararg_count,
-        );
-        markMetamethodFrame(ci, mm_name);
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        return .LoopContinue;
+        return try pushMetamethodClosureCall(vm, closure, &[_]TValue{ arg1, arg2 }, ret_abs, mm_name);
     }
 
     if (mm.isObject() and mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, mm.object);
-        vm.stack[temp] = mm;
-        vm.stack[temp + 1] = arg1;
-        vm.stack[temp + 2] = arg2;
-        vm.top = temp + 3;
-
-        try vm.callNative(nc.func.id, @intCast(temp - vm.base), 2, 1);
-        vm.stack[ret_abs] = vm.stack[temp];
-        vm.top = temp;
-        return .Continue;
+        return try callNativeClosureToAbs(vm, mm, nc, &[_]TValue{ arg1, arg2 }, ret_abs);
     }
 
     return error.NotAFunction;
