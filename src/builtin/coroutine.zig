@@ -8,13 +8,14 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ThreadStatus = object.ThreadStatus;
 const NativeFn = @import("../runtime/native.zig").NativeFn;
-const opcodes = @import("../compiler/opcodes.zig");
-const Instruction = opcodes.Instruction;
+const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const VM = @import("../vm/vm.zig").VM;
+const CallInfo = @import("../vm/execution.zig").CallInfo;
 const error_state = @import("../vm/error_state.zig");
 const hook_state = @import("../vm/hook.zig");
 const mnemonics = @import("../vm/mnemonics.zig");
 const vm_gc = @import("../vm/gc.zig");
+const synthetic_frame = @import("../vm/synthetic_frame.zig");
 const yield_state = @import("../vm/yield.zig");
 
 // Bootstrap frame for first coroutine resume:
@@ -27,26 +28,7 @@ const yield_state = @import("../vm/yield.zig");
 // - It is intentionally never freed and reused by all coroutine starts.
 // - GC may traverse it through CallInfo.func (closure=null path), which is safe
 //   because its code/metadata slices are also static immutable storage.
-var coroutine_bootstrap_code = [_]Instruction{
-    Instruction.initABC(.CALL, 0, 0, 0),
-    Instruction.initABC(.RETURN, 0, 0, 0),
-};
-var coroutine_bootstrap_lineinfo = [_]u32{ 1, 1 };
-var coroutine_bootstrap_proto = object.ProtoObject{
-    .header = object.GCObject.init(.proto, null),
-    .k = &.{},
-    .code = coroutine_bootstrap_code[0..],
-    .protos = &.{},
-    .numparams = 0,
-    .is_vararg = true,
-    // R0=function plus one scratch slot for conservative frame-top handling.
-    .maxstacksize = 2,
-    .nups = 0,
-    .upvalues = &.{},
-    .allocator = std.heap.page_allocator,
-    .source = "[coroutine bootstrap]",
-    .lineinfo = coroutine_bootstrap_lineinfo[0..],
-};
+var coroutine_bootstrap_proto = synthetic_frame.initCallReturnProto("[coroutine bootstrap]", 2);
 
 // Guard native recursion through coroutine.resume chains to avoid host stack crashes.
 const resume_c_depth_limit: u32 = 197;
@@ -66,6 +48,13 @@ const CoroutineResult = union(enum) {
 const CoroutineLuaExceptionResult = union(enum) {
     disposition: mnemonics.LuaExceptionDisposition,
     yielded: yield_state.YieldResult,
+};
+
+const CoroutineInstructionStep = union(enum) {
+    continue_loop,
+    completed: u32,
+    yielded: yield_state.YieldResult,
+    errored: TValue,
 };
 
 // Coroutine execution keeps shared LuaException semantics, then converts them
@@ -104,6 +93,72 @@ fn convertCoroutineVmRuntimeError(co_vm: *VM, inst: Instruction, err: anyerror) 
     return TValue.fromString(msg_obj);
 }
 
+fn finishCoroutineReturn(co_vm: *VM, ret_val: @import("../vm/execution.zig").ReturnValue) ?CoroutineInstructionStep {
+    if (co_vm.ci) |current_ci| {
+        if (current_ci.previous == null) {
+            return switch (ret_val) {
+                .none => .{ .completed = 0 },
+                .single => |val| blk: {
+                    co_vm.stack[0] = val;
+                    break :blk .{ .completed = 1 };
+                },
+                .multiple => |vals| blk: {
+                    for (vals, 0..) |val, i| {
+                        co_vm.stack[i] = val;
+                    }
+                    break :blk .{ .completed = @intCast(vals.len) };
+                },
+            };
+        }
+    }
+    return null;
+}
+
+fn runCoroutineInstruction(co_vm: *VM, inst: Instruction) CoroutineInstructionStep {
+    const exec_result = mnemonics.do(co_vm, inst) catch |err| {
+        if (err == error.HandledException) return .continue_loop;
+        if (err == error.LuaException) {
+            switch (handleCoroutineLuaException(co_vm)) {
+                .disposition => |d| switch (d) {
+                    .continue_loop => return .continue_loop,
+                    .handled_at_boundary => return .continue_loop,
+                    .unhandled => {},
+                },
+                .yielded => |yielded| return .{ .yielded = yielded },
+            }
+            switch (unwindCoroutineErrorFrames(co_vm, error_state.getRaisedValue(co_vm))) {
+                .done => {},
+                .yielded => |yielded| return .{ .yielded = yielded },
+            }
+            return .{ .errored = error_state.getRaisedValue(co_vm) };
+        }
+        if (err == error.Yield) {
+            hook_state.onReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
+            return .{ .yielded = yield_state.currentResult(co_vm) };
+        }
+        if (mnemonics.isVmRuntimeError(err)) {
+            const raised = convertCoroutineVmRuntimeError(co_vm, inst, err) orelse return .{ .errored = .nil };
+            error_state.setRaisedValue(co_vm, raised);
+            switch (handleCoroutineLuaException(co_vm)) {
+                .disposition => |d| switch (d) {
+                    .continue_loop => return .continue_loop,
+                    .handled_at_boundary => return .continue_loop,
+                    .unhandled => return .{ .errored = error_state.getRaisedValue(co_vm) },
+                },
+                .yielded => |yielded| return .{ .yielded = yielded },
+            }
+        }
+
+        const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
+        return .{ .errored = TValue.fromString(err_str) };
+    };
+
+    return switch (exec_result) {
+        .Continue, .LoopContinue => .continue_loop,
+        .ReturnVM => |ret_val| finishCoroutineReturn(co_vm, ret_val) orelse .continue_loop,
+    };
+}
+
 /// Set up coroutine for first resume (initialize call frame)
 fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
     // Copy arguments to coroutine stack
@@ -115,17 +170,16 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
     // Bootstrap frame executes CALL/RETURN at base 0.
     co_vm.base = 0;
     co_vm.top = 1 + num_args;
-    co_vm.base_ci = .{
-        .func = &coroutine_bootstrap_proto,
+    co_vm.base_ci = CallInfo.initRoot(
+        &coroutine_bootstrap_proto,
         // Bootstrap bytecode is CALL/RETURN only; no upvalue/env opcodes.
-        .closure = null,
-        .pc = coroutine_bootstrap_proto.code.ptr,
-        .savedpc = null,
-        .base = 0,
-        .ret_base = 0,
-        .nresults = -1,
-        .previous = null,
-    };
+        null,
+        0,
+        0,
+        -1,
+        0,
+        0,
+    );
     co_vm.ci = &co_vm.base_ci;
 }
 
@@ -149,98 +203,20 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             }
         }
         const ci = co_vm.ci.?;
-        if (mnemonics.continueFrameContinuation(co_vm, ci) catch |cerr| switch (cerr) {
-                error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
-                else => return .{ .errored = error_state.getRaisedValue(co_vm) },
-            }) continue;
-        const inst = ci.fetch() catch {
-            // End of function - check if this is the base frame
-            if (ci.previous == null) {
-                // Main coroutine function completed
-                // Return values are at stack[0..top]
-                const result_count = co_vm.top;
-                return .{ .completed = result_count };
-            }
-
-            // Pop this frame and continue with caller
-            mnemonics.popCallInfo(co_vm);
-            if (co_vm.ci) |prev_ci| {
-                co_vm.base = prev_ci.ret_base;
-                co_vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize;
-            }
-            continue;
+        const step = mnemonics.advanceFrame(co_vm, ci, false) catch |cerr| switch (cerr) {
+            error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
+            else => return .{ .errored = error_state.getRaisedValue(co_vm) },
         };
-
-        const exec_result = mnemonics.do(co_vm, inst) catch |err| {
-            if (err == error.HandledException) continue;
-            // Handle LuaException
-            if (err == error.LuaException) {
-                switch (handleCoroutineLuaException(co_vm)) {
-                    .disposition => |d| switch (d) {
-                        .continue_loop => continue,
-                        .handled_at_boundary => continue,
-                        .unhandled => {},
-                    },
+        switch (step) {
+            .continue_loop => continue,
+            .top_frame_exhausted => return .{ .completed = co_vm.top },
+            .instruction => |inst| {
+                switch (runCoroutineInstruction(co_vm, inst)) {
+                    .continue_loop => continue,
+                    .completed => |count| return .{ .completed = count },
                     .yielded => |yielded| return .{ .yielded = yielded },
+                    .errored => |err_val| return .{ .errored = err_val },
                 }
-                switch (unwindCoroutineErrorFrames(co_vm, error_state.getRaisedValue(co_vm))) {
-                    .done => {},
-                    .yielded => |yielded| return .{ .yielded = yielded },
-                }
-                // Unhandled exception - return error
-                return .{ .errored = error_state.getRaisedValue(co_vm) };
-            }
-
-            // Handle yield - coroutine suspended
-            if (err == error.Yield) {
-                hook_state.onReturnOnYield(co_vm, mnemonics.executeSyncMM) catch {};
-                return .{ .yielded = yield_state.currentResult(co_vm) };
-            }
-
-            // Convert ordinary VM runtime errors into catchable Lua exceptions,
-            // matching the main execution and call paths.
-            if (mnemonics.isVmRuntimeError(err)) {
-                const raised = convertCoroutineVmRuntimeError(co_vm, inst, err) orelse return .{ .errored = .nil };
-                error_state.setRaisedValue(co_vm, raised);
-                switch (handleCoroutineLuaException(co_vm)) {
-                    .disposition => |d| switch (d) {
-                        .continue_loop => continue,
-                        .handled_at_boundary => continue,
-                        .unhandled => return .{ .errored = error_state.getRaisedValue(co_vm) },
-                    },
-                    .yielded => |yielded| return .{ .yielded = yielded },
-                }
-            }
-
-            const err_str = co_vm.gc().allocString(@errorName(err)) catch return .{ .errored = .nil };
-            return .{ .errored = TValue.fromString(err_str) };
-        };
-
-        // Handle execution result
-        switch (exec_result) {
-            .Continue, .LoopContinue => continue,
-            .ReturnVM => |ret_val| {
-                // Function returned - check if this is the main coroutine frame
-                if (co_vm.ci) |current_ci| {
-                    if (current_ci.previous == null) {
-                        // Main coroutine function completed
-                        // Copy return values to stack[0..]
-                        switch (ret_val) {
-                            .none => return .{ .completed = 0 },
-                            .single => |val| {
-                                co_vm.stack[0] = val;
-                                return .{ .completed = 1 };
-                            },
-                            .multiple => |vals| {
-                                for (vals, 0..) |val, i| {
-                                    co_vm.stack[i] = val;
-                                }
-                                return .{ .completed = @intCast(vals.len) };
-                            },
-                        }
-                    }
-                }
-                // Otherwise handled by instruction processing
             },
         }
     }

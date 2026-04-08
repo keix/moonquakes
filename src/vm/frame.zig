@@ -21,18 +21,7 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     }
 
     const new_ci = &vm.callstack[vm.callstack_size];
-    new_ci.* = CallInfo{
-        .func = func,
-        .closure = closure,
-        .pc = func.code.ptr,
-        .savedpc = null,
-        .base = base,
-        .ret_base = ret_base,
-        .vararg_base = vararg_base,
-        .vararg_count = vararg_count,
-        .nresults = nresults,
-        .previous = vm.ci,
-    };
+    new_ci.* = CallInfo.init(func, closure, base, ret_base, nresults, vm.ci, vararg_base, vararg_count);
     call_debug.applyToCallInfo(vm, new_ci);
 
     vm.callstack_size += 1;

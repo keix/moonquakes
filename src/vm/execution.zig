@@ -85,6 +85,56 @@ pub const CallInfo = struct {
 
     continuation: Continuation = .none,
 
+    pub fn init(
+        func: *const ProtoObject,
+        closure: ?*ClosureObject,
+        base: u32,
+        ret_base: u32,
+        nresults: i16,
+        previous: ?*CallInfo,
+        vararg_base: u32,
+        vararg_count: u32,
+    ) CallInfo {
+        return .{
+            .func = func,
+            .closure = closure,
+            .pc = func.code.ptr,
+            .savedpc = null,
+            .base = base,
+            .ret_base = ret_base,
+            .vararg_base = vararg_base,
+            .vararg_count = vararg_count,
+            .nresults = nresults,
+            .previous = previous,
+        };
+    }
+
+    pub fn initRoot(
+        func: *const ProtoObject,
+        closure: ?*ClosureObject,
+        base: u32,
+        ret_base: u32,
+        nresults: i16,
+        vararg_base: u32,
+        vararg_count: u32,
+    ) CallInfo {
+        return init(func, closure, base, ret_base, nresults, null, vararg_base, vararg_count);
+    }
+
+    pub fn reset(
+        self: *CallInfo,
+        func: *const ProtoObject,
+        closure: ?*ClosureObject,
+        base: u32,
+        ret_base: u32,
+        nresults: i16,
+        previous: ?*CallInfo,
+        vararg_base: u32,
+        vararg_count: u32,
+    ) void {
+        self.* = init(func, closure, base, ret_base, nresults, previous, vararg_base, vararg_count);
+    }
+
     /// Mark a register as to-be-closed
     pub fn markTBC(self: *CallInfo, reg: u8) void {
         if (reg < 64) {

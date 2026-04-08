@@ -6,13 +6,12 @@
 
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const opcodes = @import("../compiler/opcodes.zig");
-const Instruction = opcodes.Instruction;
 const object = @import("../runtime/gc/object.zig");
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const ExecuteResult = execution.ExecuteResult;
 const frame = @import("frame.zig");
+const synthetic_frame = @import("synthetic_frame.zig");
 const VM = @import("vm.zig").VM;
 
 pub const PreparedXpcall = struct {
@@ -22,25 +21,7 @@ pub const PreparedXpcall = struct {
 
 // Synthetic Lua frame used by pcall/xpcall:
 // CALL R0, ... ; RETURN R0, ...
-var bootstrap_code = [_]Instruction{
-    Instruction.initABC(.CALL, 0, 0, 0),
-    Instruction.initABC(.RETURN, 0, 0, 0),
-};
-var bootstrap_lineinfo = [_]u32{ 1, 1 };
-var bootstrap_proto = object.ProtoObject{
-    .header = object.GCObject.init(.proto, null),
-    .k = &.{},
-    .code = bootstrap_code[0..],
-    .protos = &.{},
-    .numparams = 0,
-    .is_vararg = true,
-    .maxstacksize = 2,
-    .nups = 0,
-    .upvalues = &.{},
-    .allocator = std.heap.page_allocator,
-    .source = "[protected call bootstrap]",
-    .lineinfo = bootstrap_lineinfo[0..],
-};
+var bootstrap_proto = synthetic_frame.initCallReturnProto("[protected call bootstrap]", 2);
 
 pub fn isBootstrapProto(func: *const object.ProtoObject) bool {
     return func == &bootstrap_proto;
@@ -106,17 +87,8 @@ pub fn reuseCurrentFrame(current_ci: *CallInfo, ret_base: u32, total_results: u3
         @intCast(total_results - 1)
     else
         -1;
-    current_ci.func = &bootstrap_proto;
-    current_ci.closure = null;
-    current_ci.pc = bootstrap_proto.code.ptr;
-    current_ci.base = new_base;
-    current_ci.ret_base = ret_base;
-    current_ci.nresults = pcall_nresults;
+    current_ci.reset(&bootstrap_proto, null, new_base, ret_base, pcall_nresults, current_ci.previous, 0, 0);
     current_ci.was_tail_called = true;
-    current_ci.vararg_base = 0;
-    current_ci.vararg_count = 0;
     current_ci.is_protected = true;
     current_ci.error_handler = handler orelse .nil;
-    current_ci.tbc_bitmap = 0;
-    current_ci.clearContinuation();
 }

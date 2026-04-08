@@ -3,6 +3,7 @@ const testing = std.testing;
 const vm_mod = @import("../vm/vm.zig");
 const VM = vm_mod.VM;
 const Mnemonics = @import("../vm/mnemonics.zig");
+const CallInfo = @import("../vm/execution.zig").CallInfo;
 const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const OpCode = @import("../compiler/opcodes.zig").OpCode;
@@ -87,16 +88,7 @@ test "VM call stack push and pop" {
     const proto2 = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &proto2_code, 0, false, 1);
 
     // Set up initial call frame (simulating execute)
-    ctx.vm.base_ci = .{
-        .func = proto1,
-        .closure = null,
-        .pc = proto1.code.ptr,
-        .savedpc = null,
-        .base = 0,
-        .ret_base = 0,
-        .nresults = -1,
-        .previous = null,
-    };
+    ctx.vm.base_ci = CallInfo.initRoot(proto1, null, 0, 0, -1, 0, 0);
     ctx.vm.ci = &ctx.vm.base_ci;
     ctx.vm.base = 0;
 
@@ -140,16 +132,7 @@ test "VM call stack overflow" {
     const dummy_proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &dummy_code, 0, false, 1);
 
     // Set up initial frame
-    ctx.vm.base_ci = .{
-        .func = dummy_proto,
-        .closure = null,
-        .pc = dummy_proto.code.ptr,
-        .savedpc = null,
-        .base = 0,
-        .ret_base = 0,
-        .nresults = -1,
-        .previous = null,
-    };
+    ctx.vm.base_ci = CallInfo.initRoot(dummy_proto, null, 0, 0, -1, 0, 0);
     ctx.vm.ci = &ctx.vm.base_ci;
 
     // Push frames until we hit the limit

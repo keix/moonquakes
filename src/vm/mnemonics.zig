@@ -74,6 +74,17 @@ const CompareMMDispatch = union(enum) {
     missing,
 };
 
+pub const NextInstruction = union(enum) {
+    instruction: Instruction,
+    continue_loop,
+    top_frame_exhausted,
+};
+
+const MainLoopStep = union(enum) {
+    continue_loop,
+    return_vm: ReturnValue,
+};
+
 const BitwiseMetaEvent = enum {
     band,
     bor,
@@ -199,6 +210,91 @@ inline fn setReturnContinuation(ci: *CallInfo, a: u8, count: u32) void {
     } };
 }
 
+const PreparedReturn = struct {
+    ci: *CallInfo,
+    a: u8,
+    count: u32,
+};
+
+fn prepareReturn(vm: *VM, ci: *CallInfo, a: u8, initial_count: u32) !PreparedReturn {
+    switch (ci.continuation) {
+        .return_ => |ret| {
+            if (ret.a != a) {
+                setReturnContinuation(ci, a, initial_count);
+            }
+        },
+        else => setReturnContinuation(ci, a, initial_count),
+    }
+
+    try closeTbcForReturn(vm, ci);
+    if (vm.open_upvalues != null) {
+        vm.closeUpvalues(ci.base);
+    }
+
+    const ret_count = switch (ci.continuation) {
+        .return_ => |ret| ret.count,
+        else => initial_count,
+    };
+    return .{ .ci = ci, .a = a, .count = ret_count };
+}
+
+fn finishReturnToCaller(vm: *VM, ret: PreparedReturn) ExecuteResult {
+    const returning_ci = ret.ci;
+    const nresults = returning_ci.nresults;
+    const dst_base = returning_ci.ret_base;
+    const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
+
+    if (returning_ci.is_protected) {
+        const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
+        const copy_count: u32 = if (nresults < 0) ret.count else @min(ret.count, expected);
+        vm.stack[dst_base] = .{ .boolean = true };
+        if (copy_count > 0) {
+            for (0..copy_count) |i| {
+                vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + ret.a + i];
+            }
+        }
+        if (nresults >= 0 and expected > copy_count) {
+            for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+        vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
+        return .LoopContinue;
+    }
+
+    if (ret.count == 0) {
+        if (nresults > 0) {
+            const n: usize = @intCast(nresults);
+            for (vm.stack[dst_base..][0..n]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+        vm.top = if (nresults < 0) dst_base else caller_frame_max;
+        return .LoopContinue;
+    }
+
+    if (nresults < 0) {
+        for (0..ret.count) |i| {
+            vm.stack[dst_base + i] = vm.stack[returning_ci.base + ret.a + i];
+        }
+        vm.top = dst_base + ret.count;
+        return .LoopContinue;
+    }
+
+    const n: u32 = @intCast(nresults);
+    const copy_count = @min(ret.count, n);
+    for (0..copy_count) |i| {
+        vm.stack[dst_base + i] = vm.stack[returning_ci.base + ret.a + i];
+    }
+    if (n > copy_count) {
+        for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
+            slot.* = .nil;
+        }
+    }
+    vm.top = caller_frame_max;
+    return .LoopContinue;
+}
+
 pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
     switch (ci.continuation) {
         .none, .return_ => return false,
@@ -216,6 +312,53 @@ pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
             return false;
         },
     }
+}
+
+pub fn advanceFrame(vm: *VM, ci: *CallInfo, comptime caller_top_includes_varargs: bool) !NextInstruction {
+    if (try continueFrameContinuation(vm, ci)) {
+        return .continue_loop;
+    }
+
+    const inst = ci.fetch() catch |err| {
+        if (err != error.PcOutOfRange) return err;
+
+        if (ci.previous == null) {
+            return .top_frame_exhausted;
+        }
+
+        popCallInfo(vm);
+        if (vm.ci) |prev_ci| {
+            vm.base = prev_ci.ret_base;
+            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + if (caller_top_includes_varargs) prev_ci.vararg_count else 0;
+        }
+        return .continue_loop;
+    };
+
+    return .{ .instruction = inst };
+}
+
+fn runInstructionInMainLoop(vm: *VM, ci: *CallInfo, inst: Instruction) !MainLoopStep {
+    const result = do(vm, inst) catch |err| {
+        if (err == error.HandledException) return .continue_loop;
+        if (try continueIfLuaExceptionHandled(vm, err)) return .continue_loop;
+        if (isVmRuntimeError(err)) {
+            var msg_buf: [128]u8 = undefined;
+            const msg = formatVmRuntimeErrorMessage(vm, inst, err, &msg_buf);
+            var full_msg_buf: [320]u8 = undefined;
+            const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
+            vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
+                return err;
+            });
+            if (try continueIfLuaExceptionHandled(vm, error.LuaException)) return .continue_loop;
+            return error.LuaException;
+        }
+        return err;
+    };
+
+    return switch (result) {
+        .Continue, .LoopContinue => .continue_loop,
+        .ReturnVM => |ret| .{ .return_vm = ret },
+    };
 }
 
 pub fn popErrorFrame(vm: *VM, ci: *CallInfo, err_obj: TValue) error{Yield}!void {
@@ -1115,18 +1258,7 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
         }
     }
 
-    vm.base_ci = CallInfo{
-        .func = proto,
-        .closure = main_closure,
-        .pc = proto.code.ptr,
-        .savedpc = null,
-        .base = 0,
-        .ret_base = 0,
-        .nresults = -1,
-        .vararg_base = vararg_base,
-        .vararg_count = vararg_count,
-        .previous = null,
-    };
+    vm.base_ci = CallInfo.initRoot(proto, main_closure, 0, 0, -1, vararg_base, vararg_count);
     vm.ci = &vm.base_ci;
     vm.base = 0;
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else proto.maxstacksize;
@@ -1312,45 +1444,19 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             return error.LuaException;
         }
         const ci = vm.ci orelse return error.LuaException;
-        if (try continueFrameContinuation(vm, ci)) continue;
-        const inst = ci.fetch() catch |err| {
-            if (err == error.PcOutOfRange) {
-                if (ci.previous != null) {
-                    popCallInfo(vm);
-                    if (vm.ci) |prev_ci| {
-                        vm.base = prev_ci.ret_base;
-                        vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
-                        continue;
-                    }
+        const inst = advanceFrame(vm, ci, true) catch |err| {
+            if (try continueIfLuaExceptionHandled(vm, err)) continue;
+            return err;
+        };
+        switch (inst) {
+            .continue_loop => continue,
+            .top_frame_exhausted => return .none,
+            .instruction => |fetched| {
+                switch (try runInstructionInMainLoop(vm, ci, fetched)) {
+                    .continue_loop => continue,
+                    .return_vm => |ret| return ret,
                 }
-                return .none;
-            }
-            if (try continueIfLuaExceptionHandled(vm, err)) continue;
-            return err;
-        };
-
-        const result = do(vm, inst) catch |err| {
-            if (err == error.HandledException) continue;
-            if (try continueIfLuaExceptionHandled(vm, err)) continue;
-            // Convert VM errors to LuaException for pcall catchability
-            if (isVmRuntimeError(err)) {
-                var msg_buf: [128]u8 = undefined;
-                const msg = formatVmRuntimeErrorMessage(vm, inst, err, &msg_buf);
-                var full_msg_buf: [320]u8 = undefined;
-                const full_msg = runtimeErrorWithLocation(ci, inst, err, msg, &full_msg_buf);
-                vm.errors.lua_error_value = TValue.fromString(vm.gc().allocString(full_msg) catch {
-                    return err;
-                });
-                if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
-                return error.LuaException;
-            }
-            return err;
-        };
-
-        switch (result) {
-            .Continue => {},
-            .LoopContinue => continue,
-            .ReturnVM => |ret| return ret,
+            },
         }
     }
 }
@@ -3532,130 +3638,29 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const b = inst.getB();
+    const initial_ret_count: u32 = if (b == 0)
+        vm.top - (vm.ci.?.base + a)
+    else if (b == 1)
+        0
+    else
+        b - 1;
 
     if (vm.ci.?.previous != null) {
-        const returning_ci = vm.ci.?;
-        const nresults = returning_ci.nresults;
-        const dst_base = returning_ci.ret_base;
-        const is_protected = returning_ci.is_protected;
-        const initial_ret_count: u32 = if (b == 0)
-            vm.top - (returning_ci.base + a)
-        else if (b == 1)
-            0
-        else
-            b - 1;
-        switch (returning_ci.continuation) {
-            .return_ => |ret| {
-                if (ret.a != a) {
-                    setReturnContinuation(returning_ci, a, initial_ret_count);
-                }
-            },
-            else => {
-                setReturnContinuation(returning_ci, a, initial_ret_count);
-            }
-        }
-
-        try closeTbcForReturn(vm, returning_ci);
-        if (vm.open_upvalues != null) {
-            vm.closeUpvalues(returning_ci.base);
-        }
-        const ret_count: u32 = if (b == 0)
-            switch (returning_ci.continuation) {
-                .return_ => |ret| ret.count,
-                else => vm.top - (returning_ci.base + a),
-            }
-        else if (b == 1)
-            0
-        else
-            b - 1;
-        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, ret_count, executeSyncMM);
+        const ret = try prepareReturn(vm, vm.ci.?, a, initial_ret_count);
+        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, ret.ci.base + a, ret.count, executeSyncMM);
         popCallInfo(vm);
-
-        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-        if (is_protected) {
-            const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
-            const copy_count: u32 = if (nresults < 0) ret_count else @min(ret_count, expected);
-            vm.stack[dst_base] = .{ .boolean = true };
-            if (copy_count > 0) {
-                for (0..copy_count) |i| {
-                    vm.stack[dst_base + 1 + i] = vm.stack[returning_ci.base + a + i];
-                }
-            }
-            if (nresults >= 0 and expected > copy_count) {
-                for (vm.stack[dst_base + 1 + copy_count ..][0 .. expected - copy_count]) |*slot| {
-                    slot.* = .nil;
-                }
-            }
-            vm.top = if (nresults < 0) dst_base + 1 + copy_count else caller_frame_max;
-            return .LoopContinue;
-        }
-
-        if (ret_count == 0) {
-            if (nresults > 0) {
-                const n: usize = @intCast(nresults);
-                for (vm.stack[dst_base..][0..n]) |*slot| {
-                    slot.* = .nil;
-                }
-            }
-            vm.top = if (nresults < 0) dst_base else caller_frame_max;
-        } else if (nresults < 0) {
-            for (0..ret_count) |i| {
-                vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-            }
-            vm.top = dst_base + ret_count;
-        } else {
-            const n: u32 = @intCast(nresults);
-            const copy_count = @min(ret_count, n);
-            for (0..copy_count) |i| {
-                vm.stack[dst_base + i] = vm.stack[returning_ci.base + a + i];
-            }
-            if (n > copy_count) {
-                for (vm.stack[dst_base + copy_count ..][0 .. n - copy_count]) |*slot| {
-                    slot.* = .nil;
-                }
-            }
-            vm.top = caller_frame_max;
-        }
-
-        return .LoopContinue;
+        return finishReturnToCaller(vm, ret);
     }
 
-    const top_ci = vm.ci.?;
-    const initial_ret_count: u32 = if (b == 0)
-        vm.top - (vm.base + a)
-    else if (b == 1)
-        0
-    else
-        b - 1;
-    switch (top_ci.continuation) {
-        .return_ => |ret| {
-            if (ret.a != a) {
-                setReturnContinuation(top_ci, a, initial_ret_count);
-            }
-        },
-        else => {
-            setReturnContinuation(top_ci, a, initial_ret_count);
-        }
-    }
-    try closeTbcForReturn(vm, top_ci);
-    const ret_count: u32 = if (b == 0)
-        switch (top_ci.continuation) {
-            .return_ => |ret| ret.count,
-            else => vm.top - (vm.base + a),
-        }
-    else if (b == 1)
-        0
-    else
-        b - 1;
-    try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, ret_count, executeSyncMM);
+    const ret = try prepareReturn(vm, vm.ci.?, a, initial_ret_count);
+    try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, ret.ci.base + a, ret.count, executeSyncMM);
 
-    if (ret_count == 0) {
+    if (ret.count == 0) {
         return .{ .ReturnVM = .none };
-    } else if (ret_count == 1) {
+    } else if (ret.count == 1) {
         return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
     } else {
-        const values = vm.stack[vm.base + a .. vm.base + a + ret_count];
+        const values = vm.stack[vm.base + a .. vm.base + a + ret.count];
         return .{ .ReturnVM = .{ .multiple = values } };
     }
 }
@@ -3670,41 +3675,13 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 fn opRETURN0(vm: *VM, ci: *CallInfo) !ExecuteResult {
     _ = ci;
     if (vm.ci.?.previous != null) {
-        const returning_ci = vm.ci.?;
-        const nresults = returning_ci.nresults;
-        const dst_base = returning_ci.ret_base;
-        const is_protected = returning_ci.is_protected;
-
-        setReturnContinuation(returning_ci, 0, 0);
-        try closeTbcForReturn(vm, returning_ci);
-        if (vm.open_upvalues != null) {
-            vm.closeUpvalues(returning_ci.base);
-        }
+        const ret = try prepareReturn(vm, vm.ci.?, 0, 0);
         try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
         popCallInfo(vm);
-
-        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-        if (is_protected) {
-            vm.stack[dst_base] = .{ .boolean = true };
-            vm.top = if (nresults < 0) dst_base + 1 else caller_frame_max;
-            return .LoopContinue;
-        }
-
-        if (nresults > 0) {
-            const n: usize = @intCast(nresults);
-            for (vm.stack[dst_base..][0..n]) |*slot| {
-                slot.* = .nil;
-            }
-        }
-
-        vm.top = if (nresults < 0) dst_base else caller_frame_max;
-        return .LoopContinue;
+        return finishReturnToCaller(vm, ret);
     }
 
-    const top_ci = vm.ci.?;
-    setReturnContinuation(top_ci, 0, 0);
-    try closeTbcForReturn(vm, top_ci);
+    _ = try prepareReturn(vm, vm.ci.?, 0, 0);
     try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
     return .{ .ReturnVM = .none };
 }
@@ -3721,52 +3698,13 @@ fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
 
     if (vm.ci.?.previous != null) {
-        const returning_ci = vm.ci.?;
-        const nresults = returning_ci.nresults;
-        const dst_base = returning_ci.ret_base;
-        const is_protected = returning_ci.is_protected;
-
-        setReturnContinuation(returning_ci, a, 1);
-        try closeTbcForReturn(vm, returning_ci);
-        if (vm.open_upvalues != null) {
-            vm.closeUpvalues(returning_ci.base);
-        }
-        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, returning_ci.base + a, 1, executeSyncMM);
+        const ret = try prepareReturn(vm, vm.ci.?, a, 1);
+        try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, ret.ci.base + a, 1, executeSyncMM);
         popCallInfo(vm);
-
-        const caller_frame_max = vm.base + vm.ci.?.func.maxstacksize;
-
-        if (is_protected) {
-            vm.stack[dst_base] = .{ .boolean = true };
-            if (nresults != 0) {
-                vm.stack[dst_base + 1] = vm.stack[returning_ci.base + a];
-            }
-            vm.top = if (nresults < 0) dst_base + 2 else caller_frame_max;
-            return .LoopContinue;
-        }
-
-        if (nresults < 0) {
-            vm.stack[dst_base] = vm.stack[returning_ci.base + a];
-            vm.top = dst_base + 1;
-        } else if (nresults > 0) {
-            vm.stack[dst_base] = vm.stack[returning_ci.base + a];
-            if (nresults > 1) {
-                const n: usize = @intCast(nresults - 1);
-                for (vm.stack[dst_base + 1 ..][0..n]) |*slot| {
-                    slot.* = .nil;
-                }
-            }
-            vm.top = caller_frame_max;
-        } else {
-            vm.top = caller_frame_max;
-        }
-
-        return .LoopContinue;
+        return finishReturnToCaller(vm, ret);
     }
 
-    const top_ci = vm.ci.?;
-    setReturnContinuation(top_ci, a, 1);
-    try closeTbcForReturn(vm, top_ci);
+    _ = try prepareReturn(vm, vm.ci.?, a, 1);
     try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
     return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
 }
