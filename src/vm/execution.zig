@@ -29,6 +29,25 @@ pub const ExecuteResult = union(enum) {
     ReturnVM: ReturnValue,
 };
 
+pub const Continuation = union(enum) {
+    none,
+    return_: struct {
+        a: u8,
+        count: u32,
+        reexec: bool,
+    },
+    compare: struct {
+        negate: u8,
+        invert: bool,
+        result_slot: u32,
+    },
+    concat: struct {
+        a: u8,
+        b: u8,
+        i: i16,
+    },
+};
+
 /// CallInfo represents a function call in the call stack
 pub const CallInfo = struct {
     // Function info
@@ -64,22 +83,7 @@ pub const CallInfo = struct {
     // Bitmap tracking which registers are marked as TBC (up to 64 registers)
     tbc_bitmap: u64 = 0,
 
-    // RETURN(B=0) state across yield/resume during close unwinding.
-    pending_return_a: ?u8 = null,
-    pending_return_count: ?u32 = null,
-    pending_return_reexec: bool = false,
-
-    // Comparison metamethod continuation state (for yielded __le fallback).
-    pending_compare_active: bool = false,
-    pending_compare_negate: u8 = 0,
-    pending_compare_invert: bool = false,
-    pending_compare_result_slot: u32 = 0,
-
-    // CONCAT continuation state when __concat yields.
-    pending_concat_active: bool = false,
-    pending_concat_a: u8 = 0,
-    pending_concat_b: u8 = 0,
-    pending_concat_i: i16 = -1,
+    continuation: Continuation = .none,
 
     /// Mark a register as to-be-closed
     pub fn markTBC(self: *CallInfo, reg: u8) void {
@@ -118,17 +122,30 @@ pub const CallInfo = struct {
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
-        if (self.pending_return_reexec) {
-            if (@intFromPtr(self.pc) > @intFromPtr(self.func.code.ptr)) {
-                self.pc -= 1;
-            }
-            self.pending_return_reexec = false;
+        switch (self.continuation) {
+            .return_ => |ret| {
+                if (ret.reexec) {
+                    if (@intFromPtr(self.pc) > @intFromPtr(self.func.code.ptr)) {
+                        self.pc -= 1;
+                    }
+                    self.continuation = .{ .return_ = .{
+                        .a = ret.a,
+                        .count = ret.count,
+                        .reexec = false,
+                    } };
+                }
+            },
+            else => {},
         }
         try self.validatePC();
         const inst = self.pc[0];
         self.skip();
 
         return inst;
+    }
+
+    pub inline fn clearContinuation(self: *CallInfo) void {
+        self.continuation = .none;
     }
 
     /// Skip next instruction (increment PC by 1)

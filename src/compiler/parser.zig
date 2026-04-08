@@ -457,6 +457,30 @@ pub const ProtoBuilder = struct {
         try self.lineinfo.append(self.allocator, self.current_line);
     }
 
+    pub fn emitLTI(self: *ProtoBuilder, left: u8, imm: i8, negate: u8) !void {
+        const instr = Instruction.initABC(.LTI, negate, left, @bitCast(imm));
+        try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
+    }
+
+    pub fn emitLEI(self: *ProtoBuilder, left: u8, imm: i8, negate: u8) !void {
+        const instr = Instruction.initABC(.LEI, negate, left, @bitCast(imm));
+        try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
+    }
+
+    pub fn emitGTI(self: *ProtoBuilder, right: u8, imm: i8, negate: u8) !void {
+        const instr = Instruction.initABC(.GTI, negate, right, @bitCast(imm));
+        try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
+    }
+
+    pub fn emitGEI(self: *ProtoBuilder, right: u8, imm: i8, negate: u8) !void {
+        const instr = Instruction.initABC(.GEI, negate, right, @bitCast(imm));
+        try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
+    }
+
     pub fn emitFORLOOP(self: *ProtoBuilder, base_reg: u8, jump_target: i17) !void {
         const instr = Instruction.initAsBx(.FORLOOP, base_reg, jump_target);
         try self.code.append(self.allocator, instr);
@@ -862,6 +886,24 @@ pub const ProtoBuilder = struct {
         const new_c: u8 = nresults + 1; // C encoding: 0 = vararg, n+1 = n results
         const new_instr = Instruction.initABC(existing.getOpCode(), existing.getA(), existing.getB(), new_c);
         self.code.items[addr] = new_instr;
+    }
+
+    fn popLastInstruction(self: *ProtoBuilder) void {
+        _ = self.code.pop();
+        _ = self.lineinfo.pop();
+    }
+
+    fn trailingSmallIntegerLoad(self: *ProtoBuilder, reg: u8) ?i8 {
+        if (self.code.items.len == 0) return null;
+        const last = self.code.items[self.code.items.len - 1];
+        if (last.getOpCode() != .LOADK or last.getA() != reg) return null;
+        const const_idx = last.getBx();
+        if (const_idx >= self.const_refs.items.len) return null;
+        const cref = self.const_refs.items[const_idx];
+        if (cref.kind != .integer or cref.index >= self.integers.items.len) return null;
+        const value = self.integers.items[cref.index];
+        if (value < std.math.minInt(i8) or value > std.math.maxInt(i8)) return null;
+        return @intCast(value);
     }
 
     // add functions grouped together
@@ -3616,24 +3658,44 @@ pub const Parser = struct {
                 try self.proto.emitLOADBOOL(dst, true, false); // not equal: true
             } else if (std.mem.eql(u8, op, "<")) {
                 // For <: if left < right then set true, else set false
-                try self.proto.emitLT(left, right, 0); // skip if left < right (negate=0)
+                if (self.proto.trailingSmallIntegerLoad(right)) |imm| {
+                    self.proto.popLastInstruction();
+                    try self.proto.emitLTI(left, imm, 0);
+                } else {
+                    try self.proto.emitLT(left, right, 0); // skip if left < right (negate=0)
+                }
                 try self.proto.emitLOADBOOL(dst, false, true); // not less than: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // less than: true
             } else if (std.mem.eql(u8, op, "<=")) {
                 // For <=: if left <= right then set true, else set false
-                try self.proto.emitLE(left, right, 0); // skip if left <= right (negate=0)
+                if (self.proto.trailingSmallIntegerLoad(right)) |imm| {
+                    self.proto.popLastInstruction();
+                    try self.proto.emitLEI(left, imm, 0);
+                } else {
+                    try self.proto.emitLE(left, right, 0); // skip if left <= right (negate=0)
+                }
                 try self.proto.emitLOADBOOL(dst, false, true); // not less than or equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // less than or equal: true
             } else if (std.mem.eql(u8, op, ">")) {
                 // For >: if left > right then set true, else set false
                 // Use LT with swapped operands: right < left
-                try self.proto.emitLT(right, left, 0); // skip if right < left (negate=0)
+                if (self.proto.trailingSmallIntegerLoad(right)) |imm| {
+                    self.proto.popLastInstruction();
+                    try self.proto.emitGTI(left, imm, 0);
+                } else {
+                    try self.proto.emitLT(right, left, 0); // skip if right < left (negate=0)
+                }
                 try self.proto.emitLOADBOOL(dst, false, true); // not greater than: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // greater than: true
             } else if (std.mem.eql(u8, op, ">=")) {
                 // For >=: if left >= right then set true, else set false
                 // Use LE with swapped operands: right <= left
-                try self.proto.emitLE(right, left, 0); // skip if right <= left (negate=0)
+                if (self.proto.trailingSmallIntegerLoad(right)) |imm| {
+                    self.proto.popLastInstruction();
+                    try self.proto.emitGEI(left, imm, 0);
+                } else {
+                    try self.proto.emitLE(right, left, 0); // skip if right <= left (negate=0)
+                }
                 try self.proto.emitLOADBOOL(dst, false, true); // not greater than or equal: false, skip next
                 try self.proto.emitLOADBOOL(dst, true, false); // greater than or equal: true
             } else {

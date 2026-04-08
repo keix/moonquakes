@@ -40,6 +40,7 @@ const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 // Execution ABI: CallInfo (frame), ReturnValue (result)
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
+const Continuation = execution.Continuation;
 const ReturnValue = execution.ReturnValue;
 const ExecuteResult = execution.ExecuteResult;
 const call = @import("call.zig");
@@ -177,10 +178,44 @@ fn closeTbcForReturn(vm: *VM, ci: *CallInfo) !void {
     if (ci.tbc_bitmap == 0) return;
     closeTBCVariables(vm, ci, 0, .nil) catch |err| {
         if (err == error.Yield) {
-            ci.pending_return_reexec = true;
+            switch (ci.continuation) {
+                .return_ => |ret| ci.continuation = .{ .return_ = .{
+                    .a = ret.a,
+                    .count = ret.count,
+                    .reexec = true,
+                } },
+                else => {},
+            }
         }
         return err;
     };
+}
+
+inline fn setReturnContinuation(ci: *CallInfo, a: u8, count: u32) void {
+    ci.continuation = .{ .return_ = .{
+        .a = a,
+        .count = count,
+        .reexec = false,
+    } };
+}
+
+pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
+    switch (ci.continuation) {
+        .none, .return_ => return false,
+        .compare => |compare| {
+            var is_true = vm.stack[compare.result_slot].toBoolean();
+            if (compare.invert) is_true = !is_true;
+            if ((is_true and compare.negate == 0) or (!is_true and compare.negate != 0)) {
+                ci.skip();
+            }
+            ci.clearContinuation();
+            return false;
+        },
+        .concat => {
+            if (try continueConcatFold(vm, ci)) return true;
+            return false;
+        },
+    }
 }
 
 pub fn popErrorFrame(vm: *VM, ci: *CallInfo, err_obj: TValue) error{Yield}!void {
@@ -1277,17 +1312,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
             return error.LuaException;
         }
         const ci = vm.ci orelse return error.LuaException;
-        if (ci.pending_compare_active) {
-            var is_true = vm.stack[ci.pending_compare_result_slot].toBoolean();
-            if (ci.pending_compare_invert) is_true = !is_true;
-            if ((is_true and ci.pending_compare_negate == 0) or (!is_true and ci.pending_compare_negate != 0)) {
-                ci.skip();
-            }
-            ci.pending_compare_active = false;
-        }
-        if (ci.pending_concat_active) {
-            if (try continueConcatFold(vm, ci)) continue;
-        }
+        if (try continueFrameContinuation(vm, ci)) continue;
         const inst = ci.fetch() catch |err| {
             if (err == error.PcOutOfRange) {
                 if (ci.previous != null) {
@@ -2495,10 +2520,11 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 continue;
             },
             .LoopContinue => {
-                ci.pending_concat_active = true;
-                ci.pending_concat_a = a;
-                ci.pending_concat_b = b;
-                ci.pending_concat_i = i - 1;
+                ci.continuation = .{ .concat = .{
+                    .a = a,
+                    .b = b,
+                    .i = i - 1,
+                } };
                 return .LoopContinue;
             },
             .ReturnVM => unreachable,
@@ -3395,17 +3421,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         current_ci.is_protected = false;
         current_ci.error_handler = .nil;
         current_ci.tbc_bitmap = 0;
-        current_ci.pending_return_a = null;
-        current_ci.pending_return_count = null;
-        current_ci.pending_return_reexec = false;
-        current_ci.pending_compare_active = false;
-        current_ci.pending_compare_negate = 0;
-        current_ci.pending_compare_invert = false;
-        current_ci.pending_compare_result_slot = 0;
-        current_ci.pending_concat_active = false;
-        current_ci.pending_concat_a = 0;
-        current_ci.pending_concat_b = 0;
-        current_ci.pending_concat_i = -1;
+        current_ci.clearContinuation();
 
         vm.base = new_base;
         vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
@@ -3522,10 +3538,20 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         const nresults = returning_ci.nresults;
         const dst_base = returning_ci.ret_base;
         const is_protected = returning_ci.is_protected;
-        if (b == 0) {
-            if (returning_ci.pending_return_count == null or returning_ci.pending_return_a == null or returning_ci.pending_return_a.? != a) {
-                returning_ci.pending_return_a = a;
-                returning_ci.pending_return_count = vm.top - (returning_ci.base + a);
+        const initial_ret_count: u32 = if (b == 0)
+            vm.top - (returning_ci.base + a)
+        else if (b == 1)
+            0
+        else
+            b - 1;
+        switch (returning_ci.continuation) {
+            .return_ => |ret| {
+                if (ret.a != a) {
+                    setReturnContinuation(returning_ci, a, initial_ret_count);
+                }
+            },
+            else => {
+                setReturnContinuation(returning_ci, a, initial_ret_count);
             }
         }
 
@@ -3534,7 +3560,10 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             vm.closeUpvalues(returning_ci.base);
         }
         const ret_count: u32 = if (b == 0)
-            returning_ci.pending_return_count orelse (vm.top - (returning_ci.base + a))
+            switch (returning_ci.continuation) {
+                .return_ => |ret| ret.count,
+                else => vm.top - (returning_ci.base + a),
+            }
         else if (b == 1)
             0
         else
@@ -3593,15 +3622,28 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     const top_ci = vm.ci.?;
-    if (b == 0) {
-        if (top_ci.pending_return_count == null or top_ci.pending_return_a == null or top_ci.pending_return_a.? != a) {
-            top_ci.pending_return_a = a;
-            top_ci.pending_return_count = vm.top - (vm.base + a);
+    const initial_ret_count: u32 = if (b == 0)
+        vm.top - (vm.base + a)
+    else if (b == 1)
+        0
+    else
+        b - 1;
+    switch (top_ci.continuation) {
+        .return_ => |ret| {
+            if (ret.a != a) {
+                setReturnContinuation(top_ci, a, initial_ret_count);
+            }
+        },
+        else => {
+            setReturnContinuation(top_ci, a, initial_ret_count);
         }
     }
     try closeTbcForReturn(vm, top_ci);
     const ret_count: u32 = if (b == 0)
-        top_ci.pending_return_count orelse (vm.top - (vm.base + a))
+        switch (top_ci.continuation) {
+            .return_ => |ret| ret.count,
+            else => vm.top - (vm.base + a),
+        }
     else if (b == 1)
         0
     else
@@ -3633,6 +3675,7 @@ fn opRETURN0(vm: *VM, ci: *CallInfo) !ExecuteResult {
         const dst_base = returning_ci.ret_base;
         const is_protected = returning_ci.is_protected;
 
+        setReturnContinuation(returning_ci, 0, 0);
         try closeTbcForReturn(vm, returning_ci);
         if (vm.open_upvalues != null) {
             vm.closeUpvalues(returning_ci.base);
@@ -3660,6 +3703,7 @@ fn opRETURN0(vm: *VM, ci: *CallInfo) !ExecuteResult {
     }
 
     const top_ci = vm.ci.?;
+    setReturnContinuation(top_ci, 0, 0);
     try closeTbcForReturn(vm, top_ci);
     try hook_state.onReturnCleared(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, executeSyncMM);
     return .{ .ReturnVM = .none };
@@ -3682,6 +3726,7 @@ fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         const dst_base = returning_ci.ret_base;
         const is_protected = returning_ci.is_protected;
 
+        setReturnContinuation(returning_ci, a, 1);
         try closeTbcForReturn(vm, returning_ci);
         if (vm.open_upvalues != null) {
             vm.closeUpvalues(returning_ci.base);
@@ -3720,6 +3765,7 @@ fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     const top_ci = vm.ci.?;
+    setReturnContinuation(top_ci, a, 1);
     try closeTbcForReturn(vm, top_ci);
     try hook_state.onReturnFromStack(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, a + 1, vm.base + a, 1, executeSyncMM);
     return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
@@ -4555,18 +4601,22 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
 }
 
 pub fn continueConcatFold(vm: *VM, ci: *CallInfo) !bool {
-    var acc = vm.stack[vm.base + ci.pending_concat_a];
-    var i = ci.pending_concat_i;
+    const cont = switch (ci.continuation) {
+        .concat => |concat| concat,
+        else => return false,
+    };
+    var acc = vm.stack[vm.base + cont.a];
+    var i = cont.i;
 
-    while (i >= @as(i16, @intCast(ci.pending_concat_b))) : (i -= 1) {
+    while (i >= @as(i16, @intCast(cont.b))) : (i -= 1) {
         const left = vm.stack[vm.base + @as(u32, @intCast(i))];
         if (canConcatPrimitive(left) and canConcatPrimitive(acc)) {
             acc = try concatTwoSync(vm, left, acc);
-            vm.stack[vm.base + ci.pending_concat_a] = acc;
+            vm.stack[vm.base + cont.a] = acc;
             continue;
         }
 
-        const mm_res = try dispatchConcatMM(vm, left, acc, ci.pending_concat_a) orelse {
+        const mm_res = try dispatchConcatMM(vm, left, acc, cont.a) orelse {
             const bad = if (!canConcatPrimitive(left)) left else acc;
             const ty = callableValueTypeName(bad);
             var msg_buf: [96]u8 = undefined;
@@ -4576,20 +4626,23 @@ pub fn continueConcatFold(vm: *VM, ci: *CallInfo) !bool {
 
         switch (mm_res) {
             .Continue => {
-                acc = vm.stack[vm.base + ci.pending_concat_a];
+                acc = vm.stack[vm.base + cont.a];
                 continue;
             },
             .LoopContinue => {
-                ci.pending_concat_i = i - 1;
-                ci.pending_concat_active = true;
+                ci.continuation = .{ .concat = .{
+                    .a = cont.a,
+                    .b = cont.b,
+                    .i = i - 1,
+                } };
                 return true;
             },
             .ReturnVM => unreachable,
         }
     }
 
-    vm.stack[vm.base + ci.pending_concat_a] = acc;
-    ci.pending_concat_active = false;
+    vm.stack[vm.base + cont.a] = acc;
+    ci.clearContinuation();
     return false;
 }
 
@@ -4831,10 +4884,11 @@ fn scheduleCompareMM(
     const result_slot = vm.top;
     try ensureStackTop(vm, result_slot + 1);
 
-    ci.pending_compare_active = true;
-    ci.pending_compare_negate = negate;
-    ci.pending_compare_invert = invert;
-    ci.pending_compare_result_slot = result_slot;
+    ci.continuation = .{ .compare = .{
+        .negate = negate,
+        .invert = invert,
+        .result_slot = result_slot,
+    } };
 
     const exec_res = try callBinMetamethodToAbs(vm, mm, left, right, result_slot, mm_name);
     switch (exec_res) {
@@ -4842,7 +4896,7 @@ fn scheduleCompareMM(
         .Continue => {
             var is_true = vm.stack[result_slot].toBoolean();
             if (invert) is_true = !is_true;
-            ci.pending_compare_active = false;
+            ci.clearContinuation();
             return .{ .value = is_true };
         },
         .ReturnVM => unreachable,

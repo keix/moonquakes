@@ -118,15 +118,5 @@ pub fn reuseCurrentFrame(current_ci: *CallInfo, ret_base: u32, total_results: u3
     current_ci.is_protected = true;
     current_ci.error_handler = handler orelse .nil;
     current_ci.tbc_bitmap = 0;
-    current_ci.pending_return_a = null;
-    current_ci.pending_return_count = null;
-    current_ci.pending_return_reexec = false;
-    current_ci.pending_compare_active = false;
-    current_ci.pending_compare_negate = 0;
-    current_ci.pending_compare_invert = false;
-    current_ci.pending_compare_result_slot = 0;
-    current_ci.pending_concat_active = false;
-    current_ci.pending_concat_a = 0;
-    current_ci.pending_concat_b = 0;
-    current_ci.pending_concat_i = -1;
+    current_ci.clearContinuation();
 }

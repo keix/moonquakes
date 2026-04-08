@@ -149,20 +149,10 @@ fn executeCoroutine(co_vm: *VM) CoroutineResult {
             }
         }
         const ci = co_vm.ci.?;
-        if (ci.pending_compare_active) {
-            var is_true = co_vm.stack[ci.pending_compare_result_slot].toBoolean();
-            if (ci.pending_compare_invert) is_true = !is_true;
-            if ((is_true and ci.pending_compare_negate == 0) or (!is_true and ci.pending_compare_negate != 0)) {
-                ci.skip();
-            }
-            ci.pending_compare_active = false;
-        }
-        if (ci.pending_concat_active) {
-            if (mnemonics.continueConcatFold(co_vm, ci) catch |cerr| switch (cerr) {
+        if (mnemonics.continueFrameContinuation(co_vm, ci) catch |cerr| switch (cerr) {
                 error.Yield => return .{ .yielded = yield_state.currentResult(co_vm) },
                 else => return .{ .errored = error_state.getRaisedValue(co_vm) },
             }) continue;
-        }
         const inst = ci.fetch() catch {
             // End of function - check if this is the base frame
             if (ci.previous == null) {
