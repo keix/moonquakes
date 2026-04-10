@@ -459,6 +459,113 @@ fn callClosureIntoWithResultBase(vm: *VM, closure: *ClosureObject, args: []const
     return runUntilReturnInto(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count, out);
 }
 
+const ReentrantCallResult = union(enum) {
+    stack,
+    none,
+    single: TValue,
+    multiple: []const TValue,
+};
+
+fn restorePreviousFrame(vm: *VM, saved_depth: u8) bool {
+    mnemonics.popCallInfo(vm);
+    if (vm.callstack_size == saved_depth) {
+        return true;
+    }
+
+    const prev_ci = &vm.callstack[vm.callstack_size - 1];
+    vm.base = prev_ci.ret_base;
+    vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
+    return false;
+}
+
+fn handleCallLoopError(vm: *VM, inst: Instruction, err: anyerror, saved_depth: u8, saved_base: u32, saved_top: u32) anyerror {
+    if (err == error.Yield) return error.Yield;
+    if (err == error.HandledException) return error.HandledException;
+    if (err == error.LuaException) {
+        return switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
+            .continue_loop => error.WouldBlock,
+            .handled_at_boundary => error.HandledException,
+            .unhandled => blk: {
+                mnemonics.unwindErrorFramesIgnoringCloseErrors(vm, saved_depth, vm.errors.lua_error_value);
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupRunState(vm, saved_depth, saved_base, saved_top);
+                break :blk error.LuaException;
+            },
+        };
+    }
+    if (mnemonics.isVmRuntimeError(err)) {
+        convertVmRuntimeErrorToLuaException(vm, inst, err) catch |convert_err| {
+            cleanupRunState(vm, saved_depth, saved_base, saved_top);
+            return convert_err;
+        };
+        return switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
+            .continue_loop => error.WouldBlock,
+            .handled_at_boundary => error.HandledException,
+            .unhandled => blk: {
+                mnemonics.captureCurrentTracebackSnapshot(vm);
+                cleanupRunState(vm, saved_depth, saved_base, saved_top);
+                break :blk error.LuaException;
+            },
+        };
+    }
+    cleanupRunState(vm, saved_depth, saved_base, saved_top);
+    return err;
+}
+
+fn runUntilReturnCommon(
+    vm: *VM,
+    proto: *const ProtoObject,
+    closure: *ClosureObject,
+    call_base: u32,
+    result_slot: u32,
+    saved_base: u32,
+    saved_top: u32,
+    vararg_base: u32,
+    vararg_count: u32,
+    nresults: i16,
+) anyerror!ReentrantCallResult {
+    const saved_depth = vm.callstack_size;
+    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, nresults, vararg_base, vararg_count);
+
+    while (vm.callstack_size > saved_depth) {
+        if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
+            switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
+                .continue_loop => continue,
+                .handled_at_boundary => return error.HandledException,
+                .unhandled => {
+                    cleanupRunState(vm, saved_depth, saved_base, saved_top);
+                    return error.LuaException;
+                },
+            }
+        }
+
+        const ci = &vm.callstack[vm.callstack_size - 1];
+        const inst = ci.fetch() catch {
+            if (restorePreviousFrame(vm, saved_depth)) break;
+            continue;
+        };
+
+        const result = mnemonics.do(vm, inst) catch |err| switch (handleCallLoopError(vm, inst, err, saved_depth, saved_base, saved_top)) {
+            error.WouldBlock => continue,
+            else => |loop_err| return loop_err,
+        };
+
+        switch (result) {
+            .Continue, .LoopContinue => {},
+            .ReturnVM => |ret| {
+                _ = restorePreviousFrame(vm, saved_depth);
+                return switch (ret) {
+                    .none => .none,
+                    .single => |v| .{ .single = v },
+                    .multiple => |vs| .{ .multiple = vs },
+                };
+            },
+        }
+    }
+
+    return .stack;
+}
+
 /// Execute a Lua function until it returns to saved call depth.
 /// This is the core reentrant execution loop.
 ///
@@ -476,93 +583,12 @@ fn runUntilReturn(
     vararg_base: u32,
     vararg_count: u32,
 ) anyerror!TValue {
-    // Save current call depth for reentrancy
-    const saved_depth = vm.callstack_size;
-
-    // Push call info
-    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
-
-    // Execute until we return to saved depth
-    var direct_result: ?TValue = null;
-    while (vm.callstack_size > saved_depth) {
-        if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
-            switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                .continue_loop => continue,
-                .handled_at_boundary => return error.HandledException,
-                .unhandled => {
-                    cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                    return error.LuaException;
-                },
-            }
-        }
-        const ci = &vm.callstack[vm.callstack_size - 1];
-        const inst = ci.fetch() catch {
-            // End of function - pop this frame
-            mnemonics.popCallInfo(vm);
-
-            // If we're back to the original depth, restore caller's frame
-            if (vm.callstack_size == saved_depth) {
-                break;
-            }
-
-            // Otherwise, restore to the previous frame in the callstack
-            const prev_ci = &vm.callstack[vm.callstack_size - 1];
-            vm.base = prev_ci.ret_base;
-            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
-            continue;
-        };
-        const result = mnemonics.do(vm, inst) catch |err| {
-            // Preserve call frames on coroutine yield; resume needs intact state.
-            if (err == error.Yield) return error.Yield;
-            if (err == error.HandledException) return error.HandledException;
-            if (err == error.LuaException) {
-                switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                    .continue_loop => continue,
-                    .handled_at_boundary => return error.HandledException,
-                    .unhandled => {
-                        mnemonics.unwindErrorFramesIgnoringCloseErrors(vm, saved_depth, vm.errors.lua_error_value);
-                        mnemonics.captureCurrentTracebackSnapshot(vm);
-                        cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                        return error.LuaException;
-                    },
-                }
-            }
-            if (mnemonics.isVmRuntimeError(err)) {
-                convertVmRuntimeErrorToLuaException(vm, inst, err) catch |convert_err| {
-                    cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                    return convert_err;
-                };
-                switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                    .continue_loop => continue,
-                    .handled_at_boundary => return error.HandledException,
-                    .unhandled => {
-                        mnemonics.captureCurrentTracebackSnapshot(vm);
-                        cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                        return error.LuaException;
-                    },
-                }
-            }
-            cleanupRunState(vm, saved_depth, saved_base, saved_top);
-            return err;
-        };
-        switch (result) {
-            .Continue => {},
-            .LoopContinue => {},
-            .ReturnVM => |ret| {
-                // Top-level return: extract value from ReturnVM and pop frame
-                direct_result = switch (ret) {
-                    .none => TValue.nil,
-                    .single => |v| v,
-                    .multiple => |vs| if (vs.len > 0) vs[0] else TValue.nil,
-                };
-                mnemonics.popCallInfo(vm);
-                break;
-            },
-        }
-    }
-
-    // Get result: either from direct return or from result_slot
-    const result = direct_result orelse vm.stack[result_slot];
+    const result = switch (try runUntilReturnCommon(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count, 1)) {
+        .stack => vm.stack[result_slot],
+        .none => TValue.nil,
+        .single => |v| v,
+        .multiple => |vs| if (vs.len > 0) vs[0] else TValue.nil,
+    };
 
     // GC SAFETY: Restore caller's frame state
     vm.base = saved_base;
@@ -583,102 +609,28 @@ fn runUntilReturnInto(
     vararg_count: u32,
     out: []TValue,
 ) anyerror!void {
-    const saved_depth = vm.callstack_size;
-    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, @intCast(out.len), vararg_base, vararg_count);
-
-    var direct_results: ?[]const TValue = null;
-    var direct_single: ?TValue = null;
-    var direct_none = false;
-
-    while (vm.callstack_size > saved_depth) {
-        if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
-            switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                .continue_loop => continue,
-                .handled_at_boundary => return error.HandledException,
-                .unhandled => {
-                    cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                    return error.LuaException;
-                },
+    switch (try runUntilReturnCommon(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count, @intCast(out.len))) {
+        .none => {
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) out[i] = .nil;
+        },
+        .single => |v| {
+            if (out.len > 0) out[0] = v;
+            var i: usize = 1;
+            while (i < out.len) : (i += 1) out[i] = .nil;
+        },
+        .multiple => |vs| {
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                out[i] = if (i < vs.len) vs[i] else .nil;
             }
-        }
-        const ci = &vm.callstack[vm.callstack_size - 1];
-        const inst = ci.fetch() catch {
-            mnemonics.popCallInfo(vm);
-            if (vm.callstack_size == saved_depth) break;
-            const prev_ci = &vm.callstack[vm.callstack_size - 1];
-            vm.base = prev_ci.ret_base;
-            vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
-            continue;
-        };
-        const result = mnemonics.do(vm, inst) catch |err| {
-            if (err == error.Yield) return error.Yield;
-            if (err == error.HandledException) return error.HandledException;
-            if (err == error.LuaException) {
-                switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                    .continue_loop => continue,
-                    .handled_at_boundary => return error.HandledException,
-                    .unhandled => {
-                        mnemonics.unwindErrorFramesIgnoringCloseErrors(vm, saved_depth, vm.errors.lua_error_value);
-                        mnemonics.captureCurrentTracebackSnapshot(vm);
-                        cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                        return error.LuaException;
-                    },
-                }
+        },
+        .stack => {
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                out[i] = vm.stack[result_slot + @as(u32, @intCast(i))];
             }
-            if (mnemonics.isVmRuntimeError(err)) {
-                convertVmRuntimeErrorToLuaException(vm, inst, err) catch |convert_err| {
-                    cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                    return convert_err;
-                };
-                switch (try handleLuaExceptionAtDepth(vm, saved_depth)) {
-                    .continue_loop => continue,
-                    .handled_at_boundary => return error.HandledException,
-                    .unhandled => {
-                        mnemonics.captureCurrentTracebackSnapshot(vm);
-                        cleanupRunState(vm, saved_depth, saved_base, saved_top);
-                        return error.LuaException;
-                    },
-                }
-            }
-            cleanupRunState(vm, saved_depth, saved_base, saved_top);
-            return err;
-        };
-        switch (result) {
-            .Continue => {},
-            .LoopContinue => {},
-            .ReturnVM => |ret| {
-                switch (ret) {
-                    .none => {
-                        direct_none = true;
-                    },
-                    .single => |v| {
-                        direct_single = v;
-                    },
-                    .multiple => |vs| direct_results = vs,
-                }
-                mnemonics.popCallInfo(vm);
-                break;
-            },
-        }
-    }
-
-    if (direct_none) {
-        var i: usize = 0;
-        while (i < out.len) : (i += 1) out[i] = .nil;
-    } else if (direct_single) |v| {
-        if (out.len > 0) out[0] = v;
-        var i: usize = 1;
-        while (i < out.len) : (i += 1) out[i] = .nil;
-    } else if (direct_results) |vs| {
-        var i: usize = 0;
-        while (i < out.len) : (i += 1) {
-            out[i] = if (i < vs.len) vs[i] else .nil;
-        }
-    } else {
-        var i: usize = 0;
-        while (i < out.len) : (i += 1) {
-            out[i] = vm.stack[result_slot + @as(u32, @intCast(i))];
-        }
+        },
     }
 
     vm.base = saved_base;
