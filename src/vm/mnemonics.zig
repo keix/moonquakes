@@ -1135,45 +1135,9 @@ fn pushMetamethodClosureCallWithResults(
     nresults: i16,
     mm_name: []const u8,
 ) !ExecuteResult {
-    const func_proto = closure.proto;
-    const new_base = vm.top;
-    const total_args: u32 = @intCast(args.len);
-
-    for (args, 0..) |arg, i| {
-        vm.stack[new_base + @as(u32, @intCast(i))] = arg;
-    }
-
-    var vararg_base: u32 = 0;
-    var vararg_count: u32 = 0;
-    if (func_proto.is_vararg and total_args > func_proto.numparams) {
-        vararg_count = total_args - func_proto.numparams;
-        const min_vararg_base = new_base + func_proto.maxstacksize;
-        vararg_base = @max(min_vararg_base, vm.top) + 32;
-        try ensureStackTop(vm, vararg_base + vararg_count);
-        var i: u32 = vararg_count;
-        while (i > 0) {
-            i -= 1;
-            vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
-        }
-    }
-
-    var i: u32 = total_args;
-    while (i < func_proto.numparams) : (i += 1) {
-        vm.stack[new_base + i] = .nil;
-    }
-
-    const ci = try pushCallInfoVararg(
-        vm,
-        func_proto,
-        closure,
-        new_base,
-        ret_abs,
-        nresults,
-        vararg_base,
-        vararg_count,
-    );
+    const prepared = try call.stageLuaCallFrameFromArgs(vm, closure, args, vm.top);
+    const ci = try call.activateLuaCallFrame(vm, closure, prepared, ret_abs, nresults);
     markMetamethodFrame(ci, mm_name);
-    vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
     return .LoopContinue;
 }
 
@@ -1182,41 +1146,25 @@ fn pushMetamethodClosureCall(vm: *VM, closure: *ClosureObject, args: []const TVa
 }
 
 fn callNativeClosureToAbs(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue, ret_abs: u32) !ExecuteResult {
-    const temp = vm.top;
-    vm.stack[temp] = mm;
-    for (args, 0..) |arg, i| {
-        vm.stack[temp + 1 + @as(u32, @intCast(i))] = arg;
-    }
-    vm.top = temp + 1 + @as(u32, @intCast(args.len));
-
-    try vm.callNative(nc.func.id, @intCast(temp - vm.base), @intCast(args.len), 1);
-    vm.stack[ret_abs] = vm.stack[temp];
-    vm.top = temp;
+    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
+    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 1);
+    vm.stack[ret_abs] = vm.stack[prepared.call_base];
+    vm.top = prepared.call_base;
     return .Continue;
 }
 
 fn callNativeClosureDiscard(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !ExecuteResult {
-    const temp = vm.top;
-    vm.stack[temp] = mm;
-    for (args, 0..) |arg, i| {
-        vm.stack[temp + 1 + @as(u32, @intCast(i))] = arg;
-    }
-    vm.top = temp + 1 + @as(u32, @intCast(args.len));
-    try vm.callNative(nc.func.id, @intCast(temp - vm.base), @intCast(args.len), 0);
-    vm.top = temp;
+    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
+    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 0);
+    vm.top = prepared.call_base;
     return .Continue;
 }
 
 fn callNativeClosureSync(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !TValue {
-    const temp = vm.top;
-    vm.stack[temp] = mm;
-    for (args, 0..) |arg, i| {
-        vm.stack[temp + 1 + @as(u32, @intCast(i))] = arg;
-    }
-    vm.top = temp + 1 + @as(u32, @intCast(args.len));
-    try vm.callNative(nc.func.id, @intCast(temp - vm.base), @intCast(args.len), 1);
-    const result = vm.stack[temp];
-    vm.top = temp;
+    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
+    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 1);
+    const result = vm.stack[prepared.call_base];
+    vm.top = prepared.call_base;
     return result;
 }
 
@@ -3456,54 +3404,9 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 
         const new_base = vm.base + a;
         const ret_base = vm.base + a;
-
-        if (!func_proto.is_vararg and nargs == func_proto.numparams) {
-            if (nargs > 0) {
-                var i: u32 = 0;
-                while (i < nargs) : (i += 1) {
-                    vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
-                }
-            }
-            _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, 0, 0);
-            try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-            vm.top = new_base + func_proto.maxstacksize;
-            return .LoopContinue;
-        }
-
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-
-        if (func_proto.is_vararg and nargs > func_proto.numparams) {
-            vararg_count = nargs - func_proto.numparams;
-            const min_vararg_base = new_base + func_proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            try ensureStackTop(vm, vararg_base + vararg_count);
-
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[new_base + 1 + func_proto.numparams + i];
-            }
-        }
-
-        const params_to_copy = @min(nargs, @as(u32, func_proto.numparams));
-        if (params_to_copy > 0) {
-            for (0..params_to_copy) |i| {
-                vm.stack[new_base + i] = vm.stack[new_base + 1 + i];
-            }
-        }
-
-        if (nargs < func_proto.numparams) {
-            for (vm.stack[new_base + nargs ..][0 .. func_proto.numparams - nargs]) |*slot| {
-                slot.* = .nil;
-            }
-        }
-
-        _ = try pushCallInfoVararg(vm, func_proto, closure, new_base, ret_base, nresults, vararg_base, vararg_count);
+        const prepared = try call.stageLuaCallFrameFromStack(vm, closure, new_base, nargs);
+        _ = try call.activateLuaCallFrame(vm, closure, prepared, ret_base, nresults);
         try hook_state.onCallFromStack(vm, null, 1, new_base, func_proto.numparams, executeSyncMM);
-
-        const frame_top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
-        vm.top = frame_top;
         return .LoopContinue;
     }
 
@@ -4066,6 +3969,21 @@ fn dispatchNewindexMetamethod(vm: *VM, mm: TValue, subject: TValue, key_val: TVa
     };
 }
 
+inline fn finishIndexMiss(vm: *VM, result_reg: u8) ?ExecuteResult {
+    vm.stack[vm.base + result_reg] = .nil;
+    return null;
+}
+
+inline fn lookupTableIndexMetamethod(vm: *VM, table: *object.TableObject) ?TValue {
+    const mt = table.metatable orelse return null;
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.index)));
+}
+
+inline fn lookupTableNewindexMetamethod(vm: *VM, table: *object.TableObject) ?TValue {
+    const mt = table.metatable orelse return null;
+    return mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex)));
+}
+
 /// Index with __index metamethod fallback
 /// Returns the value if found, or calls __index if not found
 /// If __index is a table, recursively looks up the key
@@ -4087,16 +4005,7 @@ fn dispatchIndexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValu
         return null; // Continue
     }
 
-    // Check for __index metamethod
-    const mt = table.metatable orelse {
-        vm.stack[vm.base + result_reg] = .nil;
-        return null; // Continue
-    };
-
-    const index_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.index))) orelse {
-        vm.stack[vm.base + result_reg] = .nil;
-        return null; // Continue
-    };
+    const index_mm = lookupTableIndexMetamethod(vm, table) orelse return finishIndexMiss(vm, result_reg);
 
     return try dispatchIndexMetamethod(vm, index_mm, table_val, key_val, result_reg, depth);
 }
@@ -4152,13 +4061,7 @@ fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TV
         return null; // Continue
     }
 
-    // Check for __newindex metamethod
-    const mt = table.metatable orelse {
-        try tableSetWithBarrier(vm, table, key_val, value);
-        return null; // Continue
-    };
-
-    const newindex_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.newindex))) orelse {
+    const newindex_mm = lookupTableNewindexMetamethod(vm, table) orelse {
         try tableSetWithBarrier(vm, table, key_val, value);
         return null; // Continue
     };
@@ -4260,42 +4163,13 @@ fn resolveCallTarget(vm: *VM, obj_val: TValue, func_slot: u32, nargs: u32) !?Res
 fn invokeResolvedCallTarget(vm: *VM, target: ResolvedCallTarget, func_slot: u32, nresults: i16) !ExecuteResult {
     return switch (target.callable) {
         .closure => |closure| blk: {
-            const func_proto = closure.proto;
             const new_base = vm.base + func_slot;
-            const total_args = target.effective_nargs + 1;
-
-            var vararg_base: u32 = 0;
-            var vararg_count: u32 = 0;
-            if (func_proto.is_vararg and total_args > func_proto.numparams) {
-                vararg_count = total_args - func_proto.numparams;
-                const min_vararg_base = new_base + func_proto.maxstacksize;
-                vararg_base = @max(min_vararg_base, vm.top) + 32;
-                try ensureStackTop(vm, vararg_base + vararg_count);
-
-                var i: u32 = vararg_count;
-                while (i > 0) {
-                    i -= 1;
-                    vm.stack[vararg_base + i] = vm.stack[new_base + func_proto.numparams + i];
-                }
-            }
-
-            var i: u32 = total_args;
-            while (i < func_proto.numparams) : (i += 1) {
-                vm.stack[new_base + i] = .nil;
-            }
-
-            const ci = try pushCallInfoVararg(
-                vm,
-                func_proto,
-                closure,
-                new_base,
-                new_base,
-                nresults,
-                vararg_base,
-                vararg_count,
-            );
+            const prepared = if (target.callable_at_func_slot)
+                try call.stageLuaCallFrameFromStack(vm, closure, new_base, target.effective_nargs)
+            else
+                try call.stageLuaCallFrameFromArgs(vm, closure, vm.stack[new_base .. new_base + target.effective_nargs + 1], new_base);
+            const ci = try call.activateLuaCallFrame(vm, closure, prepared, new_base, nresults);
             markMetamethodFrame(ci, "call");
-            vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
             break :blk .LoopContinue;
         },
         .native => |nc| blk: {

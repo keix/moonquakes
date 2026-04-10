@@ -16,6 +16,7 @@ const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const error_state = @import("error_state.zig");
 const mnemonics = @import("mnemonics.zig");
+const frame = @import("frame.zig");
 const VM = @import("vm.zig").VM;
 
 /// Error type for call operations
@@ -23,6 +24,18 @@ pub const CallError = error{
     NotCallable,
     CallStackOverflow,
     OutOfMemory,
+};
+
+pub const PreparedLuaCallFrame = struct {
+    call_base: u32,
+    vararg_base: u32,
+    vararg_count: u32,
+    frame_top: u32,
+};
+
+pub const PreparedNativeCallFrame = struct {
+    call_base: u32,
+    frame_top: u32,
 };
 
 /// Call a Lua/native function value with given arguments and return first result.
@@ -75,6 +88,130 @@ fn computeSafeCallBase(vm: *VM) u32 {
         return @max(vm.top, safe);
     }
     return vm.top;
+}
+
+pub fn stageLuaCallFrameFromArgs(vm: *VM, closure: *ClosureObject, args: []const TValue, call_base: u32) !PreparedLuaCallFrame {
+    const proto = closure.proto;
+    const arg_count: u32 = @intCast(args.len);
+    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
+
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        vm.stack[call_base + i] = args[i];
+    }
+
+    i = params_to_copy;
+    while (i < proto.numparams) : (i += 1) {
+        vm.stack[call_base + i] = .nil;
+    }
+
+    var vararg_base: u32 = 0;
+    var vararg_count: u32 = 0;
+    if (proto.is_vararg and arg_count > proto.numparams) {
+        vararg_count = arg_count - proto.numparams;
+        const min_vararg_base = call_base + proto.maxstacksize;
+        vararg_base = @max(min_vararg_base, vm.top) + 32;
+        try frame.ensureStackTop(vm, vararg_base + vararg_count);
+        var vi: u32 = 0;
+        while (vi < vararg_count) : (vi += 1) {
+            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
+        }
+    }
+
+    return .{
+        .call_base = call_base,
+        .vararg_base = vararg_base,
+        .vararg_count = vararg_count,
+        .frame_top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize,
+    };
+}
+
+pub fn stageLuaCallFrameFromStack(vm: *VM, closure: *ClosureObject, call_base: u32, nargs: u32) !PreparedLuaCallFrame {
+    const proto = closure.proto;
+
+    if (proto.is_vararg and nargs > proto.numparams) {
+        const vararg_count = nargs - proto.numparams;
+        const min_vararg_base = call_base + proto.maxstacksize;
+        const vararg_base = @max(min_vararg_base, vm.top) + 32;
+        try frame.ensureStackTop(vm, vararg_base + vararg_count);
+
+        var i: u32 = vararg_count;
+        while (i > 0) {
+            i -= 1;
+            vm.stack[vararg_base + i] = vm.stack[call_base + 1 + proto.numparams + i];
+        }
+
+        const params_to_copy = @min(nargs, @as(u32, proto.numparams));
+        if (params_to_copy > 0) {
+            var pi: u32 = 0;
+            while (pi < params_to_copy) : (pi += 1) {
+                vm.stack[call_base + pi] = vm.stack[call_base + 1 + pi];
+            }
+        }
+
+        if (nargs < proto.numparams) {
+            for (vm.stack[call_base + nargs ..][0 .. proto.numparams - nargs]) |*slot| {
+                slot.* = .nil;
+            }
+        }
+
+        return .{
+            .call_base = call_base,
+            .vararg_base = vararg_base,
+            .vararg_count = vararg_count,
+            .frame_top = vararg_base + vararg_count,
+        };
+    }
+
+    const params_to_copy = @min(nargs, @as(u32, proto.numparams));
+    if (params_to_copy > 0) {
+        var i: u32 = 0;
+        while (i < params_to_copy) : (i += 1) {
+            vm.stack[call_base + i] = vm.stack[call_base + 1 + i];
+        }
+    }
+    var i: u32 = params_to_copy;
+    while (i < proto.numparams) : (i += 1) {
+        vm.stack[call_base + i] = .nil;
+    }
+
+    return .{
+        .call_base = call_base,
+        .vararg_base = 0,
+        .vararg_count = 0,
+        .frame_top = call_base + proto.maxstacksize,
+    };
+}
+
+pub fn activateLuaCallFrame(
+    vm: *VM,
+    closure: *ClosureObject,
+    prepared: PreparedLuaCallFrame,
+    ret_base: u32,
+    nresults: i16,
+) !*CallInfo {
+    const ci = try mnemonics.pushCallInfoVararg(
+        vm,
+        closure.proto,
+        closure,
+        prepared.call_base,
+        ret_base,
+        nresults,
+        prepared.vararg_base,
+        prepared.vararg_count,
+    );
+    vm.top = prepared.frame_top;
+    return ci;
+}
+
+pub fn stageNativeCallFrame(vm: *VM, callable: TValue, args: []const TValue, call_base: u32) PreparedNativeCallFrame {
+    vm.stack[call_base] = callable;
+    for (args, 0..) |arg, i| {
+        vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
+    }
+    const frame_top = call_base + 1 + @as(u32, @intCast(args.len));
+    vm.top = frame_top;
+    return .{ .call_base = call_base, .frame_top = frame_top };
 }
 
 fn cleanupRunState(vm: *VM, saved_depth: u8, saved_base: u32, saved_top: u32) void {
@@ -201,25 +338,18 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
 
         const call_base = vm.top;
         const result_slot = call_base;
-
-        // Stack layout: [self, arg0, arg1, ...]
-        // (native function sees self at func_reg, args at func_reg+1...)
-        vm.stack[call_base] = self;
-        for (args, 0..) |arg, i| {
-            vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
-        }
+        const prepared = stageNativeCallFrame(vm, self, args, call_base);
 
         vm.base = call_base;
-        vm.top = call_base + 1 + @as(u32, @intCast(args.len));
         defer {
             vm.base = saved_base;
             vm.top = saved_top;
         }
 
-        // nargs is args.len + 1 (includes self)
         try vm.callNative(nc.func.id, 0, @as(u32, @intCast(args.len)) + 1, 1);
 
         const result = vm.stack[result_slot];
+        _ = prepared;
         return result;
     }
 
@@ -232,37 +362,13 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
 
         const call_base = vm.top;
         const result_slot = call_base;
-
-        // Stack layout: [self, arg0, arg1, ...]
-        vm.stack[call_base] = self;
-        for (args, 0..) |arg, i| {
-            vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
-        }
-
-        // Match CALL vararg frame layout and keep varargs out of the fixed frame scratch area.
         const total_args: u32 = 1 + @as(u32, @intCast(args.len));
-        var vararg_base: u32 = 0;
-        var vararg_count: u32 = 0;
-        if (proto.is_vararg and total_args > proto.numparams) {
-            vararg_count = total_args - proto.numparams;
-            const min_vararg_base = call_base + proto.maxstacksize;
-            vararg_base = @max(min_vararg_base, vm.top) + 32;
-            var i: u32 = vararg_count;
-            while (i > 0) {
-                i -= 1;
-                vm.stack[vararg_base + i] = vm.stack[call_base + proto.numparams + i];
-            }
+        vm.stack[call_base + 1] = self;
+        for (args, 0..) |arg, i| {
+            vm.stack[call_base + 2 + @as(u32, @intCast(i))] = arg;
         }
-
-        // Fill remaining params with nil (total params = 1 + args.len)
-        var i: u32 = total_args;
-        while (i < proto.numparams) : (i += 1) {
-            vm.stack[call_base + i] = .nil;
-        }
-
-        vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
-
-        return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
+        const prepared = try stageLuaCallFrameFromStack(vm, closure, call_base, total_args);
+        return runUntilReturn(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count);
     }
 
     return CallError.NotCallable;
@@ -277,18 +383,11 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
 
     const call_base = vm.top;
     const result_slot = call_base;
-
-    // Native closures expect: [func_placeholder, arg0, arg1, ...]
-    // Set up stack
-    vm.stack[call_base] = TValue.fromNativeClosure(nc);
-    for (args, 0..) |arg, i| {
-        vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
-    }
+    _ = stageNativeCallFrame(vm, TValue.fromNativeClosure(nc), args, call_base);
 
     // Set vm.base to call_base so native function sees correct stack layout
     // (native functions use vm.base + func_reg to access their frame)
     vm.base = call_base;
-    vm.top = call_base + 1 + @as(u32, @intCast(args.len));
     defer {
         // Always restore caller frame even if native raises.
         vm.base = saved_base;
@@ -310,14 +409,9 @@ fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue
 
     const call_base = vm.top;
     const result_slot = call_base;
-
-    vm.stack[call_base] = TValue.fromNativeClosure(nc);
-    for (args, 0..) |arg, i| {
-        vm.stack[call_base + 1 + @as(u32, @intCast(i))] = arg;
-    }
+    _ = stageNativeCallFrame(vm, TValue.fromNativeClosure(nc), args, call_base);
 
     vm.base = call_base;
-    vm.top = call_base + 1 + @as(u32, @intCast(args.len));
     defer {
         vm.base = saved_base;
         vm.top = saved_top;
@@ -342,39 +436,10 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
 
     const call_base = vm.top;
     const result_slot = call_base;
-
-    const arg_count: u32 = @intCast(args.len);
-    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
-
-    // Set up fixed parameters
-    var i: u32 = 0;
-    while (i < params_to_copy) : (i += 1) {
-        vm.stack[call_base + i] = args[i];
-    }
-
-    // Fill remaining params with nil
-    i = params_to_copy;
-    while (i < proto.numparams) : (i += 1) {
-        vm.stack[call_base + i] = .nil;
-    }
-
-    // Match CALL vararg frame layout and keep varargs out of the fixed frame scratch area.
-    var vararg_base: u32 = 0;
-    var vararg_count: u32 = 0;
-    if (proto.is_vararg and arg_count > proto.numparams) {
-        vararg_count = arg_count - proto.numparams;
-        const min_vararg_base = call_base + proto.maxstacksize;
-        vararg_base = @max(min_vararg_base, vm.top) + 32;
-        var vi: u32 = 0;
-        while (vi < vararg_count) : (vi += 1) {
-            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
-        }
-    }
-
-    vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
+    const prepared = try stageLuaCallFrameFromArgs(vm, closure, args, call_base);
 
     // Execute until return, then restore caller's frame state
-    return runUntilReturn(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count);
+    return runUntilReturn(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count);
 }
 
 fn callClosureInto(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue) anyerror!void {
@@ -389,35 +454,9 @@ fn callClosureIntoWithResultBase(vm: *VM, closure: *ClosureObject, args: []const
 
     const call_base = vm.top;
     const result_slot = result_slot_override;
+    const prepared = try stageLuaCallFrameFromArgs(vm, closure, args, call_base);
 
-    const arg_count: u32 = @intCast(args.len);
-    const params_to_copy: u32 = @min(arg_count, @as(u32, proto.numparams));
-
-    var i: u32 = 0;
-    while (i < params_to_copy) : (i += 1) {
-        vm.stack[call_base + i] = args[i];
-    }
-
-    i = params_to_copy;
-    while (i < proto.numparams) : (i += 1) {
-        vm.stack[call_base + i] = .nil;
-    }
-
-    var vararg_base: u32 = 0;
-    var vararg_count: u32 = 0;
-    if (proto.is_vararg and arg_count > proto.numparams) {
-        vararg_count = arg_count - proto.numparams;
-        const min_vararg_base = call_base + proto.maxstacksize;
-        vararg_base = @max(min_vararg_base, vm.top) + 32;
-        var vi: u32 = 0;
-        while (vi < vararg_count) : (vi += 1) {
-            vm.stack[vararg_base + vi] = args[proto.numparams + vi];
-        }
-    }
-
-    vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
-
-    return runUntilReturnInto(vm, proto, closure, call_base, result_slot, saved_base, saved_top, vararg_base, vararg_count, out);
+    return runUntilReturnInto(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count, out);
 }
 
 /// Execute a Lua function until it returns to saved call depth.
