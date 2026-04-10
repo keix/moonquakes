@@ -119,6 +119,21 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
         _ = table.hash_part.remove(key);
     }
 
+    // Weak cleanup can leave an empty table holding onto oversized backing
+    // storage. Release it here so collectgarbage("count") reflects reclaimed
+    // memory after dead entries are cleared.
+    if (table.hash_part.count() == 0) {
+        table.hash_part.deinit();
+        table.hash_part = TableObject.HashMap.init(table.allocator);
+        table.deleted_keys.deinit();
+        table.deleted_keys = TableObject.DeletedKeySet.init(table.allocator);
+        table.iter_index.deinit();
+        table.iter_index = TableObject.KeyIndexMap.init(table.allocator);
+        table.iter_keys.deinit(table.allocator);
+        table.iter_keys = .{};
+        table.iter_cache_mod_count = std.math.maxInt(u64);
+    }
+
     // Weak cleanup can remove integer keys creating holes while leaving
     // hash count unchanged (due to non-integer keys). In that case, the
     // seq_len heuristic can incorrectly classify table as pure array.

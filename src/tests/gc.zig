@@ -113,3 +113,24 @@ test "markValue marks string in TValue" {
     try std.testing.expectEqual(@as(usize, 1), stats.object_count);
     try std.testing.expectEqualStrings("hello from TValue", str.asSlice());
 }
+
+test "table internal allocations are tracked by GC accounting" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const table = try gc.allocTable();
+    const before = gc.getStats().bytes_allocated;
+
+    var i: usize = 0;
+    while (i < 32) : (i += 1) {
+        try table.set(.{ .integer = @intCast(i + 1) }, .{ .integer = @intCast(i + 10) });
+    }
+
+    const after_insert = gc.getStats().bytes_allocated;
+    try std.testing.expect(after_insert > before);
+    gc.beginCollection();
+    gc.sweep();
+    gc.gc_state = .idle;
+
+    try std.testing.expectEqual(@as(usize, 0), gc.getStats().object_count);
+}

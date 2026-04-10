@@ -113,18 +113,17 @@ fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*S
 /// Allocate a new table object
 pub fn allocTable(self: anytype) !*TableObject {
     const obj = try allocObject(self, TableObject, 0);
+    const tracking_allocator = self.trackingAllocator();
 
     // Initialize GC header (black = survives current cycle)
     obj.header = newObjectHeader(self, .table);
-    // TODO: Use tracking allocator for HashMap memory accounting
-    // Currently disabled due to potential GC interaction issues
-    obj.hash_part = TableObject.HashMap.init(self.allocator);
-    obj.deleted_keys = TableObject.DeletedKeySet.init(self.allocator);
+    obj.hash_part = TableObject.HashMap.init(tracking_allocator);
+    obj.deleted_keys = TableObject.DeletedKeySet.init(tracking_allocator);
     obj.iter_keys = .{};
-    obj.iter_index = TableObject.KeyIndexMap.init(self.allocator);
+    obj.iter_index = TableObject.KeyIndexMap.init(tracking_allocator);
     obj.mod_count = 0;
     obj.iter_cache_mod_count = std.math.maxInt(u64);
-    obj.allocator = self.allocator;
+    obj.allocator = tracking_allocator;
     obj.seq_len = 0;
     obj.metatable = null; // No metatable by default
     obj.weak_mode = .none;
