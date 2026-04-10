@@ -134,6 +134,35 @@ test "iteration ipairs honors __index fallback for missing array entries" {
     }
 }
 
+test "iteration ipairs honors chained __index fallback for missing array entries" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    const result = try ctx.exec(
+        \\local fallback2 = setmetatable({}, {
+        \\  __index = function(_, k)
+        \\    if k == 2 then return "b" end
+        \\  end
+        \\})
+        \\local fallback1 = setmetatable({}, { __index = fallback2 })
+        \\local t = setmetatable({ [1] = "a" }, { __index = fallback1 })
+        \\local out = {}
+        \\for i, v in ipairs(t) do
+        \\  out[#out + 1] = i .. ":" .. v
+        \\end
+        \\return table.concat(out, ",")
+    );
+
+    switch (result) {
+        .single => |value| {
+            const s = value.asString() orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings("1:a,2:b", s.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "iteration next rejects invalid continuation keys" {
     var ctx = api.ApiContext{};
     try ctx.init();

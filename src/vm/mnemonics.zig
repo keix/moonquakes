@@ -817,7 +817,7 @@ fn raiseMetamethodNotCallable(vm: *VM, mm: TValue, metamethod_name: []const u8) 
     return vm.raiseString(msg);
 }
 
-fn raiseIndexValueError(vm: *VM, value: TValue) !void {
+pub fn raiseIndexValueError(vm: *VM, value: TValue) !void {
     const ty = callableValueTypeName(value);
     var msg_buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "attempt to index a {s} value", .{ty}) catch "attempt to index a non-table value";

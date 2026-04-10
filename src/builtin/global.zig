@@ -768,7 +768,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     const table_arg = vm.stack[vm.base + func_reg + 1];
     const index_arg = vm.stack[vm.base + func_reg + 2];
 
-    const table = table_arg.asTable() orelse {
+    _ = table_arg.asTable() orelse {
         vm.stack[vm.base + func_reg] = .nil;
         if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         return;
@@ -785,22 +785,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
 
     // Use integer key directly (Lua 5.4 supports any TValue as key)
     const key = TValue{ .integer = next_index };
-    var value = table.get(key);
-
-    // Lua-compatible fallback: ipairs uses t[i], so __index must be honored
-    // when the raw array slot is absent.
-    if (value == null or value.?.isNil()) {
-        if (metamethod.getMetamethod(table_arg, .index, &vm.gc().mm_keys, &vm.gc().shared_mt)) |index_mm| {
-            if (index_mm.asTable()) |idx_table| {
-                value = idx_table.get(key);
-            } else {
-                // TODO(vm): support full chained __index semantics.
-                // For now, function __index is enough for Lua test coverage.
-                const mm_result = try call.callValueSafe(vm, index_mm, &[_]TValue{ table_arg, key });
-                value = mm_result;
-            }
-        }
-    }
+    const value = try call.lookupIndexValueSync(vm, table_arg, key);
 
     if (value == null or value.?.isNil()) {
         // No more elements

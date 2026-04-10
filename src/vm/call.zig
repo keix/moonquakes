@@ -10,8 +10,12 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const TableObject = object.TableObject;
+const FileObject = object.FileObject;
+const UserdataObject = object.UserdataObject;
 const ProtoObject = object.ProtoObject;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
+const metamethod = @import("metamethod.zig");
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const error_state = @import("error_state.zig");
@@ -37,6 +41,48 @@ pub const PreparedNativeCallFrame = struct {
     call_base: u32,
     frame_top: u32,
 };
+
+fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
+    if (subject.asTable()) |table| {
+        return table.metatable;
+    }
+    if (subject.asFile()) |file_obj| {
+        return file_obj.metatable;
+    }
+    if (subject.asUserdata()) |ud| {
+        return ud.metatable;
+    }
+    return vm.gc().shared_mt.getForValue(subject);
+}
+
+fn lookupIndexValueSyncDepth(vm: *VM, subject: TValue, key: TValue, depth: u16) anyerror!?TValue {
+    if (depth >= 2000) return error.InvalidTableOperation;
+
+    if (subject.asTable()) |table| {
+        if (table.get(key)) |value| return value;
+    }
+
+    const mt = getIndexMetatable(vm, subject) orelse {
+        return if (subject.asTable() != null) null else error.NotATable;
+    };
+    const index_mm = mt.get(TValue.fromString(vm.gc().mm_keys.get(.index))) orelse {
+        return if (subject.asTable() != null) null else error.NotATable;
+    };
+
+    if (index_mm.asTable()) |_| {
+        return try lookupIndexValueSyncDepth(vm, index_mm, key, depth + 1);
+    }
+    if (index_mm.asClosure() != null or index_mm.asNativeClosure() != null) {
+        return try callValueSafe(vm, index_mm, &[_]TValue{ subject, key });
+    }
+
+    try mnemonics.raiseIndexValueError(vm, index_mm);
+    return error.LuaException;
+}
+
+pub fn lookupIndexValueSync(vm: *VM, subject: TValue, key: TValue) anyerror!?TValue {
+    return try lookupIndexValueSyncDepth(vm, subject, key, 0);
+}
 
 /// Call a Lua/native function value with given arguments and return first result.
 ///
