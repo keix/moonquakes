@@ -106,20 +106,41 @@ pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults
 }
 
 pub fn pushTempRoot(self: *VM, value: TValue) bool {
-    if (self.temp_roots_count >= self.temp_roots.len) return false;
-    self.temp_roots[self.temp_roots_count] = value;
+    if (self.temp_roots_count < self.temp_roots_inline.len) {
+        self.temp_roots_inline[self.temp_roots_count] = value;
+        self.temp_roots_count += 1;
+        return true;
+    }
+
+    self.temp_roots_spill.append(self.rt.allocator, value) catch return false;
     self.temp_roots_count += 1;
     return true;
 }
 
 pub fn popTempRoots(self: *VM, n: u8) void {
+    const old_count = self.temp_roots_count;
     if (n > self.temp_roots_count) {
         self.temp_roots_count = 0;
     } else {
         self.temp_roots_count -= n;
     }
-    for (self.temp_roots[self.temp_roots_count..]) |*slot| {
-        slot.* = .nil;
+
+    const inline_len: u32 = @intCast(self.temp_roots_inline.len);
+    const old_inline_count = @min(old_count, inline_len);
+    const new_inline_count = @min(self.temp_roots_count, inline_len);
+    if (new_inline_count < old_inline_count) {
+        for (self.temp_roots_inline[new_inline_count..old_inline_count]) |*slot| {
+            slot.* = .nil;
+        }
+    }
+
+    const old_spill_count = old_count - old_inline_count;
+    const new_spill_count = self.temp_roots_count - new_inline_count;
+    if (new_spill_count < old_spill_count) {
+        for (self.temp_roots_spill.items[new_spill_count..old_spill_count]) |*slot| {
+            slot.* = .nil;
+        }
+        self.temp_roots_spill.items.len = new_spill_count;
     }
 }
 

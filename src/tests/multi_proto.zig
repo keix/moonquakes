@@ -207,3 +207,21 @@ test "nested function call with register tracking" {
     try std.testing.expect(ctx.vm.callstack_size == 0);
     try std.testing.expect(ctx.vm.ci == &ctx.vm.base_ci);
 }
+
+test "temp roots grow past inline capacity" {
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
+    defer ctx.deinit();
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        try testing.expect(ctx.vm.pushTempRoot(.{ .integer = @intCast(i) }));
+    }
+
+    try testing.expectEqual(@as(u32, 40), ctx.vm.temp_roots_count);
+    try testing.expect(ctx.vm.temp_roots_spill.items.len >= 32);
+
+    ctx.vm.popTempRoots(40);
+    try testing.expectEqual(@as(u32, 0), ctx.vm.temp_roots_count);
+    try testing.expectEqual(@as(usize, 0), ctx.vm.temp_roots_spill.items.len);
+}
