@@ -65,7 +65,12 @@ fn markHooks(vm: *const VM, gc_ptr: *GC) void {
 }
 
 fn markTempRoots(vm: *const VM, gc_ptr: *GC) void {
-    for (vm.temp_roots[0..vm.temp_roots_count]) |val| {
+    const inline_count = @min(vm.temp_roots_count, vm.temp_roots_inline.len);
+    for (vm.temp_roots_inline[0..inline_count]) |val| {
+        gc_ptr.markValue(val);
+    }
+    const spill_count = vm.temp_roots_count - inline_count;
+    for (vm.temp_roots_spill.items[0..spill_count]) |val| {
         gc_ptr.markValue(val);
     }
 }
@@ -150,6 +155,7 @@ pub fn finalizerExecutor(self: *VM) FinalizerExecutor {
 /// Coroutine VM cleanup (called by GC during sweep)
 pub fn vmFreeCallback(vm_ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const vm: *VM = @ptrCast(@alignCast(vm_ptr));
+    vm.temp_roots_spill.deinit(allocator);
     vm.rt.gc.trackDeallocation(@sizeOf(VM));
     allocator.destroy(vm);
 }

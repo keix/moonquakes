@@ -25,6 +25,7 @@
 //!   - gc.zig: GC integration (root provider, mark, callbacks)
 //!   - lifecycle.zig: init/deinit
 
+const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
@@ -89,10 +90,10 @@ pub const VM = struct {
     rt: *Runtime,
     thread: *ThreadObject,
 
-    // TODO(gc): Revisit fixed size. A growable temp-root stack would remove
-    // remaining depth limits in deeply nested native/metamethod paths.
-    temp_roots: [32]TValue = [_]TValue{.nil} ** 32,
-    temp_roots_count: u8 = 0,
+    // Small inline temp-root buffer with spill storage for deeper native paths.
+    temp_roots_inline: [8]TValue = [_]TValue{.nil} ** 8,
+    temp_roots_spill: std.ArrayListUnmanaged(TValue) = .{},
+    temp_roots_count: u32 = 0,
 
     // Lifecycle
     pub const init = lifecycle.init;

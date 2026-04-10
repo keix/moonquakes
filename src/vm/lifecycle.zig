@@ -69,5 +69,6 @@ pub fn deinit(self: *VM) void {
         self.rt.gc.setFinalizerExecutor(null);
         self.rt.gc.removeRootProvider(vm_gc.rootProvider(self));
     }
+    self.temp_roots_spill.deinit(self.rt.allocator);
     self.rt.allocator.destroy(self);
 }
