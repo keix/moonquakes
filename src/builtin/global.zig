@@ -1727,15 +1727,11 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         },
         .isrunning => TValue{ .boolean = gc.is_running },
         .incremental => blk: {
-            // API compatibility mode switch only.
-            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
             const prev = modeName(gc.mode);
             gc.mode = .incremental;
             break :blk TValue.fromString(try vm.gc().allocString(prev));
         },
         .generational => blk: {
-            // API compatibility mode switch only.
-            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
             const prev = modeName(gc.mode);
             gc.mode = .generational;
             break :blk TValue.fromString(try vm.gc().allocString(prev));

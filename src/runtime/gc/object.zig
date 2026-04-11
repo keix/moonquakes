@@ -37,6 +37,12 @@ pub const GCObjectType = enum(u8) {
     file,
 };
 
+pub const ObjectGeneration = enum(u2) {
+    young,
+    survival,
+    old,
+};
+
 /// Common header for all GC-managed objects
 ///
 /// This header must be the first field in every GC object struct.
@@ -58,6 +64,9 @@ pub const GCObject = struct {
     /// true = in gray list (awaiting child scan)
     in_gray: bool = false,
 
+    /// Generational age bucket.
+    generation: ObjectGeneration = .old,
+
     /// Linked list pointer for tracking all objects
     /// The GC maintains a list of all allocated objects
     next: ?*GCObject,
@@ -68,15 +77,20 @@ pub const GCObject = struct {
     /// True if object has a pending __gc finalizer in the queue
     finalizer_queued: bool = false,
 
+    /// True if this old object is present in the remembered set.
+    remembered: bool = false,
+
     /// Initialize a GC object header
     pub fn init(object_type: GCObjectType, next_obj: ?*GCObject) GCObject {
         return .{
             .type = object_type,
             .mark_bit = false,
             .in_gray = false,
+            .generation = .old,
             .next = next_obj,
             .gray_next = null,
             .finalizer_queued = false,
+            .remembered = false,
         };
     }
 
@@ -86,9 +100,11 @@ pub const GCObject = struct {
             .type = object_type,
             .mark_bit = mark_value,
             .in_gray = false,
+            .generation = .old,
             .next = next_obj,
             .gray_next = null,
             .finalizer_queued = false,
+            .remembered = false,
         };
     }
 

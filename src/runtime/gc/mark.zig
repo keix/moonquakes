@@ -33,6 +33,20 @@ pub fn isBlack(self: anytype, obj: *const GCObject) bool {
     return isMarked(self, obj) and !obj.in_gray;
 }
 
+pub fn participatesInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    _ = self;
+    _ = obj;
+    return true;
+}
+
+fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    return self.current_cycle_kind == .major or obj.generation != .old;
+}
+
+pub fn isAliveInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    return !collectsInCurrentCycle(self, obj) or isMarked(self, obj);
+}
+
 /// Flip the mark bit for next cycle
 /// This avoids O(n) sweep reset - all objects become white implicitly
 pub fn flipMark(self: anytype) void {
@@ -61,6 +75,12 @@ pub fn markGrayValue(self: anytype, value: TValue) void {
     if (value == .object) {
         markGray(self, value.object);
     }
+}
+
+pub fn rememberObject(self: anytype, obj: *GCObject) void {
+    if (obj.remembered) return;
+    self.remembered_set.append(self.allocator, obj) catch return;
+    obj.remembered = true;
 }
 
 /// Check if gray list is empty
@@ -231,6 +251,10 @@ pub fn propagateAll(self: anytype) void {
 /// Invariant: black object must not reference white object
 /// Solution: push black parent back to gray for re-scanning
 pub fn barrierBack(self: anytype, parent: *GCObject, child: *GCObject) void {
+    if (self.mode == .generational and parent.generation == .old and child.generation != .old) {
+        rememberObject(self, parent);
+    }
+
     // Only needed during mark phase
     if (self.gc_state != .mark) return;
 
@@ -253,6 +277,17 @@ pub fn barrierBackValue(self: anytype, parent: *GCObject, value: TValue) void {
 
 /// Prepare for a new GC cycle (called before VM marks roots)
 pub fn beginCollection(self: anytype) void {
+    beginCollectionKind(self, .major);
+}
+
+pub fn beginCollectionKind(self: anytype, kind: anytype) void {
+    if (kind == .major) {
+        for (self.remembered_set.items) |obj| {
+            obj.remembered = false;
+        }
+        self.remembered_set.clearRetainingCapacity();
+    }
+
     // Flip mark - all objects become white implicitly (O(1) vs O(n))
     flipMark(self);
 
@@ -261,6 +296,8 @@ pub fn beginCollection(self: anytype) void {
 
     // Clear weak tables list from previous cycle
     self.weak_tables.clearRetainingCapacity();
+
+    self.current_cycle_kind = kind;
 
     // Set state to mark phase
     self.gc_state = .mark;
@@ -288,6 +325,14 @@ pub fn markCycleRoots(self: anytype) void {
 
     // Mark queued finalizers (objects + __gc functions)
     self.markFinalizerQueue();
+
+    // Minor cycles do not rescan the whole old heap. Revisit only old parents
+    // that were written with young children since the last major cycle.
+    if (self.current_cycle_kind == .minor) {
+        for (self.remembered_set.items) |obj| {
+            scanChildren(self, obj);
+        }
+    }
 }
 
 /// Complete the mark phase and prepare sweep.
@@ -350,8 +395,12 @@ pub fn markProtoObject(self: anytype, proto: *ProtoObject) void {
 
 /// Run a full GC cycle: mark all roots via providers, then sweep
 pub fn collect(self: anytype) void {
+    collectCycle(self, .major);
+}
+
+pub fn collectCycle(self: anytype, kind: anytype) void {
     // Prepare for new GC cycle
-    beginCollection(self);
+    beginCollectionKind(self, kind);
     markCycleRoots(self);
     finishMarkPhase(self);
     self.sweep();

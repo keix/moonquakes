@@ -38,12 +38,13 @@ pub const GCState = enum(u8) {
 };
 
 pub const GcMode = enum(u8) {
-    // NOTE:
-    // This is currently an API-visible mode flag only.
-    // The collector implementation is still a single unified mark/sweep pipeline.
-    // A true mode split (incremental vs generational behavior) is TODO.
     incremental,
     generational,
+};
+
+pub const GcCycleKind = enum(u8) {
+    minor,
+    major,
 };
 
 // Initial GC threshold - collection runs when bytes_allocated exceeds this
@@ -180,6 +181,10 @@ pub const GC = struct {
     /// Queue of pending __gc finalizers (deferred execution)
     finalizer_queue: std.ArrayListUnmanaged(FinalizerItem),
 
+    /// Old objects that may point to young/survival objects.
+    /// Minor cycles rescan only these old parents instead of the whole old heap.
+    remembered_set: std.ArrayListUnmanaged(*GCObject),
+
     /// Active executor for running finalizers (typically current VM)
     finalizer_executor: ?FinalizerExecutor = null,
 
@@ -213,9 +218,16 @@ pub const GC = struct {
     /// When false, automatic collection is disabled but manual collect() still works.
     is_running: bool = true,
 
-    /// API-visible mode for collectgarbage("incremental"/"generational").
-    /// IMPORTANT: this does not change the underlying collector algorithm yet.
     mode: GcMode = .incremental,
+
+    /// Current collection kind (major for full cycle, minor for generational step).
+    current_cycle_kind: GcCycleKind = .major,
+
+    /// Number of completed minor cycles since the last major cycle.
+    generational_minor_cycles: u8 = 0,
+
+    /// Run a major cycle after this many minor cycles.
+    generational_major_interval: u8 = 2,
 
     /// API-visible tuning values for collectgarbage("setpause"/"setstepmul").
     /// Current collector does not yet use these to alter behavior.
@@ -252,6 +264,7 @@ pub const GC = struct {
             .next_gc = GC_THRESHOLD,
             .root_providers = .{},
             .finalizer_queue = .{},
+            .remembered_set = .{},
             .finalizer_executor = null,
             .finalizer_draining = false,
             .gc_inhibit = 0,
@@ -325,7 +338,7 @@ pub const GC = struct {
         if (self.root_providers.items.len == 0) return false;
         if (size_hint == 0) {
             self.step_accum = 0;
-            self.collect();
+            self.collectModeCycle();
             return true;
         }
 
@@ -335,7 +348,7 @@ pub const GC = struct {
         while (budget > 0) {
             switch (self.gc_state) {
                 .idle => {
-                    self.beginCollection();
+                    self.beginCollectionKind(self.chooseStepCycleKind());
                     self.markCycleRoots();
                 },
                 .mark => {
@@ -359,6 +372,20 @@ pub const GC = struct {
 
         self.step_accum = 0;
         return false;
+    }
+
+    fn chooseStepCycleKind(self: *GC) GcCycleKind {
+        return switch (self.mode) {
+            .incremental => .major,
+            .generational => if (self.generational_minor_cycles >= self.generational_major_interval) .major else .minor,
+        };
+    }
+
+    pub fn collectModeCycle(self: *GC) void {
+        switch (self.mode) {
+            .incremental => self.collect(),
+            .generational => self.collectCycle(self.chooseStepCycleKind()),
+        }
     }
 
     /// Get memory usage in KB (integer part).
@@ -465,6 +492,9 @@ pub const GC = struct {
         // Clear finalizer queue
         self.finalizer_queue.deinit(self.allocator);
 
+        // Clear remembered set
+        self.remembered_set.deinit(self.allocator);
+
         // Free all remaining objects without mark/sweep
         // (no need to determine liveness at program exit)
         var current = self.objects;
@@ -512,6 +542,9 @@ pub const GC = struct {
     pub const isWhite = mark_mod.isWhite;
     pub const isGray = mark_mod.isGray;
     pub const isBlack = mark_mod.isBlack;
+    pub const participatesInCurrentCycle = mark_mod.participatesInCurrentCycle;
+    pub const isAliveInCurrentCycle = mark_mod.isAliveInCurrentCycle;
+    pub const rememberObject = mark_mod.rememberObject;
     pub const flipMark = mark_mod.flipMark;
     pub const markGray = mark_mod.markGray;
     pub const markGrayValue = mark_mod.markGrayValue;
@@ -521,12 +554,14 @@ pub const GC = struct {
     pub const barrierBack = mark_mod.barrierBack;
     pub const barrierBackValue = mark_mod.barrierBackValue;
     pub const beginCollection = mark_mod.beginCollection;
+    pub const beginCollectionKind = mark_mod.beginCollectionKind;
     pub const markCycleRoots = mark_mod.markCycleRoots;
     pub const finishMarkPhase = mark_mod.finishMarkPhase;
     pub const markStack = mark_mod.markStack;
     pub const markConstants = mark_mod.markConstants;
     pub const markValue = mark_mod.markValue;
     pub const markProtoObject = mark_mod.markProtoObject;
+    pub const collectCycle = mark_mod.collectCycle;
     pub const collect = mark_mod.collect;
 
     pub const parseWeakMode = weak_mod.parseWeakMode;

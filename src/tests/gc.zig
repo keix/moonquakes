@@ -304,3 +304,99 @@ test "thread entry function barrier keeps white callable alive from black thread
     try std.testing.expect(thread.entry_func == &entry.header);
     try std.testing.expectEqual(@as(usize, 2), gc.getStats().object_count);
 }
+
+test "generational step ages survivor from young to survival to old" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+
+    const survivor = try gc.allocString("age-me");
+    try std.testing.expectEqual(object.ObjectGeneration.young, survivor.header.generation);
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.survival, survivor.header.generation);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+}
+
+test "generational mode schedules a major cycle after minor interval" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 1;
+
+    const survivor = try gc.allocString("major");
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(u8, 1), gc.generational_minor_cycles);
+    try std.testing.expectEqual(object.ObjectGeneration.survival, survivor.header.generation);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(u8, 0), gc.generational_minor_cycles);
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+}
+
+test "generational minor keeps young child reachable from remembered old parent" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const parent = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(parent)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.survival, parent.header.generation);
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
+
+    const key = try gc.allocString("k");
+    const child = try gc.allocString("young");
+    try object.tableSetWithBarrier(&gc, parent, TValue.fromString(key), TValue.fromString(child));
+
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(gc.stepSized(0));
+
+    try std.testing.expectEqualStrings("young", parent.get(TValue.fromString(key)).?.asString().?.asSlice());
+    try std.testing.expect(gc.getStats().object_count >= 3);
+}
+
+test "generational minor does not collect unreachable old object until major cycle" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 1;
+
+    const survivor = try gc.allocString("old");
+    var root_slot = [_]TValue{TValue.fromString(survivor)};
+    var roots = TestRoots{
+        .values = root_slot[0..],
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+
+    root_slot[0] = .nil;
+
+    const before_minor = gc.getStats().object_count;
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(before_minor, gc.getStats().object_count);
+
+    gc.collect();
+    try std.testing.expectEqual(@as(usize, 0), gc.getStats().object_count);
+}

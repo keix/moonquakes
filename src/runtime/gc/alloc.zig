@@ -57,13 +57,18 @@ fn tryCollect(self: anytype) void {
     // Don't run GC if no root providers registered
     if (self.root_providers.items.len == 0) return;
 
-    self.collect();
+    self.collectModeCycle();
 }
 
 /// Create a GC header for new object allocation
 /// New objects are marked black (current_mark) to survive the current cycle
 pub fn newObjectHeader(self: anytype, obj_type: GCObjectType) GCObject {
-    return GCObject.initWithMark(obj_type, self.objects, self.current_mark);
+    var header = GCObject.initWithMark(obj_type, self.objects, self.current_mark);
+    header.generation = switch (self.mode) {
+        .incremental => .old,
+        .generational => .young,
+    };
+    return header;
 }
 
 /// Allocate a new string object

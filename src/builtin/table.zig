@@ -512,12 +512,12 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     while (i < nargs) : (i += 1) {
         const val = vm.stack[vm.base + func_reg + 1 + i];
         const key = TValue{ .integer = @as(i64, i) + 1 };
-        try table.set(key, val);
+        try rawSetWithBarrier(vm, table, key, val);
     }
 
     // Set the "n" field to the count of arguments
     const n_key = try vm.gc().allocString("n");
-    try table.set(TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
+    try rawSetWithBarrier(vm, table, TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
 
     // Return the table
     vm.stack[vm.base + func_reg] = TValue.fromTable(table);

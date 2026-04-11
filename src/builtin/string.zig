@@ -751,7 +751,7 @@ fn getGmatchStateMap(vm: *VM) !*object.TableObject {
         if (existing.asTable()) |tbl| return tbl;
     }
     const tbl = try vm.gc().allocTable();
-    try globals.set(key_val, TValue.fromTable(tbl));
+    try object.tableSetWithBarrier(vm.gc(), globals, key_val, TValue.fromTable(tbl));
     return tbl;
 }
 

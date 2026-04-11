@@ -5,12 +5,14 @@
 //!   - Free object memory and update accounting
 //!   - Handle per-type deallocation rules
 
+const std = @import("std");
 const object = @import("object.zig");
 const GCObject = object.GCObject;
 const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const ObjectGeneration = object.ObjectGeneration;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
@@ -20,6 +22,10 @@ const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const TValue = @import("../value.zig").TValue;
 
+fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    return self.current_cycle_kind == .major or obj.generation != .old;
+}
+
 /// Sweep phase: free all unmarked (white) objects
 /// Uses flip mark scheme - no need to clear marks (flipMark handles that)
 pub fn sweep(self: anytype) void {
@@ -27,9 +33,15 @@ pub fn sweep(self: anytype) void {
     var current = self.objects;
 
     while (current) |obj| {
-        if (self.isMarked(obj)) {
+        if (!collectsInCurrentCycle(self, obj) or self.isMarked(obj)) {
             // Keep object - mark is preserved (flip mark scheme)
             // Clear gray state for next cycle
+            if (!collectsInCurrentCycle(self, obj)) {
+                // Old objects skipped by a minor cycle still need their mark bit
+                // normalized to the current color so the next major flip makes
+                // them white again.
+                obj.mark_bit = self.current_mark;
+            }
             obj.in_gray = false;
             obj.gray_next = null;
             prev = obj;
@@ -59,7 +71,10 @@ pub fn sweepStep(self: anytype, budget: usize) bool {
         const obj = self.sweep_cursor orelse return true;
         remaining -= 1;
 
-        if (self.isMarked(obj)) {
+        if (!collectsInCurrentCycle(self, obj) or self.isMarked(obj)) {
+            if (!collectsInCurrentCycle(self, obj)) {
+                obj.mark_bit = self.current_mark;
+            }
             obj.in_gray = false;
             obj.gray_next = null;
             self.sweep_prev = obj;
@@ -82,6 +97,27 @@ pub fn sweepStep(self: anytype, budget: usize) bool {
 }
 
 pub fn finishSweepCycle(self: anytype) void {
+    var current = self.objects;
+    while (current) |obj| {
+        obj.generation = switch (self.current_cycle_kind) {
+            .major => .old,
+            .minor => switch (obj.generation) {
+                .young => .survival,
+                .survival, .old => .old,
+            },
+        };
+        current = obj.next;
+    }
+
+    switch (self.current_cycle_kind) {
+        .major => {
+            self.generational_minor_cycles = 0;
+        },
+        .minor => if (self.generational_minor_cycles < std.math.maxInt(u8)) {
+            self.generational_minor_cycles += 1;
+        },
+    }
+
     self.gc_state = .idle;
     self.sweep_cursor = null;
     self.sweep_prev = null;
