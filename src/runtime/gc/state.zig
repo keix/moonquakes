@@ -312,7 +312,7 @@ pub const GC = struct {
         self.is_running = true;
     }
 
-    /// Perform a GC step. Currently runs a full collection.
+    /// Perform a GC step.
     /// Returns true if a collection cycle completed.
     pub fn step(self: *GC) bool {
         return self.stepSized(1);
@@ -328,12 +328,36 @@ pub const GC = struct {
             self.collect();
             return true;
         }
+
         self.step_accum += size_hint;
-        if (self.step_accum >= 200) {
-            self.step_accum = 0;
-            self.collect();
-            return true;
+        var budget = self.step_accum;
+
+        while (budget > 0) {
+            switch (self.gc_state) {
+                .idle => {
+                    self.beginCollection();
+                    self.markCycleRoots();
+                },
+                .mark => {
+                    if (self.propagateOne()) {
+                        budget -= 1;
+                        continue;
+                    }
+                    self.finishMarkPhase();
+                },
+                .sweep => {
+                    if (self.sweepStep(budget)) {
+                        self.finishSweepCycle();
+                        self.step_accum = 0;
+                        return true;
+                    }
+                    self.step_accum = 0;
+                    return false;
+                },
+            }
         }
+
+        self.step_accum = 0;
         return false;
     }
 
@@ -497,6 +521,8 @@ pub const GC = struct {
     pub const barrierBack = mark_mod.barrierBack;
     pub const barrierBackValue = mark_mod.barrierBackValue;
     pub const beginCollection = mark_mod.beginCollection;
+    pub const markCycleRoots = mark_mod.markCycleRoots;
+    pub const finishMarkPhase = mark_mod.finishMarkPhase;
     pub const markStack = mark_mod.markStack;
     pub const markConstants = mark_mod.markConstants;
     pub const markValue = mark_mod.markValue;
@@ -512,6 +538,8 @@ pub const GC = struct {
     pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
 
     pub const sweep = sweep_mod.sweep;
+    pub const sweepStep = sweep_mod.sweepStep;
+    pub const finishSweepCycle = sweep_mod.finishSweepCycle;
     pub const freeObjectFinal = sweep_mod.freeObjectFinal;
 
     pub const allocObject = alloc_mod.allocObject;

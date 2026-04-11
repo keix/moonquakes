@@ -266,9 +266,33 @@ pub fn beginCollection(self: anytype) void {
     self.gc_state = .mark;
 }
 
-/// Complete collection: ephemeron propagation, sweep, cleanup (called after marking)
-fn finishCollection(self: anytype) void {
-    // Propagate all gray objects (non-recursive traversal)
+pub fn markCycleRoots(self: anytype) void {
+    // Mark phase: each provider marks its roots
+    for (self.root_providers.items) |provider| {
+        provider.markRoots(self);
+    }
+
+    // Mark shared metatables (global GC state)
+    if (self.shared_mt.string) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.number) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.boolean) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.function) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.nil) |mt| markGray(self, &mt.header);
+
+    // Mark metamethod key strings (must survive GC for metamethod dispatch)
+    if (self.mm_keys_initialized) {
+        for (self.mm_keys.strings) |str| {
+            markGray(self, &str.header);
+        }
+    }
+
+    // Mark queued finalizers (objects + __gc functions)
+    self.markFinalizerQueue();
+}
+
+/// Complete the mark phase and prepare sweep.
+pub fn finishMarkPhase(self: anytype) void {
+    // Drain any remaining gray work before atomic cleanup.
     propagateAll(self);
 
     // Propagate ephemerons until stable
@@ -293,18 +317,8 @@ fn finishCollection(self: anytype) void {
 
     // Set state to sweep phase
     self.gc_state = .sweep;
-
-    // Sweep phase
-    self.sweep();
-
-    // Return to idle state
-    self.gc_state = .idle;
-
-    // Adjust next GC threshold based on survival rate
-    self.next_gc = @max(
-        @as(usize, @intFromFloat(@as(f64, @floatFromInt(self.bytes_allocated)) * self.gc_multiplier)),
-        self.gc_min_threshold,
-    );
+    self.sweep_cursor = self.objects;
+    self.sweep_prev = null;
 }
 
 /// Mark all values in a stack slice as reachable
@@ -338,29 +352,8 @@ pub fn markProtoObject(self: anytype, proto: *ProtoObject) void {
 pub fn collect(self: anytype) void {
     // Prepare for new GC cycle
     beginCollection(self);
-
-    // Mark phase: each provider marks its roots
-    for (self.root_providers.items) |provider| {
-        provider.markRoots(self);
-    }
-
-    // Mark shared metatables (global GC state)
-    if (self.shared_mt.string) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.number) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.boolean) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.function) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.nil) |mt| markGray(self, &mt.header);
-
-    // Mark metamethod key strings (must survive GC for metamethod dispatch)
-    if (self.mm_keys_initialized) {
-        for (self.mm_keys.strings) |str| {
-            markGray(self, &str.header);
-        }
-    }
-
-    // Mark queued finalizers (objects + __gc functions)
-    self.markFinalizerQueue();
-
-    // Finish: ephemeron propagation, weak table cleanup, sweep
-    finishCollection(self);
+    markCycleRoots(self);
+    finishMarkPhase(self);
+    self.sweep();
+    self.finishSweepCycle();
 }

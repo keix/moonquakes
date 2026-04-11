@@ -3,6 +3,26 @@ const gc_mod = @import("../runtime/gc/gc.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 
 const GC = gc_mod.GC;
+const RootProvider = gc_mod.RootProvider;
+
+const TestRoots = struct {
+    values: []const TValue,
+
+    const vtable = RootProvider.VTable{
+        .markRoots = markRoots,
+    };
+
+    fn provider(self: *TestRoots) RootProvider {
+        return RootProvider.init(TestRoots, self, &vtable);
+    }
+
+    fn markRoots(ctx: *anyopaque, gc: *GC) void {
+        const self: *TestRoots = @ptrCast(@alignCast(ctx));
+        for (self.values) |value| {
+            gc.markValue(value);
+        }
+    }
+};
 
 test "single string mark survives GC" {
     var gc = GC.init(std.testing.allocator);
@@ -133,4 +153,51 @@ test "table internal allocations are tracked by GC accounting" {
     gc.gc_state = .idle;
 
     try std.testing.expectEqual(@as(usize, 0), gc.getStats().object_count);
+}
+
+test "gc stepSized progresses a collection cycle incrementally" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const survivor = try gc.allocString("keep");
+    _ = try gc.allocString("collect-1");
+    _ = try gc.allocString("collect-2");
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    var steps: usize = 0;
+    var completed = false;
+    while (!completed and steps < 16) : (steps += 1) {
+        completed = gc.stepSized(1);
+        if (!completed) {
+            try std.testing.expect(gc.gc_state != .idle);
+        }
+    }
+
+    try std.testing.expect(completed);
+    try std.testing.expect(steps > 0);
+    try std.testing.expectEqual(gc_mod.GCState.idle, gc.gc_state);
+    try std.testing.expectEqual(@as(usize, 1), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "gc stepSized with large budget completes the cycle immediately" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const survivor = try gc.allocString("keep");
+    _ = try gc.allocString("collect-now");
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(20000));
+    try std.testing.expectEqual(gc_mod.GCState.idle, gc.gc_state);
+    try std.testing.expectEqual(@as(usize, 1), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
 }

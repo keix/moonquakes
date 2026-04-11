@@ -50,6 +50,47 @@ pub fn sweep(self: anytype) void {
     }
 }
 
+/// Sweep up to `budget` objects from the current cursor.
+/// Returns true when the sweep phase is fully complete.
+pub fn sweepStep(self: anytype, budget: usize) bool {
+    var remaining = budget;
+
+    while (remaining > 0) {
+        const obj = self.sweep_cursor orelse return true;
+        remaining -= 1;
+
+        if (self.isMarked(obj)) {
+            obj.in_gray = false;
+            obj.gray_next = null;
+            self.sweep_prev = obj;
+            self.sweep_cursor = obj.next;
+            continue;
+        }
+
+        const next = obj.next;
+        if (self.sweep_prev) |prev| {
+            prev.next = next;
+        } else {
+            self.objects = next;
+        }
+
+        freeObject(self, obj);
+        self.sweep_cursor = next;
+    }
+
+    return self.sweep_cursor == null;
+}
+
+pub fn finishSweepCycle(self: anytype) void {
+    self.gc_state = .idle;
+    self.sweep_cursor = null;
+    self.sweep_prev = null;
+    self.next_gc = @max(
+        @as(usize, @intFromFloat(@as(f64, @floatFromInt(self.bytes_allocated)) * self.gc_multiplier)),
+        self.gc_min_threshold,
+    );
+}
+
 /// Free a GC object and update accounting
 fn freeObject(self: anytype, obj: *GCObject) void {
     // For strings, remove from intern table before freeing
