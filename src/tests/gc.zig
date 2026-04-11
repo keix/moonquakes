@@ -430,6 +430,106 @@ test "generational mode schedules a major cycle after minor interval" {
     try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
 }
 
+test "generational minor clears weak value entries for unreachable young values" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("v");
+    try gc.tableSet(metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    gc.tableSetMetatable(weak_table, metatable);
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(weak_table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, weak_table.header.generation);
+
+    const key = try gc.allocString("k");
+    const value = try gc.allocTable();
+    try gc.tableSet(weak_table, TValue.fromString(key), TValue.fromTable(value));
+    try std.testing.expectEqual(object.ObjectGeneration.young, value.header.generation);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+}
+
+test "generational minor enqueues finalizer for unreachable young object" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const holder = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(holder)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    gc.tableSetMetatable(obj, mt);
+    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
+    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.hasPendingFinalizers());
+
+    const queued = gc.finalizer_queue.items[0];
+    try std.testing.expect(queued.obj == &obj.header);
+    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), queued.func);
+}
+
+test "generational minor does not enqueue finalizer for unreachable old object" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    gc.tableSetMetatable(obj, mt);
+
+    var root_slot = [_]TValue{TValue.fromTable(obj)};
+    var roots = TestRoots{
+        .values = root_slot[0..],
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, obj.header.generation);
+
+    root_slot[0] = .nil;
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(!gc.hasPendingFinalizers());
+
+    gc.collect();
+    try std.testing.expect(gc.hasPendingFinalizers());
+    try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
+    try std.testing.expect(gc.finalizer_queue.items[0].obj == &obj.header);
+}
+
 test "generational minor keeps young child reachable from remembered old parent" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
