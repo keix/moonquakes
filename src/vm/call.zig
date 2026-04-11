@@ -42,6 +42,13 @@ pub const PreparedNativeCallFrame = struct {
     frame_top: u32,
 };
 
+pub const NativeCallResult = union(enum) {
+    discard,
+    first,
+    first_to_abs: u32,
+    into: []TValue,
+};
+
 fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
     if (subject.asTable()) |table| {
         return table.metatable;
@@ -260,6 +267,40 @@ pub fn stageNativeCallFrame(vm: *VM, callable: TValue, args: []const TValue, cal
     return .{ .call_base = call_base, .frame_top = frame_top };
 }
 
+pub fn callNativeWithResult(
+    vm: *VM,
+    callable: TValue,
+    nc: *NativeClosureObject,
+    args: []const TValue,
+    result: NativeCallResult,
+) !?TValue {
+    const prepared = stageNativeCallFrame(vm, callable, args, vm.top);
+    defer vm.top = prepared.call_base;
+
+    const requested_results: u32 = switch (result) {
+        .discard => 0,
+        .first, .first_to_abs => 1,
+        .into => |out| @intCast(out.len),
+    };
+    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), requested_results);
+
+    switch (result) {
+        .discard => return null,
+        .first => return vm.stack[prepared.call_base],
+        .first_to_abs => |ret_abs| {
+            vm.stack[ret_abs] = vm.stack[prepared.call_base];
+            return null;
+        },
+        .into => |out| {
+            var i: usize = 0;
+            while (i < out.len) : (i += 1) {
+                out[i] = vm.stack[prepared.call_base + @as(u32, @intCast(i))];
+            }
+            return null;
+        },
+    }
+}
+
 fn cleanupRunState(vm: *VM, saved_depth: u8, saved_base: u32, saved_top: u32) void {
     while (vm.callstack_size > saved_depth) {
         mnemonics.popCallInfo(vm);
@@ -383,20 +424,13 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
         const saved_top = vm.top;
 
         const call_base = vm.top;
-        const result_slot = call_base;
-        const prepared = stageNativeCallFrame(vm, self, args, call_base);
-
         vm.base = call_base;
         defer {
             vm.base = saved_base;
             vm.top = saved_top;
         }
 
-        try vm.callNative(nc.func.id, 0, @as(u32, @intCast(args.len)) + 1, 1);
-
-        const result = vm.stack[result_slot];
-        _ = prepared;
-        return result;
+        return (try callNativeWithResult(vm, self, nc, args, .first)).?;
     }
 
     // Handle Lua closure __call
@@ -428,25 +462,13 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
     const saved_top = vm.top;
 
     const call_base = vm.top;
-    const result_slot = call_base;
-    _ = stageNativeCallFrame(vm, TValue.fromNativeClosure(nc), args, call_base);
-
-    // Set vm.base to call_base so native function sees correct stack layout
-    // (native functions use vm.base + func_reg to access their frame)
     vm.base = call_base;
     defer {
         // Always restore caller frame even if native raises.
         vm.base = saved_base;
         vm.top = saved_top;
     }
-
-    // Call native function (func_reg = 0 relative to new vm.base)
-    try vm.callNative(nc.func.id, 0, @intCast(args.len), 1);
-
-    // Get result from native frame.
-    const result = vm.stack[result_slot];
-
-    return result;
+    return (try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .first)).?;
 }
 
 fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue, out: []TValue) anyerror!void {
@@ -454,21 +476,12 @@ fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue
     const saved_top = vm.top;
 
     const call_base = vm.top;
-    const result_slot = call_base;
-    _ = stageNativeCallFrame(vm, TValue.fromNativeClosure(nc), args, call_base);
-
     vm.base = call_base;
     defer {
         vm.base = saved_base;
         vm.top = saved_top;
     }
-
-    try vm.callNative(nc.func.id, 0, @intCast(args.len), @intCast(out.len));
-
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        out[i] = vm.stack[result_slot + @as(u32, @intCast(i))];
-    }
+    _ = try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .{ .into = out });
 }
 
 /// Call a Lua closure with arguments.
