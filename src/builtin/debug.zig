@@ -28,17 +28,11 @@ fn setTableMetatable(vm: *VM, table: *TableObject, new_mt: ?*TableObject) void {
 }
 
 fn setUserdataMetatable(vm: *VM, ud: *UserdataObject, new_mt: ?*TableObject) void {
-    ud.metatable = new_mt;
-    if (new_mt) |mt| {
-        vm.gc().barrierBack(&ud.header, &mt.header);
-    }
+    object.userdataSetMetatableWithBarrier(vm.gc(), ud, new_mt);
 }
 
 fn upvalueSet(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
-    upvalue.set(value);
-    if (upvalue.isClosed()) {
-        vm.gc().barrierBackValue(&upvalue.header, value);
-    }
+    object.upvalueSetWithBarrier(vm.gc(), upvalue, value);
 }
 
 fn inferEnvUpvalueIndex(closure: *ClosureObject) ?usize {

@@ -20,15 +20,11 @@ fn setTableMetatable(gc: anytype, table: *TableObject, mt: *TableObject) void {
 }
 
 fn setFileMetatable(gc: anytype, file_obj: *FileObject, mt: *TableObject) void {
-    file_obj.metatable = mt;
-    gc.barrierBack(&file_obj.header, &mt.header);
+    object.fileSetMetatableWithBarrier(gc, file_obj, mt);
 }
 
 fn setFileStringRef(gc: anytype, file_obj: *FileObject, slot: *?*object.StringObject, value: ?*object.StringObject) void {
-    slot.* = value;
-    if (value) |str| {
-        gc.barrierBack(&file_obj.header, &str.header);
-    }
+    object.fileSetStringRefWithBarrier(gc, file_obj, slot, value);
 }
 
 /// Lua 5.4 Input and Output Library

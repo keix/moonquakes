@@ -229,6 +229,90 @@ test "table write barrier keeps white child reachable from black table" {
     try std.testing.expectEqualStrings("survivor", child.asSlice());
 }
 
+test "closed upvalue write barrier keeps white child reachable from black upvalue" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    var slot: TValue = .nil;
+    const upvalue = try gc.allocUpvalue(&slot, null);
+    upvalue.close();
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue{ .object = &upvalue.header }},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&upvalue.header));
+
+    const child = try gc.allocString("captured");
+    object.upvalueSetWithBarrier(&gc, upvalue, TValue.fromString(child));
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expectEqualStrings("captured", upvalue.get().asString().?.asSlice());
+    try std.testing.expectEqual(@as(usize, 2), gc.getStats().object_count);
+}
+
+test "userdata metatable barrier keeps white metatable reachable from black userdata" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const ud = try gc.allocUserdata(0, 0);
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromUserdata(ud)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&ud.header));
+
+    const mt = try gc.allocTable();
+    object.userdataSetMetatableWithBarrier(&gc, ud, mt);
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expect(ud.metatable == mt);
+    try std.testing.expectEqual(@as(usize, 2), gc.getStats().object_count);
+}
+
+test "file reference barriers keep white children reachable from black file object" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const file_obj = try gc.allocStdioFile(.stdout);
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromFile(file_obj)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&file_obj.header));
+
+    const mt = try gc.allocTable();
+    const mode = try gc.allocString("w");
+    object.fileSetMetatableWithBarrier(&gc, file_obj, mt);
+    object.fileSetStringRefWithBarrier(&gc, file_obj, &file_obj.mode, mode);
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expect(file_obj.metatable == mt);
+    try std.testing.expectEqualStrings("w", file_obj.mode.?.asSlice());
+    try std.testing.expectEqual(@as(usize, 3), gc.getStats().object_count);
+}
+
 test "weak value table does not retain white value" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();

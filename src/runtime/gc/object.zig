@@ -540,6 +540,13 @@ pub fn tableSetMetatableWithBarrier(gc: anytype, table: *TableObject, new_mt: ?*
     }
 }
 
+pub fn userdataSetMetatableWithBarrier(gc: anytype, ud: *UserdataObject, new_mt: ?*TableObject) void {
+    ud.metatable = new_mt;
+    if (new_mt) |mt| {
+        gc.barrierBack(&ud.header, &mt.header);
+    }
+}
+
 /// Closure Object - GC-managed function instance
 ///
 /// Wraps a ProtoObject (bytecode) with upvalues for captured variables.
@@ -611,6 +618,13 @@ pub fn initClosedUpvalueWithBarrier(gc: anytype, upvalue: *UpvalueObject, value:
     upvalue.closed = value;
     upvalue.location = &upvalue.closed;
     gc.barrierBackValue(&upvalue.header, value);
+}
+
+pub fn upvalueSetWithBarrier(gc: anytype, upvalue: *UpvalueObject, value: TValue) void {
+    upvalue.set(value);
+    if (upvalue.isClosed()) {
+        gc.barrierBackValue(&upvalue.header, value);
+    }
 }
 
 /// Proto Object - GC-managed function prototype
@@ -916,6 +930,20 @@ pub const FileObject = struct {
         return self.kind == .stdout or self.kind == .stderr or self.kind == .stdin;
     }
 };
+
+pub fn fileSetMetatableWithBarrier(gc: anytype, file_obj: *FileObject, mt: ?*TableObject) void {
+    file_obj.metatable = mt;
+    if (mt) |table| {
+        gc.barrierBack(&file_obj.header, &table.header);
+    }
+}
+
+pub fn fileSetStringRefWithBarrier(gc: anytype, file_obj: *FileObject, slot: *?*StringObject, value: ?*StringObject) void {
+    slot.* = value;
+    if (value) |str| {
+        gc.barrierBack(&file_obj.header, &str.header);
+    }
+}
 
 /// Utility functions for working with GC objects
 /// Get the concrete object from a GCObject header

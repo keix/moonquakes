@@ -382,15 +382,11 @@ pub fn unwindErrorFramesToProtectedTarget(vm: *VM, target_ci: ?*CallInfo, err_ob
 }
 
 fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
-    try table.set(key, value);
-    vm.gc().barrierBackValue(&table.header, value);
+    try object.tableSetWithBarrier(vm.gc(), table, key, value);
 }
 
 fn upvalueSetWithBarrier(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
-    upvalue.set(value);
-    if (upvalue.isClosed()) {
-        vm.gc().barrierBackValue(&upvalue.header, value);
-    }
+    object.upvalueSetWithBarrier(vm.gc(), upvalue, value);
 }
 
 pub fn luaFloorDiv(a: f64, b: f64) f64 {
