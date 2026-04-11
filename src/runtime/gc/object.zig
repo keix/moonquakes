@@ -737,6 +737,13 @@ pub const ThreadObject = struct {
     }
 };
 
+pub fn setThreadEntryFuncWithBarrier(gc: anytype, thread: *ThreadObject, entry_func: ?*GCObject) void {
+    thread.entry_func = entry_func;
+    if (entry_func) |func_obj| {
+        gc.barrierBack(&thread.header, func_obj);
+    }
+}
+
 /// File kind for FileObject
 pub const FileKind = enum(u8) {
     file, // Regular disk file

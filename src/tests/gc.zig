@@ -228,3 +228,79 @@ test "table write barrier keeps white child reachable from black table" {
     try std.testing.expectEqual(@as(usize, 3), gc.getStats().object_count);
     try std.testing.expectEqualStrings("survivor", child.asSlice());
 }
+
+test "weak value table does not retain white value" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("v");
+    try object.tableSetWithBarrier(&gc, metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    object.tableSetMetatableWithBarrier(&gc, weak_table, metatable);
+
+    const key = try gc.allocString("k");
+    const value = try gc.allocTable();
+    try object.tableSetWithBarrier(&gc, weak_table, TValue.fromString(key), TValue.fromTable(value));
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(weak_table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    const before = gc.getStats().object_count;
+    gc.collect();
+
+    try std.testing.expect(before > gc.getStats().object_count);
+    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+}
+
+test "finalizer queue keeps unreachable object alive until drained" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try object.tableSetWithBarrier(&gc, mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    object.tableSetMetatableWithBarrier(&gc, obj, mt);
+
+    gc.collect();
+    const after_first = gc.getStats().object_count;
+    try std.testing.expect(gc.hasPendingFinalizers());
+    try std.testing.expect(after_first >= 3);
+
+    gc.collect();
+    try std.testing.expect(gc.hasPendingFinalizers());
+    try std.testing.expectEqual(after_first, gc.getStats().object_count);
+}
+
+test "thread entry function barrier keeps white callable alive from black thread" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    var dummy_vm: u8 = 0;
+    const thread = try gc.allocThread(@ptrCast(&dummy_vm), .suspended, null, null);
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromThread(thread)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&thread.header));
+
+    const entry = try gc.allocNativeClosure(.{ .id = .print });
+    object.setThreadEntryFuncWithBarrier(&gc, thread, &entry.header);
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expect(thread.entry_func == &entry.header);
+    try std.testing.expectEqual(@as(usize, 2), gc.getStats().object_count);
+}
