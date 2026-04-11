@@ -241,7 +241,7 @@ fn normalizeYearMonth(year: *i64, month: *i64) void {
 
 fn writeDateField(table: *TableObject, vm: anytype, name: []const u8, value: TValue) !void {
     const key = try vm.gc().allocString(name);
-    try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(key), value);
+    try vm.gc().tableSet(table, TValue.fromString(key), value);
 }
 
 fn appendFmtList(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
@@ -312,39 +312,39 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // year
         const year_key = try vm.gc().allocString("year");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(year_key), .{ .integer = dt.year });
+        try vm.gc().tableSet(table, TValue.fromString(year_key), .{ .integer = dt.year });
 
         // month (1-12)
         const month_key = try vm.gc().allocString("month");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(month_key), .{ .integer = dt.month });
+        try vm.gc().tableSet(table, TValue.fromString(month_key), .{ .integer = dt.month });
 
         // day (1-31)
         const day_key = try vm.gc().allocString("day");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(day_key), .{ .integer = dt.day });
+        try vm.gc().tableSet(table, TValue.fromString(day_key), .{ .integer = dt.day });
 
         // hour (0-23)
         const hour_key = try vm.gc().allocString("hour");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(hour_key), .{ .integer = dt.hour });
+        try vm.gc().tableSet(table, TValue.fromString(hour_key), .{ .integer = dt.hour });
 
         // min (0-59)
         const min_key = try vm.gc().allocString("min");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(min_key), .{ .integer = dt.min });
+        try vm.gc().tableSet(table, TValue.fromString(min_key), .{ .integer = dt.min });
 
         // sec (0-59)
         const sec_key = try vm.gc().allocString("sec");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(sec_key), .{ .integer = dt.sec });
+        try vm.gc().tableSet(table, TValue.fromString(sec_key), .{ .integer = dt.sec });
 
         // wday (1-7, Sunday is 1)
         const wday_key = try vm.gc().allocString("wday");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(wday_key), .{ .integer = dt.wday });
+        try vm.gc().tableSet(table, TValue.fromString(wday_key), .{ .integer = dt.wday });
 
         // yday (1-366)
         const yday_key = try vm.gc().allocString("yday");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(yday_key), .{ .integer = dt.yday });
+        try vm.gc().tableSet(table, TValue.fromString(yday_key), .{ .integer = dt.yday });
 
         // isdst (daylight saving, always false for now)
         const isdst_key = try vm.gc().allocString("isdst");
-        try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(isdst_key), .{ .boolean = false });
+        try vm.gc().tableSet(table, TValue.fromString(isdst_key), .{ .boolean = false });
 
         vm.stack[vm.base + func_reg] = TValue.fromTable(table);
         return;

@@ -20,25 +20,19 @@ const VM = @import("../vm/vm.zig").VM;
 const CallInfo = @import("../vm/execution.zig").CallInfo;
 
 fn tableSet(vm: *VM, table: *TableObject, key: TValue, value: TValue) !void {
-    try object.tableSetWithBarrier(vm.gc(), table, key, value);
+    try vm.gc().tableSet(table, key, value);
 }
 
 fn setTableMetatable(vm: *VM, table: *TableObject, new_mt: ?*TableObject) void {
-    object.tableSetMetatableWithBarrier(vm.gc(), table, new_mt);
+    vm.gc().tableSetMetatable(table, new_mt);
 }
 
 fn setUserdataMetatable(vm: *VM, ud: *UserdataObject, new_mt: ?*TableObject) void {
-    ud.metatable = new_mt;
-    if (new_mt) |mt| {
-        vm.gc().barrierBack(&ud.header, &mt.header);
-    }
+    vm.gc().userdataSetMetatable(ud, new_mt);
 }
 
 fn upvalueSet(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
-    upvalue.set(value);
-    if (upvalue.isClosed()) {
-        vm.gc().barrierBackValue(&upvalue.header, value);
-    }
+    vm.gc().upvalueSet(upvalue, value);
 }
 
 fn inferEnvUpvalueIndex(closure: *ClosureObject) ?usize {

@@ -25,6 +25,7 @@ const mark_mod = @import("mark.zig");
 const sweep_mod = @import("sweep.zig");
 const finalizer_mod = @import("finalizer.zig");
 const weak_mod = @import("weak.zig");
+const mutation_mod = @import("mutation.zig");
 
 /// GC State Machine for incremental collection
 /// idle → mark → sweep → idle
@@ -571,6 +572,15 @@ pub const GC = struct {
     pub const markFinalizerQueue = finalizer_mod.markFinalizerQueue;
     pub const enqueueFinalizers = finalizer_mod.enqueueFinalizers;
     pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
+
+    pub const tableSet = mutation_mod.tableSet;
+    pub const tableSetMetatable = mutation_mod.tableSetMetatable;
+    pub const userdataSetMetatable = mutation_mod.userdataSetMetatable;
+    pub const initClosedUpvalue = mutation_mod.initClosedUpvalue;
+    pub const upvalueSet = mutation_mod.upvalueSet;
+    pub const fileSetMetatable = mutation_mod.fileSetMetatable;
+    pub const fileSetStringRef = mutation_mod.fileSetStringRef;
+    pub const threadSetEntryFunc = mutation_mod.threadSetEntryFunc;
 
     pub const sweep = sweep_mod.sweep;
     pub const sweepStep = sweep_mod.sweepStep;

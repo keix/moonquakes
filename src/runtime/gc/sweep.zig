@@ -26,6 +26,52 @@ fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
     return self.current_cycle_kind == .major or obj.generation != .old;
 }
 
+fn valueIsYoung(value: TValue) bool {
+    return value == .object and value.object.generation != .old;
+}
+
+fn tableHasYoungRefs(table: *const TableObject) bool {
+    if (table.metatable) |mt| {
+        if (mt.header.generation != .old) return true;
+    }
+
+    var iter = table.hash_part.iterator();
+    while (iter.next()) |entry| {
+        if (valueIsYoung(entry.key_ptr.*) or valueIsYoung(entry.value_ptr.*)) return true;
+    }
+
+    var deleted_iter = table.deleted_keys.iterator();
+    while (deleted_iter.next()) |entry| {
+        if (valueIsYoung(entry.key_ptr.*)) return true;
+    }
+
+    for (table.iter_keys.items) |key| {
+        if (valueIsYoung(key)) return true;
+    }
+
+    return false;
+}
+
+fn pruneRememberedSet(self: anytype) void {
+    var write_idx: usize = 0;
+    for (self.remembered_set.items) |obj| {
+        // The remembered-set currently tracks old tables only. Other old
+        // container kinds are traced directly during minor cycles.
+        const keep = switch (obj.type) {
+            .table => tableHasYoungRefs(@fieldParentPtr("header", obj)),
+            else => false,
+        };
+
+        if (keep) {
+            self.remembered_set.items[write_idx] = obj;
+            write_idx += 1;
+        } else {
+            obj.remembered = false;
+        }
+    }
+    self.remembered_set.items.len = write_idx;
+}
+
 /// Sweep phase: free all unmarked (white) objects
 /// Uses flip mark scheme - no need to clear marks (flipMark handles that)
 pub fn sweep(self: anytype) void {
@@ -116,6 +162,10 @@ pub fn finishSweepCycle(self: anytype) void {
         .minor => if (self.generational_minor_cycles < std.math.maxInt(u8)) {
             self.generational_minor_cycles += 1;
         },
+    }
+
+    if (self.current_cycle_kind == .minor) {
+        pruneRememberedSet(self);
     }
 
     self.gc_state = .idle;

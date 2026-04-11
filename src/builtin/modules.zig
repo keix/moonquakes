@@ -12,7 +12,7 @@ const call = @import("../vm/call.zig");
 const VM = @import("../vm/vm.zig").VM;
 
 fn tableSet(vm: *VM, table: *TableObject, key: TValue, value: TValue) !void {
-    try object.tableSetWithBarrier(vm.gc(), table, key, value);
+    try vm.gc().tableSet(table, key, value);
 }
 
 /// Default search path (fallback if package.path is not set)
@@ -131,7 +131,7 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
 
     // Set up _ENV upvalue
     if (proto.nups > 0) {
-        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[0], TValue.fromTable(vm.globals()));
+        vm.gc().initClosedUpvalue(closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     const func_val = TValue.fromClosure(closure);

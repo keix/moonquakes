@@ -60,12 +60,15 @@ pub const LuaException = api.LuaException;
 pub const VM = struct {
     pub const STACK_CAPACITY = 8192;
 
+    // Runtime support state
     pub const ErrorState = error_state_mod.ErrorState;
     pub const YieldState = yield_mod.YieldState;
     pub const HookState = hook_mod.HookState;
     pub const TracebackState = traceback_mod.TracebackState;
-    pub const FieldCache = field_cache_mod.FieldCache;
     pub const CallDebugState = call_debug_mod.CallDebugState;
+
+    // Optimization
+    pub const FieldCache = field_cache_mod.FieldCache;
 
     // Core execution state
     stack: [STACK_CAPACITY]TValue,

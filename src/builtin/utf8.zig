@@ -194,8 +194,8 @@ pub fn nativeUtf8Codes(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             const state = try vm.gc().allocTable();
             const key_s = try vm.gc().allocString("s");
             const key_lax = try vm.gc().allocString("lax");
-            try object.tableSetWithBarrier(vm.gc(), state, TValue.fromString(key_s), str_arg);
-            try object.tableSetWithBarrier(vm.gc(), state, TValue.fromString(key_lax), .{ .boolean = true });
+            try vm.gc().tableSet(state, TValue.fromString(key_s), str_arg);
+            try vm.gc().tableSet(state, TValue.fromString(key_lax), .{ .boolean = true });
             vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state);
         } else {
             vm.stack[vm.base + func_reg + 1] = str_arg;

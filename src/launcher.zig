@@ -163,7 +163,7 @@ fn setPackageStringField(vm: *VM, field: []const u8, value: []const u8) !void {
     const package_table = package_val.asTable() orelse return;
     const field_key = try vm.gc().allocString(field);
     const field_val = try vm.gc().allocString(value);
-    try object.tableSetWithBarrier(vm.gc(), package_table, TValue.fromString(field_key), TValue.fromString(field_val));
+    try vm.gc().tableSet(package_table, TValue.fromString(field_key), TValue.fromString(field_val));
 }
 
 pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
@@ -252,7 +252,7 @@ pub fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
     const result = try call.callValue(vm, require_val, &[_]TValue{TValue.fromString(module_key)});
 
     const gkey = try vm.gc().allocString(global_name);
-    try object.tableSetWithBarrier(vm.gc(), vm.globals(), TValue.fromString(gkey), result);
+    try vm.gc().tableSet(vm.globals(), TValue.fromString(gkey), result);
 }
 
 /// Inject `arg` table into VM globals
@@ -265,27 +265,27 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
         const n: i64 = @intCast(options.pre_script_args.len);
         for (options.pre_script_args, 0..) |tok, i| {
             const s = try gc.allocString(tok);
-            try object.tableSetWithBarrier(gc, arg_table, .{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
+            try gc.tableSet(arg_table, .{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
         }
     } else if (options.exec_name.len > 0) {
         // Compatibility fallback
         const exec_str = try gc.allocString(options.exec_name);
-        try object.tableSetWithBarrier(gc, arg_table, .{ .integer = -1 }, TValue.fromString(exec_str));
+        try gc.tableSet(arg_table, .{ .integer = -1 }, TValue.fromString(exec_str));
     }
 
     // arg[0] = script name
     const script_str = try gc.allocString(options.script_name);
-    try object.tableSetWithBarrier(gc, arg_table, .{ .integer = 0 }, TValue.fromString(script_str));
+    try gc.tableSet(arg_table, .{ .integer = 0 }, TValue.fromString(script_str));
 
     // arg[1], arg[2], ... = script arguments
     for (options.args, 0..) |arg, i| {
         const arg_str = try gc.allocString(arg);
-        try object.tableSetWithBarrier(gc, arg_table, .{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
+        try gc.tableSet(arg_table, .{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
     }
 
     // Set arg global
     const arg_key = try gc.allocString("arg");
-    try object.tableSetWithBarrier(gc, globals, TValue.fromString(arg_key), TValue.fromTable(arg_table));
+    try gc.tableSet(globals, TValue.fromString(arg_key), TValue.fromTable(arg_table));
 }
 
 /// Full execution pipeline with options

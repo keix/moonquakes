@@ -528,18 +528,6 @@ pub const TableObject = struct {
     }
 };
 
-pub fn tableSetWithBarrier(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
-    try table.set(key, value);
-    gc.barrierBackValue(&table.header, value);
-}
-
-pub fn tableSetMetatableWithBarrier(gc: anytype, table: *TableObject, new_mt: ?*TableObject) void {
-    table.metatable = new_mt;
-    if (new_mt) |mt| {
-        gc.barrierBack(&table.header, &mt.header);
-    }
-}
-
 /// Closure Object - GC-managed function instance
 ///
 /// Wraps a ProtoObject (bytecode) with upvalues for captured variables.
@@ -606,12 +594,6 @@ pub const UpvalueObject = struct {
         self.location.* = value;
     }
 };
-
-pub fn initClosedUpvalueWithBarrier(gc: anytype, upvalue: *UpvalueObject, value: TValue) void {
-    upvalue.closed = value;
-    upvalue.location = &upvalue.closed;
-    gc.barrierBackValue(&upvalue.header, value);
-}
 
 /// Proto Object - GC-managed function prototype
 ///
@@ -752,13 +734,6 @@ pub const ThreadObject = struct {
         return self.vm;
     }
 };
-
-pub fn setThreadEntryFuncWithBarrier(gc: anytype, thread: *ThreadObject, entry_func: ?*GCObject) void {
-    thread.entry_func = entry_func;
-    if (entry_func) |func_obj| {
-        gc.barrierBack(&thread.header, func_obj);
-    }
-}
 
 /// File kind for FileObject
 pub const FileKind = enum(u8) {

@@ -381,16 +381,12 @@ pub fn unwindErrorFramesToProtectedTarget(vm: *VM, target_ci: ?*CallInfo, err_ob
     }
 }
 
-fn tableSetWithBarrier(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
-    try table.set(key, value);
-    vm.gc().barrierBackValue(&table.header, value);
+fn tableSet(vm: *VM, table: *object.TableObject, key: TValue, value: TValue) !void {
+    try vm.gc().tableSet(table, key, value);
 }
 
-fn upvalueSetWithBarrier(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
-    upvalue.set(value);
-    if (upvalue.isClosed()) {
-        vm.gc().barrierBackValue(&upvalue.header, value);
-    }
+fn upvalueSet(vm: *VM, upvalue: *UpvalueObject, value: TValue) void {
+    vm.gc().upvalueSet(upvalue, value);
 }
 
 pub fn luaFloorDiv(a: f64, b: f64) f64 {
@@ -1442,7 +1438,7 @@ fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TVa
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     const wrapper = try vm.gc().allocClosure(proto);
     if (proto.nups > 0) {
-        object.initClosedUpvalueWithBarrier(vm.gc(), wrapper.upvalues[0], TValue.fromTable(vm.globals()));
+        vm.gc().initClosedUpvalue(wrapper.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     _ = vm.pushTempRoot(TValue.fromClosure(wrapper));
@@ -1469,7 +1465,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
     };
     if (proto.nups > 0) {
         // Main chunk's upvalue[0] is _ENV = globals
-        object.initClosedUpvalueWithBarrier(vm.gc(), main_closure.upvalues[0], TValue.fromTable(vm.globals()));
+        vm.gc().initClosedUpvalue(main_closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
     vm.gc().allowGC();
 
@@ -1860,7 +1856,7 @@ fn opSETUPVAL(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const b = inst.getB();
     if (ci.closure) |closure| {
         if (b < closure.upvalues.len) {
-            upvalueSetWithBarrier(vm, closure.upvalues[b], vm.stack[vm.base + a]);
+            upvalueSet(vm, closure.upvalues[b], vm.stack[vm.base + a]);
         }
     }
     return .Continue;
@@ -3741,7 +3737,7 @@ fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
         const index: i64 = start_index + @as(i64, @intCast(i));
         const key = TValue{ .integer = index };
-        try tableSetWithBarrier(vm, table, key, value);
+        try tableSet(vm, table, key, value);
     }
 
     return .Continue;
@@ -4046,12 +4042,12 @@ fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TV
     if (depth >= 2000) return error.InvalidTableOperation;
     // Fast path: key already exists in table - just update it
     if (table.get(key_val) != null) {
-        try tableSetWithBarrier(vm, table, key_val, value);
+        try tableSet(vm, table, key_val, value);
         return null; // Continue
     }
 
     const newindex_mm = lookupTableNewindexMetamethod(vm, table) orelse {
-        try tableSetWithBarrier(vm, table, key_val, value);
+        try tableSet(vm, table, key_val, value);
         return null; // Continue
     };
 
@@ -4063,7 +4059,7 @@ fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TV
         return result;
     }
 
-    try tableSetWithBarrier(vm, table, key_val, value);
+    try tableSet(vm, table, key_val, value);
     return null;
 }
 

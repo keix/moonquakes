@@ -56,7 +56,7 @@ const modules = @import("modules.zig");
 /// This ensures the key is properly managed by GC and can be marked during collection
 fn setStringKey(tbl: *TableObject, gc: *GC, name: []const u8, value: TValue) !void {
     const key_str = try gc.allocString(name);
-    try object.tableSetWithBarrier(gc, tbl, TValue.fromString(key_str), value);
+    try gc.tableSet(tbl, TValue.fromString(key_str), value);
 }
 
 /// Register a native function in a table using NativeClosureObject
@@ -170,13 +170,13 @@ fn registerStdLibsInPackageLoaded(globals: *TableObject, gc: *GC) !void {
     for (lib_names) |name| {
         const key = try gc.allocString(name);
         if (globals.get(TValue.fromString(key))) |lib_val| {
-            try object.tableSetWithBarrier(gc, loaded_table, TValue.fromString(key), lib_val);
+            try gc.tableSet(loaded_table, TValue.fromString(key), lib_val);
         }
     }
 
     // Also register _G as the loaded base library (for compat)
     const g_key = try gc.allocString("_G");
-    try object.tableSetWithBarrier(gc, loaded_table, TValue.fromString(g_key), TValue.fromTable(globals));
+    try gc.tableSet(loaded_table, TValue.fromString(g_key), TValue.fromTable(globals));
 }
 
 /// Global Functions: print, assert, error, type, tostring, collectgarbage, etc.
@@ -250,7 +250,7 @@ fn initStringLibrary(globals: *TableObject, gc: *GC) !void {
 
     // Set shared string metatable so "str:method(...)" works.
     const string_mt = try gc.allocTable();
-    try object.tableSetWithBarrier(gc, string_mt, TValue.fromString(gc.mm_keys.get(.index)), TValue.fromTable(string_table));
+    try gc.tableSet(string_mt, TValue.fromString(gc.mm_keys.get(.index)), TValue.fromTable(string_table));
     gc.shared_mt.string = string_mt;
 }
 
