@@ -4,8 +4,9 @@
 //! Dispatcher entrypoints are grouped below.
 
 const std = @import("std");
+const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
-const TableObject = @import("../runtime/gc/object.zig").TableObject;
+const TableObject = object.TableObject;
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 const VM = @import("../vm/vm.zig").VM;
@@ -126,8 +127,7 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
 
     // Set up _ENV upvalue
     if (proto.nups > 0) {
-        closure.upvalues[0].closed = TValue.fromTable(vm.globals());
-        closure.upvalues[0].location = &closure.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     const func_val = TValue.fromClosure(closure);

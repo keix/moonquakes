@@ -5,7 +5,8 @@
 
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const TableObject = @import("../runtime/gc/object.zig").TableObject;
+const object = @import("../runtime/gc/object.zig");
+const TableObject = object.TableObject;
 
 fn makeShellScript(allocator: std.mem.Allocator, cmd: []const u8) ![]u8 {
     if (std.mem.trim(u8, cmd, " \t\r\n").len == 0) {
@@ -240,7 +241,7 @@ fn normalizeYearMonth(year: *i64, month: *i64) void {
 
 fn writeDateField(table: *TableObject, vm: anytype, name: []const u8, value: TValue) !void {
     const key = try vm.gc().allocString(name);
-    try table.set(TValue.fromString(key), value);
+    try object.tableSetWithBarrier(vm.gc(), table, TValue.fromString(key), value);
 }
 
 fn appendFmtList(out: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {

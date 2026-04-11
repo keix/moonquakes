@@ -1442,8 +1442,7 @@ fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TVa
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     const wrapper = try vm.gc().allocClosure(proto);
     if (proto.nups > 0) {
-        wrapper.upvalues[0].closed = TValue.fromTable(vm.globals());
-        wrapper.upvalues[0].location = &wrapper.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), wrapper.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     _ = vm.pushTempRoot(TValue.fromClosure(wrapper));
@@ -1470,8 +1469,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
     };
     if (proto.nups > 0) {
         // Main chunk's upvalue[0] is _ENV = globals
-        main_closure.upvalues[0].closed = TValue.fromTable(vm.globals());
-        main_closure.upvalues[0].location = &main_closure.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), main_closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
     vm.gc().allowGC();
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const gc_mod = @import("../runtime/gc/gc.zig");
+const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 
 const GC = gc_mod.GC;
@@ -200,4 +201,30 @@ test "gc stepSized with large budget completes the cycle immediately" {
     try std.testing.expectEqual(gc_mod.GCState.idle, gc.gc_state);
     try std.testing.expectEqual(@as(usize, 1), gc.getStats().object_count);
     try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "table write barrier keeps white child reachable from black table" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const table = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&table.header));
+
+    const child = try gc.allocString("survivor");
+    try object.tableSetWithBarrier(&gc, table, TValue.fromString(try gc.allocString("k")), TValue.fromString(child));
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expectEqual(@as(usize, 3), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("survivor", child.asSlice());
 }
