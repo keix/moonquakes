@@ -92,6 +92,9 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
         // Check weak value (only for collectable values)
         if (table.hasWeakValues() and !remove) {
             const val = entry.value_ptr.*;
+            // Minor cycles must not clear old values just because they are
+            // white in the flipped mark scheme; old objects that did not
+            // participate in the current cycle are still alive.
             if (val == .object and val.object.type != .string and self.isWhite(val.object)) {
                 if (!self.isAliveInCurrentCycle(val.object) and !(key == .object and key.object == val.object)) {
                     remove = true;

@@ -89,6 +89,22 @@ pub fn rememberObject(self: anytype, obj: *GCObject) void {
     obj.remembered = true;
 }
 
+pub fn forgetObject(self: anytype, obj: *GCObject) void {
+    if (!obj.remembered) return;
+
+    var write_idx: usize = 0;
+    for (self.remembered_set.items) |item| {
+        if (item == obj) {
+            item.remembered = false;
+            continue;
+        }
+
+        self.remembered_set.items[write_idx] = item;
+        write_idx += 1;
+    }
+    self.remembered_set.items.len = write_idx;
+}
+
 /// Check if gray list is empty
 pub fn grayListEmpty(self: anytype) bool {
     return self.gray_list == null;

@@ -6,6 +6,7 @@ for the Moonquakes Lua implementation.
 ## Architecture
 - [Architecture](moonquakes-architecture.md) - High-level design and philosophy
 - [Virtual machine](moonquakes-vm-architecture.md) - Virtual machine internals and API
+- [Garbage collector](moonquakes-gc-architecture.md) - GC roots, phases, barriers, and generational behavior
 - [Core Types](moonquakes-core-types.md) - Type system and value representation
 
 ## Implementation

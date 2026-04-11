@@ -13,6 +13,9 @@ const TValue = @import("../value.zig").TValue;
 /// Mark pending finalizers as roots to keep them alive across cycles.
 pub fn markFinalizerQueue(self: anytype) void {
     for (self.finalizer_queue.items) |item| {
+        // Queued finalizers are roots for both incremental and generational
+        // cycles. Minor collections must keep the object and its finalizer
+        // function alive even when neither is reachable from regular roots.
         self.markGray(item.obj);
         self.markGrayValue(item.func);
     }
@@ -36,6 +39,9 @@ fn enqueueMatchingFinalizers(self: anytype, only_white: bool) void {
     if (!self.mm_keys_initialized) return;
     var current = self.objects;
     while (current) |obj| {
+        // In generational mode, minor cycles only enqueue objects that
+        // participate in the current cycle. Unreachable old objects wait for
+        // the next major cycle.
         if ((!only_white or !self.isAliveInCurrentCycle(obj)) and !obj.finalizer_queued) {
             const maybe_metatable: ?*TableObject = switch (obj.type) {
                 .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
