@@ -461,6 +461,106 @@ test "generational minor clears weak value entries for unreachable young values"
     try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
 }
 
+test "generational minor keeps weak value entry for unreachable old value" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("v");
+    try gc.tableSet(metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    gc.tableSetMetatable(weak_table, metatable);
+
+    const old_value = try gc.allocTable();
+    var root_slots = [_]TValue{ TValue.fromTable(weak_table), TValue.fromTable(old_value) };
+    var roots = TestRoots{
+        .values = root_slots[0..],
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, weak_table.header.generation);
+    try std.testing.expectEqual(object.ObjectGeneration.old, old_value.header.generation);
+
+    const key = try gc.allocString("k");
+    try gc.tableSet(weak_table, TValue.fromString(key), TValue.fromTable(old_value));
+    root_slots[1] = .nil;
+
+    try std.testing.expect(gc.stepSized(0));
+    const result = weak_table.get(TValue.fromString(key));
+    try std.testing.expect(result != null);
+    try std.testing.expect(result.?.asTable() == old_value);
+
+    gc.collect();
+    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+}
+
+test "generational minor keeps ephemeron value when young key is still rooted" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("k");
+    try gc.tableSet(metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    gc.tableSetMetatable(weak_table, metatable);
+
+    const live_key = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{ TValue.fromTable(weak_table), TValue.fromTable(live_key) },
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, weak_table.header.generation);
+
+    const value = try gc.allocString("kept");
+    try gc.tableSet(weak_table, TValue.fromTable(live_key), TValue.fromString(value));
+
+    try std.testing.expect(gc.stepSized(0));
+    const result = weak_table.get(TValue.fromTable(live_key));
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("kept", result.?.asString().?.asSlice());
+}
+
+test "generational minor clears ephemeron entry when young key is unreachable" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("k");
+    try gc.tableSet(metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    gc.tableSetMetatable(weak_table, metatable);
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(weak_table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, weak_table.header.generation);
+
+    const dead_key = try gc.allocTable();
+    const value = try gc.allocString("gone");
+    try gc.tableSet(weak_table, TValue.fromTable(dead_key), TValue.fromString(value));
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(usize, 0), weak_table.hash_part.count());
+}
+
 test "generational minor enqueues finalizer for unreachable young object" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
@@ -493,6 +593,42 @@ test "generational minor enqueues finalizer for unreachable young object" {
     const queued = gc.finalizer_queue.items[0];
     try std.testing.expect(queued.obj == &obj.header);
     try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), queued.func);
+}
+
+test "queued finalizer survives subsequent minor cycle" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const holder = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(holder)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    gc.tableSetMetatable(obj, mt);
+    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
+    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
+    try std.testing.expect(gc.finalizer_queue.items[0].obj == &obj.header);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
+    try std.testing.expect(gc.finalizer_queue.items[0].obj == &obj.header);
+    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
 }
 
 test "generational minor does not enqueue finalizer for unreachable old object" {

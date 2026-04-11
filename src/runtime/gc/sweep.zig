@@ -55,6 +55,8 @@ fn tableHasYoungRefs(table: *const TableObject) bool {
 fn pruneRememberedSet(self: anytype) void {
     var write_idx: usize = 0;
     for (self.remembered_set.items) |obj| {
+        // The remembered-set currently tracks old tables only. Other old
+        // container kinds are traced directly during minor cycles.
         const keep = switch (obj.type) {
             .table => tableHasYoungRefs(@fieldParentPtr("header", obj)),
             else => false,

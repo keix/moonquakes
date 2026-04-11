@@ -332,8 +332,9 @@ pub fn markCycleRoots(self: anytype) void {
     // Mark queued finalizers (objects + __gc functions)
     self.markFinalizerQueue();
 
-    // Minor cycles do not rescan the whole old heap. Revisit only old parents
-    // that were written with young children since the last major cycle.
+    // Minor cycles do not rescan the whole old heap. Revisit only remembered
+    // old tables; other old container kinds stay on the regular root/child
+    // traversal path via participatesInCurrentCycle().
     if (self.current_cycle_kind == .minor) {
         for (self.remembered_set.items) |obj| {
             scanChildren(self, obj);

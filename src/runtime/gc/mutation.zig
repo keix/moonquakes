@@ -13,8 +13,15 @@ const StringObject = object.StringObject;
 const GCObject = object.GCObject;
 const TValue = @import("../value.zig").TValue;
 
+fn valueIsYoung(value: TValue) bool {
+    return value == .object and value.object.generation != .old;
+}
+
 pub fn tableSet(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
     try table.set(key, value);
+    if (gc.mode == .generational and table.header.generation == .old and (valueIsYoung(key) or valueIsYoung(value))) {
+        gc.rememberObject(&table.header);
+    }
     gc.barrierBackValue(&table.header, value);
 }
 
