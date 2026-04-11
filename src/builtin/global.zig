@@ -850,10 +850,9 @@ pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Set the new metatable (nil clears it)
     if (mt_arg.isNil()) {
-        table.metatable = null;
+        object.tableSetMetatableWithBarrier(vm.gc(), table, null);
     } else if (mt_arg.asTable()) |new_mt| {
-        table.metatable = new_mt;
-        vm.gc().barrierBack(&table.header, &new_mt.header);
+        object.tableSetMetatableWithBarrier(vm.gc(), table, new_mt);
     } else {
         return vm.raiseString("bad argument #2 to 'setmetatable' (nil or table expected)");
     }

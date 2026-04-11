@@ -34,17 +34,16 @@ pub fn isBlack(self: anytype, obj: *const GCObject) bool {
 }
 
 pub fn participatesInCurrentCycle(self: anytype, obj: *const GCObject) bool {
-    _ = self;
-    _ = obj;
-    return true;
-}
+    if (self.current_cycle_kind == .major or obj.generation != .old) return true;
 
-fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
-    return self.current_cycle_kind == .major or obj.generation != .old;
+    return switch (obj.type) {
+        .closure, .upvalue, .userdata, .proto, .thread, .file => true,
+        .string, .table, .native_closure => false,
+    };
 }
 
 pub fn isAliveInCurrentCycle(self: anytype, obj: *const GCObject) bool {
-    return !collectsInCurrentCycle(self, obj) or isMarked(self, obj);
+    return !participatesInCurrentCycle(self, obj) or isMarked(self, obj);
 }
 
 /// Flip the mark bit for next cycle
@@ -58,6 +57,8 @@ pub fn flipMark(self: anytype) void {
 /// Note: This is for first-time marking. Re-graying black objects
 /// during incremental marking must use barrierBack().
 pub fn markGray(self: anytype, obj: *GCObject) void {
+    if (!participatesInCurrentCycle(self, obj)) return;
+
     // Skip if already marked
     if (isMarked(self, obj)) return;
 

@@ -7,10 +7,11 @@
 //! Embedders can use this directly or build their own launcher.
 
 const std = @import("std");
+const object = @import("runtime/gc/object.zig");
 const Runtime = @import("runtime/runtime.zig").Runtime;
 const VM = @import("vm/vm.zig").VM;
 const GC = @import("runtime/gc/gc.zig").GC;
-const TableObject = @import("runtime/gc/object.zig").TableObject;
+const TableObject = object.TableObject;
 const TValue = @import("runtime/value.zig").TValue;
 const Mnemonics = @import("vm/mnemonics.zig");
 const ReturnValue = @import("vm/execution.zig").ReturnValue;
@@ -162,7 +163,7 @@ fn setPackageStringField(vm: *VM, field: []const u8, value: []const u8) !void {
     const package_table = package_val.asTable() orelse return;
     const field_key = try vm.gc().allocString(field);
     const field_val = try vm.gc().allocString(value);
-    try package_table.set(TValue.fromString(field_key), TValue.fromString(field_val));
+    try object.tableSetWithBarrier(vm.gc(), package_table, TValue.fromString(field_key), TValue.fromString(field_val));
 }
 
 pub fn executeInitChunk(vm: *VM, allocator: std.mem.Allocator, source: []const u8, source_name: []const u8) !void {
@@ -251,7 +252,7 @@ pub fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
     const result = try call.callValue(vm, require_val, &[_]TValue{TValue.fromString(module_key)});
 
     const gkey = try vm.gc().allocString(global_name);
-    try vm.globals().set(TValue.fromString(gkey), result);
+    try object.tableSetWithBarrier(vm.gc(), vm.globals(), TValue.fromString(gkey), result);
 }
 
 /// Inject `arg` table into VM globals
@@ -264,27 +265,27 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
         const n: i64 = @intCast(options.pre_script_args.len);
         for (options.pre_script_args, 0..) |tok, i| {
             const s = try gc.allocString(tok);
-            try arg_table.set(.{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
+            try object.tableSetWithBarrier(gc, arg_table, .{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
         }
     } else if (options.exec_name.len > 0) {
         // Compatibility fallback
         const exec_str = try gc.allocString(options.exec_name);
-        try arg_table.set(.{ .integer = -1 }, TValue.fromString(exec_str));
+        try object.tableSetWithBarrier(gc, arg_table, .{ .integer = -1 }, TValue.fromString(exec_str));
     }
 
     // arg[0] = script name
     const script_str = try gc.allocString(options.script_name);
-    try arg_table.set(.{ .integer = 0 }, TValue.fromString(script_str));
+    try object.tableSetWithBarrier(gc, arg_table, .{ .integer = 0 }, TValue.fromString(script_str));
 
     // arg[1], arg[2], ... = script arguments
     for (options.args, 0..) |arg, i| {
         const arg_str = try gc.allocString(arg);
-        try arg_table.set(.{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
+        try object.tableSetWithBarrier(gc, arg_table, .{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
     }
 
     // Set arg global
     const arg_key = try gc.allocString("arg");
-    try globals.set(TValue.fromString(arg_key), TValue.fromTable(arg_table));
+    try object.tableSetWithBarrier(gc, globals, TValue.fromString(arg_key), TValue.fromTable(arg_table));
 }
 
 /// Full execution pipeline with options
