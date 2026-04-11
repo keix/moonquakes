@@ -558,6 +558,37 @@ test "generational minor keeps young child reachable from remembered old parent"
     try std.testing.expect(gc.getStats().object_count >= 3);
 }
 
+test "remembered set prunes old table after child ages out of young generation" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const parent = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(parent)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
+
+    const key = try gc.allocString("k");
+    const child = try gc.allocString("age-out");
+    try gc.tableSet(parent, TValue.fromString(key), TValue.fromString(child));
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.survival, child.header.generation);
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, child.header.generation);
+    try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
+    try std.testing.expect(!parent.header.remembered);
+}
+
 test "generational minor does not collect unreachable old object until major cycle" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();

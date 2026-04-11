@@ -79,6 +79,11 @@ pub fn markGrayValue(self: anytype, value: TValue) void {
 }
 
 pub fn rememberObject(self: anytype, obj: *GCObject) void {
+    // Remembered-set tracks old containers that may hide younger children from
+    // the next minor cycle. In the current collector that means old tables.
+    if (obj.generation != .old) return;
+    if (obj.type != .table) return;
+
     if (obj.remembered) return;
     self.remembered_set.append(self.allocator, obj) catch return;
     obj.remembered = true;
