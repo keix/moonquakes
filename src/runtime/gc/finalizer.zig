@@ -36,7 +36,7 @@ fn enqueueMatchingFinalizers(self: anytype, only_white: bool) void {
     if (!self.mm_keys_initialized) return;
     var current = self.objects;
     while (current) |obj| {
-        if ((!only_white or self.isWhite(obj)) and !obj.finalizer_queued) {
+        if ((!only_white or !self.isAliveInCurrentCycle(obj)) and !obj.finalizer_queued) {
             const maybe_metatable: ?*TableObject = switch (obj.type) {
                 .table => @as(*TableObject, @fieldParentPtr("header", obj)).metatable,
                 .userdata => @as(*UserdataObject, @fieldParentPtr("header", obj)).metatable,

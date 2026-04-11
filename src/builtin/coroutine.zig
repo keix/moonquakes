@@ -302,10 +302,7 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
-    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
-    if (new_vm.thread.entry_func) |entry_fn| {
-        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
-    }
+    object.setThreadEntryFuncWithBarrier(vm.gc(), new_vm.thread, if (func_arg == .object) func_arg.object else null);
 
     vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
 }
@@ -458,10 +455,7 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
-    new_vm.thread.entry_func = if (func_arg == .object) func_arg.object else null;
-    if (new_vm.thread.entry_func) |entry_fn| {
-        vm.gc().barrierBack(&new_vm.thread.header, entry_fn);
-    }
+    object.setThreadEntryFuncWithBarrier(vm.gc(), new_vm.thread, if (func_arg == .object) func_arg.object else null);
 
     // CRITICAL: Protect the new thread from GC before any more allocations.
     // VM.init may increase bytes_allocated (if tracking enabled), and subsequent
@@ -476,7 +470,7 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     defer vm.popTempRoots(1);
 
     // Store thread at index 1
-    try wrapper.set(.{ .integer = 1 }, TValue.fromThread(new_vm.thread));
+    try object.tableSetWithBarrier(vm.gc(), wrapper, .{ .integer = 1 }, TValue.fromThread(new_vm.thread));
 
     // Create metatable with __call
     const metatable = try vm.gc().allocTable();
@@ -485,10 +479,10 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
 
     const call_key = try vm.gc().allocString("__call");
     const call_fn = try vm.gc().allocNativeClosure(NativeFn.init(.coroutine_wrap_call));
-    try metatable.set(TValue.fromString(call_key), TValue.fromNativeClosure(call_fn));
+    try object.tableSetWithBarrier(vm.gc(), metatable, TValue.fromString(call_key), TValue.fromNativeClosure(call_fn));
 
     // Set metatable
-    wrapper.metatable = metatable;
+    object.tableSetMetatableWithBarrier(vm.gc(), wrapper, metatable);
 
     // Return the wrapper table (acts as function due to __call)
     vm.stack[vm.base + func_reg] = TValue.fromTable(wrapper);

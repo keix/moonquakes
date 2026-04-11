@@ -33,6 +33,19 @@ pub fn isBlack(self: anytype, obj: *const GCObject) bool {
     return isMarked(self, obj) and !obj.in_gray;
 }
 
+pub fn participatesInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    if (self.current_cycle_kind == .major or obj.generation != .old) return true;
+
+    return switch (obj.type) {
+        .closure, .upvalue, .userdata, .proto, .thread, .file => true,
+        .string, .table, .native_closure => false,
+    };
+}
+
+pub fn isAliveInCurrentCycle(self: anytype, obj: *const GCObject) bool {
+    return !participatesInCurrentCycle(self, obj) or isMarked(self, obj);
+}
+
 /// Flip the mark bit for next cycle
 /// This avoids O(n) sweep reset - all objects become white implicitly
 pub fn flipMark(self: anytype) void {
@@ -44,6 +57,8 @@ pub fn flipMark(self: anytype) void {
 /// Note: This is for first-time marking. Re-graying black objects
 /// during incremental marking must use barrierBack().
 pub fn markGray(self: anytype, obj: *GCObject) void {
+    if (!participatesInCurrentCycle(self, obj)) return;
+
     // Skip if already marked
     if (isMarked(self, obj)) return;
 
@@ -61,6 +76,12 @@ pub fn markGrayValue(self: anytype, value: TValue) void {
     if (value == .object) {
         markGray(self, value.object);
     }
+}
+
+pub fn rememberObject(self: anytype, obj: *GCObject) void {
+    if (obj.remembered) return;
+    self.remembered_set.append(self.allocator, obj) catch return;
+    obj.remembered = true;
 }
 
 /// Check if gray list is empty
@@ -231,6 +252,10 @@ pub fn propagateAll(self: anytype) void {
 /// Invariant: black object must not reference white object
 /// Solution: push black parent back to gray for re-scanning
 pub fn barrierBack(self: anytype, parent: *GCObject, child: *GCObject) void {
+    if (self.mode == .generational and parent.generation == .old and child.generation != .old) {
+        rememberObject(self, parent);
+    }
+
     // Only needed during mark phase
     if (self.gc_state != .mark) return;
 
@@ -253,6 +278,17 @@ pub fn barrierBackValue(self: anytype, parent: *GCObject, value: TValue) void {
 
 /// Prepare for a new GC cycle (called before VM marks roots)
 pub fn beginCollection(self: anytype) void {
+    beginCollectionKind(self, .major);
+}
+
+pub fn beginCollectionKind(self: anytype, kind: anytype) void {
+    if (kind == .major) {
+        for (self.remembered_set.items) |obj| {
+            obj.remembered = false;
+        }
+        self.remembered_set.clearRetainingCapacity();
+    }
+
     // Flip mark - all objects become white implicitly (O(1) vs O(n))
     flipMark(self);
 
@@ -262,13 +298,47 @@ pub fn beginCollection(self: anytype) void {
     // Clear weak tables list from previous cycle
     self.weak_tables.clearRetainingCapacity();
 
+    self.current_cycle_kind = kind;
+
     // Set state to mark phase
     self.gc_state = .mark;
 }
 
-/// Complete collection: ephemeron propagation, sweep, cleanup (called after marking)
-fn finishCollection(self: anytype) void {
-    // Propagate all gray objects (non-recursive traversal)
+pub fn markCycleRoots(self: anytype) void {
+    // Mark phase: each provider marks its roots
+    for (self.root_providers.items) |provider| {
+        provider.markRoots(self);
+    }
+
+    // Mark shared metatables (global GC state)
+    if (self.shared_mt.string) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.number) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.boolean) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.function) |mt| markGray(self, &mt.header);
+    if (self.shared_mt.nil) |mt| markGray(self, &mt.header);
+
+    // Mark metamethod key strings (must survive GC for metamethod dispatch)
+    if (self.mm_keys_initialized) {
+        for (self.mm_keys.strings) |str| {
+            markGray(self, &str.header);
+        }
+    }
+
+    // Mark queued finalizers (objects + __gc functions)
+    self.markFinalizerQueue();
+
+    // Minor cycles do not rescan the whole old heap. Revisit only old parents
+    // that were written with young children since the last major cycle.
+    if (self.current_cycle_kind == .minor) {
+        for (self.remembered_set.items) |obj| {
+            scanChildren(self, obj);
+        }
+    }
+}
+
+/// Complete the mark phase and prepare sweep.
+pub fn finishMarkPhase(self: anytype) void {
+    // Drain any remaining gray work before atomic cleanup.
     propagateAll(self);
 
     // Propagate ephemerons until stable
@@ -293,18 +363,8 @@ fn finishCollection(self: anytype) void {
 
     // Set state to sweep phase
     self.gc_state = .sweep;
-
-    // Sweep phase
-    self.sweep();
-
-    // Return to idle state
-    self.gc_state = .idle;
-
-    // Adjust next GC threshold based on survival rate
-    self.next_gc = @max(
-        @as(usize, @intFromFloat(@as(f64, @floatFromInt(self.bytes_allocated)) * self.gc_multiplier)),
-        self.gc_min_threshold,
-    );
+    self.sweep_cursor = self.objects;
+    self.sweep_prev = null;
 }
 
 /// Mark all values in a stack slice as reachable
@@ -336,31 +396,14 @@ pub fn markProtoObject(self: anytype, proto: *ProtoObject) void {
 
 /// Run a full GC cycle: mark all roots via providers, then sweep
 pub fn collect(self: anytype) void {
+    collectCycle(self, .major);
+}
+
+pub fn collectCycle(self: anytype, kind: anytype) void {
     // Prepare for new GC cycle
-    beginCollection(self);
-
-    // Mark phase: each provider marks its roots
-    for (self.root_providers.items) |provider| {
-        provider.markRoots(self);
-    }
-
-    // Mark shared metatables (global GC state)
-    if (self.shared_mt.string) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.number) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.boolean) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.function) |mt| markGray(self, &mt.header);
-    if (self.shared_mt.nil) |mt| markGray(self, &mt.header);
-
-    // Mark metamethod key strings (must survive GC for metamethod dispatch)
-    if (self.mm_keys_initialized) {
-        for (self.mm_keys.strings) |str| {
-            markGray(self, &str.header);
-        }
-    }
-
-    // Mark queued finalizers (objects + __gc functions)
-    self.markFinalizerQueue();
-
-    // Finish: ephemeron propagation, weak table cleanup, sweep
-    finishCollection(self);
+    beginCollectionKind(self, kind);
+    markCycleRoots(self);
+    finishMarkPhase(self);
+    self.sweep();
+    self.finishSweepCycle();
 }

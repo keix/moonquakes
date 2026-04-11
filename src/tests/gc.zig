@@ -1,8 +1,29 @@
 const std = @import("std");
 const gc_mod = @import("../runtime/gc/gc.zig");
+const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 
 const GC = gc_mod.GC;
+const RootProvider = gc_mod.RootProvider;
+
+const TestRoots = struct {
+    values: []const TValue,
+
+    const vtable = RootProvider.VTable{
+        .markRoots = markRoots,
+    };
+
+    fn provider(self: *TestRoots) RootProvider {
+        return RootProvider.init(TestRoots, self, &vtable);
+    }
+
+    fn markRoots(ctx: *anyopaque, gc: *GC) void {
+        const self: *TestRoots = @ptrCast(@alignCast(ctx));
+        for (self.values) |value| {
+            gc.markValue(value);
+        }
+    }
+};
 
 test "single string mark survives GC" {
     var gc = GC.init(std.testing.allocator);
@@ -132,5 +153,250 @@ test "table internal allocations are tracked by GC accounting" {
     gc.sweep();
     gc.gc_state = .idle;
 
+    try std.testing.expectEqual(@as(usize, 0), gc.getStats().object_count);
+}
+
+test "gc stepSized progresses a collection cycle incrementally" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const survivor = try gc.allocString("keep");
+    _ = try gc.allocString("collect-1");
+    _ = try gc.allocString("collect-2");
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    var steps: usize = 0;
+    var completed = false;
+    while (!completed and steps < 16) : (steps += 1) {
+        completed = gc.stepSized(1);
+        if (!completed) {
+            try std.testing.expect(gc.gc_state != .idle);
+        }
+    }
+
+    try std.testing.expect(completed);
+    try std.testing.expect(steps > 0);
+    try std.testing.expectEqual(gc_mod.GCState.idle, gc.gc_state);
+    try std.testing.expectEqual(@as(usize, 1), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "gc stepSized with large budget completes the cycle immediately" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const survivor = try gc.allocString("keep");
+    _ = try gc.allocString("collect-now");
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(20000));
+    try std.testing.expectEqual(gc_mod.GCState.idle, gc.gc_state);
+    try std.testing.expectEqual(@as(usize, 1), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("keep", survivor.asSlice());
+}
+
+test "table write barrier keeps white child reachable from black table" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    const table = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&table.header));
+
+    const child = try gc.allocString("survivor");
+    try object.tableSetWithBarrier(&gc, table, TValue.fromString(try gc.allocString("k")), TValue.fromString(child));
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expectEqual(@as(usize, 3), gc.getStats().object_count);
+    try std.testing.expectEqualStrings("survivor", child.asSlice());
+}
+
+test "weak value table does not retain white value" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+
+    const weak_table = try gc.allocTable();
+    const metatable = try gc.allocTable();
+    const mode_str = try gc.allocString("v");
+    try object.tableSetWithBarrier(&gc, metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    object.tableSetMetatableWithBarrier(&gc, weak_table, metatable);
+
+    const key = try gc.allocString("k");
+    const value = try gc.allocTable();
+    try object.tableSetWithBarrier(&gc, weak_table, TValue.fromString(key), TValue.fromTable(value));
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(weak_table)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    const before = gc.getStats().object_count;
+    gc.collect();
+
+    try std.testing.expect(before > gc.getStats().object_count);
+    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+}
+
+test "finalizer queue keeps unreachable object alive until drained" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try object.tableSetWithBarrier(&gc, mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    object.tableSetMetatableWithBarrier(&gc, obj, mt);
+
+    gc.collect();
+    const after_first = gc.getStats().object_count;
+    try std.testing.expect(gc.hasPendingFinalizers());
+    try std.testing.expect(after_first >= 3);
+
+    gc.collect();
+    try std.testing.expect(gc.hasPendingFinalizers());
+    try std.testing.expectEqual(after_first, gc.getStats().object_count);
+}
+
+test "thread entry function barrier keeps white callable alive from black thread" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    var dummy_vm: u8 = 0;
+    const thread = try gc.allocThread(@ptrCast(&dummy_vm), .suspended, null, null);
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromThread(thread)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    gc.beginCollection();
+    gc.markCycleRoots();
+    try std.testing.expect(gc.propagateOne());
+    try std.testing.expect(gc.isBlack(&thread.header));
+
+    const entry = try gc.allocNativeClosure(.{ .id = .print });
+    object.setThreadEntryFuncWithBarrier(&gc, thread, &entry.header);
+
+    gc.finishMarkPhase();
+    gc.sweep();
+    gc.finishSweepCycle();
+
+    try std.testing.expect(thread.entry_func == &entry.header);
+    try std.testing.expectEqual(@as(usize, 2), gc.getStats().object_count);
+}
+
+test "generational step ages survivor from young to survival to old" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+
+    const survivor = try gc.allocString("age-me");
+    try std.testing.expectEqual(object.ObjectGeneration.young, survivor.header.generation);
+
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.survival, survivor.header.generation);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+}
+
+test "generational mode schedules a major cycle after minor interval" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 1;
+
+    const survivor = try gc.allocString("major");
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromString(survivor)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(u8, 1), gc.generational_minor_cycles);
+    try std.testing.expectEqual(object.ObjectGeneration.survival, survivor.header.generation);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(@as(u8, 0), gc.generational_minor_cycles);
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+}
+
+test "generational minor keeps young child reachable from remembered old parent" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const parent = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(parent)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.survival, parent.header.generation);
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
+
+    const key = try gc.allocString("k");
+    const child = try gc.allocString("young");
+    try object.tableSetWithBarrier(&gc, parent, TValue.fromString(key), TValue.fromString(child));
+
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(gc.stepSized(0));
+
+    try std.testing.expectEqualStrings("young", parent.get(TValue.fromString(key)).?.asString().?.asSlice());
+    try std.testing.expect(gc.getStats().object_count >= 3);
+}
+
+test "generational minor does not collect unreachable old object until major cycle" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 1;
+
+    const survivor = try gc.allocString("old");
+    var root_slot = [_]TValue{TValue.fromString(survivor)};
+    var roots = TestRoots{
+        .values = root_slot[0..],
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, survivor.header.generation);
+
+    root_slot[0] = .nil;
+
+    const before_minor = gc.getStats().object_count;
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(before_minor, gc.getStats().object_count);
+
+    gc.collect();
     try std.testing.expectEqual(@as(usize, 0), gc.getStats().object_count);
 }

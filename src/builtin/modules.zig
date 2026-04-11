@@ -4,11 +4,16 @@
 //! Dispatcher entrypoints are grouped below.
 
 const std = @import("std");
+const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
-const TableObject = @import("../runtime/gc/object.zig").TableObject;
+const TableObject = object.TableObject;
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 const VM = @import("../vm/vm.zig").VM;
+
+fn tableSet(vm: *VM, table: *TableObject, key: TValue, value: TValue) !void {
+    try object.tableSetWithBarrier(vm.gc(), table, key, value);
+}
 
 /// Default search path (fallback if package.path is not set)
 const DEFAULT_PATH = "./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/usr/local/share/lua/5.4/?/init.lua";
@@ -126,8 +131,7 @@ fn loadModuleFile(vm: *VM, filename: []const u8, mod_key: anytype) !TValue {
 
     // Set up _ENV upvalue
     if (proto.nups > 0) {
-        closure.upvalues[0].closed = TValue.fromTable(vm.globals());
-        closure.upvalues[0].location = &closure.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     const func_val = TValue.fromClosure(closure);
@@ -286,7 +290,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         loaded_table = try vm.gc().allocTable();
         if (package_table) |pkg| {
             const loaded_key = try vm.gc().allocString("loaded");
-            try pkg.set(TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
+            try tableSet(vm, pkg, TValue.fromString(loaded_key), TValue.fromTable(loaded_table.?));
         }
     }
 
@@ -330,17 +334,17 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                             const xuxu_key = try vm.gc().allocString("xuxu");
                             if (res_table.get(TValue.fromString(xuxu_key)) == null) {
                                 if (vm.globals().get(TValue.fromString(xuxu_key))) |global_xuxu| {
-                                    try res_table.set(TValue.fromString(xuxu_key), global_xuxu);
+                                    try tableSet(vm, res_table, TValue.fromString(xuxu_key), global_xuxu);
                                 }
                             }
                         }
                         if (!result.isNil()) {
-                            try loaded_table.?.set(TValue.fromString(mod_key), result);
+                            try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), result);
                         }
                         var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
                         if (require_result.isNil()) {
                             require_result = TValue{ .boolean = true };
-                            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
+                            try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);
                         }
 
                         if (nresults > 0) {
@@ -361,7 +365,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         if (std.mem.eql(u8, modname, builtin)) {
             const builtin_key = try vm.gc().allocString(builtin);
             if (vm.globals().get(TValue.fromString(builtin_key))) |global_val| {
-                try loaded_table.?.set(TValue.fromString(mod_key), global_val);
+                try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), global_val);
                 if (nresults > 0) {
                     vm.stack[vm.base + func_reg] = global_val;
                 }
@@ -397,12 +401,12 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (searchPathImpl(modname, search_path, ".", "/", &path_buf, &path_len, &err_buf, &err_pos)) {
         const result = try loadModuleFile(vm, path_buf[0..path_len], mod_key);
         if (!result.isNil()) {
-            try loaded_table.?.set(TValue.fromString(mod_key), result);
+            try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), result);
         }
         var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
         if (require_result.isNil()) {
             require_result = TValue{ .boolean = true };
-            try loaded_table.?.set(TValue.fromString(mod_key), require_result);
+            try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);
         }
 
         if (nresults > 0) {
@@ -415,7 +419,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         const required_key = try vm.gc().allocString("REQUIRED");
         if (vm.globals().get(TValue.fromString(required_key)) != null) {
-            try vm.globals().set(TValue.fromString(required_key), TValue.fromString(mod_key));
+            try tableSet(vm, vm.globals(), TValue.fromString(required_key), TValue.fromString(mod_key));
         }
         return;
     }

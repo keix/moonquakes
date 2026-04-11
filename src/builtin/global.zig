@@ -4,6 +4,7 @@
 //! Dispatcher entrypoints are grouped below.
 
 const std = @import("std");
+const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("../vm/vm.zig").VM;
 const Upvaldesc = @import("../compiler/proto.zig").Upvaldesc;
@@ -727,13 +728,13 @@ pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         // Cache is invalid, recreate
         const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
         const val = TValue.fromNativeClosure(iter_nc);
-        try globals.set(TValue.fromString(cache_key), val);
+        try object.tableSetWithBarrier(vm.gc(), globals, TValue.fromString(cache_key), val);
         break :blk val;
     } else blk: {
         // No cache, create and store
         const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
         const val = TValue.fromNativeClosure(iter_nc);
-        try globals.set(TValue.fromString(cache_key), val);
+        try object.tableSetWithBarrier(vm.gc(), globals, TValue.fromString(cache_key), val);
         break :blk val;
     };
     vm.stack[vm.base + func_reg] = iter_val;
@@ -849,10 +850,9 @@ pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Set the new metatable (nil clears it)
     if (mt_arg.isNil()) {
-        table.metatable = null;
+        object.tableSetMetatableWithBarrier(vm.gc(), table, null);
     } else if (mt_arg.asTable()) |new_mt| {
-        table.metatable = new_mt;
-        vm.gc().barrierBack(&table.header, &new_mt.header);
+        object.tableSetMetatableWithBarrier(vm.gc(), table, new_mt);
     } else {
         return vm.raiseString("bad argument #2 to 'setmetatable' (nil or table expected)");
     }
@@ -907,7 +907,7 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Direct table set without metamethods
     // Supports any TValue as key (Lua 5.4 semantics)
-    try table.set(key_arg, value_arg);
+    try object.tableSetWithBarrier(vm.gc(), table, key_arg, value_arg);
 
     // Return the table
     if (nresults > 0) {
@@ -1250,8 +1250,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         // Initialize _ENV upvalue to the environment table.
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            closure.upvalues[env_idx].closed = env_value;
-            closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
+            object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
         }
 
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1310,8 +1309,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        closure.upvalues[env_idx].closed = env_value;
-        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1420,8 +1418,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const closure = try vm.gc().allocClosure(proto);
         coalesceEquivalentUpvalues(closure);
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            closure.upvalues[env_idx].closed = env_value;
-            closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
+            object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
         }
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
         if (nresults > 1) {
@@ -1480,8 +1477,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        closure.upvalues[env_idx].closed = env_value;
-        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1548,8 +1544,7 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the globals table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        closure.upvalues[env_idx].closed = TValue.fromTable(vm.globals());
-        closure.upvalues[env_idx].location = &closure.upvalues[env_idx].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], TValue.fromTable(vm.globals()));
     }
 
     const func_val = TValue.fromClosure(closure);
@@ -1731,15 +1726,11 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         },
         .isrunning => TValue{ .boolean = gc.is_running },
         .incremental => blk: {
-            // API compatibility mode switch only.
-            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
             const prev = modeName(gc.mode);
             gc.mode = .incremental;
             break :blk TValue.fromString(try vm.gc().allocString(prev));
         },
         .generational => blk: {
-            // API compatibility mode switch only.
-            // Runtime GC behavior is still shared (not a true incremental/generational split yet).
             const prev = modeName(gc.mode);
             gc.mode = .generational;
             break :blk TValue.fromString(try vm.gc().allocString(prev));

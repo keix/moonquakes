@@ -1146,26 +1146,17 @@ fn pushMetamethodClosureCall(vm: *VM, closure: *ClosureObject, args: []const TVa
 }
 
 fn callNativeClosureToAbs(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue, ret_abs: u32) !ExecuteResult {
-    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
-    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 1);
-    vm.stack[ret_abs] = vm.stack[prepared.call_base];
-    vm.top = prepared.call_base;
+    _ = try call.callNativeWithResult(vm, mm, nc, args, .{ .first_to_abs = ret_abs });
     return .Continue;
 }
 
 fn callNativeClosureDiscard(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !ExecuteResult {
-    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
-    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 0);
-    vm.top = prepared.call_base;
+    _ = try call.callNativeWithResult(vm, mm, nc, args, .discard);
     return .Continue;
 }
 
 fn callNativeClosureSync(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !TValue {
-    const prepared = call.stageNativeCallFrame(vm, mm, args, vm.top);
-    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), 1);
-    const result = vm.stack[prepared.call_base];
-    vm.top = prepared.call_base;
-    return result;
+    return (try call.callNativeWithResult(vm, mm, nc, args, .first)).?;
 }
 
 /// Close to-be-closed variables from the current frame
@@ -1451,8 +1442,7 @@ fn executeTostringForUnhandledError(vm: *VM, closure: *ClosureObject, value: TVa
     const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
     const wrapper = try vm.gc().allocClosure(proto);
     if (proto.nups > 0) {
-        wrapper.upvalues[0].closed = TValue.fromTable(vm.globals());
-        wrapper.upvalues[0].location = &wrapper.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), wrapper.upvalues[0], TValue.fromTable(vm.globals()));
     }
 
     _ = vm.pushTempRoot(TValue.fromClosure(wrapper));
@@ -1479,8 +1469,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
     };
     if (proto.nups > 0) {
         // Main chunk's upvalue[0] is _ENV = globals
-        main_closure.upvalues[0].closed = TValue.fromTable(vm.globals());
-        main_closure.upvalues[0].location = &main_closure.upvalues[0].closed;
+        object.initClosedUpvalueWithBarrier(vm.gc(), main_closure.upvalues[0], TValue.fromTable(vm.globals()));
     }
     vm.gc().allowGC();
 

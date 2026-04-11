@@ -751,7 +751,7 @@ fn getGmatchStateMap(vm: *VM) !*object.TableObject {
         if (existing.asTable()) |tbl| return tbl;
     }
     const tbl = try vm.gc().allocTable();
-    try globals.set(key_val, TValue.fromTable(tbl));
+    try object.tableSetWithBarrier(vm.gc(), globals, key_val, TValue.fromTable(tbl));
     return tbl;
 }
 
@@ -1935,15 +1935,15 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const key_p = try vm.gc().allocString("p");
     const key_pos = try vm.gc().allocString("pos");
     const key_last_end = try vm.gc().allocString("last_end");
-    try state_table.set(TValue.fromString(key_s), str_arg);
-    try state_table.set(TValue.fromString(key_p), pat_arg);
-    try state_table.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(init_pos)) });
-    try state_table.set(TValue.fromString(key_last_end), .{ .integer = -1 });
+    try object.tableSetWithBarrier(vm.gc(), state_table, TValue.fromString(key_s), str_arg);
+    try object.tableSetWithBarrier(vm.gc(), state_table, TValue.fromString(key_p), pat_arg);
+    try object.tableSetWithBarrier(vm.gc(), state_table, TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(init_pos)) });
+    try object.tableSetWithBarrier(vm.gc(), state_table, TValue.fromString(key_last_end), .{ .integer = -1 });
 
     // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .string_gmatch_iterator });
     const state_map = try getGmatchStateMap(vm);
-    try state_map.set(TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
+    try object.tableSetWithBarrier(vm.gc(), state_map, TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // Generic-for still accepts (f, s, var, toclose), but gmatch keeps state privately.
@@ -2054,8 +2054,8 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try state.set(TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
-            try state.set(TValue.fromString(key_last_end), .{ .integer = @as(i64, @intCast(matcher.match_end)) });
+            try object.tableSetWithBarrier(vm.gc(), state, TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
+            try object.tableSetWithBarrier(vm.gc(), state, TValue.fromString(key_last_end), .{ .integer = @as(i64, @intCast(matcher.match_end)) });
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {

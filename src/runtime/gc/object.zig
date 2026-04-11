@@ -37,6 +37,12 @@ pub const GCObjectType = enum(u8) {
     file,
 };
 
+pub const ObjectGeneration = enum(u2) {
+    young,
+    survival,
+    old,
+};
+
 /// Common header for all GC-managed objects
 ///
 /// This header must be the first field in every GC object struct.
@@ -58,6 +64,9 @@ pub const GCObject = struct {
     /// true = in gray list (awaiting child scan)
     in_gray: bool = false,
 
+    /// Generational age bucket.
+    generation: ObjectGeneration = .old,
+
     /// Linked list pointer for tracking all objects
     /// The GC maintains a list of all allocated objects
     next: ?*GCObject,
@@ -68,15 +77,20 @@ pub const GCObject = struct {
     /// True if object has a pending __gc finalizer in the queue
     finalizer_queued: bool = false,
 
+    /// True if this old object is present in the remembered set.
+    remembered: bool = false,
+
     /// Initialize a GC object header
     pub fn init(object_type: GCObjectType, next_obj: ?*GCObject) GCObject {
         return .{
             .type = object_type,
             .mark_bit = false,
             .in_gray = false,
+            .generation = .old,
             .next = next_obj,
             .gray_next = null,
             .finalizer_queued = false,
+            .remembered = false,
         };
     }
 
@@ -86,9 +100,11 @@ pub const GCObject = struct {
             .type = object_type,
             .mark_bit = mark_value,
             .in_gray = false,
+            .generation = .old,
             .next = next_obj,
             .gray_next = null,
             .finalizer_queued = false,
+            .remembered = false,
         };
     }
 
@@ -512,6 +528,18 @@ pub const TableObject = struct {
     }
 };
 
+pub fn tableSetWithBarrier(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
+    try table.set(key, value);
+    gc.barrierBackValue(&table.header, value);
+}
+
+pub fn tableSetMetatableWithBarrier(gc: anytype, table: *TableObject, new_mt: ?*TableObject) void {
+    table.metatable = new_mt;
+    if (new_mt) |mt| {
+        gc.barrierBack(&table.header, &mt.header);
+    }
+}
+
 /// Closure Object - GC-managed function instance
 ///
 /// Wraps a ProtoObject (bytecode) with upvalues for captured variables.
@@ -578,6 +606,12 @@ pub const UpvalueObject = struct {
         self.location.* = value;
     }
 };
+
+pub fn initClosedUpvalueWithBarrier(gc: anytype, upvalue: *UpvalueObject, value: TValue) void {
+    upvalue.closed = value;
+    upvalue.location = &upvalue.closed;
+    gc.barrierBackValue(&upvalue.header, value);
+}
 
 /// Proto Object - GC-managed function prototype
 ///
@@ -718,6 +752,13 @@ pub const ThreadObject = struct {
         return self.vm;
     }
 };
+
+pub fn setThreadEntryFuncWithBarrier(gc: anytype, thread: *ThreadObject, entry_func: ?*GCObject) void {
+    thread.entry_func = entry_func;
+    if (entry_func) |func_obj| {
+        gc.barrierBack(&thread.header, func_obj);
+    }
+}
 
 /// File kind for FileObject
 pub const FileKind = enum(u8) {
