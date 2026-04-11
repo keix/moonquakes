@@ -12,19 +12,19 @@ const FileKind = object.FileKind;
 const GC = @import("../runtime/gc/gc.zig").GC;
 
 fn tableSet(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
-    try object.tableSetWithBarrier(gc, table, key, value);
+    try gc.tableSet(table, key, value);
 }
 
 fn setTableMetatable(gc: anytype, table: *TableObject, mt: *TableObject) void {
-    object.tableSetMetatableWithBarrier(gc, table, mt);
+    gc.tableSetMetatable(table, mt);
 }
 
 fn setFileMetatable(gc: anytype, file_obj: *FileObject, mt: *TableObject) void {
-    object.fileSetMetatableWithBarrier(gc, file_obj, mt);
+    gc.fileSetMetatable(file_obj, mt);
 }
 
 fn setFileStringRef(gc: anytype, file_obj: *FileObject, slot: *?*object.StringObject, value: ?*object.StringObject) void {
-    object.fileSetStringRefWithBarrier(gc, file_obj, slot, value);
+    gc.fileSetStringRef(file_obj, slot, value);
 }
 
 /// Lua 5.4 Input and Output Library

@@ -18,9 +18,8 @@ fn getTableLength(table: *TableObject) i64 {
     return table.rawLen();
 }
 
-fn rawSetWithBarrier(vm: anytype, table: *TableObject, key: TValue, value: TValue) !void {
-    try table.set(key, value);
-    vm.gc().barrierBackValue(&table.header, value);
+fn rawSet(vm: anytype, table: *TableObject, key: TValue, value: TValue) !void {
+    try vm.gc().tableSet(table, key, value);
 }
 
 fn callValueManaged(vm: anytype, fn_val: TValue, args: []const TValue) !TValue {
@@ -64,16 +63,16 @@ fn getAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue) !TVal
 
 fn setAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue, value: TValue) !void {
     if (table.get(key) != null) {
-        return rawSetWithBarrier(vm, table, key, value);
+        return rawSet(vm, table, key, value);
     }
     if (metamethod.getMetamethod(table_val, .newindex, &vm.gc().mm_keys, &vm.gc().shared_mt)) |newindex_mm| {
         if (newindex_mm.asTable()) |newindex_table| {
-            return rawSetWithBarrier(vm, newindex_table, key, value);
+            return rawSet(vm, newindex_table, key, value);
         }
         _ = try callValueManaged(vm, newindex_mm, &[_]TValue{ table_val, key, value });
         return;
     }
-    return rawSetWithBarrier(vm, table, key, value);
+    return rawSet(vm, table, key, value);
 }
 
 /// Compare two values for sorting.
@@ -512,12 +511,12 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     while (i < nargs) : (i += 1) {
         const val = vm.stack[vm.base + func_reg + 1 + i];
         const key = TValue{ .integer = @as(i64, i) + 1 };
-        try rawSetWithBarrier(vm, table, key, val);
+        try rawSet(vm, table, key, val);
     }
 
     // Set the "n" field to the count of arguments
     const n_key = try vm.gc().allocString("n");
-    try rawSetWithBarrier(vm, table, TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
+    try rawSet(vm, table, TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
 
     // Return the table
     vm.stack[vm.base + func_reg] = TValue.fromTable(table);

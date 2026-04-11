@@ -219,7 +219,7 @@ test "table write barrier keeps white child reachable from black table" {
     try std.testing.expect(gc.isBlack(&table.header));
 
     const child = try gc.allocString("survivor");
-    try object.tableSetWithBarrier(&gc, table, TValue.fromString(try gc.allocString("k")), TValue.fromString(child));
+    try gc.tableSet(table, TValue.fromString(try gc.allocString("k")), TValue.fromString(child));
 
     gc.finishMarkPhase();
     gc.sweep();
@@ -248,7 +248,7 @@ test "closed upvalue write barrier keeps white child reachable from black upvalu
     try std.testing.expect(gc.isBlack(&upvalue.header));
 
     const child = try gc.allocString("captured");
-    object.upvalueSetWithBarrier(&gc, upvalue, TValue.fromString(child));
+    gc.upvalueSet(upvalue, TValue.fromString(child));
 
     gc.finishMarkPhase();
     gc.sweep();
@@ -274,7 +274,7 @@ test "userdata metatable barrier keeps white metatable reachable from black user
     try std.testing.expect(gc.isBlack(&ud.header));
 
     const mt = try gc.allocTable();
-    object.userdataSetMetatableWithBarrier(&gc, ud, mt);
+    gc.userdataSetMetatable(ud, mt);
 
     gc.finishMarkPhase();
     gc.sweep();
@@ -301,8 +301,8 @@ test "file reference barriers keep white children reachable from black file obje
 
     const mt = try gc.allocTable();
     const mode = try gc.allocString("w");
-    object.fileSetMetatableWithBarrier(&gc, file_obj, mt);
-    object.fileSetStringRefWithBarrier(&gc, file_obj, &file_obj.mode, mode);
+    gc.fileSetMetatable(file_obj, mt);
+    gc.fileSetStringRef(file_obj, &file_obj.mode, mode);
 
     gc.finishMarkPhase();
     gc.sweep();
@@ -321,12 +321,12 @@ test "weak value table does not retain white value" {
     const weak_table = try gc.allocTable();
     const metatable = try gc.allocTable();
     const mode_str = try gc.allocString("v");
-    try object.tableSetWithBarrier(&gc, metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
-    object.tableSetMetatableWithBarrier(&gc, weak_table, metatable);
+    try gc.tableSet(metatable, TValue.fromString(gc.mm_keys.get(.mode)), TValue.fromString(mode_str));
+    gc.tableSetMetatable(weak_table, metatable);
 
     const key = try gc.allocString("k");
     const value = try gc.allocTable();
-    try object.tableSetWithBarrier(&gc, weak_table, TValue.fromString(key), TValue.fromTable(value));
+    try gc.tableSet(weak_table, TValue.fromString(key), TValue.fromTable(value));
 
     var roots = TestRoots{
         .values = &[_]TValue{TValue.fromTable(weak_table)},
@@ -347,10 +347,10 @@ test "finalizer queue keeps unreachable object alive until drained" {
 
     const mt = try gc.allocTable();
     const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
-    try object.tableSetWithBarrier(&gc, mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+    try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
     const obj = try gc.allocTable();
-    object.tableSetMetatableWithBarrier(&gc, obj, mt);
+    gc.tableSetMetatable(obj, mt);
 
     gc.collect();
     const after_first = gc.getStats().object_count;
@@ -379,7 +379,7 @@ test "thread entry function barrier keeps white callable alive from black thread
     try std.testing.expect(gc.isBlack(&thread.header));
 
     const entry = try gc.allocNativeClosure(.{ .id = .print });
-    object.setThreadEntryFuncWithBarrier(&gc, thread, &entry.header);
+    gc.threadSetEntryFunc(thread, &entry.header);
 
     gc.finishMarkPhase();
     gc.sweep();
@@ -449,7 +449,7 @@ test "generational minor keeps young child reachable from remembered old parent"
 
     const key = try gc.allocString("k");
     const child = try gc.allocString("young");
-    try object.tableSetWithBarrier(&gc, parent, TValue.fromString(key), TValue.fromString(child));
+    try gc.tableSet(parent, TValue.fromString(key), TValue.fromString(child));
 
     try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
     try std.testing.expect(gc.stepSized(0));

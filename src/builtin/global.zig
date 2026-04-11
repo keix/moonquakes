@@ -728,13 +728,13 @@ pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         // Cache is invalid, recreate
         const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
         const val = TValue.fromNativeClosure(iter_nc);
-        try object.tableSetWithBarrier(vm.gc(), globals, TValue.fromString(cache_key), val);
+        try vm.gc().tableSet(globals, TValue.fromString(cache_key), val);
         break :blk val;
     } else blk: {
         // No cache, create and store
         const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
         const val = TValue.fromNativeClosure(iter_nc);
-        try object.tableSetWithBarrier(vm.gc(), globals, TValue.fromString(cache_key), val);
+        try vm.gc().tableSet(globals, TValue.fromString(cache_key), val);
         break :blk val;
     };
     vm.stack[vm.base + func_reg] = iter_val;
@@ -850,9 +850,9 @@ pub fn nativeSetmetatable(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Set the new metatable (nil clears it)
     if (mt_arg.isNil()) {
-        object.tableSetMetatableWithBarrier(vm.gc(), table, null);
+        vm.gc().tableSetMetatable(table, null);
     } else if (mt_arg.asTable()) |new_mt| {
-        object.tableSetMetatableWithBarrier(vm.gc(), table, new_mt);
+        vm.gc().tableSetMetatable(table, new_mt);
     } else {
         return vm.raiseString("bad argument #2 to 'setmetatable' (nil or table expected)");
     }
@@ -907,7 +907,7 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Direct table set without metamethods
     // Supports any TValue as key (Lua 5.4 semantics)
-    try object.tableSetWithBarrier(vm.gc(), table, key_arg, value_arg);
+    try vm.gc().tableSet(table, key_arg, value_arg);
 
     // Return the table
     if (nresults > 0) {
@@ -1250,7 +1250,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         // Initialize _ENV upvalue to the environment table.
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
+            vm.gc().initClosedUpvalue(closure.upvalues[env_idx], env_value);
         }
 
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1309,7 +1309,7 @@ pub fn nativeLoad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
+        vm.gc().initClosedUpvalue(closure.upvalues[env_idx], env_value);
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1418,7 +1418,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const closure = try vm.gc().allocClosure(proto);
         coalesceEquivalentUpvalues(closure);
         if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-            object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
+            vm.gc().initClosedUpvalue(closure.upvalues[env_idx], env_value);
         }
         vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
         if (nresults > 1) {
@@ -1477,7 +1477,7 @@ pub fn nativeLoadfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Initialize _ENV upvalue to the environment table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], env_value);
+        vm.gc().initClosedUpvalue(closure.upvalues[env_idx], env_value);
     }
 
     vm.stack[vm.base + func_reg] = TValue.fromClosure(closure);
@@ -1544,7 +1544,7 @@ pub fn nativeDofile(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Initialize _ENV upvalue to the globals table.
     if (inferEnvUpvalueIndex(closure.proto)) |env_idx| {
-        object.initClosedUpvalueWithBarrier(vm.gc(), closure.upvalues[env_idx], TValue.fromTable(vm.globals()));
+        vm.gc().initClosedUpvalue(closure.upvalues[env_idx], TValue.fromTable(vm.globals()));
     }
 
     const func_val = TValue.fromClosure(closure);
