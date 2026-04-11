@@ -546,6 +546,7 @@ pub const GC = struct {
     pub const participatesInCurrentCycle = mark_mod.participatesInCurrentCycle;
     pub const isAliveInCurrentCycle = mark_mod.isAliveInCurrentCycle;
     pub const rememberObject = mark_mod.rememberObject;
+    pub const forgetObject = mark_mod.forgetObject;
     pub const flipMark = mark_mod.flipMark;
     pub const markGray = mark_mod.markGray;
     pub const markGrayValue = mark_mod.markGrayValue;

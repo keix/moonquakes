@@ -631,6 +631,44 @@ test "queued finalizer survives subsequent minor cycle" {
     try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
 }
 
+test "queued finalizer keeps young __gc function alive across minor cycle" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    try gc.initMetamethodKeys();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const holder = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(holder)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
+
+    const mt = try gc.allocTable();
+    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    try std.testing.expectEqual(object.ObjectGeneration.young, gc_fn.header.generation);
+    try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
+
+    const obj = try gc.allocTable();
+    gc.tableSetMetatable(obj, mt);
+    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
+    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+
+    try std.testing.expect(gc.stepSized(0));
+    const queued_count = gc.getStats().object_count;
+    try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
+    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(queued_count, gc.getStats().object_count);
+    try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
+    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
+}
+
 test "generational minor does not enqueue finalizer for unreachable old object" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
@@ -721,6 +759,58 @@ test "remembered set prunes old table after child ages out of young generation" 
 
     try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(object.ObjectGeneration.old, child.header.generation);
+    try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
+    try std.testing.expect(!parent.header.remembered);
+}
+
+test "remembered set forgets old table immediately after overwriting young value" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const parent = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(parent)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
+
+    const child = try gc.allocString("young");
+    try gc.tableSet(parent, .{ .integer = 1 }, TValue.fromString(child));
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(parent.header.remembered);
+
+    try gc.tableSet(parent, .{ .integer = 1 }, .nil);
+    try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
+    try std.testing.expect(!parent.header.remembered);
+}
+
+test "remembered set forgets old table immediately after clearing young metatable" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+    gc.mode = .generational;
+    gc.generational_major_interval = 8;
+
+    const parent = try gc.allocTable();
+    var roots = TestRoots{
+        .values = &[_]TValue{TValue.fromTable(parent)},
+    };
+    try gc.addRootProvider(roots.provider());
+
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
+
+    const mt = try gc.allocTable();
+    gc.tableSetMetatable(parent, mt);
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(parent.header.remembered);
+
+    gc.tableSetMetatable(parent, null);
     try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
     try std.testing.expect(!parent.header.remembered);
 }
