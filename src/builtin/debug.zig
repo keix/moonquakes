@@ -914,26 +914,37 @@ fn mapLocalOrdinalToRegister(target_vm: *VM, ci: *const CallInfo, local_idx: u32
     return null;
 }
 
-fn writeGetlocalNilResult(vm: *VM, func_reg: u32, nresults: u32) void {
-    vm.stack[vm.base + func_reg] = TValue.nil;
-    if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = TValue.nil;
-    }
-    if (nresults == 0) {
-        vm.top = vm.base + func_reg + 1;
-    }
-}
+const GetlocalResult = union(enum) {
+    none,
+    pair: struct {
+        name: []const u8,
+        value: TValue,
+    },
+};
 
-fn writeGetlocalPairResult(vm: *VM, func_reg: u32, nresults: u32, name: []const u8, value: TValue) !void {
-    const name_val = TValue.fromString(try vm.gc().allocString(name));
-    vm.stack[vm.base + func_reg] = name_val;
-    if (nresults == 0) {
-        vm.stack[vm.base + func_reg + 1] = value;
-        vm.top = vm.base + func_reg + 2;
-        return;
-    }
-    if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = value;
+fn writeGetlocalResult(vm: *VM, func_reg: u32, nresults: u32, result: GetlocalResult) !void {
+    switch (result) {
+        .none => {
+            vm.stack[vm.base + func_reg] = TValue.nil;
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = TValue.nil;
+            }
+            if (nresults == 0) {
+                vm.top = vm.base + func_reg + 1;
+            }
+        },
+        .pair => |pair| {
+            const name_val = TValue.fromString(try vm.gc().allocString(pair.name));
+            vm.stack[vm.base + func_reg] = name_val;
+            if (nresults == 0) {
+                vm.stack[vm.base + func_reg + 1] = pair.value;
+                vm.top = vm.base + func_reg + 2;
+                return;
+            }
+            if (nresults > 1) {
+                vm.stack[vm.base + func_reg + 1] = pair.value;
+            }
+        },
     }
 }
 
@@ -1639,7 +1650,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     }
 
     if (nargs < 2 + arg_off) {
-        writeGetlocalNilResult(vm, func_reg, nresults);
+        try writeGetlocalResult(vm, func_reg, nresults, .none);
         return;
     }
 
@@ -1648,7 +1659,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 
     // Get local index (1-based, negative for vararg)
     const local_int = local_arg.toInteger() orelse {
-        writeGetlocalNilResult(vm, func_reg, nresults);
+        try writeGetlocalResult(vm, func_reg, nresults, .none);
         return;
     };
 
@@ -1656,7 +1667,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     if (f_arg.toInteger()) |level| {
         if (level < 0) {
             if (vm.hooks.in_hook) {
-                writeGetlocalNilResult(vm, func_reg, nresults);
+                try writeGetlocalResult(vm, func_reg, nresults, .none);
                 return;
             }
             return vm.raiseString("bad argument to 'getlocal' (level out of range)");
@@ -1667,7 +1678,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             const rel = local_int - start_i;
             if (rel >= 0 and rel < count_i and @as(u64, @intCast(rel)) < vm.hooks.transfer_values.len) {
                 const idx: usize = @intCast(rel);
-                try writeGetlocalPairResult(vm, func_reg, nresults, "(temporary)", vm.hooks.transfer_values[idx]);
+                try writeGetlocalResult(vm, func_reg, nresults, .{ .pair = .{ .name = "(temporary)", .value = vm.hooks.transfer_values[idx] } });
                 return;
             }
         }
@@ -1675,18 +1686,18 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         // Lua compatibility: level 0 inspects debug.getlocal's own C args.
         if (level == 0) {
             if (local_int < 1 or @as(u32, @intCast(local_int)) > nargs - arg_off) {
-                writeGetlocalNilResult(vm, func_reg, nresults);
+                try writeGetlocalResult(vm, func_reg, nresults, .none);
                 return;
             }
             const idx: u32 = @intCast(local_int);
             const value = vm.stack[vm.base + func_reg + arg_off + idx];
-            try writeGetlocalPairResult(vm, func_reg, nresults, "(C temporary)", value);
+            try writeGetlocalResult(vm, func_reg, nresults, .{ .pair = .{ .name = "(C temporary)", .value = value } });
             return;
         }
 
         const ci = getCallInfoAtLevel(target_vm, level) orelse {
             if (vm.hooks.in_hook) {
-                writeGetlocalNilResult(vm, func_reg, nresults);
+                try writeGetlocalResult(vm, func_reg, nresults, .none);
                 return;
             }
             return vm.raiseString("bad argument to 'getlocal' (level out of range)");
@@ -1697,7 +1708,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         if (local_int > 0) {
             const local_idx: usize = @intCast(local_int - 1);
             const reg = mapLocalOrdinalToRegister(target_vm, ci, @intCast(local_idx), ulevel >= 2 or target_vm != vm) orelse {
-                writeGetlocalNilResult(vm, func_reg, nresults);
+                try writeGetlocalResult(vm, func_reg, nresults, .none);
                 return;
             };
             const reg_idx: usize = @intCast(reg);
@@ -1750,20 +1761,20 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
                 }
             }
 
-            try writeGetlocalPairResult(vm, func_reg, nresults, name, visible_value);
+            try writeGetlocalResult(vm, func_reg, nresults, .{ .pair = .{ .name = name, .value = visible_value } });
             return;
         } else if (local_int < 0) {
             const vararg_idx: u32 = @intCast(-local_int);
             if (vararg_idx < 1 or vararg_idx > ci.vararg_count) {
-                writeGetlocalNilResult(vm, func_reg, nresults);
+                try writeGetlocalResult(vm, func_reg, nresults, .none);
                 return;
             }
             const value = target_vm.stack[ci.vararg_base + vararg_idx - 1];
 
-            try writeGetlocalPairResult(vm, func_reg, nresults, "(vararg)", value);
+            try writeGetlocalResult(vm, func_reg, nresults, .{ .pair = .{ .name = "(vararg)", .value = value } });
             return;
         }
-        writeGetlocalNilResult(vm, func_reg, nresults);
+        try writeGetlocalResult(vm, func_reg, nresults, .none);
         return;
     }
 
@@ -1773,12 +1784,12 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
 
         // For functions, we can only report info about parameters
         if (local_int < 1) {
-            writeGetlocalNilResult(vm, func_reg, nresults);
+            try writeGetlocalResult(vm, func_reg, nresults, .none);
             return;
         }
         const local_idx: usize = @intCast(local_int - 1);
         if (local_idx >= proto.numparams) {
-            writeGetlocalNilResult(vm, func_reg, nresults);
+            try writeGetlocalResult(vm, func_reg, nresults, .none);
             return;
         }
 
@@ -1790,12 +1801,12 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
         }
         if (name.len == 0) name = "(temporary)";
 
-        try writeGetlocalPairResult(vm, func_reg, nresults, name, TValue.nil);
+        try writeGetlocalResult(vm, func_reg, nresults, .{ .pair = .{ .name = name, .value = TValue.nil } });
         return;
     }
 
     // Invalid argument
-    writeGetlocalNilResult(vm, func_reg, nresults);
+    try writeGetlocalResult(vm, func_reg, nresults, .none);
 }
 
 /// debug.getmetatable(value) - Returns metatable of given value
