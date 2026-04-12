@@ -79,6 +79,11 @@ pub const NativeReturnTransfer = union(enum) {
     },
 };
 
+pub const ExecutedNativeCall = struct {
+    stack_result: NativeStackCallOutcome,
+    top_defined: bool,
+};
+
 fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
     if (subject.asTable()) |table| {
         return table.metatable;
@@ -366,13 +371,13 @@ pub fn describeNativeReturnTransfer(
     }
 }
 
-pub fn callNativeWithResult(
+fn executeNativeCall(
     vm: *VM,
     callable: TValue,
     nc: *NativeClosureObject,
     args: []const TValue,
     result: NativeCallResult,
-) !NativeCallOutcome {
+) !ExecutedNativeCall {
     const prepared = stageNativeCallFrame(vm, callable, args, vm.top);
     defer vm.top = prepared.call_base;
 
@@ -391,7 +396,16 @@ pub fn callNativeWithResult(
         result == .top_defined,
     );
 
-    switch (result) {
+    return .{
+        .stack_result = stack_result,
+        .top_defined = result == .top_defined,
+    };
+}
+
+fn projectNativeCallResult(vm: *VM, executed: ExecutedNativeCall, result: NativeCallResult) NativeCallOutcome {
+    const stack_result = executed.stack_result;
+
+    return switch (result) {
         .discard => return .none,
         .first => return .{ .first = vm.stack[stack_result.result_base] },
         .first_to_abs => |ret_abs| {
@@ -406,7 +420,18 @@ pub fn callNativeWithResult(
             return .none;
         },
         .top_defined => return .{ .multiple = vm.stack[stack_result.result_base..stack_result.result_end] },
-    }
+    };
+}
+
+pub fn callNativeWithResult(
+    vm: *VM,
+    callable: TValue,
+    nc: *NativeClosureObject,
+    args: []const TValue,
+    result: NativeCallResult,
+) !NativeCallOutcome {
+    const executed = try executeNativeCall(vm, callable, nc, args, result);
+    return projectNativeCallResult(vm, executed, result);
 }
 
 fn cleanupRunState(vm: *VM, saved_depth: u8, saved_base: u32, saved_top: u32) void {
