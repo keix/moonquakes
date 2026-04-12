@@ -1048,32 +1048,38 @@ fn emitNativeReturnHook(
     vm: *VM,
     id: NativeFnId,
     native_call_args: []const TValue,
-    result_base: u32,
-    result_end: u32,
-    fixed_result_count: u32,
+    stack_result: call.NativeStackCallOutcome,
 ) !void {
     switch (id) {
-        .select => {
-            var idx_u: u32 = 1;
-            if (native_call_args.len > 0) {
-                const idx_val = native_call_args[0].toInteger() orelse 1;
-                if (idx_val >= 1) idx_u = @intCast(idx_val);
-            }
-            const arg_count: u32 = @intCast(native_call_args.len);
-            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
-            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_args.len);
-            const src_slice = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))];
-            try hook_state.onReturnFromValues(vm, nativeReturnHookName(id), null, idx_u + 1, src_slice, executeSyncMM);
-        },
         .math_sin => {
             const arg = if (native_call_args.len > 0) native_call_args[0].toNumber() orelse 0 else 0;
             const out = TValue{ .number = std.math.sin(arg) };
             try hook_state.onReturnFromValues(vm, nativeReturnHookName(id), null, 2, &[_]TValue{out}, executeSyncMM);
         },
         else => {
-            const native_transfer_total: u32 = if (fixed_result_count == 0) result_end - result_base else fixed_result_count;
-            const native_transfer_count: u32 = if (native_transfer_total > 0) native_transfer_total - 1 else 0;
-            try hook_state.onReturnFromStack(vm, nativeReturnHookName(id), null, 2, result_base + 1, native_transfer_count, executeSyncMM);
+            switch (call.describeNativeReturnTransfer(id, native_call_args, stack_result)) {
+                .stack => |transfer| {
+                    try hook_state.onReturnFromStack(
+                        vm,
+                        nativeReturnHookName(id),
+                        null,
+                        transfer.start,
+                        transfer.src_base,
+                        transfer.count,
+                        executeSyncMM,
+                    );
+                },
+                .values => |transfer| {
+                    try hook_state.onReturnFromValues(
+                        vm,
+                        nativeReturnHookName(id),
+                        null,
+                        transfer.start,
+                        transfer.values,
+                        executeSyncMM,
+                    );
+                },
+            }
         },
     }
 }
@@ -3313,7 +3319,6 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             vm.top = vm.base + a + 1 + nargs;
             try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, nresults, top_defined);
-            const result_base = native_result.result_base;
             const result_end = native_result.result_end;
             if (result_end < frame_max) {
                 for (vm.stack[result_end..frame_max]) |*slot| {
@@ -3321,7 +3326,7 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
             vm.top = if (c == 0) result_end else frame_max;
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, nresults);
+            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
             return .LoopContinue;
         }
     }
@@ -3528,9 +3533,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
             }
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, native_nresults, top_defined);
-            const result_base = native_result.result_base;
-            const result_end = native_result.result_end;
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, native_nresults);
+            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
 
             if (current_ci.previous != null) {
                 const actual_nresults: u32 = if (nresults < 0) blk: {

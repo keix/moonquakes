@@ -14,6 +14,7 @@ const TableObject = object.TableObject;
 const FileObject = object.FileObject;
 const UserdataObject = object.UserdataObject;
 const ProtoObject = object.ProtoObject;
+const NativeFnId = @import("../runtime/native.zig").NativeFnId;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const metamethod = @import("metamethod.zig");
 const execution = @import("execution.zig");
@@ -60,6 +61,18 @@ pub const NativeStackCallOutcome = struct {
     result_base: u32,
     result_end: u32,
     actual_count: u32,
+};
+
+pub const NativeReturnTransfer = union(enum) {
+    stack: struct {
+        start: u32,
+        src_base: u32,
+        count: u32,
+    },
+    values: struct {
+        start: u32,
+        values: []const TValue,
+    },
 };
 
 fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
@@ -312,6 +325,34 @@ pub fn invokeNativeOnStack(
         .result_end = result_base + requested_results,
         .actual_count = requested_results,
     };
+}
+
+pub fn describeNativeReturnTransfer(
+    id: NativeFnId,
+    native_call_args: []const TValue,
+    stack_result: NativeStackCallOutcome,
+) NativeReturnTransfer {
+    switch (id) {
+        .select => {
+            var idx_u: u32 = 1;
+            if (native_call_args.len > 0) {
+                const idx_val = native_call_args[0].toInteger() orelse 1;
+                if (idx_val >= 1) idx_u = @intCast(idx_val);
+            }
+            const arg_count: u32 = @intCast(native_call_args.len);
+            const native_transfer_count: u32 = if (arg_count >= idx_u) arg_count - idx_u else 0;
+            const src_idx: usize = @min(@as(usize, @intCast(idx_u)), native_call_args.len);
+            return .{ .values = .{
+                .start = idx_u + 1,
+                .values = native_call_args[src_idx .. src_idx + @as(usize, @intCast(native_transfer_count))],
+            } };
+        },
+        else => return .{ .stack = .{
+            .start = 2,
+            .src_base = stack_result.result_base + 1,
+            .count = if (stack_result.actual_count > 0) stack_result.actual_count - 1 else 0,
+        } },
+    }
 }
 
 pub fn callNativeWithResult(
