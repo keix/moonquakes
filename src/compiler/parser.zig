@@ -1659,6 +1659,48 @@ pub const Parser = struct {
         return self.patchTrailingResultProducer(code_start, true, false, .variable, target_reg) != null;
     }
 
+    fn hasCallContinuationSuffix(self: *Parser) bool {
+        return (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, ".") or
+                std.mem.eql(u8, self.current.lexeme, "[") or
+                std.mem.eql(u8, self.current.lexeme, ":") or
+                std.mem.eql(u8, self.current.lexeme, "("))) or
+            self.isNoParensArg();
+    }
+
+    fn prepareMethodCall(self: *Parser, receiver_reg: u8, func_reg_opt: ?u8) ParseError!u8 {
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+        const method_name = self.current.lexeme;
+        self.advance(); // consume method name
+
+        const method_const = try self.proto.addConstString(method_name);
+        const func_reg = if (func_reg_opt) |existing| blk: {
+            if (self.proto.next_reg <= existing + 1) {
+                self.proto.next_reg = existing + 2;
+                self.proto.updateMaxStack(existing + 2);
+            }
+            break :blk existing;
+        } else blk: {
+            const fresh = self.proto.allocTemp();
+            _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
+            break :blk fresh;
+        };
+
+        try self.proto.emitSELF(func_reg, receiver_reg, method_const);
+        return func_reg;
+    }
+
+    fn finishStatementCall(self: *Parser, func_reg: u8, arg_count: u8) ParseError!void {
+        if (self.hasCallContinuationSuffix()) {
+            try self.proto.emitCallVararg(func_reg, arg_count, 1);
+            _ = try self.parseSuffixChain(func_reg);
+        } else {
+            try self.proto.emitCallVararg(func_reg, arg_count, 0);
+        }
+    }
+
     fn recoverAssignmentTarget(self: *Parser, code_start: usize, expr_reg: u8) ParseError!AssignmentTargetRecovery {
         if (self.proto.code.items.len == 0 or self.proto.code.items.len <= code_start) return error.UnsupportedStatement;
 
@@ -2188,18 +2230,7 @@ pub const Parser = struct {
 
                 // Parse arguments and emit call
                 const arg_count = try self.parseCallArgs(func_reg);
-                const has_suffix = (self.current.kind == .Symbol and
-                    (std.mem.eql(u8, self.current.lexeme, ".") or
-                        std.mem.eql(u8, self.current.lexeme, "[") or
-                        std.mem.eql(u8, self.current.lexeme, ":") or
-                        std.mem.eql(u8, self.current.lexeme, "("))) or
-                    self.isNoParensArg();
-                if (has_suffix) {
-                    try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                    _ = try self.parseSuffixChain(func_reg);
-                } else {
-                    try self.proto.emitCallVararg(func_reg, arg_count, 0);
-                }
+                try self.finishStatementCall(func_reg, arg_count);
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
                 // Method call on indexed value: t[key]:method()
                 // First, get the receiver from the table
@@ -2214,36 +2245,12 @@ pub const Parser = struct {
 
                 self.advance(); // consume ':'
 
-                // Parse method name
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const method_name = self.current.lexeme;
-                self.advance(); // consume method name
-
-                // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
-                //           R[func_reg+1] := R[receiver_reg]
-                const method_const = try self.proto.addConstString(method_name);
-                const func_reg = self.proto.allocTemp();
-                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
-                try self.proto.emitSELF(func_reg, receiver_reg, method_const);
+                const func_reg = try self.prepareMethodCall(receiver_reg, null);
 
                 // Parse extra arguments
                 const extra_args = try self.parseMethodArgs(func_reg);
-
-                const has_suffix = (self.current.kind == .Symbol and
-                    (std.mem.eql(u8, self.current.lexeme, ".") or
-                        std.mem.eql(u8, self.current.lexeme, "[") or
-                        std.mem.eql(u8, self.current.lexeme, ":") or
-                        std.mem.eql(u8, self.current.lexeme, "("))) or
-                    self.isNoParensArg();
                 const total_args: u8 = if (extra_args == ProtoBuilder.VARARG_SENTINEL) ProtoBuilder.VARARG_SENTINEL else extra_args + 1;
-                if (has_suffix) {
-                    try self.proto.emitCallVararg(func_reg, total_args, 1);
-                    _ = try self.parseSuffixChain(func_reg);
-                } else {
-                    try self.proto.emitCallVararg(func_reg, total_args, 0);
-                }
+                try self.finishStatementCall(func_reg, total_args);
             } else {
                 return error.ExpectedEquals;
             }
@@ -2903,22 +2910,9 @@ pub const Parser = struct {
             } else {
                 // Method call: t:method() - returns result
                 self.advance(); // consume ':'
-
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const method_name = self.current.lexeme;
-                self.advance(); // consume method name
-
                 // Keep method-call base in the same register so trailing MULTRET
                 // argument expansion does not include stale prefix values.
-                const method_const = try self.proto.addConstString(method_name);
-                const func_reg = reg;
-                if (self.proto.next_reg <= func_reg + 1) {
-                    self.proto.next_reg = func_reg + 2;
-                    self.proto.updateMaxStack(func_reg + 2);
-                }
-                try self.proto.emitSELF(func_reg, reg, method_const);
+                const func_reg = try self.prepareMethodCall(reg, reg);
 
                 // Parse extra arguments starting at func_reg + 2
                 const extra_args = try self.parseMethodArgs(func_reg);
@@ -5131,18 +5125,7 @@ pub const Parser = struct {
         self.advance(); // consume ':'
 
         // Parse method name
-        if (self.current.kind != .Identifier) {
-            return error.ExpectedIdentifier;
-        }
-        const method_name = self.current.lexeme;
-        self.advance(); // consume method name
-
-        // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
-        //           R[func_reg+1] := R[receiver_reg]
-        const method_const = try self.proto.addConstString(method_name);
-        const func_reg = self.proto.allocTemp();
-        _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
-        try self.proto.emitSELF(func_reg, receiver_reg, method_const);
+        const func_reg = try self.prepareMethodCall(receiver_reg, null);
 
         // Parse extra arguments starting at func_reg + 2
         const extra_args = try self.parseMethodArgs(func_reg);
@@ -5213,15 +5196,7 @@ pub const Parser = struct {
                 if (self.current.kind != .Identifier) {
                     return error.ExpectedIdentifier;
                 }
-                const method_name = self.current.lexeme;
-                self.advance(); // consume method name
-
-                // Use SELF: R[func_reg] := R[receiver_reg][K[method_const]]
-                //           R[func_reg+1] := R[receiver_reg]
-                const method_const = try self.proto.addConstString(method_name);
-                const func_reg = self.proto.allocTemp();
-                _ = self.proto.allocTemp(); // Reserve for self (SELF writes to A+1)
-                try self.proto.emitSELF(func_reg, receiver_reg, method_const);
+                const func_reg = try self.prepareMethodCall(receiver_reg, null);
 
                 // Parse extra arguments
                 const extra_args = try self.parseMethodArgs(func_reg);
