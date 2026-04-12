@@ -1758,6 +1758,200 @@ pub const Parser = struct {
         return error.ExpectedEquals;
     }
 
+    fn parseFunctionNamePath(self: *Parser) ParseError!FunctionNamePath {
+        if (self.current.kind != .Identifier) {
+            return error.ExpectedIdentifier;
+        }
+
+        var path = FunctionNamePath{
+            .base_name = self.current.lexeme,
+            .base_const = try self.proto.addConstString(self.current.lexeme),
+        };
+        self.advance(); // consume base name
+
+        while (self.current.kind == .Symbol) {
+            if (std.mem.eql(u8, self.current.lexeme, ".")) {
+                self.advance(); // consume '.'
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                path.field_names[path.field_count] = self.current.lexeme;
+                path.field_count += 1;
+                self.advance(); // consume field name
+            } else if (std.mem.eql(u8, self.current.lexeme, ":")) {
+                self.advance(); // consume ':'
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                path.field_names[path.field_count] = self.current.lexeme;
+                path.field_count += 1;
+                path.is_method = true;
+                self.advance(); // consume method name
+                break;
+            } else {
+                break;
+            }
+        }
+
+        return path;
+    }
+
+    fn resolveAccessBaseIn(self: *Parser, builder: *ProtoBuilder, base_name: []const u8, base_const: u32) ParseError!u8 {
+        if (try builder.resolveVariable(base_name)) |loc| {
+            return switch (loc) {
+                .local => |local_reg| blk: {
+                    const reg = builder.allocTemp();
+                    try builder.emitMOVE(reg, local_reg);
+                    break :blk reg;
+                },
+                .upvalue => |uv_idx| blk: {
+                    const reg = builder.allocTemp();
+                    try builder.emit(.GETUPVAL, reg, uv_idx, 0);
+                    break :blk reg;
+                },
+            };
+        }
+
+        const reg = builder.allocTemp();
+        try builder.emitGETTABUP(reg, 0, base_const);
+        _ = self;
+        return reg;
+    }
+
+    fn storeNamedFunction(self: *Parser, builder: *ProtoBuilder, path: FunctionNamePath, closure_reg: u8) ParseError!void {
+        if (path.field_count == 0) {
+            if (builder.isVariableConst(path.base_name)) {
+                self.setError("attempt to assign to const variable '{s}'", .{path.base_name});
+                return error.AssignToConst;
+            }
+            if (try builder.resolveVariable(path.base_name)) |loc| {
+                switch (loc) {
+                    .local => |local_reg| try builder.emitMOVE(local_reg, closure_reg),
+                    .upvalue => |uv_idx| try builder.emit(.SETUPVAL, closure_reg, uv_idx, 0),
+                }
+            } else {
+                try builder.emitSETTABUP(0, path.base_const, closure_reg);
+            }
+            return;
+        }
+
+        var table_reg = try self.resolveAccessBaseIn(builder, path.base_name, path.base_const);
+        var i: usize = 0;
+        while (i < path.field_count - 1) : (i += 1) {
+            const field_const = try builder.addConstString(path.field_names[i]);
+            const next_reg = builder.allocTemp();
+            try builder.emitGETFIELD(next_reg, table_reg, field_const);
+            table_reg = next_reg;
+        }
+
+        const last_field_const = try builder.addConstString(path.field_names[path.field_count - 1]);
+        try builder.emitSETFIELD(table_reg, last_field_const, closure_reg);
+    }
+
+    fn initFunctionBuildState(self: *Parser) ParseError!FunctionBuildState {
+        var builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
+        builder.source = self.proto.source;
+
+        const proto_ptr = try self.proto.output_allocator.create(RawProto);
+        errdefer self.proto.output_allocator.destroy(proto_ptr);
+        proto_ptr.* = .{
+            .code = &.{},
+            .booleans = &.{},
+            .integers = &.{},
+            .numbers = &.{},
+            .strings = &.{},
+            .native_ids = &.{},
+            .const_refs = &.{},
+            .protos = &.{},
+            .numparams = 0,
+            .is_vararg = false,
+            .maxstacksize = 0,
+            .nups = 0,
+            .upvalues = &.{},
+            .local_reg_names = &.{},
+            .source = "",
+            .lineinfo = &.{},
+        };
+
+        return .{
+            .builder = builder,
+            .proto_ptr = proto_ptr,
+            .param_count = 0,
+        };
+    }
+
+    fn parseFunctionParameters(self: *Parser, builder: *ProtoBuilder, implicit_self: bool) ParseError!u8 {
+        var param_count: u8 = 0;
+
+        if (implicit_self) {
+            try builder.addVariable("self", param_count);
+            param_count += 1;
+        }
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+            builder.is_vararg = true;
+            self.advance(); // consume '...'
+        } else if (self.current.kind == .Identifier) {
+            const param_name = self.current.lexeme;
+            self.advance();
+            try builder.addVariable(param_name, param_count);
+            param_count += 1;
+
+            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+                self.advance(); // consume ','
+                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
+                    builder.is_vararg = true;
+                    self.advance(); // consume '...'
+                    break;
+                }
+                if (self.current.kind != .Identifier) {
+                    return error.ExpectedIdentifier;
+                }
+                const next_param = self.current.lexeme;
+                self.advance();
+                try builder.addVariable(next_param, param_count);
+                param_count += 1;
+            }
+        }
+
+        builder.next_reg = param_count;
+        builder.locals_top = param_count;
+        return param_count;
+    }
+
+    fn finishFunctionBuild(self: *Parser, builder: *ProtoBuilder, proto_ptr: *RawProto, param_count: u8, fn_line: u32) ParseError!u32 {
+        if (builder.is_vararg) {
+            builder.current_line = fn_line;
+            try builder.emit(.VARARGPREP, param_count, 0, 0);
+        }
+
+        const old_proto = self.proto;
+        self.proto = builder;
+        defer self.proto = old_proto;
+
+        try self.parseStatements();
+
+        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
+            return error.ExpectedEnd;
+        }
+        const end_line: u32 = @intCast(self.current.line);
+        self.advance(); // consume 'end'
+
+        var return_line: u32 = @intCast(self.current.line);
+        if (builder.lineinfo.items.len > 0) {
+            const last_line = builder.lineinfo.items[builder.lineinfo.items.len - 1];
+            if (last_line > 0) return_line = last_line;
+        } else {
+            return_line = end_line;
+        }
+        builder.current_line = return_line;
+        try builder.emit(.RETURN, 0, 1, 0);
+
+        const func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
+        proto_ptr.* = func_proto_data;
+        return end_line;
+    }
+
     fn dispatchFieldStatement(self: *Parser, base_reg: u8, field_name: []const u8) ParseError!FieldStatementDispatch {
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
             self.advance(); // consume '='
@@ -2444,6 +2638,20 @@ pub const Parser = struct {
     const FieldStatementDispatch = union(enum) {
         continued: u8,
         finished,
+    };
+
+    const FunctionNamePath = struct {
+        base_name: []const u8,
+        base_const: u32,
+        field_names: [64][]const u8 = undefined,
+        field_count: usize = 0,
+        is_method: bool = false,
+    };
+
+    const FunctionBuildState = struct {
+        builder: ProtoBuilder,
+        proto_ptr: *RawProto,
+        param_count: u8,
     };
 
     fn parseMultipleAssignmentCore(self: *Parser, first_target: ?AssignTarget) ParseError!void {
@@ -5218,8 +5426,6 @@ pub const Parser = struct {
     }
 
     fn parseIoCall(self: *Parser) ParseError!void {
-        // Parse "io.<method>(...)" calls (io.write, io.input, io.output, etc.)
-        // Current token should be "io"
         if (!std.mem.eql(u8, self.current.lexeme, "io")) {
             return error.UnsupportedStatement;
         }
@@ -5244,41 +5450,13 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Generate bytecode for io.<method> call
-        // Get io table from global
-        const io_reg = self.proto.allocTemp();
-        const io_key_const = try self.proto.addConstString("io");
-        try self.emitGetGlobal(io_reg, io_key_const);
-
-        // Get method from io table
-        const method_reg = self.proto.allocTemp();
-        const method_key_const = try self.proto.addConstString(method_name);
-        try self.proto.emitLoadK(method_reg, method_key_const);
-
-        // Get io.<method> function
+        const io_reg = try self.resolveAccessBase("io");
         const func_reg = self.proto.allocTemp();
-        try self.proto.emitGETTABLE(func_reg, io_reg, method_reg);
+        const method_key_const = try self.proto.addConstString(method_name);
+        try self.proto.emitGETFIELD(func_reg, io_reg, method_key_const);
 
-        // Parse arguments
-        var arg_count: u8 = 0;
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            // Parse first argument
-            const arg_reg = try self.parseExpr();
-            // Move argument to correct position (func_reg + 1)
-            if (arg_reg != func_reg + 1) {
-                try self.proto.emitMOVE(func_reg + 1, arg_reg);
-            }
-            arg_count = 1;
-        }
-
-        // Expect ')'
-        if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
-            return error.ExpectedRightParen;
-        }
-        self.advance(); // consume ')'
-
-        // Emit CALL instruction (0 results for io.write)
-        try self.proto.emitCall(func_reg, arg_count, 0);
+        const arg_count = try self.parseCallArgs(func_reg);
+        try self.finishStatementCall(func_reg, arg_count);
     }
 
     fn parseFunctionDefinition(self: *Parser) ParseError!void {
@@ -5289,41 +5467,7 @@ pub const Parser = struct {
         self.advance(); // consume 'function'
 
         // Parse function name (possibly with . or : chain)
-        if (self.current.kind != .Identifier) {
-            return error.ExpectedIdentifier;
-        }
-        const base_name = self.current.lexeme;
-        const base_const = try self.proto.addConstString(base_name);
-        self.advance(); // consume base name
-
-        // Check for field access chain (t.a.b.c) or method (t:m)
-        var is_method = false;
-        var field_names: [64][]const u8 = undefined;
-        var field_count: usize = 0;
-
-        while (self.current.kind == .Symbol) {
-            if (std.mem.eql(u8, self.current.lexeme, ".")) {
-                self.advance(); // consume '.'
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                field_names[field_count] = self.current.lexeme;
-                field_count += 1;
-                self.advance(); // consume field name
-            } else if (std.mem.eql(u8, self.current.lexeme, ":")) {
-                self.advance(); // consume ':'
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                field_names[field_count] = self.current.lexeme;
-                field_count += 1;
-                is_method = true;
-                self.advance(); // consume method name
-                break; // ':' must be last in the chain
-            } else {
-                break;
-            }
-        }
+        const name_path = try self.parseFunctionNamePath();
 
         // Parse parameters: (param)
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "("))) {
@@ -5331,186 +5475,31 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Create a separate builder for function body with parent reference
-        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
-        func_builder.source = self.proto.source;
-        defer func_builder.deinit(); // Clean up at end of function
-
-        // Create RawProto container early (address is fixed, content will be filled later)
-        const proto_ptr = try self.proto.output_allocator.create(RawProto);
-        proto_ptr.* = .{
-            .code = &.{},
-            .booleans = &.{},
-            .integers = &.{},
-            .numbers = &.{},
-            .strings = &.{},
-            .native_ids = &.{},
-            .const_refs = &.{},
-            .protos = &.{},
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 0,
-            .nups = 0,
-            .upvalues = &.{},
-            .local_reg_names = &.{},
-            .source = "",
-            .lineinfo = &.{},
-        };
+        const old_proto = self.proto;
+        var build = try self.initFunctionBuildState();
+        defer build.builder.deinit();
 
         // Temporarily add function for recursive calls with unfilled RawProto
         // Use the full qualified name for lookup (base.field1.field2 or base)
-        try self.proto.addFunction(base_name, proto_ptr);
-
-        // Parse parameters and assign to registers
-        var param_count: u8 = 0;
-
-        // For method syntax (t:method), add implicit 'self' parameter
-        if (is_method) {
-            try func_builder.addVariable("self", param_count);
-            param_count += 1;
-        }
-
-        // Check for vararg-only function: function(...)
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-            func_builder.is_vararg = true;
-            self.advance(); // consume '...'
-        } else if (self.current.kind == .Identifier) {
-            // Parse first parameter
-            const param_name = self.current.lexeme;
-            self.advance();
-
-            // Parameters start at register 0 in function scope
-            try func_builder.addVariable(param_name, param_count);
-            param_count += 1;
-
-            // Parse additional parameters
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                self.advance(); // consume ','
-                // Check for vararg: function(a, b, ...)
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-                    func_builder.is_vararg = true;
-                    self.advance(); // consume '...'
-                    break;
-                }
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const next_param = self.current.lexeme;
-                self.advance();
-
-                try func_builder.addVariable(next_param, param_count);
-                param_count += 1;
-            }
-        }
-
-        // Parameters (including implicit self) occupy registers 0..param_count-1
-        func_builder.next_reg = param_count;
-        func_builder.locals_top = param_count;
+        try self.proto.addFunction(name_path.base_name, build.proto_ptr);
+        build.param_count = try self.parseFunctionParameters(&build.builder, name_path.is_method);
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
 
-        // Emit VARARGPREP for vararg functions
-        if (func_builder.is_vararg) {
-            func_builder.current_line = fn_line;
-            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
-        }
-
-        // Parse function body dynamically
-        const old_proto = self.proto;
-        self.proto = &func_builder; // Switch to function's ProtoBuilder
-        defer self.proto = old_proto; // Restore original ProtoBuilder
-
-        try self.parseStatements(); // Parse function body statements
-
-        // Expect 'end'
-        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
-            return error.ExpectedEnd;
-        }
-        const end_line: u32 = @intCast(self.current.line);
-        self.advance(); // consume 'end'
-
-        // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = @intCast(self.current.line);
-        if (func_builder.lineinfo.items.len > 0) {
-            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
-            if (last_line > 0) return_line = last_line;
-        } else {
-            return_line = end_line;
-        }
-        func_builder.current_line = return_line;
-        // Always add a fallthrough return for paths that do not explicitly return.
-        try func_builder.emit(.RETURN, 0, 1, 0);
-
-        // Convert function builder to RawProto with dynamic allocation
-        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
-
-        // Fill the Proto container with actual content (late binding)
-        proto_ptr.* = func_proto_data;
+        _ = try self.finishFunctionBuild(&build.builder, build.proto_ptr, build.param_count, fn_line);
 
         // Proto is already registered in old_proto.functions for recursive lookup
         // Now emit CLOSURE to create the function
         const closure_reg = old_proto.allocTemp();
-        const proto_idx = try old_proto.addProto(proto_ptr);
+        const proto_idx = try old_proto.addProto(build.proto_ptr);
         old_proto.current_line = fn_line;
         try old_proto.emitClosure(closure_reg, proto_idx);
 
         // Store the closure based on how the function was defined
-        if (field_count == 0) {
-            // Simple function: function name() -> name = closure
-            if (old_proto.isVariableConst(base_name)) {
-                self.setError("attempt to assign to const variable '{s}'", .{base_name});
-                return error.AssignToConst;
-            }
-            // First check if there's a local or upvalue with this name
-            if (try old_proto.resolveVariable(base_name)) |loc| {
-                switch (loc) {
-                    .local => |local_reg| {
-                        // Local found - store to local variable
-                        try old_proto.emitMOVE(local_reg, closure_reg);
-                    },
-                    .upvalue => |uv_idx| {
-                        // Upvalue found - store to upvalue
-                        try old_proto.emit(.SETUPVAL, closure_reg, uv_idx, 0);
-                    },
-                }
-            } else {
-                // No local or upvalue - store to global _ENV[name]
-                try old_proto.emitSETTABUP(0, base_const, closure_reg);
-            }
-        } else {
-            // Field function: function t.a.b() -> t.a.b = closure
-            // Load base table (could be local, upvalue, or global)
-            var table_reg = old_proto.allocTemp();
-            if (try old_proto.resolveVariable(base_name)) |loc| {
-                switch (loc) {
-                    .local => |local_reg| {
-                        try old_proto.emitMOVE(table_reg, local_reg);
-                    },
-                    .upvalue => |uv_idx| {
-                        try old_proto.emit(.GETUPVAL, table_reg, uv_idx, 0);
-                    },
-                }
-            } else {
-                // Load from _ENV
-                try old_proto.emitGETTABUP(table_reg, 0, base_const);
-            }
-
-            // Navigate through intermediate fields (all but the last)
-            var i: usize = 0;
-            while (i < field_count - 1) : (i += 1) {
-                const field_const = try old_proto.addConstString(field_names[i]);
-                const next_reg = old_proto.allocTemp();
-                try old_proto.emitGETFIELD(next_reg, table_reg, field_const);
-                table_reg = next_reg;
-            }
-
-            // Set the last field to the closure
-            const last_field_const = try old_proto.addConstString(field_names[field_count - 1]);
-            try old_proto.emitSETFIELD(table_reg, last_field_const, closure_reg);
-        }
+        try self.storeNamedFunction(old_proto, name_path, closure_reg);
     }
 
     /// Parse 'local function name(...) ... end'
@@ -5535,110 +5524,27 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Create a separate builder for function body with parent reference
-        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
-        func_builder.source = self.proto.source;
-        defer func_builder.deinit();
-
-        // Create RawProto container with safe default values
-        // This ensures cleanup won't crash if parsing fails before proto is filled
-        const proto_ptr = try self.proto.output_allocator.create(RawProto);
-        proto_ptr.* = .{
-            .code = &.{},
-            .booleans = &.{},
-            .integers = &.{},
-            .numbers = &.{},
-            .strings = &.{},
-            .native_ids = &.{},
-            .const_refs = &.{},
-            .protos = &.{},
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 0,
-        };
+        const old_proto = self.proto;
+        var build = try self.initFunctionBuildState();
+        defer build.builder.deinit();
 
         // Add function to parent's function list for recursive calls
-        try self.proto.addFunction(func_name, proto_ptr);
+        try self.proto.addFunction(func_name, build.proto_ptr);
 
         // Add function name to local scope NOW (enables recursion via local lookup)
         try self.proto.addVariable(func_name, func_reg);
 
-        // Parse parameters
-        var param_count: u8 = 0;
-        // Check for vararg-only function: function(...)
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-            func_builder.is_vararg = true;
-            self.advance(); // consume '...'
-        } else if (self.current.kind == .Identifier) {
-            const param_name = self.current.lexeme;
-            self.advance();
-            try func_builder.addVariable(param_name, param_count);
-            param_count += 1;
-
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                self.advance(); // consume ','
-                // Check for vararg: function(a, b, ...)
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-                    func_builder.is_vararg = true;
-                    self.advance(); // consume '...'
-                    break;
-                }
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const next_param = self.current.lexeme;
-                self.advance();
-                try func_builder.addVariable(next_param, param_count);
-                param_count += 1;
-            }
-
-            func_builder.next_reg = param_count;
-            func_builder.locals_top = param_count;
-        }
+        build.param_count = try self.parseFunctionParameters(&build.builder, false);
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
 
-        // Emit VARARGPREP for vararg functions
-        if (func_builder.is_vararg) {
-            func_builder.current_line = fn_line;
-            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
-        }
-
-        // Parse function body
-        const old_proto = self.proto;
-        self.proto = &func_builder;
-        defer self.proto = old_proto;
-
-        try self.parseStatements();
-
-        // Expect 'end'
-        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
-            return error.ExpectedEnd;
-        }
-        const end_line: u32 = @intCast(self.current.line);
-        self.advance(); // consume 'end'
-
-        // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = @intCast(self.current.line);
-        if (func_builder.lineinfo.items.len > 0) {
-            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
-            if (last_line > 0) return_line = last_line;
-        } else {
-            return_line = end_line;
-        }
-        func_builder.current_line = return_line;
-        // Always add a fallthrough return for paths that do not explicitly return.
-        try func_builder.emit(.RETURN, 0, 1, 0);
-
-        // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
-        proto_ptr.* = func_proto_data;
+        _ = try self.finishFunctionBuild(&build.builder, build.proto_ptr, build.param_count, fn_line);
 
         // Emit CLOSURE to local register (no SETTABUP - it's local, not global)
-        const proto_idx = try old_proto.addProto(proto_ptr);
+        const proto_idx = try old_proto.addProto(build.proto_ptr);
         try old_proto.emitClosure(func_reg, proto_idx);
     }
 
@@ -5657,105 +5563,20 @@ pub const Parser = struct {
         }
         self.advance(); // consume '('
 
-        // Create a separate builder for function body with parent reference
-        var func_builder = try ProtoBuilder.init(self.proto.allocator, self.proto);
-        func_builder.source = self.proto.source;
-        defer func_builder.deinit();
-
-        // Create RawProto container with safe default values
-        // This ensures cleanup won't crash if parsing fails before proto is filled
-        const proto_ptr = try self.proto.output_allocator.create(RawProto);
-        errdefer self.proto.output_allocator.destroy(proto_ptr);
-        proto_ptr.* = .{
-            .code = &.{},
-            .booleans = &.{},
-            .integers = &.{},
-            .numbers = &.{},
-            .strings = &.{},
-            .native_ids = &.{},
-            .const_refs = &.{},
-            .protos = &.{},
-            .numparams = 0,
-            .is_vararg = false,
-            .maxstacksize = 0,
-        };
-
-        // Parse parameters
-        var param_count: u8 = 0;
-        // Check for vararg-only function: function(...)
-        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-            func_builder.is_vararg = true;
-            self.advance(); // consume '...'
-        } else if (self.current.kind == .Identifier) {
-            const param_name = self.current.lexeme;
-            self.advance();
-            try func_builder.addVariable(param_name, param_count);
-            param_count += 1;
-
-            while (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
-                self.advance(); // consume ','
-                // Check for vararg: function(a, b, ...)
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "...")) {
-                    func_builder.is_vararg = true;
-                    self.advance(); // consume '...'
-                    break;
-                }
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const next_param = self.current.lexeme;
-                self.advance();
-                try func_builder.addVariable(next_param, param_count);
-                param_count += 1;
-            }
-
-            func_builder.next_reg = param_count;
-            func_builder.locals_top = param_count;
-        }
+        const old_proto = self.proto;
+        var build = try self.initFunctionBuildState();
+        defer build.builder.deinit();
+        build.param_count = try self.parseFunctionParameters(&build.builder, false);
 
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
             return error.ExpectedRightParen;
         }
         self.advance(); // consume ')'
 
-        // Emit VARARGPREP for vararg functions
-        if (func_builder.is_vararg) {
-            func_builder.current_line = fn_line;
-            try func_builder.emit(.VARARGPREP, param_count, 0, 0);
-        }
-
-        // Parse function body
-        const old_proto = self.proto;
-        self.proto = &func_builder;
-        defer self.proto = old_proto;
-
-        try self.parseStatements();
-
-        // Expect 'end'
-        if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
-            return error.ExpectedEnd;
-        }
-        const end_line: u32 = @intCast(self.current.line);
-        self.advance(); // consume 'end'
-
-        // Keep synthetic fallthrough return on the function body's last line.
-        var return_line: u32 = @intCast(self.current.line);
-        if (func_builder.lineinfo.items.len > 0) {
-            const last_line = func_builder.lineinfo.items[func_builder.lineinfo.items.len - 1];
-            if (last_line > 0) return_line = last_line;
-        } else {
-            return_line = end_line;
-        }
-        func_builder.current_line = return_line;
-        // Always add a fallthrough return for paths that do not explicitly return.
-        try func_builder.emit(.RETURN, 0, 1, 0);
-
-        // Convert to RawProto
-        const func_proto_data = try func_builder.toRawProto(self.proto.output_allocator, param_count);
-        proto_ptr.* = func_proto_data;
+        const end_line = try self.finishFunctionBuild(&build.builder, build.proto_ptr, build.param_count, fn_line);
 
         // Emit CLOSURE instruction
-        const proto_idx = try old_proto.addProto(proto_ptr);
+        const proto_idx = try old_proto.addProto(build.proto_ptr);
         old_proto.current_line = end_line;
         try old_proto.emitClosure(func_reg, proto_idx);
 
