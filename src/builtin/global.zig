@@ -487,7 +487,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     var payload: [64]TValue = [_]TValue{.nil} ** 64;
     const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
-    if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
+    if (call.callValueFixed(vm, func_val, args[0..arg_count], .{ .out = payload[0..out_len] })) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
         if (nresults == 0) {
             var payload_len = out_len;
@@ -553,7 +553,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     var payload: [64]TValue = [_]TValue{.nil} ** 64;
     const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
-    if (call.callValueInto(vm, func_val, args[0..arg_count], payload[0..out_len])) |_| {
+    if (call.callValueFixed(vm, func_val, args[0..arg_count], .{ .out = payload[0..out_len] })) |_| {
         vm.stack[vm.base + func_reg] = .{ .boolean = true };
         if (nresults == 0) {
             var payload_len = out_len;
@@ -673,7 +673,10 @@ pub fn nativePairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 // Route Lua return placement directly into caller-visible result slots.
                 // This preserves results even if __pairs yields across this native frame.
                 const result_slice = vm.stack[vm.base + func_reg .. vm.base + func_reg + copy_n];
-                try call.callValueIntoAt(vm, pairs_mm, &[_]TValue{table_arg}, result_slice, vm.base + func_reg);
+                try call.callValueFixed(vm, pairs_mm, &[_]TValue{table_arg}, .{
+                    .out = result_slice,
+                    .lua_result_base = vm.base + func_reg,
+                });
                 if (nresults > copy_n) {
                     i = copy_n;
                     while (i < nresults) : (i += 1) {

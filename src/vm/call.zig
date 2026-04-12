@@ -371,34 +371,45 @@ pub fn describeNativeReturnTransfer(
     }
 }
 
-fn executeNativeCall(
+const NativeCallProjectionPlan = struct {
+    requested_results: u32,
+    top_defined: bool,
+};
+
+fn planNativeCallResult(result: NativeCallResult) NativeCallProjectionPlan {
+    return .{
+        .requested_results = switch (result) {
+            .discard => 0,
+            .first, .first_to_abs => 1,
+            .into => |out| @intCast(out.len),
+            .top_defined => 0,
+        },
+        .top_defined = result == .top_defined,
+    };
+}
+
+fn invokePlannedNativeCall(
     vm: *VM,
     callable: TValue,
     nc: *NativeClosureObject,
     args: []const TValue,
-    result: NativeCallResult,
+    plan: NativeCallProjectionPlan,
 ) !ExecutedNativeCall {
     const prepared = stageNativeCallFrame(vm, callable, args, vm.top);
     defer vm.top = prepared.call_base;
 
-    const requested_results: u32 = switch (result) {
-        .discard => 0,
-        .first, .first_to_abs => 1,
-        .into => |out| @intCast(out.len),
-        .top_defined => 0,
-    };
     const stack_result = try invokeNativeOnStack(
         vm,
         nc,
         @intCast(prepared.call_base - vm.base),
         @intCast(args.len),
-        requested_results,
-        result == .top_defined,
+        plan.requested_results,
+        plan.top_defined,
     );
 
     return .{
         .stack_result = stack_result,
-        .top_defined = result == .top_defined,
+        .top_defined = plan.top_defined,
     };
 }
 
@@ -430,7 +441,8 @@ pub fn callNative(
     args: []const TValue,
     result: NativeCallResult,
 ) !NativeCallOutcome {
-    const executed = try executeNativeCall(vm, callable, nc, args, result);
+    const plan = planNativeCallResult(result);
+    const executed = try invokePlannedNativeCall(vm, callable, nc, args, plan);
     return projectNativeCallResult(vm, executed, result);
 }
 
@@ -472,74 +484,43 @@ pub fn callValueSafe(vm: *VM, func_val: TValue, args: []const TValue) anyerror!T
     return result;
 }
 
+pub const FixedCallProjection = struct {
+    out: []TValue,
+    lua_result_base: ?u32 = null,
+};
+
 /// Reentrant-safe fixed-results call entry.
-/// Fills `out` with fixed results (nil-padded as needed).
-pub fn callValueInto(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue) anyerror!void {
+/// Projects call results into `projection.out`, nil-padding as needed.
+/// When `lua_result_base` is set, Lua closure returns are routed through that
+/// stable VM slot base before projection.
+pub fn callValueFixed(vm: *VM, func_val: TValue, args: []const TValue, projection: FixedCallProjection) anyerror!void {
     const saved_top = vm.top;
 
     const safe_base = computeSafeCallBase(vm);
     if (vm.top < safe_base) vm.top = safe_base;
 
-    callValueIntoUnsafe(vm, func_val, args, out) catch |err| {
+    callValueFixedUnsafe(vm, func_val, args, projection) catch |err| {
         if (err != error.Yield and err != error.HandledException) vm.top = saved_top;
         return err;
     };
     vm.top = saved_top;
 }
 
-/// Reentrant-safe fixed-results call entry that routes Lua return placement to `ret_base`.
-/// Useful for native callers that may yield and need results to land in stable VM slots.
-pub fn callValueIntoAt(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue, ret_base: u32) anyerror!void {
-    const saved_top = vm.top;
-
-    const safe_base = computeSafeCallBase(vm);
-    if (vm.top < safe_base) vm.top = safe_base;
-
-    callValueIntoUnsafeAt(vm, func_val, args, out, ret_base) catch |err| {
-        if (err != error.Yield and err != error.HandledException) vm.top = saved_top;
-        return err;
-    };
-    vm.top = saved_top;
-}
-
-fn callValueIntoUnsafe(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue) anyerror!void {
+fn callValueFixedUnsafe(vm: *VM, func_val: TValue, args: []const TValue, projection: FixedCallProjection) anyerror!void {
     if (func_val.asNativeClosure()) |nc| {
-        return callNativeClosureInto(vm, nc, args, out);
+        return callNativeClosureFixed(vm, nc, args, projection.out);
     }
     if (func_val.asClosure()) |closure| {
-        return callClosureInto(vm, closure, args, out);
+        return callClosureFixed(vm, closure, args, projection);
     }
     if (func_val.asTable()) |table| {
         if (table.metatable) |mt| {
             const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
             if (mt.get(call_key)) |call_mm| {
                 const first = try callWithPrependedArg(vm, call_mm, func_val, args);
-                if (out.len > 0) out[0] = first;
+                if (projection.out.len > 0) projection.out[0] = first;
                 var i: usize = 1;
-                while (i < out.len) : (i += 1) out[i] = .nil;
-                return;
-            }
-        }
-    }
-    return CallError.NotCallable;
-}
-
-fn callValueIntoUnsafeAt(vm: *VM, func_val: TValue, args: []const TValue, out: []TValue, ret_base: u32) anyerror!void {
-    if (func_val.asNativeClosure()) |nc| {
-        // Native closures do not need custom ret_base placement.
-        return callNativeClosureInto(vm, nc, args, out);
-    }
-    if (func_val.asClosure()) |closure| {
-        return callClosureIntoAt(vm, closure, args, out, ret_base);
-    }
-    if (func_val.asTable()) |table| {
-        if (table.metatable) |mt| {
-            const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
-            if (mt.get(call_key)) |call_mm| {
-                const first = try callWithPrependedArg(vm, call_mm, func_val, args);
-                if (out.len > 0) out[0] = first;
-                var i: usize = 1;
-                while (i < out.len) : (i += 1) out[i] = .nil;
+                while (i < projection.out.len) : (i += 1) projection.out[i] = .nil;
                 return;
             }
         }
@@ -610,7 +591,7 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
     };
 }
 
-fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue, out: []TValue) anyerror!void {
+fn callNativeClosureFixed(vm: *VM, nc: *NativeClosureObject, args: []const TValue, out: []TValue) anyerror!void {
     const saved_base = vm.base;
     const saved_top = vm.top;
 
@@ -640,11 +621,7 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
     return runUntilReturn(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count);
 }
 
-fn callClosureInto(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue) anyerror!void {
-    return callClosureIntoAt(vm, closure, args, out, vm.top);
-}
-
-fn callClosureIntoAt(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue, result_slot: u32) anyerror!void {
+fn callClosureFixed(vm: *VM, closure: *ClosureObject, args: []const TValue, projection: FixedCallProjection) anyerror!void {
     const proto = closure.proto;
 
     const saved_base = vm.base;
@@ -652,8 +629,9 @@ fn callClosureIntoAt(vm: *VM, closure: *ClosureObject, args: []const TValue, out
 
     const call_base = vm.top;
     const prepared = try stageLuaCallFrameFromArgs(vm, closure, args, call_base);
+    const result_slot = projection.lua_result_base orelse vm.top;
 
-    return runUntilReturnInto(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count, out);
+    return runUntilReturnFixed(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count, projection.out);
 }
 
 const ReentrantCallResult = union(enum) {
@@ -794,7 +772,7 @@ fn runUntilReturn(
     return result;
 }
 
-fn runUntilReturnInto(
+fn runUntilReturnFixed(
     vm: *VM,
     proto: *const ProtoObject,
     closure: *ClosureObject,
