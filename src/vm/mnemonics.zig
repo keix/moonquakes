@@ -1050,36 +1050,37 @@ fn emitNativeReturnHook(
     native_call_args: []const TValue,
     stack_result: call.NativeStackCallOutcome,
 ) !void {
-    switch (id) {
-        .math_sin => {
-            const arg = if (native_call_args.len > 0) native_call_args[0].toNumber() orelse 0 else 0;
-            const out = TValue{ .number = std.math.sin(arg) };
-            try hook_state.onReturnFromValues(vm, nativeReturnHookName(id), null, 2, &[_]TValue{out}, executeSyncMM);
+    switch (call.describeNativeReturnTransfer(id, native_call_args, stack_result)) {
+        .stack => |transfer| {
+            try hook_state.onReturnFromStack(
+                vm,
+                nativeReturnHookName(id),
+                null,
+                transfer.start,
+                transfer.src_base,
+                transfer.count,
+                executeSyncMM,
+            );
         },
-        else => {
-            switch (call.describeNativeReturnTransfer(id, native_call_args, stack_result)) {
-                .stack => |transfer| {
-                    try hook_state.onReturnFromStack(
-                        vm,
-                        nativeReturnHookName(id),
-                        null,
-                        transfer.start,
-                        transfer.src_base,
-                        transfer.count,
-                        executeSyncMM,
-                    );
-                },
-                .values => |transfer| {
-                    try hook_state.onReturnFromValues(
-                        vm,
-                        nativeReturnHookName(id),
-                        null,
-                        transfer.start,
-                        transfer.values,
-                        executeSyncMM,
-                    );
-                },
-            }
+        .value => |transfer| {
+            try hook_state.onReturnFromValues(
+                vm,
+                nativeReturnHookName(id),
+                null,
+                transfer.start,
+                &[_]TValue{transfer.value},
+                executeSyncMM,
+            );
+        },
+        .values => |transfer| {
+            try hook_state.onReturnFromValues(
+                vm,
+                nativeReturnHookName(id),
+                null,
+                transfer.start,
+                transfer.values,
+                executeSyncMM,
+            );
         },
     }
 }

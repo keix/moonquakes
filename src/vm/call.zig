@@ -69,6 +69,10 @@ pub const NativeReturnTransfer = union(enum) {
         src_base: u32,
         count: u32,
     },
+    value: struct {
+        start: u32,
+        value: TValue,
+    },
     values: struct {
         start: u32,
         values: []const TValue,
@@ -333,6 +337,13 @@ pub fn describeNativeReturnTransfer(
     stack_result: NativeStackCallOutcome,
 ) NativeReturnTransfer {
     switch (id) {
+        .math_sin => {
+            const arg = if (native_call_args.len > 0) native_call_args[0].toNumber() orelse 0 else 0;
+            return .{ .value = .{
+                .start = 2,
+                .value = TValue{ .number = std.math.sin(arg) },
+            } };
+        },
         .select => {
             var idx_u: u32 = 1;
             if (native_call_args.len > 0) {
