@@ -243,7 +243,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
 
 /// Set up coroutine for resume after yield (pass values to yield return)
 fn setupResumeAfterYield(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32) void {
-    yield_state.resumeWithValues(co_vm, caller_stack, arg_base, num_args, mnemonics.popCallInfo);
+    yield_state.resumeFromCallerValues(co_vm, caller_stack, arg_base, num_args, mnemonics.popCallInfo);
 }
 
 /// Execute coroutine until completion or yield

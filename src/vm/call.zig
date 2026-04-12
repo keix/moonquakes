@@ -158,7 +158,7 @@ pub fn callValue(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValu
             if (mt.get(call_key)) |call_mm| {
                 // __call can be a native closure or Lua closure
                 // Call as: __call(table, args...)
-                return callWithSelf(vm, call_mm, func_val, args);
+                return callWithPrependedArg(vm, call_mm, func_val, args);
             }
         }
     }
@@ -513,7 +513,7 @@ fn callValueIntoUnsafe(vm: *VM, func_val: TValue, args: []const TValue, out: []T
         if (table.metatable) |mt| {
             const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
             if (mt.get(call_key)) |call_mm| {
-                const first = try callWithSelf(vm, call_mm, func_val, args);
+                const first = try callWithPrependedArg(vm, call_mm, func_val, args);
                 if (out.len > 0) out[0] = first;
                 var i: usize = 1;
                 while (i < out.len) : (i += 1) out[i] = .nil;
@@ -530,13 +530,13 @@ fn callValueIntoUnsafeAt(vm: *VM, func_val: TValue, args: []const TValue, out: [
         return callNativeClosureInto(vm, nc, args, out);
     }
     if (func_val.asClosure()) |closure| {
-        return callClosureIntoWithResultBase(vm, closure, args, out, ret_base);
+        return callClosureIntoAt(vm, closure, args, out, ret_base);
     }
     if (func_val.asTable()) |table| {
         if (table.metatable) |mt| {
             const call_key = TValue.fromString(vm.gc().mm_keys.get(.call));
             if (mt.get(call_key)) |call_mm| {
-                const first = try callWithSelf(vm, call_mm, func_val, args);
+                const first = try callWithPrependedArg(vm, call_mm, func_val, args);
                 if (out.len > 0) out[0] = first;
                 var i: usize = 1;
                 while (i < out.len) : (i += 1) out[i] = .nil;
@@ -547,9 +547,9 @@ fn callValueIntoUnsafeAt(vm: *VM, func_val: TValue, args: []const TValue, out: [
     return CallError.NotCallable;
 }
 
-/// Call a function with self prepended to arguments.
-/// Used for __call metamethod: __call(self, args...)
-fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) anyerror!TValue {
+/// Call a function with one leading argument prepended before `args`.
+/// Used for __call metamethod dispatch: __call(self, args...)
+fn callWithPrependedArg(vm: *VM, func_val: TValue, leading_arg: TValue, args: []const TValue) anyerror!TValue {
     // Handle native closure __call
     if (func_val.asNativeClosure()) |nc| {
         // GC SAFETY: Save caller's frame state
@@ -563,7 +563,7 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.top = saved_top;
         }
 
-        return switch (try callNative(vm, self, nc, args, .first)) {
+        return switch (try callNative(vm, leading_arg, nc, args, .first)) {
             .first => |value| value,
             else => unreachable,
         };
@@ -579,7 +579,7 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
         const call_base = vm.top;
         const result_slot = call_base;
         const total_args: u32 = 1 + @as(u32, @intCast(args.len));
-        vm.stack[call_base + 1] = self;
+        vm.stack[call_base + 1] = leading_arg;
         for (args, 0..) |arg, i| {
             vm.stack[call_base + 2 + @as(u32, @intCast(i))] = arg;
         }
@@ -641,17 +641,16 @@ fn callClosure(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!
 }
 
 fn callClosureInto(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue) anyerror!void {
-    return callClosureIntoWithResultBase(vm, closure, args, out, vm.top);
+    return callClosureIntoAt(vm, closure, args, out, vm.top);
 }
 
-fn callClosureIntoWithResultBase(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue, result_slot_override: u32) anyerror!void {
+fn callClosureIntoAt(vm: *VM, closure: *ClosureObject, args: []const TValue, out: []TValue, result_slot: u32) anyerror!void {
     const proto = closure.proto;
 
     const saved_base = vm.base;
     const saved_top = vm.top;
 
     const call_base = vm.top;
-    const result_slot = result_slot_override;
     const prepared = try stageLuaCallFrameFromArgs(vm, closure, args, call_base);
 
     return runUntilReturnInto(vm, proto, closure, prepared.call_base, result_slot, saved_base, saved_top, prepared.vararg_base, prepared.vararg_count, out);

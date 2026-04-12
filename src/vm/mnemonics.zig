@@ -893,15 +893,19 @@ const ensureStackTop = frame.ensureStackTop;
 /// Execute a metamethod synchronously and return its first result.
 /// Used for comparison metamethods (__eq, __lt, __le) that need immediate results.
 pub fn executeSyncMM(vm: *VM, closure: *ClosureObject, args: []const TValue) anyerror!TValue {
-    return executeSyncMMWithDebug(vm, closure, args, null, null);
+    return executeSyncMMAnnotated(vm, closure, args, .{});
 }
 
-fn executeSyncMMWithDebug(
+const SyncMMAnnotation = struct {
+    debug_name: ?[]const u8 = null,
+    debug_namewhat: ?[]const u8 = null,
+};
+
+fn executeSyncMMAnnotated(
     vm: *VM,
     closure: *ClosureObject,
     args: []const TValue,
-    debug_name: ?[]const u8,
-    debug_namewhat: ?[]const u8,
+    annotation: SyncMMAnnotation,
 ) anyerror!TValue {
     const proto = closure.proto;
     // Use a safe stack location that doesn't overlap with the caller's active stack.
@@ -960,9 +964,9 @@ fn executeSyncMMWithDebug(
 
     // Push call info for metamethod
     const new_ci = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
-    if (debug_name) |name| {
+    if (annotation.debug_name) |name| {
         new_ci.debug_name = name;
-        new_ci.debug_namewhat = debug_namewhat orelse "metamethod";
+        new_ci.debug_namewhat = annotation.debug_namewhat orelse "metamethod";
     }
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else call_base + proto.maxstacksize;
 
@@ -1085,7 +1089,7 @@ fn emitNativeReturnHook(
     }
 }
 
-fn pushMetamethodClosureCallWithResults(
+fn pushMetamethodClosureCallInto(
     vm: *VM,
     closure: *ClosureObject,
     args: []const TValue,
@@ -1100,7 +1104,7 @@ fn pushMetamethodClosureCallWithResults(
 }
 
 fn pushMetamethodClosureCall(vm: *VM, closure: *ClosureObject, args: []const TValue, ret_abs: u32, mm_name: []const u8) !ExecuteResult {
-    return try pushMetamethodClosureCallWithResults(vm, closure, args, ret_abs, 1, mm_name);
+    return try pushMetamethodClosureCallInto(vm, closure, args, ret_abs, 1, mm_name);
 }
 
 fn callNativeClosureToAbs(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue, ret_abs: u32) !ExecuteResult {
@@ -1417,8 +1421,8 @@ pub fn captureCurrentTracebackSnapshot(vm: *VM) void {
 }
 
 /// Main VM execution loop.
-/// Executes instructions until RETURN from main chunk.
-pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TValue) !ReturnValue {
+/// Executes instructions until RETURN from the main chunk.
+pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const TValue) !ReturnValue {
     // Create main closure with _ENV upvalue pointing to globals
     // Inhibit GC during allocation sequence to prevent collection of
     // intermediate objects (main_closure) before they're fully rooted
@@ -1467,7 +1471,7 @@ pub fn executeWithArgs(vm: *VM, proto: *const ProtoObject, main_args: []const TV
 }
 
 pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
-    return executeWithArgs(vm, proto, &.{});
+    return executeMainChunk(vm, proto, &.{});
 }
 
 inline fn runCountHookIfNeeded(vm: *VM) !void {
@@ -3903,7 +3907,7 @@ fn dispatchIndexMetamethod(vm: *VM, mm: TValue, subject: TValue, key_val: TValue
 
 fn dispatchNewindexMetamethod(vm: *VM, mm: TValue, subject: TValue, key_val: TValue, value: TValue) anyerror!?ExecuteResult {
     return switch (resolveCallableValue(mm) orelse return null) {
-        .closure => |closure| try pushMetamethodClosureCallWithResults(vm, closure, &[_]TValue{ subject, key_val, value }, vm.top, 0, "newindex"),
+        .closure => |closure| try pushMetamethodClosureCallInto(vm, closure, &[_]TValue{ subject, key_val, value }, vm.top, 0, "newindex"),
         .native => |nc| try callNativeClosureDiscard(vm, mm, nc, &[_]TValue{ subject, key_val, value }),
     };
 }
@@ -4203,7 +4207,10 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
         return vm.raiseString(msg);
     };
     if (concat_mm.asClosure()) |closure| {
-        return try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "concat", "metamethod");
+        return try executeSyncMMAnnotated(vm, closure, &[_]TValue{ left, right }, .{
+            .debug_name = "concat",
+            .debug_namewhat = "metamethod",
+        });
     }
     if (concat_mm.isObject() and concat_mm.object.type == .native_closure) {
         const nc = object.getObject(NativeClosureObject, concat_mm.object);
@@ -4316,10 +4323,13 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __eq is a Lua function - call synchronously using VM's executeSync
     if (eq_mm.asClosure()) |closure| {
-        const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{
+        const result = try executeSyncMMAnnotated(vm, closure, &[_]TValue{
             TValue.fromTable(left_table),
             TValue.fromTable(right_table),
-        }, "eq", "metamethod");
+        }, .{
+            .debug_name = "eq",
+            .debug_namewhat = "metamethod",
+        });
         return result.toBoolean();
     }
 
@@ -4352,7 +4362,10 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // __lt is a Lua function - call synchronously
     if (lt_mm.asClosure()) |closure| {
-        const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "lt", "metamethod");
+        const result = try executeSyncMMAnnotated(vm, closure, &[_]TValue{ left, right }, .{
+            .debug_name = "lt",
+            .debug_namewhat = "metamethod",
+        });
         return result.toBoolean();
     }
 
@@ -4449,7 +4462,10 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __le is a Lua function
         if (le_mm.asClosure()) |closure| {
-            const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ left, right }, "le", "metamethod");
+            const result = try executeSyncMMAnnotated(vm, closure, &[_]TValue{ left, right }, .{
+                .debug_name = "le",
+                .debug_namewhat = "metamethod",
+            });
             return result.toBoolean();
         }
 
@@ -4467,7 +4483,10 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
         // __lt is a Lua function
         if (lt_mm.asClosure()) |closure| {
-            const result = try executeSyncMMWithDebug(vm, closure, &[_]TValue{ right, left }, "lt", "metamethod");
+            const result = try executeSyncMMAnnotated(vm, closure, &[_]TValue{ right, left }, .{
+                .debug_name = "lt",
+                .debug_namewhat = "metamethod",
+            });
             return !result.toBoolean();
         }
 

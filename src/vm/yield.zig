@@ -44,7 +44,7 @@ pub fn clearTailcallResume(vm: *VM) bool {
     return true;
 }
 
-pub fn resumeWithValues(vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32, pop_call_info: anytype) void {
+pub fn resumeFromCallerValues(vm: *VM, caller_stack: []TValue, arg_base: u32, num_args: u32, pop_call_info: anytype) void {
     if (clearTailcallResume(vm)) {
         const ci = vm.ci orelse return;
         const dst_base = ci.ret_base;

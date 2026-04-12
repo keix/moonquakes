@@ -354,7 +354,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
         }
     }
 
-    const result = Mnemonics.executeWithArgs(vm, proto, main_args.items) catch |err| {
+    const result = Mnemonics.executeMainChunk(vm, proto, main_args.items) catch |err| {
         if (err == error.LuaException) {
             printUnhandledLuaError(vm, options.exec_name);
         }
@@ -405,7 +405,7 @@ pub fn runFile(allocator: std.mem.Allocator, file_path: []const u8, options: Run
             return error.CompileFailed;
         };
 
-        const result = Mnemonics.executeWithArgs(vm, proto, &.{}) catch |err| {
+        const result = Mnemonics.executeMainChunk(vm, proto, &.{}) catch |err| {
             if (err == error.LuaException) {
                 printUnhandledLuaError(vm, opts.exec_name);
             }
