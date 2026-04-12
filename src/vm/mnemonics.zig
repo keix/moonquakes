@@ -3304,6 +3304,7 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
             else
                 nc.func.id.desiredResultsForCall(c);
+            const top_defined = c == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
             var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
             const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
             for (0..native_call_arg_count) |i| {
@@ -3311,17 +3312,9 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             }
             vm.top = vm.base + a + 1 + nargs;
             try hook_state.onCallFromStack(vm, null, 1, vm.base + a + 1, nargs, executeSyncMM);
-            try vm.callNative(nc.func.id, a, nargs, nresults);
-
-            const result_base = vm.base + a;
-            if (nresults > 0 and vm.top == result_base) {
-                for (vm.stack[result_base .. result_base + nresults]) |*slot| {
-                    slot.* = .nil;
-                }
-                vm.top = result_base + nresults;
-            }
-
-            const result_end = if (nresults == 0) vm.top else result_base + nresults;
+            const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, nresults, top_defined);
+            const result_base = native_result.result_base;
+            const result_end = native_result.result_end;
             if (result_end < frame_max) {
                 for (vm.stack[result_end..frame_max]) |*slot| {
                     slot.* = .nil;
@@ -3528,22 +3521,23 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             vm.top = vm.base + a + 1 + nargs;
             const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
             const native_nresults = nc.func.id.desiredResultsForCall(c_for_native);
+            const top_defined = c_for_native == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
             var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
             const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
             for (0..native_call_arg_count) |i| {
                 native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
             }
-            try vm.callNative(nc.func.id, a, nargs, native_nresults);
-            const result_base = vm.base + a;
-            const result_end = if (native_nresults > 0) result_base + native_nresults else if (vm.top > result_base) vm.top else result_base;
+            const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, native_nresults, top_defined);
+            const result_base = native_result.result_base;
+            const result_end = native_result.result_end;
             try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, native_nresults);
 
             if (current_ci.previous != null) {
                 const actual_nresults: u32 = if (nresults < 0) blk: {
-                    if (native_nresults > 0) {
-                        break :blk native_nresults;
+                    if (native_nresults > 0 and !top_defined) {
+                        break :blk native_result.actual_count;
                     } else {
-                        break :blk if (vm.top > result_base) vm.top - result_base else 0;
+                        break :blk native_result.actual_count;
                     }
                 } else @intCast(nresults);
 
@@ -4118,10 +4112,17 @@ fn invokeResolvedCallTarget(vm: *VM, target: ResolvedCallTarget, func_slot: u32,
             const native_nargs: u32 = if (target.callable_at_func_slot) target.effective_nargs else target.effective_nargs + 1;
             const stack_room: u32 = @intCast(vm.stack.len - (vm.base + base_slot));
             const actual_nresults = nc.func.id.desiredResultsForMetamethod(nresults, stack_room);
-            try vm.callNative(nc.func.id, base_slot, native_nargs, actual_nresults);
+            const stack_result = try call.invokeNativeOnStack(
+                vm,
+                nc,
+                base_slot,
+                native_nargs,
+                actual_nresults,
+                nc.func.id.keepsTopForMetamethod(nresults),
+            );
 
             if (!nc.func.id.keepsTopForMetamethod(nresults)) {
-                vm.top = vm.base + base_slot + actual_nresults;
+                vm.top = stack_result.result_end;
             }
             break :blk .LoopContinue;
         },

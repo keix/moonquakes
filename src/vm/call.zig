@@ -56,6 +56,12 @@ pub const NativeCallOutcome = union(enum) {
     multiple: []const TValue,
 };
 
+pub const NativeStackCallOutcome = struct {
+    result_base: u32,
+    result_end: u32,
+    actual_count: u32,
+};
+
 fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
     if (subject.asTable()) |table| {
         return table.metatable;
@@ -274,6 +280,40 @@ pub fn stageNativeCallFrame(vm: *VM, callable: TValue, args: []const TValue, cal
     return .{ .call_base = call_base, .frame_top = frame_top };
 }
 
+pub fn invokeNativeOnStack(
+    vm: *VM,
+    nc: *NativeClosureObject,
+    func_slot: u32,
+    nargs: u32,
+    requested_results: u32,
+    top_defined: bool,
+) !NativeStackCallOutcome {
+    try vm.callNative(nc.func.id, func_slot, nargs, requested_results);
+
+    const result_base = vm.base + func_slot;
+    if (top_defined) {
+        const result_end = vm.top;
+        return .{
+            .result_base = result_base,
+            .result_end = result_end,
+            .actual_count = if (result_end > result_base) result_end - result_base else 0,
+        };
+    }
+
+    if (requested_results > 0 and vm.top == result_base) {
+        for (vm.stack[result_base .. result_base + requested_results]) |*slot| {
+            slot.* = .nil;
+        }
+        vm.top = result_base + requested_results;
+    }
+
+    return .{
+        .result_base = result_base,
+        .result_end = result_base + requested_results,
+        .actual_count = requested_results,
+    };
+}
+
 pub fn callNativeWithResult(
     vm: *VM,
     callable: TValue,
@@ -290,23 +330,30 @@ pub fn callNativeWithResult(
         .into => |out| @intCast(out.len),
         .top_defined => 0,
     };
-    try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), requested_results);
+    const stack_result = try invokeNativeOnStack(
+        vm,
+        nc,
+        @intCast(prepared.call_base - vm.base),
+        @intCast(args.len),
+        requested_results,
+        result == .top_defined,
+    );
 
     switch (result) {
         .discard => return .none,
-        .first => return .{ .first = vm.stack[prepared.call_base] },
+        .first => return .{ .first = vm.stack[stack_result.result_base] },
         .first_to_abs => |ret_abs| {
-            vm.stack[ret_abs] = vm.stack[prepared.call_base];
+            vm.stack[ret_abs] = vm.stack[stack_result.result_base];
             return .none;
         },
         .into => |out| {
             var i: usize = 0;
             while (i < out.len) : (i += 1) {
-                out[i] = vm.stack[prepared.call_base + @as(u32, @intCast(i))];
+                out[i] = vm.stack[stack_result.result_base + @as(u32, @intCast(i))];
             }
             return .none;
         },
-        .top_defined => return .{ .multiple = vm.stack[prepared.call_base..vm.top] },
+        .top_defined => return .{ .multiple = vm.stack[stack_result.result_base..stack_result.result_end] },
     }
 }
 
