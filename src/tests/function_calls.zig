@@ -3,6 +3,7 @@ const testing = std.testing;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
+const call = @import("../vm/call.zig");
 const test_utils = @import("test_utils.zig");
 
 test "CALL returns multiple values" {
@@ -80,4 +81,37 @@ test "CALL pads missing results with nil" {
 
     const result = try Mnemonics.execute(ctx.vm, main_proto);
     try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ .{ .integer = 99 }, .nil });
+}
+
+test "callNativeWithResult can project top-defined multret results" {
+    var ctx: test_utils.TestContext = undefined;
+    try ctx.init();
+    defer ctx.deinit();
+
+    const nc = try ctx.vm.gc().allocNativeClosure(.{ .id = .select });
+    const saved_top = ctx.vm.top;
+
+    const outcome = try call.callNativeWithResult(
+        ctx.vm,
+        TValue.fromNativeClosure(nc),
+        nc,
+        &[_]TValue{
+            .{ .integer = 2 },
+            .{ .integer = 10 },
+            .{ .integer = 20 },
+            .{ .integer = 30 },
+        },
+        .top_defined,
+    );
+
+    switch (outcome) {
+        .multiple => |values| {
+            try testing.expectEqual(@as(usize, 2), values.len);
+            try testing.expect(values[0].eql(.{ .integer = 20 }));
+            try testing.expect(values[1].eql(.{ .integer = 30 }));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expectEqual(saved_top, ctx.vm.top);
 }

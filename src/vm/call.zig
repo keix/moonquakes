@@ -47,6 +47,13 @@ pub const NativeCallResult = union(enum) {
     first,
     first_to_abs: u32,
     into: []TValue,
+    top_defined,
+};
+
+pub const NativeCallOutcome = union(enum) {
+    none,
+    first: TValue,
+    multiple: []const TValue,
 };
 
 fn getIndexMetatable(vm: *VM, subject: TValue) ?*TableObject {
@@ -273,7 +280,7 @@ pub fn callNativeWithResult(
     nc: *NativeClosureObject,
     args: []const TValue,
     result: NativeCallResult,
-) !?TValue {
+) !NativeCallOutcome {
     const prepared = stageNativeCallFrame(vm, callable, args, vm.top);
     defer vm.top = prepared.call_base;
 
@@ -281,23 +288,25 @@ pub fn callNativeWithResult(
         .discard => 0,
         .first, .first_to_abs => 1,
         .into => |out| @intCast(out.len),
+        .top_defined => 0,
     };
     try vm.callNative(nc.func.id, @intCast(prepared.call_base - vm.base), @intCast(args.len), requested_results);
 
     switch (result) {
-        .discard => return null,
-        .first => return vm.stack[prepared.call_base],
+        .discard => return .none,
+        .first => return .{ .first = vm.stack[prepared.call_base] },
         .first_to_abs => |ret_abs| {
             vm.stack[ret_abs] = vm.stack[prepared.call_base];
-            return null;
+            return .none;
         },
         .into => |out| {
             var i: usize = 0;
             while (i < out.len) : (i += 1) {
                 out[i] = vm.stack[prepared.call_base + @as(u32, @intCast(i))];
             }
-            return null;
+            return .none;
         },
+        .top_defined => return .{ .multiple = vm.stack[prepared.call_base..vm.top] },
     }
 }
 
@@ -430,7 +439,10 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.top = saved_top;
         }
 
-        return (try callNativeWithResult(vm, self, nc, args, .first)).?;
+        return switch (try callNativeWithResult(vm, self, nc, args, .first)) {
+            .first => |value| value,
+            else => unreachable,
+        };
     }
 
     // Handle Lua closure __call
@@ -468,7 +480,10 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
         vm.base = saved_base;
         vm.top = saved_top;
     }
-    return (try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .first)).?;
+    return switch (try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .first)) {
+        .first => |value| value,
+        else => unreachable,
+    };
 }
 
 fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue, out: []TValue) anyerror!void {

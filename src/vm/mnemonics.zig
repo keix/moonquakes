@@ -1107,7 +1107,10 @@ fn callNativeClosureDiscard(vm: *VM, mm: TValue, nc: *NativeClosureObject, args:
 }
 
 fn callNativeClosureSync(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !TValue {
-    return (try call.callNativeWithResult(vm, mm, nc, args, .first)).?;
+    return switch (try call.callNativeWithResult(vm, mm, nc, args, .first)) {
+        .first => |value| value,
+        else => unreachable,
+    };
 }
 
 /// Close to-be-closed variables from the current frame
