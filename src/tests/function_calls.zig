@@ -83,7 +83,7 @@ test "CALL pads missing results with nil" {
     try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ .{ .integer = 99 }, .nil });
 }
 
-test "callNativeWithResult can project top-defined multret results" {
+test "callNative can project top-defined multret results" {
     var ctx: test_utils.TestContext = undefined;
     try ctx.init();
     defer ctx.deinit();
@@ -91,7 +91,7 @@ test "callNativeWithResult can project top-defined multret results" {
     const nc = try ctx.vm.gc().allocNativeClosure(.{ .id = .select });
     const saved_top = ctx.vm.top;
 
-    const outcome = try call.callNativeWithResult(
+    const outcome = try call.callNative(
         ctx.vm,
         TValue.fromNativeClosure(nc),
         nc,

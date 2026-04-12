@@ -1104,17 +1104,17 @@ fn pushMetamethodClosureCall(vm: *VM, closure: *ClosureObject, args: []const TVa
 }
 
 fn callNativeClosureToAbs(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue, ret_abs: u32) !ExecuteResult {
-    _ = try call.callNativeWithResult(vm, mm, nc, args, .{ .first_to_abs = ret_abs });
+    _ = try call.callNative(vm, mm, nc, args, .{ .first_to_abs = ret_abs });
     return .Continue;
 }
 
 fn callNativeClosureDiscard(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !ExecuteResult {
-    _ = try call.callNativeWithResult(vm, mm, nc, args, .discard);
+    _ = try call.callNative(vm, mm, nc, args, .discard);
     return .Continue;
 }
 
 fn callNativeClosureSync(vm: *VM, mm: TValue, nc: *NativeClosureObject, args: []const TValue) !TValue {
-    return switch (try call.callNativeWithResult(vm, mm, nc, args, .first)) {
+    return switch (try call.callNative(vm, mm, nc, args, .first)) {
         .first => |value| value,
         else => unreachable,
     };

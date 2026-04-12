@@ -423,7 +423,7 @@ fn projectNativeCallResult(vm: *VM, executed: ExecutedNativeCall, result: Native
     };
 }
 
-pub fn callNativeWithResult(
+pub fn callNative(
     vm: *VM,
     callable: TValue,
     nc: *NativeClosureObject,
@@ -563,7 +563,7 @@ fn callWithSelf(vm: *VM, func_val: TValue, self: TValue, args: []const TValue) a
             vm.top = saved_top;
         }
 
-        return switch (try callNativeWithResult(vm, self, nc, args, .first)) {
+        return switch (try callNative(vm, self, nc, args, .first)) {
             .first => |value| value,
             else => unreachable,
         };
@@ -604,7 +604,7 @@ fn callNativeClosure(vm: *VM, nc: *NativeClosureObject, args: []const TValue) an
         vm.base = saved_base;
         vm.top = saved_top;
     }
-    return switch (try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .first)) {
+    return switch (try callNative(vm, TValue.fromNativeClosure(nc), nc, args, .first)) {
         .first => |value| value,
         else => unreachable,
     };
@@ -620,7 +620,7 @@ fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue
         vm.base = saved_base;
         vm.top = saved_top;
     }
-    _ = try callNativeWithResult(vm, TValue.fromNativeClosure(nc), nc, args, .{ .into = out });
+    _ = try callNative(vm, TValue.fromNativeClosure(nc), nc, args, .{ .into = out });
 }
 
 /// Call a Lua closure with arguments.
