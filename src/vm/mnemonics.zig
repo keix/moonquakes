@@ -243,8 +243,11 @@ fn finishReturnToCaller(vm: *VM, ret: PreparedReturn) ExecuteResult {
 }
 
 pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
+    // Fast path for common case
+    if (ci.continuation == .none) return false;
     switch (ci.continuation) {
-        .none, .return_ => return false,
+        .none => unreachable,
+        .return_ => return false,
         .compare => |compare| {
             var is_true = vm.stack[compare.result_slot].toBoolean();
             if (compare.invert) is_true = !is_true;
@@ -3616,21 +3619,25 @@ fn opRETURN(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 
     if (vm.ci.?.previous != null) {
         const ret = try prepareReturn(vm, vm.ci.?, a, initial_ret_count);
-        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
-            .start = a + 1,
-            .src_base = ret.ci.base + a,
-            .count = ret.count,
-        } }, executeSyncMM);
+        if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+            try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
+                .start = a + 1,
+                .src_base = ret.ci.base + a,
+                .count = ret.count,
+            } }, executeSyncMM);
+        }
         popCallInfo(vm);
         return finishReturnToCaller(vm, ret);
     }
 
     const ret = try prepareReturn(vm, vm.ci.?, a, initial_ret_count);
-    try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
-        .start = a + 1,
-        .src_base = ret.ci.base + a,
-        .count = ret.count,
-    } }, executeSyncMM);
+    if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
+            .start = a + 1,
+            .src_base = ret.ci.base + a,
+            .count = ret.count,
+        } }, executeSyncMM);
+    }
 
     if (ret.count == 0) {
         return .{ .ReturnVM = .none };
@@ -3658,13 +3665,17 @@ fn opRETURN0(vm: *VM, ci: *CallInfo) !ExecuteResult {
     _ = ci;
     if (vm.ci.?.previous != null) {
         const ret = try prepareReturn(vm, vm.ci.?, 0, 0);
-        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .cleared, executeSyncMM);
+        if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+            try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .cleared, executeSyncMM);
+        }
         popCallInfo(vm);
         return finishReturnToCaller(vm, ret);
     }
 
     _ = try prepareReturn(vm, vm.ci.?, 0, 0);
-    try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .cleared, executeSyncMM);
+    if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .cleared, executeSyncMM);
+    }
     return .{ .ReturnVM = .none };
 }
 
@@ -3686,21 +3697,26 @@ fn opRETURN1(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 
     if (vm.ci.?.previous != null) {
         const ret = try prepareReturn(vm, vm.ci.?, a, 1);
-        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
-            .start = a + 1,
-            .src_base = ret.ci.base + a,
-            .count = 1,
-        } }, executeSyncMM);
+        // Only invoke hook machinery when return hooks are registered
+        if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+            try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
+                .start = a + 1,
+                .src_base = ret.ci.base + a,
+                .count = 1,
+            } }, executeSyncMM);
+        }
         popCallInfo(vm);
         return finishReturnToCaller(vm, ret);
     }
 
     _ = try prepareReturn(vm, vm.ci.?, a, 1);
-    try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
-        .start = a + 1,
-        .src_base = vm.base + a,
-        .count = 1,
-    } }, executeSyncMM);
+    if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+        try hook_state.onReturnTransfer(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, .{ .stack = .{
+            .start = a + 1,
+            .src_base = vm.base + a,
+            .count = 1,
+        } }, executeSyncMM);
+    }
     return .{ .ReturnVM = .{ .single = vm.stack[vm.base + a] } };
 }
 
