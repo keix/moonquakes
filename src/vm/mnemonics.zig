@@ -1596,6 +1596,9 @@ inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
 }
 
 inline fn runHooksIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
+    // Fast path: skip all hook processing when no hooks are registered
+    // Note: count hooks use hooks.count, not hooks.mask
+    if (vm.hooks.mask == 0 and vm.hooks.count == 0) return;
     try runCountHookIfNeeded(vm);
     try runLineHookIfNeeded(vm, ci, inst);
 }
@@ -3362,11 +3365,14 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         const ret_base = vm.base + a;
         const prepared = try call.stageLuaCallFrameFromStack(vm, closure, new_base, nargs);
         _ = try call.activateLuaCallFrame(vm, closure, prepared, ret_base, nresults);
-        try hook_state.onCallTransfer(vm, null, .{ .stack = .{
-            .start = 1,
-            .src_base = new_base,
-            .count = func_proto.numparams,
-        } }, executeSyncMM);
+        // Only invoke hook machinery when call hooks are actually registered
+        if (vm.hooks.mask != 0 and vm.hooks.func != null) {
+            try hook_state.onCallTransfer(vm, null, .{ .stack = .{
+                .start = 1,
+                .src_base = new_base,
+                .count = func_proto.numparams,
+            } }, executeSyncMM);
+        }
         return .LoopContinue;
     }
 
