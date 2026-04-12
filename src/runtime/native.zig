@@ -1,5 +1,22 @@
 const std = @import("std");
 
+pub const NativeCallMultret = enum(u8) {
+    fixed_default_one,
+    fixed_exact_two,
+    top_defined,
+};
+
+pub const NativeMetamethodMultret = enum(u8) {
+    fixed_default_one,
+    top_defined,
+    capped_to_stack,
+};
+
+pub const NativeResultAbi = struct {
+    call_multret: NativeCallMultret = .fixed_default_one,
+    metamethod_multret: NativeMetamethodMultret = .fixed_default_one,
+};
+
 pub const NativeFnId = enum(u8) {
     // Global Functions (builtin/global.zig)
     print, // Keep first for parser compatibility
@@ -164,6 +181,60 @@ pub const NativeFnId = enum(u8) {
     debug_traceback,
     debug_upvalueid,
     debug_upvaluejoin,
+
+    pub fn resultAbi(self: NativeFnId) NativeResultAbi {
+        return switch (self) {
+            .table_unpack,
+            .string_byte,
+            .string_match,
+            .utf8_codepoint,
+            .select,
+            .debug_getlocal,
+            .debug_getupvalue,
+            .debug_gethook,
+            .pcall,
+            .xpcall,
+            .coroutine_yield,
+            .coroutine_resume,
+            => .{ .call_multret = .top_defined },
+
+            .string_gsub,
+            .require,
+            .next,
+            .load,
+            .loadfile,
+            => .{ .call_multret = .fixed_exact_two },
+
+            .coroutine_wrap_call => .{ .metamethod_multret = .top_defined },
+            .io_lines_iterator => .{ .metamethod_multret = .capped_to_stack },
+
+            else => .{},
+        };
+    }
+
+    pub fn desiredResultsForCall(self: NativeFnId, c: u8) u32 {
+        if (c > 0) return c - 1;
+
+        return switch (self.resultAbi().call_multret) {
+            .fixed_default_one => 1,
+            .fixed_exact_two => 2,
+            .top_defined => 0,
+        };
+    }
+
+    pub fn desiredResultsForMetamethod(self: NativeFnId, nresults: i16, stack_room: u32) u32 {
+        if (nresults >= 0) return @intCast(nresults);
+
+        return switch (self.resultAbi().metamethod_multret) {
+            .fixed_default_one => 1,
+            .top_defined => 0,
+            .capped_to_stack => @min(@as(u32, 256), stack_room),
+        };
+    }
+
+    pub fn keepsTopForMetamethod(self: NativeFnId, nresults: i16) bool {
+        return nresults < 0 and self.resultAbi().metamethod_multret == .top_defined;
+    }
 };
 
 pub const NativeFn = struct {

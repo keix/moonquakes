@@ -110,7 +110,6 @@ const BitwiseMetaEvent = enum {
     }
 };
 
-const native_multret_cap: u32 = 256;
 const CallNameKind = name_resolver.CallNameKind;
 const CallNameContext = name_resolver.CallNameContext;
 
@@ -141,50 +140,6 @@ fn formatConcatNumber(buf: []u8, n: f64) []const u8 {
     }
 
     return rendered;
-}
-
-fn nativeDesiredResultsForCall(id: NativeFnId, c: u8, _: u32) u32 {
-    if (c > 0) return c - 1;
-    // COMPAT HACK: allow MULTRET only for specific natives that are required
-    // by compatibility tests while keeping C=0 conservative by default.
-    return switch (id) {
-        .table_unpack => 0, // C=0 sentinel: callee decides actual result count.
-        .string_byte => 0, // C=0 sentinel: callee decides based on i,j args.
-        .string_gsub => 2, // gsub always returns (string, count).
-        .string_match => 0, // C=0 sentinel: captures can return variable results.
-        .utf8_codepoint => 0, // C=0 sentinel: callee decides based on i,j args.
-        .select => 0, // C=0 sentinel: callee decides based on index and arg count.
-        .debug_getlocal => 0, // C=0 sentinel: allow returning both (name, value).
-        .debug_getupvalue => 0, // C=0 sentinel: allow returning (name, value).
-        .debug_gethook => 0, // C=0 sentinel: allow returning (func, mask, count).
-        .pcall, .xpcall => 0, // C=0 sentinel: propagate success flag + payload.
-        .coroutine_yield => 0, // C=0 sentinel: resume values propagate as MULTRET.
-        .require => 2, // require returns module value and loader data.
-        .next => 2, // next returns key, value
-        .load, .loadfile => 2, // load/loadfile return (func) or (nil, err)
-        .coroutine_resume => 0, // C=0 sentinel: callee decides actual result count.
-        else => 1,
-    };
-}
-
-fn nativeKeepsTopForCall(id: NativeFnId, c: u8) bool {
-    if (c > 0) return false;
-    return switch (id) {
-        .table_unpack, .string_byte, .string_match, .select, .debug_getlocal => true,
-        else => false,
-    };
-}
-
-fn nativeDesiredResultsForMM(id: NativeFnId, nresults: i16, stack_room: u32) u32 {
-    if (nresults >= 0) return @intCast(nresults);
-    // MULTRET: these natives can return variable number of results
-    return switch (id) {
-        .coroutine_resume,
-        .coroutine_wrap_call,
-        => 0,
-        .io_lines_iterator => @min(native_multret_cap, stack_room),
-        else => 1,
-    };
 }
 
 // Shared frame/error cleanup helpers used by the main loop and caller adapters.
@@ -3342,11 +3297,10 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
             };
             const frame_max = vm.base + ci.func.maxstacksize;
-            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
             const nresults: u32 = if (c == 0 and ci.is_protected and protected_call.isBootstrapProto(ci.func))
                 (if (ci.nresults < 0) 0 else @max(@as(u32, 1), @as(u32, @intCast(ci.nresults))))
             else
-                nativeDesiredResultsForCall(nc.func.id, c, stack_room);
+                nc.func.id.desiredResultsForCall(c);
             var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
             const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
             for (0..native_call_arg_count) |i| {
@@ -3370,7 +3324,7 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                     slot.* = .nil;
                 }
             }
-            vm.top = if (c == 0 or nativeKeepsTopForCall(nc.func.id, c)) result_end else frame_max;
+            vm.top = if (c == 0) result_end else frame_max;
             try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], result_base, result_end, nresults);
             return .LoopContinue;
         }
@@ -3569,9 +3523,8 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             const ret_base = current_ci.ret_base;
             const nresults = current_ci.nresults;
             vm.top = vm.base + a + 1 + nargs;
-            const stack_room: u32 = @intCast(vm.stack.len - (vm.base + a));
             const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
-            const native_nresults = nativeDesiredResultsForCall(nc.func.id, c_for_native, stack_room);
+            const native_nresults = nc.func.id.desiredResultsForCall(c_for_native);
             var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
             const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
             for (0..native_call_arg_count) |i| {
@@ -4161,14 +4114,10 @@ fn invokeResolvedCallTarget(vm: *VM, target: ResolvedCallTarget, func_slot: u32,
             const base_slot = func_slot;
             const native_nargs: u32 = if (target.callable_at_func_slot) target.effective_nargs else target.effective_nargs + 1;
             const stack_room: u32 = @intCast(vm.stack.len - (vm.base + base_slot));
-            const actual_nresults = nativeDesiredResultsForMM(nc.func.id, nresults, stack_room);
+            const actual_nresults = nc.func.id.desiredResultsForMetamethod(nresults, stack_room);
             try vm.callNative(nc.func.id, base_slot, native_nargs, actual_nresults);
 
-            const is_multret_native = nresults < 0 and switch (nc.func.id) {
-                .io_lines_iterator, .coroutine_resume, .coroutine_wrap_call => true,
-                else => false,
-            };
-            if (!is_multret_native) {
+            if (!nc.func.id.keepsTopForMetamethod(nresults)) {
                 vm.top = vm.base + base_slot + actual_nresults;
             }
             break :blk .LoopContinue;
