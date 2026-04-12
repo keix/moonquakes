@@ -1701,6 +1701,129 @@ pub const Parser = struct {
         }
     }
 
+    fn resolveAccessBase(self: *Parser, base_name: []const u8) ParseError!u8 {
+        if (try self.proto.resolveVariable(base_name)) |loc| {
+            return switch (loc) {
+                .local => |reg| reg,
+                .upvalue => |idx| blk: {
+                    const reg = self.proto.allocTemp();
+                    try self.proto.emitGETUPVAL(reg, idx);
+                    break :blk reg;
+                },
+            };
+        }
+
+        const reg = self.proto.allocTemp();
+        if (std.mem.eql(u8, base_name, "_ENV")) {
+            try self.proto.emitGETUPVAL(reg, 0);
+        } else {
+            const name_const = try self.proto.addConstString(base_name);
+            try self.emitGetGlobal(reg, name_const);
+        }
+        return reg;
+    }
+
+    fn materializePendingAccess(self: *Parser, pending: *PendingAccess) ParseError!void {
+        if (pending.key_const) |kc| {
+            const next_reg = self.proto.allocTemp();
+            try self.proto.emitGETFIELD(next_reg, pending.table_reg, kc);
+            pending.table_reg = next_reg;
+            pending.key_const = null;
+        } else if (pending.key_reg) |kr| {
+            const next_reg = self.proto.allocTemp();
+            try self.proto.emitGETTABLE(next_reg, pending.table_reg, kr);
+            pending.table_reg = next_reg;
+            pending.key_reg = null;
+        }
+    }
+
+    fn loadPendingAccessValue(self: *Parser, dst: u8, pending: PendingAccess) ParseError!void {
+        if (pending.key_const) |kc| {
+            try self.proto.emitGETFIELD(dst, pending.table_reg, kc);
+        } else if (pending.key_reg) |kr| {
+            try self.proto.emitGETTABLE(dst, pending.table_reg, kr);
+        } else {
+            return error.ExpectedEquals;
+        }
+    }
+
+    fn pendingAccessAssignTarget(self: *Parser, pending: PendingAccess) ParseError!AssignTarget {
+        _ = self;
+        if (pending.key_const) |kc| {
+            return .{ .field = .{ .table_reg = pending.table_reg, .field_const = kc } };
+        }
+        if (pending.key_reg) |kr| {
+            return .{ .index = .{ .table_reg = pending.table_reg, .key_reg = kr } };
+        }
+        return error.ExpectedEquals;
+    }
+
+    fn dispatchFieldStatement(self: *Parser, base_reg: u8, field_name: []const u8) ParseError!FieldStatementDispatch {
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+            self.advance(); // consume '='
+            const value_reg = try self.parseExpr();
+            const field_const = try self.proto.addConstString(field_name);
+            try self.proto.emitSETFIELD(base_reg, field_const, value_reg);
+            return .finished;
+        }
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
+            self.advance(); // consume ':'
+            const field_const = try self.proto.addConstString(field_name);
+            const receiver_reg = self.proto.allocTemp();
+            try self.proto.emitGETFIELD(receiver_reg, base_reg, field_const);
+
+            const func_reg = try self.prepareMethodCall(receiver_reg, null);
+            const extra_args = try self.parseMethodArgs(func_reg);
+            const total_args: u8 = if (extra_args == ProtoBuilder.VARARG_SENTINEL) ProtoBuilder.VARARG_SENTINEL else extra_args + 1;
+            try self.proto.emitCallVararg(func_reg, total_args, 0);
+            return .finished;
+        }
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
+            const field_const = try self.proto.addConstString(field_name);
+            const next_reg = self.proto.allocTemp();
+            try self.proto.emitGETFIELD(next_reg, base_reg, field_const);
+            return .{ .continued = next_reg };
+        }
+
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
+            const field_const = try self.proto.addConstString(field_name);
+            const table_reg = self.proto.allocTemp();
+            try self.proto.emitGETFIELD(table_reg, base_reg, field_const);
+
+            self.advance(); // consume '['
+            const key_reg = try self.parseExpr();
+
+            if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
+                return error.ExpectedCloseBracket;
+            }
+            self.advance(); // consume ']'
+
+            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
+                self.advance(); // consume '='
+                const value_reg = try self.parseExpr();
+                try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                return .finished;
+            }
+
+            return error.UnsupportedStatement;
+        }
+
+        if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
+            const field_const = try self.proto.addConstString(field_name);
+            const func_reg = self.proto.allocTemp();
+            try self.proto.emitGETFIELD(func_reg, base_reg, field_const);
+
+            const arg_count = try self.parseCallArgs(func_reg);
+            try self.proto.emitCallVararg(func_reg, arg_count, 1);
+            _ = try self.parseSuffixChain(func_reg);
+            return .finished;
+        }
+
+        return error.UnsupportedStatement;
+    }
+
     fn recoverAssignmentTarget(self: *Parser, code_start: usize, expr_reg: u8) ParseError!AssignmentTargetRecovery {
         if (self.proto.code.items.len == 0 or self.proto.code.items.len <= code_start) return error.UnsupportedStatement;
 
@@ -2095,47 +2218,13 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
         {
-            // Get the base table
-            var table_reg: u8 = undefined;
-            if (try self.proto.resolveVariable(name)) |loc| {
-                switch (loc) {
-                    .local => |reg| table_reg = reg,
-                    .upvalue => |idx| {
-                        // Upvalue: load table into temp register first
-                        table_reg = self.proto.allocTemp();
-                        try self.proto.emitGETUPVAL(table_reg, idx);
-                    },
-                }
-            } else {
-                table_reg = self.proto.allocTemp();
-                if (std.mem.eql(u8, name, "_ENV")) {
-                    // _ENV is the environment upvalue itself.
-                    try self.proto.emitGETUPVAL(table_reg, 0);
-                } else {
-                    const name_const = try self.proto.addConstString(name);
-                    try self.emitGetGlobal(table_reg, name_const);
-                }
-            }
+            var pending = PendingAccess{ .table_reg = try self.resolveAccessBase(name) };
 
             // Parse field chain: .a.b.c or [key] until we hit '='
-            var last_key_reg: ?u8 = null;
-            var last_key_const: ?u32 = null;
-
             while (self.current.kind == .Symbol and
                 (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
             {
-                // If we have a pending key, navigate to it first
-                if (last_key_const) |kc| {
-                    const next_reg = self.proto.allocTemp();
-                    try self.proto.emitGETFIELD(next_reg, table_reg, kc);
-                    table_reg = next_reg;
-                    last_key_const = null;
-                } else if (last_key_reg) |kr| {
-                    const next_reg = self.proto.allocTemp();
-                    try self.proto.emitGETTABLE(next_reg, table_reg, kr);
-                    table_reg = next_reg;
-                    last_key_reg = null;
-                }
+                try self.materializePendingAccess(&pending);
 
                 if (std.mem.eql(u8, self.current.lexeme, ".")) {
                     self.advance(); // consume '.'
@@ -2146,12 +2235,12 @@ pub const Parser = struct {
                     const field_name = self.current.lexeme;
                     self.advance(); // consume field name
 
-                    last_key_const = try self.proto.addConstString(field_name);
+                    pending.key_const = try self.proto.addConstString(field_name);
                 } else {
                     // '['
                     self.advance(); // consume '['
 
-                    last_key_reg = try self.parseExpr();
+                    pending.key_reg = try self.parseExpr();
 
                     if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
                         return error.ExpectedCloseBracket;
@@ -2163,15 +2252,7 @@ pub const Parser = struct {
             // Check for ',' (multiple assignment), '=' (single assignment), or '(' (function call)
             if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
                 // Multiple assignment with indexed first target: t[1], a[1] = ...
-                // Build the first target and delegate to multiple assignment handler
-                const first_target: AssignTarget = if (last_key_const) |kc|
-                    .{ .field = .{ .table_reg = table_reg, .field_const = kc } }
-                else if (last_key_reg) |kr|
-                    .{ .index = .{ .table_reg = table_reg, .key_reg = kr } }
-                else
-                    return error.ExpectedEquals;
-
-                return self.parseMultipleAssignmentWithFirstTarget(first_target);
+                return self.parseMultipleAssignmentWithFirstTarget(try self.pendingAccessAssignTarget(pending));
             } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
                 self.advance(); // consume '='
 
@@ -2209,24 +2290,18 @@ pub const Parser = struct {
                 }
 
                 // Emit SET instruction for the final key
-                if (last_key_const) |kc| {
+                if (pending.key_const) |kc| {
                     self.proto.current_line = store_line;
-                    try self.proto.emitSETFIELD(table_reg, kc, value_reg);
-                } else if (last_key_reg) |kr| {
+                    try self.proto.emitSETFIELD(pending.table_reg, kc, value_reg);
+                } else if (pending.key_reg) |kr| {
                     self.proto.current_line = store_line;
-                    try self.proto.emitSETTABLE(table_reg, kr, value_reg);
+                    try self.proto.emitSETTABLE(pending.table_reg, kr, value_reg);
                 }
             } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
                 // Function call: t[key]() or t.field[key]() etc.
                 // First, get the function from the table
                 const func_reg = self.proto.allocTemp();
-                if (last_key_const) |kc| {
-                    try self.proto.emitGETFIELD(func_reg, table_reg, kc);
-                } else if (last_key_reg) |kr| {
-                    try self.proto.emitGETTABLE(func_reg, table_reg, kr);
-                } else {
-                    return error.ExpectedEquals;
-                }
+                try self.loadPendingAccessValue(func_reg, pending);
 
                 // Parse arguments and emit call
                 const arg_count = try self.parseCallArgs(func_reg);
@@ -2235,13 +2310,7 @@ pub const Parser = struct {
                 // Method call on indexed value: t[key]:method()
                 // First, get the receiver from the table
                 const receiver_reg = self.proto.allocTemp();
-                if (last_key_const) |kc| {
-                    try self.proto.emitGETFIELD(receiver_reg, table_reg, kc);
-                } else if (last_key_reg) |kr| {
-                    try self.proto.emitGETTABLE(receiver_reg, table_reg, kr);
-                } else {
-                    return error.ExpectedEquals;
-                }
+                try self.loadPendingAccessValue(receiver_reg, pending);
 
                 self.advance(); // consume ':'
 
@@ -2364,6 +2433,17 @@ pub const Parser = struct {
     const AssignmentTargetRecovery = struct {
         target: AssignTarget,
         pop_count: usize,
+    };
+
+    const PendingAccess = struct {
+        table_reg: u8,
+        key_const: ?u32 = null,
+        key_reg: ?u8 = null,
+    };
+
+    const FieldStatementDispatch = union(enum) {
+        continued: u8,
+        finished,
     };
 
     fn parseMultipleAssignmentCore(self: *Parser, first_target: ?AssignTarget) ParseError!void {
@@ -2546,68 +2626,24 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, ".") or std.mem.eql(u8, self.current.lexeme, "[")))
         {
-            // Load base table
-            var table_reg: u8 = undefined;
-            if (try self.proto.resolveVariable(base_name)) |loc| {
-                switch (loc) {
-                    .local => |reg| table_reg = reg,
-                    .upvalue => |idx| {
-                        table_reg = self.proto.allocTemp();
-                        try self.proto.emitGETUPVAL(table_reg, idx);
-                    },
-                }
-            } else {
-                table_reg = self.proto.allocTemp();
-                if (std.mem.eql(u8, base_name, "_ENV")) {
-                    try self.proto.emitGETUPVAL(table_reg, 0);
-                } else {
-                    const name_const = try self.proto.addConstString(base_name);
-                    try self.proto.emitGETTABUP(table_reg, 0, name_const);
-                }
-            }
+            var pending = PendingAccess{ .table_reg = try self.resolveAccessBase(base_name) };
 
             // Parse field chain until we hit ',' or '='
-            var last_is_field = false;
-            var last_field_const: u32 = 0;
-            var last_key_reg: u8 = 0;
-
             while (self.current.kind == .Symbol) {
                 if (std.mem.eql(u8, self.current.lexeme, ".")) {
-                    // Navigate to field first if we have a pending access
-                    if (last_is_field) {
-                        const next_reg = self.proto.allocTemp();
-                        try self.proto.emitGETFIELD(next_reg, table_reg, last_field_const);
-                        table_reg = next_reg;
-                    } else if (last_key_reg != 0) {
-                        const next_reg = self.proto.allocTemp();
-                        try self.proto.emitGETTABLE(next_reg, table_reg, last_key_reg);
-                        table_reg = next_reg;
-                        last_key_reg = 0;
-                    }
+                    try self.materializePendingAccess(&pending);
 
                     self.advance(); // consume '.'
                     if (self.current.kind != .Identifier) {
                         return error.ExpectedIdentifier;
                     }
-                    last_field_const = try self.proto.addConstString(self.current.lexeme);
-                    last_is_field = true;
+                    pending.key_const = try self.proto.addConstString(self.current.lexeme);
                     self.advance(); // consume field name
                 } else if (std.mem.eql(u8, self.current.lexeme, "[")) {
-                    // Navigate to field first if we have a pending access
-                    if (last_is_field) {
-                        const next_reg = self.proto.allocTemp();
-                        try self.proto.emitGETFIELD(next_reg, table_reg, last_field_const);
-                        table_reg = next_reg;
-                        last_is_field = false;
-                    } else if (last_key_reg != 0) {
-                        const next_reg = self.proto.allocTemp();
-                        try self.proto.emitGETTABLE(next_reg, table_reg, last_key_reg);
-                        table_reg = next_reg;
-                    }
+                    try self.materializePendingAccess(&pending);
 
                     self.advance(); // consume '['
-                    last_key_reg = try self.parseExpr();
-                    last_is_field = false;
+                    pending.key_reg = try self.parseExpr();
 
                     if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
                         return error.ExpectedCloseBracket;
@@ -2619,11 +2655,7 @@ pub const Parser = struct {
             }
 
             // Return the final target
-            if (last_is_field) {
-                return .{ .field = .{ .table_reg = table_reg, .field_const = last_field_const } };
-            } else {
-                return .{ .index = .{ .table_reg = table_reg, .key_reg = last_key_reg } };
-            }
+            return self.pendingAccessAssignTarget(pending);
         }
 
         // Simple variable
@@ -5175,86 +5207,9 @@ pub const Parser = struct {
             const field_name = self.current.lexeme;
             self.advance(); // consume field name
 
-            // Check what comes next
-            if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
-                // Field assignment: t.field = expr
-                self.advance(); // consume '='
-                const value_reg = try self.parseExpr();
-                const field_const = try self.proto.addConstString(field_name);
-                try self.proto.emitSETFIELD(base_reg, field_const, value_reg);
-                return;
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ":")) {
-                // Method call: t.a:method()
-                self.advance(); // consume ':'
-
-                // Get the field first (t.a)
-                const field_const = try self.proto.addConstString(field_name);
-                const receiver_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(receiver_reg, base_reg, field_const);
-
-                // Parse method name
-                if (self.current.kind != .Identifier) {
-                    return error.ExpectedIdentifier;
-                }
-                const func_reg = try self.prepareMethodCall(receiver_reg, null);
-
-                // Parse extra arguments
-                const extra_args = try self.parseMethodArgs(func_reg);
-
-                const total_args: u8 = if (extra_args == ProtoBuilder.VARARG_SENTINEL) ProtoBuilder.VARARG_SENTINEL else extra_args + 1;
-                try self.proto.emitCallVararg(func_reg, total_args, 0);
-                return;
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ".")) {
-                // Continue chaining: get this field and continue
-                const field_const = try self.proto.addConstString(field_name);
-                const next_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(next_reg, base_reg, field_const);
-                base_reg = next_reg;
-                // Loop continues
-            } else if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "[")) {
-                // Mixed access: t.field[key] = expr
-                // First get the field
-                const field_const = try self.proto.addConstString(field_name);
-                const table_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(table_reg, base_reg, field_const);
-
-                // Parse index
-                self.advance(); // consume '['
-                const key_reg = try self.parseExpr();
-
-                if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
-                    return error.ExpectedCloseBracket;
-                }
-                self.advance(); // consume ']'
-
-                // Check for more chaining or assignment
-                if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
-                    // Index assignment: t.field[key] = expr
-                    self.advance(); // consume '='
-                    const value_reg = try self.parseExpr();
-                    try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
-                    return;
-                } else {
-                    // Could support more chaining here, but for now error
-                    return error.UnsupportedStatement;
-                }
-            } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
-                self.isNoParensArg())
-            {
-                // Function call: t.field(args) - e.g., table.insert(t, v)
-                const field_const = try self.proto.addConstString(field_name);
-                const func_reg = self.proto.allocTemp();
-                try self.proto.emitGETFIELD(func_reg, base_reg, field_const);
-
-                // Parse arguments and emit call (keep 1 result so chained suffixes like
-                // io.input():close() can continue in statement context)
-                const arg_count = try self.parseCallArgs(func_reg);
-                try self.proto.emitCallVararg(func_reg, arg_count, 1);
-                _ = try self.parseSuffixChain(func_reg);
-                return;
-            } else {
-                // Unknown pattern after field access
-                return error.UnsupportedStatement;
+            switch (try self.dispatchFieldStatement(base_reg, field_name)) {
+                .continued => |next_reg| base_reg = next_reg,
+                .finished => return,
             }
         }
 
