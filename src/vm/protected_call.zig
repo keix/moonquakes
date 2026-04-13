@@ -112,7 +112,8 @@ pub fn prepareXpcall(vm: *VM, a: u8, total_args: u32, fail_base: u32) !PreparedX
 
 // Tail-called pcall/xpcall reuses the current frame instead of pushing a new
 // one, but it still needs the same synthetic bootstrap semantics.
-pub fn reuseCurrentFrame(current_ci: *CallInfo, ret_base: u32, total_results: u32, handler: ?TValue, new_base: u32) void {
+pub fn reuseCurrentFrame(vm: *VM, current_ci: *CallInfo, ret_base: u32, total_results: u32, handler: ?TValue, new_base: u32) void {
+    _ = vm;
     const pcall_nresults: i16 = if (total_results > 0)
         @intCast(total_results - 1)
     else

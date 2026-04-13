@@ -48,7 +48,6 @@ pub const CallInfo = struct {
     closure: ?*ClosureObject,       // Closure (null for main chunk)
 
     pc: [*]const Instruction,       // Program counter
-    savedpc: ?[*]const Instruction, // Saved PC for yields
 
     base: u32,                      // Register frame base
     ret_base: u32,                  // Return value destination
@@ -71,7 +70,6 @@ pub const CallInfo = struct {
 - **pc**: Current instruction pointer within the function
 - **base**: Base register index for this function's local variables
 - **ret_base**: Where to place return values in the caller's register space
-- **savedpc**: Saved program counter (used for coroutines/yields)
 - **vararg_base**: Stack base for varargs
 - **vararg_count**: Number of vararg values
 - **nresults**: Number of expected return values (-1 = variadic)

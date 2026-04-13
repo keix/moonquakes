@@ -1580,7 +1580,8 @@ inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
                 ci.hook_last_line = line;
                 try hook_state.onLine(vm, line, executeSyncMM);
             }
-        } else if (ci.hook_last_pc < 0) {
+        } else {
+            if (ci.hook_last_pc >= 0) return;
             // Stripped chunk: no lineinfo. Lua still triggers one line hook
             // callback with nil line for the first instruction.
             if (ci.previous) |caller| {
@@ -3467,7 +3468,7 @@ fn startTailProtectedCall(vm: *VM, current_ci: *CallInfo, a: u8, nargs: u32, nat
     }
 
     const new_base = vm.base + a + 1;
-    protected_call.reuseCurrentFrame(current_ci, ret_base, total_results, handler, new_base);
+    protected_call.reuseCurrentFrame(vm, current_ci, ret_base, total_results, handler, new_base);
     vm.base = new_base;
     vm.top = new_base + effective_total_args;
     return .LoopContinue;
