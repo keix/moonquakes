@@ -57,7 +57,6 @@ pub const CallInfo = struct {
 
     // Execution state
     pc: [*]const Instruction,
-    savedpc: ?[*]const Instruction, // saved pc for yielding
 
     // Stack frame
     base: u32,
@@ -100,7 +99,6 @@ pub const CallInfo = struct {
             .func = func,
             .closure = closure,
             .pc = func.code.ptr,
-            .savedpc = null,
             .base = base,
             .ret_base = ret_base,
             .vararg_base = vararg_base,
