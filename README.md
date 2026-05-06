@@ -5,17 +5,17 @@ An interpretation of Lua
 Moonquakes imagines Lua as moonlight at night — still on the surface, quietly trembling beneath as time moves on. It reflects the sunlight, forever.
 
 ## Overview
-Moonquakes is a clean-room implementation of the **Lua 5.4** virtual machine and runtime.
+Moonquakes is a clean-room implementation of the **Lua 5.4** virtual machine and runtime, written in Zig.
 
-It is not a binding to the official C implementation — it reimagines Lua from first principles with a clear, modern design and a focus on readability, correctness, and hackability.
+It is not a binding to the official C implementation, nor is it derived from Lua's implementation. Moonquakes implements Lua 5.4 semantics as observed from Lua code, with an emphasis on readability, correctness, and hackability.
 
 Even decades after its creation, Lua's architecture remains one of the most elegant and minimal designs in language engineering — small, clear, yet powerful enough to move worlds.
 
-Moonquakes carries that elegance forward — rewritten in Zig.
+Moonquakes is an attempt to unravel and preserve that elegance in the form of an independent Zig implementation.
 
 ## Dependencies
 Moonquakes has intentionally minimal dependencies.  
-No external libraries, system runtimes, or original Lua source code are required.
+No external libraries or original Lua source code are required.
 
 - **Zig compiler 0.15.2** (required)
 
@@ -36,7 +36,6 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 ## Running Moonquakes
-
 After building:
 
 ```sh
@@ -54,8 +53,7 @@ make
 ```
 
 ## Compatibility
-
-Moonquakes presents itself as Lua 5.4.
+Moonquakes defines compatibility at the Lua-language boundary.
 
 This means:
 
@@ -65,10 +63,6 @@ This means:
   - `src/tests/api`
 - Internal implementation details (VM, GC, memory layout, etc.) are not part of the contract
 
-Moonquakes is not derived from Lua's implementation.
-
-It is an independent implementation that reproduces Lua 5.4 semantics as observed from Lua code.
-
 ## Running C Example
 Build first (either `make` above or `zig build`), then run the example:
 ```sh
@@ -76,7 +70,7 @@ LD_LIBRARY_PATH=build/lib ./build/bin/minimal
 ```
 
 ## Architecture
-Moonquakes follows a clean, modular design inspired by the original Lua architecture, prioritizing clarity, minimalism, and structural integrity.
+Moonquakes follows a clean, modular design inspired by Lua's language design and philosophy, prioritizing clarity, minimalism, and structural integrity.
 
 For detailed design and implementation notes, see the documentation in [docs/](docs/).
 
