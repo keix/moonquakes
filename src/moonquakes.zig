@@ -35,6 +35,8 @@ pub const Mnemonics = @import("vm/mnemonics.zig");
 pub const ReturnValue = @import("vm/execution.zig").ReturnValue;
 pub const TValue = @import("runtime/value.zig").TValue;
 pub const Proto = @import("compiler/proto.zig").Proto;
+pub const call = @import("vm/call.zig");
+pub const error_state = @import("vm/error_state.zig");
 
 const ErrorHandler = @import("vm/error.zig");
 
