@@ -117,6 +117,14 @@ int mq_load(mq_State* L, mq_Reader reader, void* data,
 // Protected call
 int mq_pcall(mq_State* L, int nargs, int nresults, int msgh);
 
+// Tables
+//
+// `mq_newtable` pushes a new empty table.
+// `mq_setfield` does t[k] = v, where t is at idx and v is on top of the
+// stack; v is popped on success.
+void mq_newtable(mq_State* L);
+void mq_setfield(mq_State* L, int idx, const char* k);
+
 // Globals
 int mq_getglobal(mq_State* L, const char* name);
 void mq_setglobal(mq_State* L, const char* name);

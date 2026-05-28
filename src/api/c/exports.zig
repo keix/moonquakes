@@ -405,6 +405,17 @@ fn formatLuaFloat(buf: []u8, n: f64) []const u8 {
     return rendered;
 }
 
+/// Length-less compat shim for `mq_tolstring(L, idx, NULL)`. The return value
+/// is a **borrowed byte view**, not a Lua-style NUL-terminated C string —
+/// Moonquakes' GC strings are not NUL-terminated, so passing the result
+/// directly to `printf("%s", ...)` is undefined unless the caller already
+/// knows the string is NUL-followed by chance. Prefer `mq_tolstring` with an
+/// explicit `len` for any actual use; `mq_tostring` exists only to satisfy
+/// the Lua-shaped name in `api.md`.
+pub export fn mq_tostring(state: ?*mq_State, idx: c_int) ?[*]const u8 {
+    return mq_tolstring(state, idx, null);
+}
+
 /// Borrow the value at `idx` as a byte view. Strings are returned directly;
 /// numbers are converted and the stack slot is rewritten in place (matching
 /// `lua_tolstring`). Other types yield null.
@@ -597,6 +608,36 @@ fn mqStatusFromError(err: anyerror) c_int {
         error.OutOfMemory => constants.MQ_ERRMEM,
         else => constants.MQ_ERRRUN,
     };
+}
+
+// ----------------------------------------------------------------------------
+// Tables
+// ----------------------------------------------------------------------------
+
+/// Create a new empty table and push it onto the stack. No-op when the state
+/// is invalid or allocation fails (in which case nothing is pushed).
+pub export fn mq_newtable(state: ?*mq_State) void {
+    const vm = vmOf(state) orelse return;
+    const tbl = vm.gc().allocTable() catch return;
+    pushTValue(vm, TValue.fromTable(tbl));
+}
+
+/// Do `t[k] = v`, where `t` is the table at `idx`, `k` is the NUL-terminated
+/// string `name`, and `v` is the value on top of the stack. Pops `v` on
+/// success. No-op when the state is invalid, the stack is empty, `name` is
+/// null, the slot at `idx` is not a table, or allocation fails; in those
+/// error paths the value is left on the stack so the caller can recover it.
+pub export fn mq_setfield(state: ?*mq_State, idx: c_int, name: ?[*:0]const u8) void {
+    const vm = vmOf(state) orelse return;
+    const cstr = name orelse return;
+    if (vm.top <= vm.base) return;
+    const abs = absIndex(vm, idx) orelse return;
+    const tbl = vm.stack[abs].asTable() orelse return;
+    const slice = std.mem.span(cstr);
+    const key_obj = vm.gc().allocString(slice) catch return;
+    const top_val = vm.stack[vm.top - 1];
+    vm.gc().tableSet(tbl, TValue.fromString(key_obj), top_val) catch return;
+    vm.top -= 1;
 }
 
 // ----------------------------------------------------------------------------
