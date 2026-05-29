@@ -34,6 +34,7 @@ pub const GCObjectType = enum(u8) {
     closure,
     native_closure,
     c_closure,
+    dynamic_library,
     upvalue,
     userdata,
     proto,
@@ -567,6 +568,13 @@ pub const NativeClosureObject = struct {
 pub const CClosureObject = struct {
     header: GCObject,
     func: CFunction,
+    lib: ?*DynamicLibraryObject = null,
+};
+
+/// Dynamic Library Object - keeps a loaded shared library alive.
+pub const DynamicLibraryObject = struct {
+    header: GCObject,
+    lib: std.DynLib,
 };
 
 /// Upvalue Object - GC-managed captured variable

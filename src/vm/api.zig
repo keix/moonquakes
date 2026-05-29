@@ -18,6 +18,10 @@ const builtin_dispatch = @import("../builtin/dispatch.zig");
 const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
+const CApiState = struct {
+    vm: *VM,
+};
+
 pub fn gc(self: *VM) *GC {
     return self.rt.gc;
 }
@@ -135,7 +139,8 @@ fn invokeCFunction(
     nargs: u32,
     nresults: u32,
 ) !void {
-    const state_opaque = self.c_state_opaque orelse return error.LuaException;
+    var fallback_state = CApiState{ .vm = self };
+    const state_opaque = self.c_state_opaque orelse @as(*anyopaque, @ptrCast(&fallback_state));
 
     const caller_base = self.base;
     const callable_slot = caller_base + func_reg;

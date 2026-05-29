@@ -206,19 +206,19 @@ test "modules.package searchpath supports custom separator and replacement" {
     }
 }
 
-test "modules.package loadlib reports unsupported C loader contract" {
+test "modules.package loadlib reports absent before any C loader succeeds" {
     var ctx = api.ApiContext{};
     try ctx.init();
     defer ctx.deinit();
 
     const result = try ctx.exec(
         \\local f, msg, where = package.loadlib("libdemo.so", "luaopen_demo")
-        \\return f, msg, where
+        \\return f, type(msg), where
     );
 
     try api.expectMultiple(result, &[_]TValue{
         .nil,
-        TValue.fromString(try ctx.base.gc().allocString("C libraries not supported")),
+        TValue.fromString(try ctx.base.gc().allocString("string")),
         TValue.fromString(try ctx.base.gc().allocString("absent")),
     });
 }

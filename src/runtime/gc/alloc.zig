@@ -14,6 +14,7 @@ const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const CClosureObject = object.CClosureObject;
+const DynamicLibraryObject = object.DynamicLibraryObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
@@ -275,11 +276,24 @@ pub fn allocNativeClosure(self: anytype, func: NativeFn) !*NativeClosureObject {
 }
 
 /// Allocate a new external C closure object
-pub fn allocCClosure(self: anytype, func: CFunction) !*CClosureObject {
+pub fn allocCClosure(self: anytype, func: CFunction, lib: ?*DynamicLibraryObject) !*CClosureObject {
     const obj = try allocObject(self, CClosureObject, 0);
 
     obj.header = newObjectHeader(self, .c_closure);
     obj.func = func;
+    obj.lib = lib;
+
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a dynamic library handle object.
+pub fn allocDynamicLibrary(self: anytype, lib: std.DynLib) !*DynamicLibraryObject {
+    const obj = try allocObject(self, DynamicLibraryObject, 0);
+
+    obj.header = newObjectHeader(self, .dynamic_library);
+    obj.lib = lib;
 
     self.objects = &obj.header;
 

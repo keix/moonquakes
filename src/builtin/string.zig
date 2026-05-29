@@ -82,7 +82,7 @@ fn toStringValue(vm: *VM, arg: TValue) !*StringObject {
         .boolean => |b| vm.gc().allocString(if (b) "true" else "false"),
         .object => |obj| switch (obj.type) {
             .string => unreachable,
-            .table, .userdata => ret: {
+            .table, .userdata, .dynamic_library => ret: {
                 // Moonquakes file handles are tables internally; mimic Lua file tostring().
                 if (obj.type == .table) {
                     if (arg.asTable()) |tbl| {
@@ -853,7 +853,7 @@ fn replacementTypeName(v: TValue) []const u8 {
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
             .thread => "thread",
-            .userdata, .file => "userdata",
+            .userdata, .file, .dynamic_library => "userdata",
             .upvalue, .proto => "userdata",
         },
     };

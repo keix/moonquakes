@@ -35,7 +35,7 @@ fn errorValueTypeName(value: TValue) []const u8 {
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
             .thread => "thread",
-            .userdata, .file => "userdata",
+            .userdata, .file, .dynamic_library => "userdata",
             .proto => "proto",
             .upvalue => "userdata",
         },

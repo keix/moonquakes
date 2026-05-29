@@ -10,6 +10,7 @@ const object = @import("object.zig");
 const GCObject = object.GCObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
+const CClosureObject = object.CClosureObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
@@ -37,8 +38,8 @@ pub fn participatesInCurrentCycle(self: anytype, obj: *const GCObject) bool {
     if (self.current_cycle_kind == .major or obj.generation != .old) return true;
 
     return switch (obj.type) {
-        .closure, .upvalue, .userdata, .proto, .thread, .file => true,
-        .string, .table, .native_closure, .c_closure => false,
+        .closure, .c_closure, .upvalue, .userdata, .proto, .thread, .file => true,
+        .string, .table, .native_closure, .dynamic_library => false,
     };
 }
 
@@ -198,6 +199,12 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
             // No references
         },
         .c_closure => {
+            const c_closure: *CClosureObject = @fieldParentPtr("header", obj);
+            if (c_closure.lib) |lib| {
+                markGray(self, &lib.header);
+            }
+        },
+        .dynamic_library => {
             // No references
         },
         .upvalue => {

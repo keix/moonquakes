@@ -174,7 +174,7 @@ fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
             .upvalue => "upvalue",
-            .userdata, .file => "userdata",
+            .userdata, .file, .dynamic_library => "userdata",
             .proto => "proto",
             .thread => "thread",
         },
@@ -453,7 +453,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
             .upvalue => "upvalue",
-            .userdata, .file => "userdata", // file handles are userdata in Lua
+            .userdata, .file, .dynamic_library => "userdata", // file handles are userdata in Lua
             .proto => "proto",
             .thread => "thread",
         },

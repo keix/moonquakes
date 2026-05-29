@@ -61,6 +61,10 @@ typedef double mq_Number;
  * signals an error; the value on top of the stack (or a synthesized message
  * when the stack is empty) becomes the raised error. v1 does not support
  * upvalues or yielding from a C function.
+ *
+ * The mq_State* passed to mq_CFunction is borrowed. It is valid only for the
+ * duration of the C function call. Extensions must not store it or use it
+ * after the function returns.
  */
 typedef int (*mq_CFunction)(mq_State* L);
 
@@ -173,4 +177,3 @@ enum {
 #endif
 
 #endif /* MOONQUAKES_H */
-

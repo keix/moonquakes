@@ -7,12 +7,57 @@ const std = @import("std");
 const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
 const TableObject = object.TableObject;
+const DynamicLibraryObject = object.DynamicLibraryObject;
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
 const VM = @import("../vm/vm.zig").VM;
 
 fn tableSet(vm: *VM, table: *TableObject, key: TValue, value: TValue) !void {
     try vm.gc().tableSet(table, key, value);
+}
+
+fn pushLoadlibError(vm: *VM, func_reg: u32, nresults: u32, msg: []const u8, where: []const u8) !void {
+    vm.stack[vm.base + func_reg] = .nil;
+    if (nresults > 1) {
+        vm.stack[vm.base + func_reg + 1] = TValue.fromString(try vm.gc().allocString(msg));
+    }
+    if (nresults > 2) {
+        vm.stack[vm.base + func_reg + 2] = TValue.fromString(try vm.gc().allocString(where));
+    }
+}
+
+fn getOrCreateLoadlibHandles(vm: *VM) !*TableObject {
+    const package_key = try vm.gc().allocString("__moonquakes_package");
+    const package_table = (vm.globals().get(TValue.fromString(package_key)) orelse return error.NotAFunction).asTable() orelse return error.NotAFunction;
+
+    const handles_key = try vm.gc().allocString("__moonquakes_loadlib_handles");
+    if (package_table.get(TValue.fromString(handles_key))) |value| {
+        if (value.asTable()) |table| return table;
+    }
+
+    const table = try vm.gc().allocTable();
+    try tableSet(vm, package_table, TValue.fromString(handles_key), TValue.fromTable(table));
+    return table;
+}
+
+fn setLoadlibAvailable(vm: *VM) !void {
+    const package_key = try vm.gc().allocString("__moonquakes_package");
+    const package_table = (vm.globals().get(TValue.fromString(package_key)) orelse return error.NotAFunction).asTable() orelse return error.NotAFunction;
+    const available_key = try vm.gc().allocString("__moonquakes_loadlib_available");
+    try tableSet(vm, package_table, TValue.fromString(available_key), .{ .boolean = true });
+}
+
+fn loadlibAvailable(vm: *VM) bool {
+    const package_key = vm.gc().allocString("__moonquakes_package") catch return false;
+    const package_table = (vm.globals().get(TValue.fromString(package_key)) orelse return false).asTable() orelse return false;
+    const available_key = vm.gc().allocString("__moonquakes_loadlib_available") catch return false;
+    return (package_table.get(TValue.fromString(available_key)) orelse return false).toBoolean();
+}
+
+fn rememberDynamicLibrary(vm: *VM, lib_obj: *DynamicLibraryObject, name: []const u8) !void {
+    const handles = try getOrCreateLoadlibHandles(vm);
+    const key = try vm.gc().allocString(name);
+    try tableSet(vm, handles, TValue.fromString(key), .{ .object = &lib_obj.header });
 }
 
 /// Default search path (fallback if package.path is not set)
@@ -439,31 +484,72 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     return vm.raiseString(msg);
 }
 
-/// package.loadlib(libname, funcname) - Dynamically links with C library libname
-/// Moonquakes does not support C library loading - returns nil + error
+/// package.loadlib(libname, funcname) - dynamically links a Moonquakes C ABI library.
 pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
         return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
     }
 
     const libname_arg = vm.stack[vm.base + func_reg + 1];
-    if (libname_arg.asString() == null) {
+    const libname = (libname_arg.asString() orelse {
         return vm.raiseString("bad argument #1 to 'loadlib' (string expected)");
-    }
+    }).asSlice();
 
     const funcname_arg = vm.stack[vm.base + func_reg + 2];
-    if (funcname_arg.asString() == null) {
+    const funcname = (funcname_arg.asString() orelse {
         return vm.raiseString("bad argument #2 to 'loadlib' (string expected)");
+    }).asSlice();
+
+    var lib = std.DynLib.open(libname) catch |err| {
+        var msg_buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "error loading module '{s}': {s}", .{ libname, @errorName(err) }) catch "error loading module";
+        return try pushLoadlibError(vm, func_reg, nresults, msg, if (loadlibAvailable(vm)) "open" else "absent");
+    };
+    var close_lib = true;
+    defer if (close_lib) lib.close();
+
+    if (std.mem.eql(u8, funcname, "*")) {
+        vm.gc().inhibitGC();
+        defer vm.gc().allowGC();
+
+        const lib_obj = try vm.gc().allocDynamicLibrary(lib);
+        close_lib = false;
+        try setLoadlibAvailable(vm);
+        try rememberDynamicLibrary(vm, lib_obj, libname);
+        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        if (nresults > 1) {
+            var i: u32 = 1;
+            while (i < nresults) : (i += 1) {
+                vm.stack[vm.base + func_reg + i] = .nil;
+            }
+        }
+        return;
     }
 
-    vm.stack[vm.base + func_reg] = .nil;
+    var symbol_buf: [512:0]u8 = undefined;
+    const symbol = std.fmt.bufPrintZ(&symbol_buf, "{s}", .{funcname}) catch {
+        return try pushLoadlibError(vm, func_reg, nresults, "symbol name too long", "init");
+    };
+
+    const fp = lib.lookup(@import("../runtime/native.zig").CFunction, symbol) orelse {
+        var msg_buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "symbol '{s}' not found", .{funcname}) catch "symbol not found";
+        return try pushLoadlibError(vm, func_reg, nresults, msg, "init");
+    };
+
+    vm.gc().inhibitGC();
+    defer vm.gc().allowGC();
+
+    const lib_obj = try vm.gc().allocDynamicLibrary(lib);
+    close_lib = false;
+    try setLoadlibAvailable(vm);
+    const cc = try vm.gc().allocCClosure(fp, lib_obj);
+    vm.stack[vm.base + func_reg] = TValue.fromCClosure(cc);
     if (nresults > 1) {
-        const err_str = try vm.gc().allocString("C libraries not supported");
-        vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
-    }
-    if (nresults > 2) {
-        const when_str = try vm.gc().allocString("absent");
-        vm.stack[vm.base + func_reg + 2] = TValue.fromString(when_str);
+        var i: u32 = 1;
+        while (i < nresults) : (i += 1) {
+            vm.stack[vm.base + func_reg + i] = .nil;
+        }
     }
 }
 

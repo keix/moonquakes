@@ -186,7 +186,7 @@ fn tvalueTypeTag(v: TValue) c_int {
             .string => constants.MQ_TSTRING,
             .table => constants.MQ_TTABLE,
             .closure, .native_closure, .c_closure => constants.MQ_TFUNCTION,
-            .userdata, .file => constants.MQ_TUSERDATA,
+            .userdata, .file, .dynamic_library => constants.MQ_TUSERDATA,
             .thread => constants.MQ_TTHREAD,
             .proto, .upvalue => constants.MQ_TNONE,
         },
@@ -352,7 +352,7 @@ pub export fn mq_pushstring(state: ?*mq_State, s: ?[*:0]const u8) ?[*]const u8 {
 pub export fn mq_pushcfunction(state: ?*mq_State, fn_ptr: ?mq_CFunction) void {
     const vm = vmOf(state) orelse return;
     const fp = fn_ptr orelse return;
-    const cc = vm.gc().allocCClosure(@ptrCast(fp)) catch return;
+    const cc = vm.gc().allocCClosure(@ptrCast(fp), null) catch return;
     pushTValue(vm, TValue.fromCClosure(cc));
 }
 

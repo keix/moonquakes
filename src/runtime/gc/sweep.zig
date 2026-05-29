@@ -13,6 +13,7 @@ const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
 const CClosureObject = object.CClosureObject;
+const DynamicLibraryObject = object.DynamicLibraryObject;
 const ObjectGeneration = object.ObjectGeneration;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
@@ -230,6 +231,14 @@ pub fn freeObjectFinal(self: anytype, obj: *GCObject) void {
             const size = @sizeOf(CClosureObject);
             self.bytes_allocated -= size;
             const memory = @as([*]u8, @ptrCast(c_obj))[0..size];
+            self.allocator.free(memory);
+        },
+        .dynamic_library => {
+            const lib_obj: *DynamicLibraryObject = @fieldParentPtr("header", obj);
+            lib_obj.lib.close();
+            const size = @sizeOf(DynamicLibraryObject);
+            self.bytes_allocated -= size;
+            const memory = @as([*]u8, @ptrCast(lib_obj))[0..size];
             self.allocator.free(memory);
         },
         .upvalue => {

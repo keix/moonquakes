@@ -260,6 +260,7 @@ pub const TValue = union(enum) {
                 },
                 .table => try writer.print("table: 0x{x}", .{@intFromPtr(obj)}),
                 .closure, .native_closure, .c_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .dynamic_library => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                 .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
