@@ -1,6 +1,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 
 const Decoded = struct {
     codepoint: u32,
@@ -185,7 +186,7 @@ pub fn nativeUtf8Codes(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const lax = if (nargs >= 2) vm.stack[vm.base + func_reg + 2].toBoolean() else false;
 
     // Return iterator function
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .utf8_codes_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.utf8_codes_iterator));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // In lax mode pass iterator state table { s = string, lax = true }.

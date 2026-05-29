@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
     const c_test_names = [_][]const u8{
         "test_string",
         "test_table",
+        "test_cfunction",
     };
     for (c_test_names) |c_test_name| {
         const c_test_exe = b.addExecutable(.{

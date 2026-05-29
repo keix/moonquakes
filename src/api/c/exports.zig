@@ -14,6 +14,8 @@ const pipeline = mq.pipeline;
 const call_mod = mq.call;
 const error_state = mq.error_state;
 
+pub const mq_CFunction = *const fn (?*mq_State) callconv(.c) c_int;
+
 const State = struct {
     vm: *VM,
 };
@@ -64,7 +66,9 @@ pub export fn mq_newstate() ?*mq_State {
     state.* = .{
         .vm = vm,
     };
-    return @as(*mq_State, @ptrCast(state));
+    const opaque_state: *mq_State = @ptrCast(state);
+    vm.c_state_opaque = opaque_state;
+    return opaque_state;
 }
 
 pub export fn mq_close(state: ?*mq_State) void {
@@ -181,7 +185,7 @@ fn tvalueTypeTag(v: TValue) c_int {
         .object => |obj| switch (obj.type) {
             .string => constants.MQ_TSTRING,
             .table => constants.MQ_TTABLE,
-            .closure, .native_closure => constants.MQ_TFUNCTION,
+            .closure, .native_closure, .c_closure => constants.MQ_TFUNCTION,
             .userdata, .file => constants.MQ_TUSERDATA,
             .thread => constants.MQ_TTHREAD,
             .proto, .upvalue => constants.MQ_TNONE,
@@ -328,6 +332,28 @@ pub export fn mq_pushstring(state: ?*mq_State, s: ?[*:0]const u8) ?[*]const u8 {
     const str_obj = vm.gc().allocString(slice) catch return null;
     pushTValue(vm, TValue.fromString(str_obj));
     return str_obj.data();
+}
+
+/// Push a native callable wrapping the external C function `fn_ptr`.
+///
+/// The pushed value behaves as a Lua function: it can be assigned, stored in
+/// tables, and invoked via `mq_pcall` or from Lua code. When called, the
+/// callee sees a fresh stack frame where index 1 is the first argument and
+/// `mq_gettop(L) == nargs`. It pushes its results and returns the result
+/// count. A negative return value signals an error; the dispatcher takes the
+/// top-of-stack value (or a synthesized message when the stack is empty) as
+/// the error value.
+///
+/// This v1 entry point has **no upvalue support**. Use the future
+/// `mq_pushcclosure` for that. Calls from a C function back into a yieldable
+/// path are unsupported.
+///
+/// No-op when the state is invalid, `fn_ptr` is null, or allocation fails.
+pub export fn mq_pushcfunction(state: ?*mq_State, fn_ptr: ?mq_CFunction) void {
+    const vm = vmOf(state) orelse return;
+    const fp = fn_ptr orelse return;
+    const cc = vm.gc().allocCClosure(@ptrCast(fp)) catch return;
+    pushTValue(vm, TValue.fromCClosure(cc));
 }
 
 /// Push a copy of the value at `idx`. No-op when the index is invalid.

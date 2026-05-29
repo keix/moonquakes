@@ -46,6 +46,19 @@ static int load_string(mq_State* L, const char* src, const char* chunkname) {
     return mq_load(L, string_reader, &st, chunkname, "t");
 }
 
+/*
+ * A C function callable from Lua. Reads two integer arguments and pushes
+ * two results (sum and product). The return value is the number of results
+ * the dispatcher should forward to the caller.
+ */
+static int c_addmul(mq_State* L) {
+    mq_Integer a = mq_tointeger(L, 1);
+    mq_Integer b = mq_tointeger(L, 2);
+    mq_pushinteger(L, a + b);
+    mq_pushinteger(L, a * b);
+    return 2;
+}
+
 static void run_chunk(mq_State* L, const char* label, const char* src) {
     printf("--- %s ---\n", label);
     int load_st = load_string(L, src, "=(load)");
@@ -123,7 +136,16 @@ int main(void) {
     mq_setglobal(L, "from_c");
     run_chunk(L, "print from_c", "print('from_c =', from_c)");
 
-    // 8. Exercise mq_gc sub-commands.
+    // 8. Register a C function as a Lua global and let Lua call it.
+    //    The closure is held alive through the global; mq_setglobal pops
+    //    it from the stack after binding.
+    mq_pushcfunction(L, c_addmul);
+    mq_setglobal(L, "addmul");
+    run_chunk(L, "call addmul",
+        "local s, p = addmul(6, 7) "
+        "print('addmul(6, 7) -> sum=' .. s .. ' product=' .. p)");
+
+    // 9. Exercise mq_gc sub-commands.
     printf("gc running before stop: %d\n", mq_gc(L, MQ_GCISRUNNING, 0));
     mq_gc(L, MQ_GCSTOP, 0);
     printf("gc running after stop:  %d\n", mq_gc(L, MQ_GCISRUNNING, 0));

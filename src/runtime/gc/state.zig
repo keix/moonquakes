@@ -598,6 +598,7 @@ pub const GC = struct {
     pub const allocUpvalue = alloc_mod.allocUpvalue;
     pub const allocClosedUpvalue = alloc_mod.allocClosedUpvalue;
     pub const allocNativeClosure = alloc_mod.allocNativeClosure;
+    pub const allocCClosure = alloc_mod.allocCClosure;
     pub const allocUserdata = alloc_mod.allocUserdata;
     pub const allocThread = alloc_mod.allocThread;
     pub const allocStdioFile = alloc_mod.allocStdioFile;

@@ -10,6 +10,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const object = @import("../runtime/gc/object.zig");
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const CClosureObject = object.CClosureObject;
 const TableObject = object.TableObject;
 const FileObject = object.FileObject;
 const UserdataObject = object.UserdataObject;
@@ -144,6 +145,10 @@ pub fn callValue(vm: *VM, func_val: TValue, args: []const TValue) anyerror!TValu
     // Handle native closure
     if (func_val.asNativeClosure()) |nc| {
         return callNativeClosure(vm, nc, args);
+    }
+
+    if (func_val.asCClosure()) |cc| {
+        return callCClosure(vm, cc, args);
     }
 
     // Handle Lua closure
@@ -310,7 +315,7 @@ pub fn invokeNativeOnStack(
     requested_results: u32,
     top_defined: bool,
 ) !NativeStackCallOutcome {
-    try vm.callNative(nc.func.id, func_slot, nargs, requested_results);
+    try vm.callNative(nc, func_slot, nargs, requested_results);
 
     const result_base = vm.base + func_slot;
     if (top_defined) {
@@ -506,6 +511,9 @@ fn callValueIntoUnsafe(vm: *VM, func_val: TValue, args: []const TValue, out: []T
     if (func_val.asNativeClosure()) |nc| {
         return callNativeClosureInto(vm, nc, args, out);
     }
+    if (func_val.asCClosure()) |cc| {
+        return callCClosureInto(vm, cc, args, out);
+    }
     if (func_val.asClosure()) |closure| {
         return callClosureInto(vm, closure, args, out);
     }
@@ -528,6 +536,9 @@ fn callValueIntoUnsafeAt(vm: *VM, func_val: TValue, args: []const TValue, out: [
     if (func_val.asNativeClosure()) |nc| {
         // Native closures do not need custom ret_base placement.
         return callNativeClosureInto(vm, nc, args, out);
+    }
+    if (func_val.asCClosure()) |cc| {
+        return callCClosureInto(vm, cc, args, out);
     }
     if (func_val.asClosure()) |closure| {
         return callClosureIntoAt(vm, closure, args, out, ret_base);
@@ -567,6 +578,10 @@ fn callWithPrependedArg(vm: *VM, func_val: TValue, leading_arg: TValue, args: []
             .first => |value| value,
             else => unreachable,
         };
+    }
+
+    if (func_val.asCClosure()) |cc| {
+        return callCClosureWithPrependedArg(vm, cc, leading_arg, args);
     }
 
     // Handle Lua closure __call
@@ -621,6 +636,52 @@ fn callNativeClosureInto(vm: *VM, nc: *NativeClosureObject, args: []const TValue
         vm.top = saved_top;
     }
     _ = try callNative(vm, TValue.fromNativeClosure(nc), nc, args, .{ .into = out });
+}
+
+fn callCClosure(vm: *VM, cc: *CClosureObject, args: []const TValue) anyerror!TValue {
+    var out: [1]TValue = undefined;
+    try callCClosureInto(vm, cc, args, out[0..1]);
+    return out[0];
+}
+
+fn callCClosureInto(vm: *VM, cc: *CClosureObject, args: []const TValue, out: []TValue) anyerror!void {
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
+    const call_base = vm.top;
+    vm.base = call_base;
+    defer {
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
+
+    _ = stageNativeCallFrame(vm, TValue.fromCClosure(cc), args, call_base);
+    try vm.callCClosure(cc, 0, @intCast(args.len), @intCast(out.len));
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        out[i] = vm.stack[call_base + @as(u32, @intCast(i))];
+    }
+}
+
+fn callCClosureWithPrependedArg(vm: *VM, cc: *CClosureObject, leading_arg: TValue, args: []const TValue) anyerror!TValue {
+    const saved_base = vm.base;
+    const saved_top = vm.top;
+
+    const call_base = vm.top;
+    vm.base = call_base;
+    defer {
+        vm.base = saved_base;
+        vm.top = saved_top;
+    }
+
+    vm.stack[call_base] = TValue.fromCClosure(cc);
+    vm.stack[call_base + 1] = leading_arg;
+    for (args, 0..) |arg, i| {
+        vm.stack[call_base + 2 + @as(u32, @intCast(i))] = arg;
+    }
+    vm.top = call_base + 2 + @as(u32, @intCast(args.len));
+    try vm.callCClosure(cc, 0, 1 + @as(u32, @intCast(args.len)), 1);
+    return vm.stack[call_base];
 }
 
 /// Call a Lua closure with arguments.

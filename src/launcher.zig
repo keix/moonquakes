@@ -33,7 +33,7 @@ fn errorValueTypeName(value: TValue) []const u8 {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .thread => "thread",
             .userdata, .file => "userdata",
             .proto => "proto",

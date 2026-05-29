@@ -54,6 +54,17 @@ typedef int64_t mq_Integer;
 typedef double mq_Number;
 
 /*
+ * Native callable signature. Registered via mq_pushcfunction.
+ *
+ * On entry, arguments are visible at indices 1..mq_gettop(L). The callee
+ * pushes its results and returns the result count. A negative return value
+ * signals an error; the value on top of the stack (or a synthesized message
+ * when the stack is empty) becomes the raised error. v1 does not support
+ * upvalues or yielding from a C function.
+ */
+typedef int (*mq_CFunction)(mq_State* L);
+
+/*
  * Reader callback used by mq_load. Called repeatedly until it returns NULL
  * or writes 0 to *size. The returned pointer must stay valid until the next
  * call into the same reader.
@@ -93,6 +104,7 @@ void mq_pushinteger(mq_State* L, mq_Integer n);
 void mq_pushnumber(mq_State* L, mq_Number n);
 const char* mq_pushlstring(mq_State* L, const char* s, size_t len);
 const char* mq_pushstring(mq_State* L, const char* s);
+void mq_pushcfunction(mq_State* L, mq_CFunction fn);
 void mq_pushvalue(mq_State* L, int idx);
 
 // Conversion (to*)

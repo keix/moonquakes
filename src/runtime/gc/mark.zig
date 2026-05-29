@@ -38,7 +38,7 @@ pub fn participatesInCurrentCycle(self: anytype, obj: *const GCObject) bool {
 
     return switch (obj.type) {
         .closure, .upvalue, .userdata, .proto, .thread, .file => true,
-        .string, .table, .native_closure => false,
+        .string, .table, .native_closure, .c_closure => false,
     };
 }
 
@@ -195,6 +195,9 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
             markGray(self, &closure.proto.header);
         },
         .native_closure => {
+            // No references
+        },
+        .c_closure => {
             // No references
         },
         .upvalue => {

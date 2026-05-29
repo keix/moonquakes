@@ -58,7 +58,7 @@ pub fn toOwnedValue(allocator: std.mem.Allocator, val: TValue) !OwnedValue {
         .object => |obj| switch (obj.type) {
             .string => .{ .string = try allocator.dupe(u8, val.asString().?.asSlice()) },
             .table => .nil, // TODO: serialize table
-            .closure, .native_closure => .nil, // TODO: represent closure
+            .closure, .native_closure, .c_closure => .nil, // TODO: represent closure
             .upvalue, .userdata, .proto, .thread, .file => .nil,
         },
     };

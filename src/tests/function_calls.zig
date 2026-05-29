@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const Mnemonics = @import("../vm/mnemonics.zig");
 const TValue = @import("../runtime/value.zig").TValue;
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 const Instruction = @import("../compiler/opcodes.zig").Instruction;
 const call = @import("../vm/call.zig");
 const test_utils = @import("test_utils.zig");
@@ -88,7 +89,7 @@ test "callNative can project top-defined multret results" {
     try ctx.init();
     defer ctx.deinit();
 
-    const nc = try ctx.vm.gc().allocNativeClosure(.{ .id = .select });
+    const nc = try ctx.vm.gc().allocNativeClosure(NativeFn.init(.select));
     const saved_top = ctx.vm.top;
 
     const outcome = try call.callNative(

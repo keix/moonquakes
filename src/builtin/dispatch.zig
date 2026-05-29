@@ -62,7 +62,7 @@ fn setStringKey(tbl: *TableObject, gc: *GC, name: []const u8, value: TValue) !vo
 /// Register a native function in a table using NativeClosureObject
 /// Keys are GC-allocated strings to ensure proper marking during GC
 fn registerNative(tbl: *TableObject, gc: *GC, name: []const u8, id: NativeFnId) !void {
-    const nc = try gc.allocNativeClosure(.{ .id = id });
+    const nc = try gc.allocNativeClosure(NativeFn.init(id));
     try setStringKey(tbl, gc, name, TValue.fromNativeClosure(nc));
 }
 

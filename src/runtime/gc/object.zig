@@ -7,7 +7,8 @@
 //!   - StringObject: interned, immutable, hash cached
 //!   - TableObject: hash + array hybrid (Lua table)
 //!   - ClosureObject: function + captured upvalues
-//!   - NativeClosureObject: C/Zig function + upvalues
+//!   - NativeClosureObject: builtin native function id
+//!   - CClosureObject: external C function pointer
 //!   - UpvalueObject: open (stack ref) or closed (own storage)
 //!   - ProtoObject: compiled bytecode (function prototype)
 //!   - ThreadObject: coroutine state (VM reference)
@@ -19,7 +20,9 @@
 
 const std = @import("std");
 const proto_mod = @import("../../compiler/proto.zig");
-const NativeFn = @import("../native.zig").NativeFn;
+const native_mod = @import("../native.zig");
+const NativeFn = native_mod.NativeFn;
+const CFunction = native_mod.CFunction;
 const TValue = @import("../value.zig").TValue;
 pub const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 pub const Upvaldesc = proto_mod.Upvaldesc;
@@ -30,6 +33,7 @@ pub const GCObjectType = enum(u8) {
     table,
     closure,
     native_closure,
+    c_closure,
     upvalue,
     userdata,
     proto,
@@ -554,6 +558,15 @@ pub const NativeClosureObject = struct {
     pub fn getFunc(self: *const NativeClosureObject) NativeFn {
         return self.func;
     }
+};
+
+/// C Closure Object - GC-managed external C function
+///
+/// Kept separate from `NativeClosureObject` so builtin native calls keep their
+/// compact hot-path representation.
+pub const CClosureObject = struct {
+    header: GCObject,
+    func: CFunction,
 };
 
 /// Upvalue Object - GC-managed captured variable

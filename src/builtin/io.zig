@@ -10,6 +10,7 @@ const TableObject = object.TableObject;
 const FileObject = object.FileObject;
 const FileKind = object.FileKind;
 const GC = @import("../runtime/gc/gc.zig").GC;
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 
 fn tableSet(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
     try gc.tableSet(table, key, value);
@@ -56,7 +57,7 @@ fn valueTypeName(v: TValue) []const u8 {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .userdata => "userdata",
             .thread => "thread",
             .file => "userdata",
@@ -129,33 +130,33 @@ fn createFileMetatableInit(gc: *GC) !*TableObject {
     try tableSet(gc, mt, TValue.fromString(gc.mm_keys.get(.index)), TValue.fromTable(index_table));
     try tableSet(gc, mt, TValue.fromString(gc.mm_keys.get(.name)), TValue.fromString(try gc.allocString("FILE*")));
 
-    const read_nc = try gc.allocNativeClosure(.{ .id = .file_read });
+    const read_nc = try gc.allocNativeClosure(NativeFn.init(.file_read));
     const read_key = try gc.allocString("read");
     try tableSet(gc, index_table, TValue.fromString(read_key), TValue.fromNativeClosure(read_nc));
 
-    const close_nc = try gc.allocNativeClosure(.{ .id = .file_close });
+    const close_nc = try gc.allocNativeClosure(NativeFn.init(.file_close));
     const close_key = try gc.allocString("close");
     try tableSet(gc, index_table, TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
     try tableSet(gc, mt, TValue.fromString(gc.mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
     try tableSet(gc, mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
 
-    const write_nc = try gc.allocNativeClosure(.{ .id = .file_write });
+    const write_nc = try gc.allocNativeClosure(NativeFn.init(.file_write));
     const write_key = try gc.allocString("write");
     try tableSet(gc, index_table, TValue.fromString(write_key), TValue.fromNativeClosure(write_nc));
 
-    const lines_nc = try gc.allocNativeClosure(.{ .id = .file_lines });
+    const lines_nc = try gc.allocNativeClosure(NativeFn.init(.file_lines));
     const lines_key = try gc.allocString("lines");
     try tableSet(gc, index_table, TValue.fromString(lines_key), TValue.fromNativeClosure(lines_nc));
 
-    const flush_nc = try gc.allocNativeClosure(.{ .id = .file_flush });
+    const flush_nc = try gc.allocNativeClosure(NativeFn.init(.file_flush));
     const flush_key = try gc.allocString("flush");
     try tableSet(gc, index_table, TValue.fromString(flush_key), TValue.fromNativeClosure(flush_nc));
 
-    const seek_nc = try gc.allocNativeClosure(.{ .id = .file_seek });
+    const seek_nc = try gc.allocNativeClosure(NativeFn.init(.file_seek));
     const seek_key = try gc.allocString("seek");
     try tableSet(gc, index_table, TValue.fromString(seek_key), TValue.fromNativeClosure(seek_nc));
 
-    const setvbuf_nc = try gc.allocNativeClosure(.{ .id = .file_setvbuf });
+    const setvbuf_nc = try gc.allocNativeClosure(NativeFn.init(.file_setvbuf));
     const setvbuf_key = try gc.allocString("setvbuf");
     try tableSet(gc, index_table, TValue.fromString(setvbuf_key), TValue.fromNativeClosure(setvbuf_nc));
 
@@ -337,39 +338,39 @@ fn createFileMetatable(vm: anytype, temp_slot: u32) !*TableObject {
     try tableSet(vm.gc(), mt, TValue.fromString(vm.gc().mm_keys.get(.index)), TValue.fromTable(index_table));
     try tableSet(vm.gc(), mt, TValue.fromString(vm.gc().mm_keys.get(.name)), TValue.fromString(try vm.gc().allocString("FILE*")));
 
-    const read_nc = try vm.gc().allocNativeClosure(.{ .id = .file_read });
+    const read_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_read));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(read_nc);
     const read_key = try vm.gc().allocString("read");
     try tableSet(vm.gc(), index_table, TValue.fromString(read_key), TValue.fromNativeClosure(read_nc));
 
-    const close_nc = try vm.gc().allocNativeClosure(.{ .id = .file_close });
+    const close_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_close));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(close_nc);
     const close_key = try vm.gc().allocString("close");
     try tableSet(vm.gc(), index_table, TValue.fromString(close_key), TValue.fromNativeClosure(close_nc));
     try tableSet(vm.gc(), mt, TValue.fromString(vm.gc().mm_keys.get(.close)), TValue.fromNativeClosure(close_nc));
     try tableSet(vm.gc(), mt, TValue.fromString(vm.gc().mm_keys.get(.gc)), TValue.fromNativeClosure(close_nc));
 
-    const write_nc = try vm.gc().allocNativeClosure(.{ .id = .file_write });
+    const write_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_write));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(write_nc);
     const write_key = try vm.gc().allocString("write");
     try tableSet(vm.gc(), index_table, TValue.fromString(write_key), TValue.fromNativeClosure(write_nc));
 
-    const lines_nc = try vm.gc().allocNativeClosure(.{ .id = .file_lines });
+    const lines_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_lines));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(lines_nc);
     const lines_key = try vm.gc().allocString("lines");
     try tableSet(vm.gc(), index_table, TValue.fromString(lines_key), TValue.fromNativeClosure(lines_nc));
 
-    const flush_nc = try vm.gc().allocNativeClosure(.{ .id = .file_flush });
+    const flush_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_flush));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(flush_nc);
     const flush_key = try vm.gc().allocString("flush");
     try tableSet(vm.gc(), index_table, TValue.fromString(flush_key), TValue.fromNativeClosure(flush_nc));
 
-    const seek_nc = try vm.gc().allocNativeClosure(.{ .id = .file_seek });
+    const seek_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_seek));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(seek_nc);
     const seek_key = try vm.gc().allocString("seek");
     try tableSet(vm.gc(), index_table, TValue.fromString(seek_key), TValue.fromNativeClosure(seek_nc));
 
-    const setvbuf_nc = try vm.gc().allocNativeClosure(.{ .id = .file_setvbuf });
+    const setvbuf_nc = try vm.gc().allocNativeClosure(NativeFn.init(.file_setvbuf));
     vm.stack[vm.base + temp_slot + 2] = TValue.fromNativeClosure(setvbuf_nc);
     const setvbuf_key = try vm.gc().allocString("setvbuf");
     try tableSet(vm.gc(), index_table, TValue.fromString(setvbuf_key), TValue.fromNativeClosure(setvbuf_nc));
@@ -794,7 +795,7 @@ fn createLinesIteratorWrapper(vm: anytype, temp_slot: u32, state_table: *TableOb
     const mt = try vm.gc().allocTable();
     vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(mt);
     const call_key = try vm.gc().allocString("__call");
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.io_lines_iterator));
     try tableSet(vm.gc(), mt, TValue.fromString(call_key), TValue.fromNativeClosure(iter_nc));
     setTableMetatable(vm.gc(), wrapper, mt);
     return wrapper;
@@ -2664,7 +2665,7 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     if (!can_read) {
-        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .io_lines_unreadable_iterator });
+        const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.io_lines_unreadable_iterator));
         vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
         if (nresults > 1) vm.stack[vm.base + func_reg + 1] = .nil;
         if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .nil;

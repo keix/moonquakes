@@ -12,6 +12,7 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const CClosureObject = object.CClosureObject;
 const ObjectGeneration = object.ObjectGeneration;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
@@ -222,6 +223,13 @@ pub fn freeObjectFinal(self: anytype, obj: *GCObject) void {
             const size = @sizeOf(NativeClosureObject);
             self.bytes_allocated -= size;
             const memory = @as([*]u8, @ptrCast(native_obj))[0..size];
+            self.allocator.free(memory);
+        },
+        .c_closure => {
+            const c_obj: *CClosureObject = @fieldParentPtr("header", obj);
+            const size = @sizeOf(CClosureObject);
+            self.bytes_allocated -= size;
+            const memory = @as([*]u8, @ptrCast(c_obj))[0..size];
             self.allocator.free(memory);
         },
         .upvalue => {

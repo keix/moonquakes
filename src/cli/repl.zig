@@ -336,8 +336,7 @@ pub const REPL = struct {
                         try stdout.writeAll(str.asSlice());
                     },
                     .table => try stdout.print("table: 0x{x}", .{@intFromPtr(obj)}),
-                    .closure => try stdout.print("function: 0x{x}", .{@intFromPtr(obj)}),
-                    .native_closure => try stdout.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                    .closure, .native_closure, .c_closure => try stdout.print("function: 0x{x}", .{@intFromPtr(obj)}),
                     .userdata => try stdout.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                     .proto => try stdout.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                     .upvalue => try stdout.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),

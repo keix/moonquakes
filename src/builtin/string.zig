@@ -9,6 +9,7 @@ const call = @import("../vm/call.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const object = @import("../runtime/gc/object.zig");
 const interrupt = @import("../interrupt.zig");
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 const StringObject = object.StringObject;
 const VM = @import("../vm/vm.zig").VM;
 
@@ -103,7 +104,7 @@ fn toStringValue(vm: *VM, arg: TValue) !*StringObject {
                 const formatted = try formatObjectAddress(vm, type_name, obj);
                 return formatted.asString().?;
             },
-            .closure, .native_closure => (try formatObjectAddress(vm, "function", obj)).asString().?,
+            .closure, .native_closure, .c_closure => (try formatObjectAddress(vm, "function", obj)).asString().?,
             .upvalue => vm.gc().allocString("<upvalue>"),
             .proto => vm.gc().allocString("<proto>"),
             .thread => (try formatObjectAddress(vm, "thread", obj)).asString().?,
@@ -850,7 +851,7 @@ fn replacementTypeName(v: TValue) []const u8 {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .thread => "thread",
             .userdata, .file => "userdata",
             .upvalue, .proto => "userdata",
@@ -1303,7 +1304,7 @@ pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             .object => |obj| switch (obj.type) {
                 .string => "string",
                 .table => "table",
-                .closure, .native_closure => "function",
+                .closure, .native_closure, .c_closure => "function",
                 .thread => "thread",
                 .userdata, .file => "userdata",
                 else => "userdata",
@@ -1646,7 +1647,7 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             .object => |obj| switch (obj.type) {
                 .string => "string",
                 .table => "table",
-                .closure, .native_closure => "function",
+                .closure, .native_closure, .c_closure => "function",
                 .thread => "thread",
                 .userdata, .file => "userdata",
                 else => "userdata",
@@ -1668,7 +1669,7 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             .object => |obj| switch (obj.type) {
                 .string => "string",
                 .table => "table",
-                .closure, .native_closure => "function",
+                .closure, .native_closure, .c_closure => "function",
                 .thread => "thread",
                 .userdata, .file => "userdata",
                 else => "userdata",
@@ -1941,7 +1942,7 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     try vm.gc().tableSet(state_table, TValue.fromString(key_last_end), .{ .integer = -1 });
 
     // Create iterator function and store private state by iterator identity.
-    const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .string_gmatch_iterator });
+    const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.string_gmatch_iterator));
     const state_map = try getGmatchStateMap(vm);
     try vm.gc().tableSet(state_map, TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);

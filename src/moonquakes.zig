@@ -37,6 +37,7 @@ pub const TValue = @import("runtime/value.zig").TValue;
 pub const Proto = @import("compiler/proto.zig").Proto;
 pub const call = @import("vm/call.zig");
 pub const error_state = @import("vm/error_state.zig");
+pub const NativeFn = @import("runtime/native.zig").NativeFn;
 
 const ErrorHandler = @import("vm/error.zig");
 
