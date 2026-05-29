@@ -42,7 +42,7 @@ static const char* string_reader(mq_State* L, void* ud, size_t* size) {
 }
 
 static int load_string(mq_State* L, const char* src, const char* chunkname) {
-    string_reader_state st = { src, 0 };
+    string_reader_state st = {src, 0};
     return mq_load(L, string_reader, &st, chunkname, "t");
 }
 
@@ -142,10 +142,18 @@ int main(void) {
     mq_pushcfunction(L, c_addmul);
     mq_setglobal(L, "addmul");
     run_chunk(L, "call addmul",
-        "local s, p = addmul(6, 7) "
-        "print('addmul(6, 7) -> sum=' .. s .. ' product=' .. p)");
+              "local s, p = addmul(6, 7) "
+              "print('addmul(6, 7) -> sum=' .. s .. ' product=' .. p)");
 
-    // 9. Exercise mq_gc sub-commands.
+    // 9. Load a C function from a shared object through package.loadlib.
+    run_chunk(L, "package.loadlib",
+              "local f, err, where = package.loadlib('./build/lib/loadlib_addmul.so', "
+              "'mq_loadlib_addmul') "
+              "assert(f, tostring(err) .. ' (' .. tostring(where) .. ')') "
+              "local s, p = f(8, 9) "
+              "print('loadlib addmul(8, 9) -> sum=' .. s .. ' product=' .. p)");
+
+    // 10. Exercise mq_gc sub-commands.
     printf("gc running before stop: %d\n", mq_gc(L, MQ_GCISRUNNING, 0));
     mq_gc(L, MQ_GCSTOP, 0);
     printf("gc running after stop:  %d\n", mq_gc(L, MQ_GCISRUNNING, 0));

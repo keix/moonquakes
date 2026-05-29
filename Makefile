@@ -3,6 +3,7 @@
 # Builds:
 #   - Zig C API libraries via `zig build`
 #   - minimal example executable
+#   - loadlib example shared object
 #
 # Runtime is implemented in Zig.
 # This Makefile provides a minimal C ABI smoke test.
@@ -17,12 +18,14 @@ CFLAGS  = -Wall -Wextra -O2 -fPIC -Iinclude
 
 BUILD   = build
 BINDIR  = $(BUILD)/bin
+LIBDIR  = $(BUILD)/lib
 
 ZIG_LIBDIR = zig-out/lib
 STATIC  = $(ZIG_LIBDIR)/libmoonquakes.a
 SHARED  = $(ZIG_LIBDIR)/libmoonquakes.so
 
 TARGET  = $(BINDIR)/minimal
+LOADLIB_EXAMPLE = $(LIBDIR)/loadlib_addmul.so
 
 all: $(TARGET)
 
@@ -32,6 +35,9 @@ $(BUILD):
 $(BINDIR):
 	mkdir -p $(BINDIR)
 
+$(LIBDIR):
+	mkdir -p $(LIBDIR)
+
 # Build Zig libraries
 
 zig-libs:
@@ -39,8 +45,13 @@ zig-libs:
 
 # Example executable (links against shared library)
 
-$(TARGET): examples/minimal.c zig-libs | $(BINDIR)
+$(TARGET): examples/minimal.c zig-libs $(LOADLIB_EXAMPLE) | $(BINDIR)
 	$(CC) examples/minimal.c -Iinclude -L$(ZIG_LIBDIR) -lmoonquakes -o $@
+
+# Example package.loadlib target.
+
+$(LOADLIB_EXAMPLE): examples/loadlib_addmul.c zig-libs | $(LIBDIR)
+	$(CC) $(CFLAGS) -shared examples/loadlib_addmul.c -L$(ZIG_LIBDIR) -lmoonquakes -o $@
 
 clean:
 	rm -rf $(BUILD)
