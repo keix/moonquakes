@@ -17,9 +17,13 @@ pub fn install() void {
 }
 
 pub fn isPending() bool {
-    return pending.load(.seq_cst);
+    return pending.load(.acquire);
 }
 
+/// Fast check + consume: only do atomic swap if interrupt is pending
 pub fn consume() bool {
-    return pending.swap(false, .seq_cst);
+    // Fast path: relaxed load first to avoid expensive atomic swap
+    if (!pending.load(.monotonic)) return false;
+    // Slow path: actually consume the interrupt
+    return pending.swap(false, .acq_rel);
 }

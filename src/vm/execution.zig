@@ -8,6 +8,7 @@
 //! Future additions: YieldResult, ResumeResult, CallStatus
 
 const std = @import("std");
+const builtin = @import("builtin");
 const TValue = @import("../runtime/value.zig").TValue;
 const opcodes = @import("../compiler/opcodes.zig");
 const Instruction = opcodes.Instruction;
@@ -56,7 +57,6 @@ pub const CallInfo = struct {
 
     // Execution state
     pc: [*]const Instruction,
-    savedpc: ?[*]const Instruction, // saved pc for yielding
 
     // Stack frame
     base: u32,
@@ -99,7 +99,6 @@ pub const CallInfo = struct {
             .func = func,
             .closure = closure,
             .pc = func.code.ptr,
-            .savedpc = null,
             .base = base,
             .ret_base = ret_base,
             .vararg_base = vararg_base,
@@ -172,20 +171,23 @@ pub const CallInfo = struct {
     /// Fetch next instruction and advance PC
     /// Encapsulates PC bounds checking as an invariant
     pub inline fn fetch(self: *CallInfo) !Instruction {
-        switch (self.continuation) {
-            .return_ => |ret| {
-                if (ret.reexec) {
-                    if (@intFromPtr(self.pc) > @intFromPtr(self.func.code.ptr)) {
-                        self.pc -= 1;
+        // Fast path: common case is no continuation
+        if (self.continuation != .none) {
+            switch (self.continuation) {
+                .return_ => |ret| {
+                    if (ret.reexec) {
+                        if (@intFromPtr(self.pc) > @intFromPtr(self.func.code.ptr)) {
+                            self.pc -= 1;
+                        }
+                        self.continuation = .{ .return_ = .{
+                            .a = ret.a,
+                            .count = ret.count,
+                            .reexec = false,
+                        } };
                     }
-                    self.continuation = .{ .return_ = .{
-                        .a = ret.a,
-                        .count = ret.count,
-                        .reexec = false,
-                    } };
-                }
-            },
-            else => {},
+                },
+                else => {},
+            }
         }
         try self.validatePC();
         const inst = self.pc[0];
@@ -226,12 +228,14 @@ pub const CallInfo = struct {
     }
 
     /// Validate PC is within function bounds
-    /// Always enabled for VM safety - prevents undefined behavior from malformed bytecode
+    /// Skipped in optimized builds for performance - bytecode is assumed valid
     inline fn validatePC(self: *CallInfo) !void {
-        const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
-        const pc_index = pc_offset / @sizeOf(Instruction);
-        if (pc_index >= self.func.code.len) {
-            return error.PcOutOfRange;
+        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+            const pc_offset = @intFromPtr(self.pc) - @intFromPtr(self.func.code.ptr);
+            const pc_index = pc_offset / @sizeOf(Instruction);
+            if (pc_index >= self.func.code.len) {
+                return error.PcOutOfRange;
+            }
         }
     }
 };

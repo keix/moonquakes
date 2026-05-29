@@ -8,7 +8,6 @@ const ProtoObject = object.ProtoObject;
 const call_debug = @import("call_debug.zig");
 const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
-const field_cache = @import("field_cache.zig");
 const VM = @import("vm.zig").VM;
 
 pub fn pushCallInfo(vm: *VM, func: *const ProtoObject, closure: ?*ClosureObject, base: u32, ret_base: u32, nresults: i16) !*CallInfo {
@@ -27,7 +26,6 @@ pub fn pushCallInfoVararg(vm: *VM, func: *const ProtoObject, closure: ?*ClosureO
     vm.callstack_size += 1;
     vm.ci = new_ci;
     vm.base = base;
-    field_cache.reset(vm);
 
     return new_ci;
 }
@@ -43,7 +41,6 @@ pub fn popCallInfo(vm: *VM) void {
         } else {
             vm.ci = null;
         }
-        field_cache.reset(vm);
     }
 }
 

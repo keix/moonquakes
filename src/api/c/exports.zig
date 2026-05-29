@@ -602,7 +602,7 @@ pub export fn mq_pcall(
 
     var out_buf: [PCALL_MAX_RESULTS]TValue = undefined;
     const out = out_buf[0..want];
-    call_mod.callValueInto(vm, func, args, out) catch |err| {
+    call_mod.callValueFixed(vm, func, args, .{ .out = out }) catch |err| {
         return finishPCallError(vm, func_idx, err);
     };
 

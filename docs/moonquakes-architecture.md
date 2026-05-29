@@ -96,7 +96,6 @@ pub const CallInfo = struct {
     func: *const ProtoObject,        // function prototype being executed
     closure: ?*ClosureObject,        // closure (null for main chunk)
     pc: [*]const Instruction,        // pointer to current instruction
-    savedpc: ?[*]const Instruction,  // saved pc for yielding
     base: u32,                       // base register index in VM stack
     ret_base: u32,                   // where to place return values in caller's frame
     vararg_base: u32,                // vararg base

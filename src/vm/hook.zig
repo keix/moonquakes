@@ -24,8 +24,20 @@ pub const HookState = struct {
     last_line: i64 = -1,
 };
 
+pub const HookTransfer = union(enum) {
+    cleared,
+    stack: struct {
+        start: u32,
+        src_base: u32,
+        count: u32,
+    },
+    values: struct {
+        start: u32,
+        values: []const TValue,
+    },
+};
+
 fn clearTransfer(vm: *VM) void {
-    if (vm.hooks.in_hook) return;
     vm.hooks.transfer_start = 1;
     vm.hooks.transfer_count = 0;
     for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
@@ -60,6 +72,15 @@ fn setTransferFromValues(vm: *VM, start: u32, values: []const TValue) void {
     for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
     for (values[0..n], 0..) |v, i| {
         vm.hooks.transfer_values[i] = v;
+    }
+}
+
+fn applyTransfer(vm: *VM, transfer: HookTransfer) void {
+    if (vm.hooks.in_hook) return;
+    switch (transfer) {
+        .cleared => clearTransfer(vm),
+        .stack => |stack| setTransferFromStack(vm, stack.start, stack.src_base, stack.count),
+        .values => |values| setTransferFromValues(vm, values.start, values.values),
     }
 }
 
@@ -144,9 +165,9 @@ pub fn onCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn onCallFromStack(vm: *VM, name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+pub fn onCallTransfer(vm: *VM, name_override: ?[]const u8, transfer: HookTransfer, invoke: anytype) !void {
     if (!hasCallListener(vm)) return;
-    setTransferFromStack(vm, start, src_base, count);
+    applyTransfer(vm, transfer);
     try onCall(vm, name_override, invoke);
 }
 
@@ -171,9 +192,9 @@ pub fn onTailCall(vm: *VM, name_override: ?[]const u8, invoke: anytype) !void {
     _ = try invoke(vm, hook, &[_]TValue{TValue.fromString(event_name)});
 }
 
-pub fn onTailCallFromStack(vm: *VM, name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+pub fn onTailCallTransfer(vm: *VM, name_override: ?[]const u8, transfer: HookTransfer, invoke: anytype) !void {
     if (!hasCallListener(vm)) return;
-    setTransferFromStack(vm, start, src_base, count);
+    applyTransfer(vm, transfer);
     try onTailCall(vm, name_override, invoke);
 }
 
@@ -208,20 +229,8 @@ pub fn onReturnOnYield(vm: *VM, invoke: anytype) !void {
     try onReturn(vm, null, if (error_state.isClosingMetamethod(vm)) "close" else null, invoke);
 }
 
-pub fn onReturnFromStack(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, start: u32, src_base: u32, count: u32, invoke: anytype) !void {
+pub fn onReturnTransfer(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, transfer: HookTransfer, invoke: anytype) !void {
     if (!hasReturnListener(vm)) return;
-    setTransferFromStack(vm, start, src_base, count);
-    try onReturn(vm, name_override, close_name_override, invoke);
-}
-
-pub fn onReturnFromValues(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, start: u32, values: []const TValue, invoke: anytype) !void {
-    if (!hasReturnListener(vm)) return;
-    setTransferFromValues(vm, start, values);
-    try onReturn(vm, name_override, close_name_override, invoke);
-}
-
-pub fn onReturnCleared(vm: *VM, name_override: ?[]const u8, close_name_override: ?[]const u8, invoke: anytype) !void {
-    if (!hasReturnListener(vm)) return;
-    clearTransfer(vm);
+    applyTransfer(vm, transfer);
     try onReturn(vm, name_override, close_name_override, invoke);
 }
