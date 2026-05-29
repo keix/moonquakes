@@ -1,6 +1,46 @@
 const std = @import("std");
 const ver = @import("src/version.zig");
 
+const c_api_symbols = [_][]const u8{
+    "mq_version",
+    "mq_newstate",
+    "mq_close",
+    "mq_gc",
+    "mq_gettop",
+    "mq_settop",
+    "mq_type",
+    "mq_typename",
+    "mq_isnil",
+    "mq_isnone",
+    "mq_isnoneornil",
+    "mq_isboolean",
+    "mq_istable",
+    "mq_isfunction",
+    "mq_isnumber",
+    "mq_isinteger",
+    "mq_isstring",
+    "mq_pushnil",
+    "mq_pushboolean",
+    "mq_pushinteger",
+    "mq_pushnumber",
+    "mq_pushlstring",
+    "mq_pushstring",
+    "mq_pushcfunction",
+    "mq_pushvalue",
+    "mq_toboolean",
+    "mq_tointegerx",
+    "mq_tointeger",
+    "mq_tonumberx",
+    "mq_tonumber",
+    "mq_tolstring",
+    "mq_load",
+    "mq_pcall",
+    "mq_newtable",
+    "mq_setfield",
+    "mq_getglobal",
+    "mq_setglobal",
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -8,35 +48,14 @@ pub fn build(b: *std.Build) void {
         std.debug.panic("invalid version string in src/version.zig", .{});
     };
 
-    const exe = b.addExecutable(.{
-        .name = "moonquakes",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    b.installArtifact(exe);
-
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
     // C API libraries (static + shared)
-    const c_api_module = b.createModule(.{
-        .root_source_file = b.path("src/api/c/exports.zig"),
+    const moonquakes_module = b.createModule(.{
+        .root_source_file = b.path("src/moonquakes.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const moonquakes_module = b.createModule(.{
-        .root_source_file = b.path("src/moonquakes.zig"),
+    const c_api_module = b.createModule(.{
+        .root_source_file = b.path("src/api/c/exports.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -58,6 +77,35 @@ pub fn build(b: *std.Build) void {
     });
     c_shared.linkLibC();
     b.installArtifact(c_shared);
+
+    const exe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "moonquakes",
+        .root_module = exe_module,
+    });
+    exe.rdynamic = true;
+    exe.linkLibC();
+    exe.linkLibrary(c_static);
+    for (c_api_symbols) |symbol| {
+        exe.forceUndefinedSymbol(symbol);
+    }
+
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
 
     b.getInstallStep().dependOn(
         &b.addInstallHeaderFile(b.path("include/moonquakes.h"), "moonquakes.h").step,
