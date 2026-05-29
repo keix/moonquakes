@@ -21,7 +21,7 @@ fn valueTypeName(v: TValue) []const u8 {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .userdata => "userdata",
             .thread => "thread",
             .file => "userdata",
@@ -38,7 +38,7 @@ pub fn callableValueTypeName(v: TValue) []const u8 {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .userdata, .file => "userdata",
             .thread => "thread",
             else => "userdata",

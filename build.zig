@@ -83,6 +83,35 @@ pub fn build(b: *std.Build) void {
     const run_moonquakes_tests = b.addRunArtifact(moonquakes_tests);
     test_step.dependOn(&run_moonquakes_tests.step);
 
+    // C API black-box tests: build small C programs against the public header
+    // and link them to the static library, then run each as part of `test`.
+    const c_test_step = b.step("test-c", "Run C API black-box tests");
+    const c_test_names = [_][]const u8{
+        "test_string",
+        "test_table",
+        "test_cfunction",
+    };
+    for (c_test_names) |c_test_name| {
+        const c_test_exe = b.addExecutable(.{
+            .name = c_test_name,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        c_test_exe.addCSourceFile(.{
+            .file = b.path(b.fmt("tests/c/{s}.c", .{c_test_name})),
+            .flags = &.{ "-std=c99", "-Wall", "-Wextra", "-Werror" },
+        });
+        c_test_exe.addIncludePath(b.path("include"));
+        c_test_exe.linkLibrary(c_static);
+        c_test_exe.linkLibC();
+
+        const run_c_test = b.addRunArtifact(c_test_exe);
+        c_test_step.dependOn(&run_c_test.step);
+        test_step.dependOn(&run_c_test.step);
+    }
+
     // Integration test executables
     const integration_step = b.step("integration", "Run integration tests");
     const test_names = [_][]const u8{

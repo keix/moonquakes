@@ -98,6 +98,13 @@ pub const VM = struct {
     temp_roots_spill: std.ArrayListUnmanaged(TValue) = .{},
     temp_roots_count: u32 = 0,
 
+    // Backref to the C-API `mq_State` wrapper, populated by `mq_newstate`.
+    // Read by the C-function dispatcher (`vm.callNative` for native closures
+    // backed by an external C function pointer) to satisfy the
+    // `int (*)(mq_State*)` contract. Null when the VM is driven directly
+    // from Zig with no C API entry point.
+    c_state_opaque: ?*anyopaque = null,
+
     // Lifecycle
     pub const init = lifecycle.init;
     pub const deinit = lifecycle.deinit;
@@ -119,6 +126,7 @@ pub const VM = struct {
 
     // Native
     pub const callNative = api.callNative;
+    pub const callCClosure = api.callCClosure;
 
     // GC
     pub const pushTempRoot = api.pushTempRoot;

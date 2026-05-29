@@ -4,7 +4,10 @@
 
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
-const NativeFnId = @import("../runtime/native.zig").NativeFnId;
+const native_mod = @import("../runtime/native.zig");
+const CFunction = native_mod.CFunction;
+const NativeClosureObject = object.NativeClosureObject;
+const CClosureObject = object.CClosureObject;
 const gc_mod = @import("../runtime/gc/gc.zig");
 const GC = gc_mod.GC;
 const object = @import("../runtime/gc/object.zig");
@@ -14,6 +17,10 @@ const ThreadObject = object.ThreadObject;
 const builtin_dispatch = @import("../builtin/dispatch.zig");
 const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
+
+const CApiState = struct {
+    vm: *VM,
+};
 
 pub fn gc(self: *VM) *GC {
     return self.rt.gc;
@@ -84,7 +91,7 @@ pub fn raiseString(self: *VM, message: []const u8) (LuaException || error{OutOfM
     return raise(self, TValue.fromString(str));
 }
 
-pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults: u32) !void {
+pub fn callNative(self: *VM, nc: *NativeClosureObject, func_reg: u32, nargs: u32, nresults: u32) !void {
     // Clear slots that may become results without clobbering incoming arguments.
     // Native call layout is [func_reg]=callee/self, [func_reg+1 .. func_reg+nargs]=args.
     // Some natives read func_reg as self (e.g., __call handlers), so do not clear it.
@@ -102,7 +109,88 @@ pub fn callNative(self: *VM, id: NativeFnId, func_reg: u32, nargs: u32, nresults
     defer {
         error_state.endNativeCall(self);
     }
-    try builtin_dispatch.invoke(id, self, func_reg, nargs, nresults);
+    try builtin_dispatch.invoke(nc.func.id, self, func_reg, nargs, nresults);
+}
+
+pub fn callCClosure(self: *VM, cc: *CClosureObject, func_reg: u32, nargs: u32, nresults: u32) !void {
+    error_state.beginNativeCall(self);
+    defer {
+        error_state.endNativeCall(self);
+    }
+    try invokeCFunction(self, cc.func, func_reg, nargs, nresults);
+}
+
+/// Dispatch an external C function registered via `mq_pushcfunction`.
+///
+/// Stack layout on entry (in the caller's frame):
+///   [vm.base + func_reg]      = callable
+///   [vm.base + func_reg + 1..] = nargs arguments
+///
+/// Convention: the C callee sees a frame where index 1 = first arg
+/// (`mq_gettop(L) == nargs`). It pushes M results and returns M; the
+/// dispatcher transfers the top M slots back into the caller's frame
+/// starting at `vm.base + func_reg`. A negative return value raises
+/// `error.LuaException` with whatever the callee left on top of its frame
+/// (or a synthesized message when the frame is empty).
+fn invokeCFunction(
+    self: *VM,
+    fp: CFunction,
+    func_reg: u32,
+    nargs: u32,
+    nresults: u32,
+) !void {
+    var fallback_state = CApiState{ .vm = self };
+    const state_opaque = self.c_state_opaque orelse @as(*anyopaque, @ptrCast(&fallback_state));
+
+    const caller_base = self.base;
+    const callable_slot = caller_base + func_reg;
+    const frame_base = callable_slot + 1;
+
+    self.base = frame_base;
+    self.top = frame_base + nargs;
+    defer self.base = caller_base;
+
+    const returned = fp(state_opaque);
+
+    if (returned < 0) {
+        const top_now = self.top;
+        const raised: TValue = if (top_now > self.base) self.stack[top_now - 1] else blk: {
+            const msg = gc(self).allocString("C function returned error") catch {
+                error_state.setRaisedValue(self, .nil);
+                self.top = callable_slot;
+                return error.LuaException;
+            };
+            break :blk TValue.fromString(msg);
+        };
+        error_state.setRaisedValue(self, raised);
+        self.top = callable_slot;
+        return error.LuaException;
+    }
+
+    const claimed: u32 = @intCast(returned);
+    const top_now = self.top;
+    const available: u32 = if (top_now >= self.base) top_now - self.base else 0;
+    const actual = @min(claimed, available);
+    const result_src_base = top_now - actual;
+
+    // Move results down to the callable slot in the caller's frame.
+    var i: u32 = 0;
+    while (i < actual) : (i += 1) {
+        self.stack[callable_slot + i] = self.stack[result_src_base + i];
+    }
+
+    // Re-publish vm.top so the wrapper (`invokeNativeOnStack`) can read either
+    // `top_defined` (uses vm.top) or fixed-count (nil-pads up to nresults).
+    if (nresults == 0) {
+        self.top = callable_slot + actual;
+    } else {
+        var pad_to: u32 = callable_slot + actual;
+        const target = callable_slot + nresults;
+        while (pad_to < target) : (pad_to += 1) {
+            self.stack[pad_to] = .nil;
+        }
+        self.top = target;
+    }
 }
 
 pub fn pushTempRoot(self: *VM, value: TValue) bool {

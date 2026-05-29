@@ -24,6 +24,7 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const CClosureObject = object.CClosureObject;
 const UserdataObject = object.UserdataObject;
 const ThreadObject = object.ThreadObject;
 const FileObject = object.FileObject;
@@ -74,8 +75,13 @@ pub const TValue = union(enum) {
         return self == .object and self.object.type == .native_closure;
     }
 
+    pub fn isCClosure(self: TValue) bool {
+        return self == .object and self.object.type == .c_closure;
+    }
+
     pub fn isCallable(self: TValue) bool {
-        return self == .object and (self.object.type == .closure or self.object.type == .native_closure);
+        return self == .object and
+            (self.object.type == .closure or self.object.type == .native_closure or self.object.type == .c_closure);
     }
 
     pub fn isUserdata(self: TValue) bool {
@@ -114,6 +120,13 @@ pub const TValue = union(enum) {
     pub fn asNativeClosure(self: TValue) ?*NativeClosureObject {
         if (self == .object and self.object.type == .native_closure) {
             return object.getObject(NativeClosureObject, self.object);
+        }
+        return null;
+    }
+
+    pub fn asCClosure(self: TValue) ?*CClosureObject {
+        if (self == .object and self.object.type == .c_closure) {
+            return object.getObject(CClosureObject, self.object);
         }
         return null;
     }
@@ -211,6 +224,10 @@ pub const TValue = union(enum) {
         return .{ .object = &nc.header };
     }
 
+    pub fn fromCClosure(cc: *CClosureObject) TValue {
+        return .{ .object = &cc.header };
+    }
+
     pub fn fromUserdata(ud: *UserdataObject) TValue {
         return .{ .object = &ud.header };
     }
@@ -242,8 +259,8 @@ pub const TValue = union(enum) {
                     try writer.print("{s}", .{s.asSlice()});
                 },
                 .table => try writer.print("table: 0x{x}", .{@intFromPtr(obj)}),
-                .closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
-                .native_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .closure, .native_closure, .c_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .dynamic_library => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                 .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),

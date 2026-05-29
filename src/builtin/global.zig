@@ -13,6 +13,7 @@ const call = @import("../vm/call.zig");
 const error_state = @import("../vm/error_state.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const metamethod = @import("../vm/metamethod.zig");
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 
 fn stripUtf8Bom(bytes: []const u8) []const u8 {
     if (bytes.len >= 3 and bytes[0] == 0xEF and bytes[1] == 0xBB and bytes[2] == 0xBF) {
@@ -171,9 +172,9 @@ fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .upvalue => "upvalue",
-            .userdata, .file => "userdata",
+            .userdata, .file, .dynamic_library => "userdata",
             .proto => "proto",
             .thread => "thread",
         },
@@ -450,9 +451,9 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
         .object => |obj| switch (obj.type) {
             .string => "string",
             .table => "table",
-            .closure, .native_closure => "function",
+            .closure, .native_closure, .c_closure => "function",
             .upvalue => "upvalue",
-            .userdata, .file => "userdata", // file handles are userdata in Lua
+            .userdata, .file, .dynamic_library => "userdata", // file handles are userdata in Lua
             .proto => "proto",
             .thread => "thread",
         },
@@ -689,7 +690,7 @@ pub fn nativePairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Default behavior: return next, table, nil
-    const next_nc = try vm.gc().allocNativeClosure(.{ .id = .next });
+    const next_nc = try vm.gc().allocNativeClosure(NativeFn.init(.next));
     vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(next_nc);
 
     // Return the table
@@ -724,18 +725,18 @@ pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const globals = vm.globals();
     const iter_val = if (globals.get(TValue.fromString(cache_key))) |cached| blk: {
         if (cached.asNativeClosure()) |nc| {
-            if (nc.func.id == .ipairs_iterator) {
+            if (nc.func.isBuiltin(.ipairs_iterator)) {
                 break :blk cached;
             }
         }
         // Cache is invalid, recreate
-        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
+        const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.ipairs_iterator));
         const val = TValue.fromNativeClosure(iter_nc);
         try vm.gc().tableSet(globals, TValue.fromString(cache_key), val);
         break :blk val;
     } else blk: {
         // No cache, create and store
-        const iter_nc = try vm.gc().allocNativeClosure(.{ .id = .ipairs_iterator });
+        const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.ipairs_iterator));
         const val = TValue.fromNativeClosure(iter_nc);
         try vm.gc().tableSet(globals, TValue.fromString(cache_key), val);
         break :blk val;

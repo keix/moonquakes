@@ -468,9 +468,8 @@ fn printValue(writer: anytype, val: TValue) !void {
                     try writer.writeAll(str.asSlice());
                 },
                 .table => try writer.print("table: 0x{x}", .{@intFromPtr(obj)}),
-                .closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
-                .native_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
-                .userdata => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
+                .closure, .native_closure, .c_closure => try writer.print("function: 0x{x}", .{@intFromPtr(obj)}),
+                .userdata, .dynamic_library => try writer.print("userdata: 0x{x}", .{@intFromPtr(obj)}),
                 .proto => try writer.print("proto: 0x{x}", .{@intFromPtr(obj)}),
                 .upvalue => try writer.print("upvalue: 0x{x}", .{@intFromPtr(obj)}),
                 .thread => try writer.print("thread: 0x{x}", .{@intFromPtr(obj)}),

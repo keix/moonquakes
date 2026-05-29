@@ -2,6 +2,7 @@ const std = @import("std");
 const gc_mod = @import("../runtime/gc/gc.zig");
 const object = @import("../runtime/gc/object.zig");
 const TValue = @import("../runtime/value.zig").TValue;
+const NativeFn = @import("../runtime/native.zig").NativeFn;
 
 const GC = gc_mod.GC;
 const RootProvider = gc_mod.RootProvider;
@@ -346,7 +347,7 @@ test "finalizer queue keeps unreachable object alive until drained" {
     try gc.initMetamethodKeys();
 
     const mt = try gc.allocTable();
-    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    const gc_fn = try gc.allocNativeClosure(NativeFn.init(.print));
     try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
     const obj = try gc.allocTable();
@@ -378,7 +379,7 @@ test "thread entry function barrier keeps white callable alive from black thread
     try std.testing.expect(gc.propagateOne());
     try std.testing.expect(gc.isBlack(&thread.header));
 
-    const entry = try gc.allocNativeClosure(.{ .id = .print });
+    const entry = try gc.allocNativeClosure(NativeFn.init(.print));
     gc.threadSetEntryFunc(thread, &entry.header);
 
     gc.finishMarkPhase();
@@ -579,7 +580,7 @@ test "generational minor enqueues finalizer for unreachable young object" {
     try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
 
     const mt = try gc.allocTable();
-    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    const gc_fn = try gc.allocNativeClosure(NativeFn.init(.print));
     try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
     const obj = try gc.allocTable();
@@ -613,7 +614,7 @@ test "queued finalizer survives subsequent minor cycle" {
     try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
 
     const mt = try gc.allocTable();
-    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    const gc_fn = try gc.allocNativeClosure(NativeFn.init(.print));
     try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
     const obj = try gc.allocTable();
@@ -649,7 +650,7 @@ test "queued finalizer keeps young __gc function alive across minor cycle" {
     try std.testing.expectEqual(object.ObjectGeneration.old, holder.header.generation);
 
     const mt = try gc.allocTable();
-    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    const gc_fn = try gc.allocNativeClosure(NativeFn.init(.print));
     try std.testing.expectEqual(object.ObjectGeneration.young, gc_fn.header.generation);
     try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
@@ -677,7 +678,7 @@ test "generational minor does not enqueue finalizer for unreachable old object" 
     gc.generational_major_interval = 8;
 
     const mt = try gc.allocTable();
-    const gc_fn = try gc.allocNativeClosure(.{ .id = .print });
+    const gc_fn = try gc.allocNativeClosure(NativeFn.init(.print));
     try gc.tableSet(mt, TValue.fromString(gc.mm_keys.get(.gc)), TValue.fromNativeClosure(gc_fn));
 
     const obj = try gc.allocTable();

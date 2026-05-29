@@ -13,6 +13,8 @@ const StringObject = object.StringObject;
 const TableObject = object.TableObject;
 const ClosureObject = object.ClosureObject;
 const NativeClosureObject = object.NativeClosureObject;
+const CClosureObject = object.CClosureObject;
+const DynamicLibraryObject = object.DynamicLibraryObject;
 const UpvalueObject = object.UpvalueObject;
 const ProtoObject = object.ProtoObject;
 const UserdataObject = object.UserdataObject;
@@ -23,6 +25,7 @@ const FileKind = object.FileKind;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const NativeFn = @import("../native.zig").NativeFn;
+const CFunction = @import("../native.zig").CFunction;
 const TValue = @import("../value.zig").TValue;
 
 // Debug: force GC on every allocation to expose marking bugs
@@ -267,6 +270,31 @@ pub fn allocNativeClosure(self: anytype, func: NativeFn) !*NativeClosureObject {
     obj.func = func;
 
     // Add to GC object list
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a new external C closure object
+pub fn allocCClosure(self: anytype, func: CFunction, lib: ?*DynamicLibraryObject) !*CClosureObject {
+    const obj = try allocObject(self, CClosureObject, 0);
+
+    obj.header = newObjectHeader(self, .c_closure);
+    obj.func = func;
+    obj.lib = lib;
+
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a dynamic library handle object.
+pub fn allocDynamicLibrary(self: anytype, lib: std.DynLib) !*DynamicLibraryObject {
+    const obj = try allocObject(self, DynamicLibraryObject, 0);
+
+    obj.header = newObjectHeader(self, .dynamic_library);
+    obj.lib = lib;
+
     self.objects = &obj.header;
 
     return obj;

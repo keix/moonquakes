@@ -237,10 +237,20 @@ pub const NativeFnId = enum(u8) {
     }
 };
 
+/// External C function pointer registered via `mq_pushcfunction`. The opaque
+/// pointer it receives is the `*mq_State` (cast from `*State`) handed back
+/// from `mq_newstate`; the callee returns the number of results it pushed,
+/// or a negative value to signal an error.
+pub const CFunction = *const fn (?*anyopaque) callconv(.c) c_int;
+
 pub const NativeFn = struct {
     id: NativeFnId,
 
     pub fn init(id: NativeFnId) NativeFn {
         return NativeFn{ .id = id };
+    }
+
+    pub fn isBuiltin(self: NativeFn, id: NativeFnId) bool {
+        return self.id == id;
     }
 };
