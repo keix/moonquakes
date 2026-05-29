@@ -51,7 +51,7 @@ $(TARGET): examples/minimal.c zig-libs $(LOADLIB_EXAMPLE) | $(BINDIR)
 # Example package.loadlib target.
 
 $(LOADLIB_EXAMPLE): examples/loadlib_addmul.c zig-libs | $(LIBDIR)
-	$(CC) $(CFLAGS) -shared examples/loadlib_addmul.c -L$(ZIG_LIBDIR) -lmoonquakes -o $@
+	$(CC) $(CFLAGS) -shared examples/loadlib_addmul.c -o $@
 
 clean:
 	rm -rf $(BUILD)
