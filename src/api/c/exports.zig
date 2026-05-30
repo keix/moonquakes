@@ -666,6 +666,20 @@ pub export fn mq_setfield(state: ?*mq_State, idx: c_int, name: ?[*:0]const u8) v
     vm.top -= 1;
 }
 
+/// Do `t[n] = v`, where `t` is the table at `idx`, `n` is an integer key, and
+/// `v` is the value on top of the stack. Pops `v` on success. Mirrors
+/// `mq_setfield`'s failure behavior: invalid state, empty stack, non-table
+/// target, or allocation failure leaves the value on the stack.
+pub export fn mq_seti(state: ?*mq_State, idx: c_int, n: i64) void {
+    const vm = vmOf(state) orelse return;
+    if (vm.top <= vm.base) return;
+    const abs = absIndex(vm, idx) orelse return;
+    const tbl = vm.stack[abs].asTable() orelse return;
+    const top_val = vm.stack[vm.top - 1];
+    vm.gc().tableSet(tbl, .{ .integer = n }, top_val) catch return;
+    vm.top -= 1;
+}
+
 // ----------------------------------------------------------------------------
 // Globals
 // ----------------------------------------------------------------------------

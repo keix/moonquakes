@@ -140,6 +140,7 @@ int mq_pcall(mq_State* L, int nargs, int nresults, int msgh);
 // stack; v is popped on success.
 void mq_newtable(mq_State* L);
 void mq_setfield(mq_State* L, int idx, const char* k);
+void mq_seti(mq_State* L, int idx, mq_Integer n);
 
 // Globals
 int mq_getglobal(mq_State* L, const char* name);
