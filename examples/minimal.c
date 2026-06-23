@@ -150,8 +150,9 @@ int main(void) {
               "local f, err, where = package.loadlib('./build/lib/loadlib_addmul.so', "
               "'mq_loadlib_addmul') "
               "assert(f, tostring(err) .. ' (' .. tostring(where) .. ')') "
-              "local s, p = f(8, 9) "
-              "print('loadlib addmul(8, 9) -> sum=' .. s .. ' product=' .. p)");
+              "local out = f(8, 9) "
+              "print('loadlib addmul(8, 9) -> sum=' .. out[1] .. ' product=' .. out[2] "
+              ".. ' len=' .. out[3])");
 
     // 10. Exercise mq_gc sub-commands.
     printf("gc running before stop: %d\n", mq_gc(L, MQ_GCISRUNNING, 0));

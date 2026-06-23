@@ -10,6 +10,9 @@
  *     below the value.
  *   - mq_setfield is a no-op (leaves the value on the stack) when the
  *     target slot is not a table.
+ *   - mq_seti stores top-of-stack under an integer key and pops on success.
+ *   - mq_geti pushes an integer-keyed value and returns its type tag.
+ *   - mq_len pushes direct table/string length and returns the pushed type tag.
  *   - Values stored via mq_setfield are observable through mq_getglobal /
  *     mq_getfield-style retrieval (here exercised end-to-end via Lua code
  *     loaded by mq_load + mq_pcall).
@@ -54,18 +57,44 @@ static void test_setfield_pops_value_on_success(mq_State *L) {
     mq_settop(L, 0);
 }
 
+static void test_geti_and_len(mq_State *L) {
+    mq_newtable(L);
+    mq_pushinteger(L, 10);
+    mq_seti(L, -2, 1);
+    mq_pushinteger(L, 20);
+    mq_seti(L, -2, 2);
+
+    int t = mq_geti(L, -1, 2);
+    assert(t == MQ_TNUMBER);
+    assert(mq_tointeger(L, -1) == 20);
+    mq_settop(L, 1);
+
+    t = mq_geti(L, -1, 99);
+    assert(t == MQ_TNIL);
+    assert(mq_isnil(L, -1));
+    mq_settop(L, 1);
+
+    t = mq_len(L, -1);
+    assert(t == MQ_TNUMBER);
+    assert(mq_tointeger(L, -1) == 2);
+    mq_settop(L, 0);
+}
+
 static void test_setfield_is_visible_from_lua(mq_State *L) {
     mq_newtable(L);
     mq_pushinteger(L, 7);
     mq_setfield(L, -2, "x");
     mq_pushstring(L, "hello");
     mq_setfield(L, -2, "greeting");
+    mq_pushinteger(L, 33);
+    mq_seti(L, -2, 1);
     /* Promote the table to a global so Lua code can see it. */
     mq_setglobal(L, "cfg");
 
     const char *src =
         "assert(cfg.x == 7, 'x'); "
         "assert(cfg.greeting == 'hello', 'greeting'); "
+        "assert(cfg[1] == 33, 'integer key'); "
         "return true";
     const char *cursor = src;
     int rc = mq_load(L, one_shot, &cursor, "=cfg_test", NULL);
@@ -97,15 +126,51 @@ static void test_setfield_null_key_is_noop(mq_State *L) {
     mq_settop(L, 0);
 }
 
+static void test_seti_on_non_table_is_noop(mq_State *L) {
+    mq_pushinteger(L, 1);     /* not a table */
+    mq_pushinteger(L, 2);     /* value to set */
+    mq_seti(L, -2, 1);
+    assert(mq_gettop(L) == 2);
+    assert(mq_type(L, -1) == MQ_TNUMBER);
+    assert(mq_type(L, -2) == MQ_TNUMBER);
+    mq_settop(L, 0);
+}
+
+static void test_geti_on_non_table_pushes_nil(mq_State *L) {
+    mq_pushinteger(L, 1);
+    int t = mq_geti(L, -1, 1);
+    assert(t == MQ_TNIL);
+    assert(mq_isnil(L, -1));
+    mq_settop(L, 0);
+}
+
+static void test_len_string_and_unsupported(mq_State *L) {
+    mq_pushstring(L, "hello");
+    int t = mq_len(L, -1);
+    assert(t == MQ_TNUMBER);
+    assert(mq_tointeger(L, -1) == 5);
+    mq_settop(L, 0);
+
+    mq_pushinteger(L, 12);
+    t = mq_len(L, -1);
+    assert(t == MQ_TNIL);
+    assert(mq_isnil(L, -1));
+    mq_settop(L, 0);
+}
+
 int main(void) {
     mq_State *L = mq_newstate();
     assert(L != NULL);
 
     test_newtable_pushes_a_table(L);
     test_setfield_pops_value_on_success(L);
+    test_geti_and_len(L);
     test_setfield_is_visible_from_lua(L);
     test_setfield_on_non_table_is_noop(L);
     test_setfield_null_key_is_noop(L);
+    test_seti_on_non_table_is_noop(L);
+    test_geti_on_non_table_pushes_nil(L);
+    test_len_string_and_unsupported(L);
 
     mq_close(L);
     return 0;
