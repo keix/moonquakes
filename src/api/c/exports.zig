@@ -648,6 +648,23 @@ pub export fn mq_newtable(state: ?*mq_State) void {
     pushTValue(vm, TValue.fromTable(tbl));
 }
 
+/// Push `t[n]` for the table at `idx` and return the pushed value's type tag.
+/// Missing keys, invalid indices, and non-table targets push nil.
+pub export fn mq_geti(state: ?*mq_State, idx: c_int, n: i64) c_int {
+    const vm = vmOf(state) orelse return constants.MQ_TNONE;
+    const abs = absIndex(vm, idx) orelse {
+        pushTValue(vm, .nil);
+        return constants.MQ_TNIL;
+    };
+    const tbl = vm.stack[abs].asTable() orelse {
+        pushTValue(vm, .nil);
+        return constants.MQ_TNIL;
+    };
+    const v = tbl.get(.{ .integer = n }) orelse TValue.nil;
+    pushTValue(vm, v);
+    return tvalueTypeTag(v);
+}
+
 /// Do `t[k] = v`, where `t` is the table at `idx`, `k` is the NUL-terminated
 /// string `name`, and `v` is the value on top of the stack. Pops `v` on
 /// success. No-op when the state is invalid, the stack is empty, `name` is
@@ -678,6 +695,27 @@ pub export fn mq_seti(state: ?*mq_State, idx: c_int, n: i64) void {
     const top_val = vm.stack[vm.top - 1];
     vm.gc().tableSet(tbl, .{ .integer = n }, top_val) catch return;
     vm.top -= 1;
+}
+
+/// Push the length of the value at `idx` and return the pushed type tag.
+/// Currently supports strings and tables directly. Unsupported values push nil.
+pub export fn mq_len(state: ?*mq_State, idx: c_int) c_int {
+    const vm = vmOf(state) orelse return constants.MQ_TNONE;
+    const abs = absIndex(vm, idx) orelse {
+        pushTValue(vm, .nil);
+        return constants.MQ_TNIL;
+    };
+    const v = vm.stack[abs];
+    const len: i64 = if (v.asString()) |str|
+        @intCast(str.len)
+    else if (v.asTable()) |tbl|
+        tbl.rawLen()
+    else {
+        pushTValue(vm, .nil);
+        return constants.MQ_TNIL;
+    };
+    pushTValue(vm, .{ .integer = len });
+    return constants.MQ_TNUMBER;
 }
 
 // ----------------------------------------------------------------------------

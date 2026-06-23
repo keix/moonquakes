@@ -36,8 +36,10 @@ const c_api_symbols = [_][]const u8{
     "mq_load",
     "mq_pcall",
     "mq_newtable",
+    "mq_geti",
     "mq_setfield",
     "mq_seti",
+    "mq_len",
     "mq_getglobal",
     "mq_setglobal",
 };
