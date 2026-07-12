@@ -2702,7 +2702,23 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - primitive equality fast path
 //   - falls back to __eq metamethod handling
-fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; everything else (generic equality, __eq
+    // metamethods) stays out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer == right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opEQSlow(vm, ci, inst);
+}
+
+fn opEQSlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const negate = inst.getA();
     const b = inst.getB();
@@ -2727,7 +2743,22 @@ fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric/string fast path
 //   - falls back to __lt metamethod handling
-fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, strings, and metamethods out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer < right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLTSlow(vm, ci, inst);
+}
+
+fn opLTSlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -2759,7 +2790,22 @@ fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric/string fast path
 //   - falls back to __le metamethod handling
-fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, strings, and metamethods out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer <= right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLESlow(vm, ci, inst);
+}
+
+fn opLESlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -3081,7 +3127,7 @@ fn opGEISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //
 // Semantics:
 //   - branches on truthiness without moving values
-fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+inline fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const k = inst.getk();
@@ -3103,7 +3149,7 @@ fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
 //
 // Semantics:
 //   - conditional move paired with branch skip
-fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+inline fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const k = inst.getk();
