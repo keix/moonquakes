@@ -20,8 +20,9 @@ pub fn isPending() bool {
     return pending.load(.acquire);
 }
 
-/// Fast check + consume: only do atomic swap if interrupt is pending
-pub fn consume() bool {
+/// Fast check + consume: only do atomic swap if interrupt is pending.
+/// Inline so the per-instruction fast path is a single relaxed load.
+pub inline fn consume() bool {
     // Fast path: relaxed load first to avoid expensive atomic swap
     if (!pending.load(.monotonic)) return false;
     // Slow path: actually consume the interrupt

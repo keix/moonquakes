@@ -244,11 +244,18 @@ fn finishReturnToCaller(vm: *VM, ret: PreparedReturn) ExecuteResult {
     return .LoopContinue;
 }
 
-pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
-    // Fast path for common case
+pub inline fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
+    // Inline fast path: this tag check runs on every executed instruction.
+    // Keeping the handler bodies in this function made it too big to
+    // inline, turning the check into an out-of-line call (measured ~36
+    // instructions per executed Lua instruction).
     if (ci.continuation == .none) return false;
+    return continueFrameContinuationSlow(vm, ci);
+}
+
+fn continueFrameContinuationSlow(vm: *VM, ci: *CallInfo) !bool {
     switch (ci.continuation) {
-        .none => unreachable,
+        .none => return false,
         .return_ => return false,
         .compare => |compare| {
             var is_true = vm.stack[compare.result_slot].toBoolean();
@@ -1615,9 +1622,10 @@ inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
 }
 
 inline fn runHooksIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
-    // Fast path: skip all hook processing when no hooks are registered
-    // Note: count hooks use hooks.count, not hooks.mask
-    if (vm.hooks.mask == 0 and vm.hooks.count == 0) return;
+    // Fast path: skip all hook processing when no hooks are registered.
+    // `active` is derived from mask/count (see hook.syncActive) so the
+    // per-instruction guard is a single load.
+    if (!vm.hooks.active) return;
     try runCountHookIfNeeded(vm);
     try runLineHookIfNeeded(vm, ci, inst);
 }
@@ -1628,7 +1636,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     if (interrupt.consume()) {
         return vm.raiseString("interrupted!");
     }
-    vm.field_cache.exec_tick +%= 1;
     const ci = vm.ci.?;
     try runHooksIfNeeded(vm, ci, inst);
 
@@ -2241,7 +2248,25 @@ fn opSHRI(vm: *VM, inst: Instruction) !ExecuteResult {
     return error.ArithmeticError;
 }
 
-fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+inline fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+    // Inline integer fast path; coercion and metamethods stay out of line.
+    if (op == .add or op == .sub or op == .mul) {
+        const vb = &vm.stack[vm.base + inst.getB()];
+        const vc = &ci.func.k[inst.getC()];
+        if (vb.isInteger() and vc.isInteger()) {
+            vm.stack[vm.base + inst.getA()] = .{ .integer = switch (op) {
+                .add => vb.integer +% vc.integer,
+                .sub => vb.integer -% vc.integer,
+                .mul => vb.integer *% vc.integer,
+                else => unreachable,
+            } };
+            return .Continue;
+        }
+    }
+    return execArithKSlow(vm, ci, inst, op);
+}
+
+fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -2695,7 +2720,23 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - primitive equality fast path
 //   - falls back to __eq metamethod handling
-fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; everything else (generic equality, __eq
+    // metamethods) stays out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer == right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opEQSlow(vm, ci, inst);
+}
+
+fn opEQSlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     _ = ci;
     const negate = inst.getA();
     const b = inst.getB();
@@ -2720,7 +2761,22 @@ fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric/string fast path
 //   - falls back to __lt metamethod handling
-fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, strings, and metamethods out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer < right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLTSlow(vm, ci, inst);
+}
+
+fn opLTSlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -2752,7 +2808,22 @@ fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric/string fast path
 //   - falls back to __le metamethod handling
-fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, strings, and metamethods out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    const right = &vm.stack[vm.base + inst.getC()];
+    if (left.isInteger() and right.isInteger()) {
+        const negate = inst.getA();
+        const is_true = left.integer <= right.integer;
+        if ((is_true and negate == 0) or (!is_true and negate != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLESlow(vm, ci, inst);
+}
+
+fn opLESlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const negate = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -2885,7 +2956,22 @@ fn opEQI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric fast path
 //   - falls back to __lt metamethod handling
-fn opLTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, metamethods, and errors out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    if (left.isInteger()) {
+        const a = inst.getA();
+        const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
+        const is_true = left.integer < imm;
+        if ((is_true and a == 0) or (!is_true and a != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLTISlow(vm, ci, inst);
+}
+
+fn opLTISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -2916,7 +3002,22 @@ fn opLTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric fast path
 //   - falls back to __le metamethod handling
-fn opLEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opLEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, metamethods, and errors out of line.
+    const left = &vm.stack[vm.base + inst.getB()];
+    if (left.isInteger()) {
+        const a = inst.getA();
+        const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
+        const is_true = left.integer <= imm;
+        if ((is_true and a == 0) or (!is_true and a != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opLEISlow(vm, ci, inst);
+}
+
+fn opLEISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -2947,7 +3048,22 @@ fn opLEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric fast path
 //   - falls back to reversed __lt metamethod handling
-fn opGTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opGTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, metamethods, and errors out of line.
+    const right = &vm.stack[vm.base + inst.getB()];
+    if (right.isInteger()) {
+        const a = inst.getA();
+        const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
+        const is_true = imm < right.integer;
+        if ((is_true and a == 0) or (!is_true and a != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opGTISlow(vm, ci, inst);
+}
+
+fn opGTISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -2978,7 +3094,22 @@ fn opGTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 // Semantics:
 //   - numeric fast path
 //   - falls back to reversed __le metamethod handling
-fn opGEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opGEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; floats, metamethods, and errors out of line.
+    const right = &vm.stack[vm.base + inst.getB()];
+    if (right.isInteger()) {
+        const a = inst.getA();
+        const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
+        const is_true = imm <= right.integer;
+        if ((is_true and a == 0) or (!is_true and a != 0)) {
+            ci.skip();
+        }
+        return .Continue;
+    }
+    return opGEISlow(vm, ci, inst);
+}
+
+fn opGEISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const sc = inst.getC();
@@ -3014,7 +3145,7 @@ fn opGEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //
 // Semantics:
 //   - branches on truthiness without moving values
-fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+inline fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     _ = ci;
     const a = inst.getA();
     const k = inst.getk();
@@ -3036,7 +3167,7 @@ fn opTEST(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
 //
 // Semantics:
 //   - conditional move paired with branch skip
-fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
+inline fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const k = inst.getk();
@@ -3055,7 +3186,9 @@ fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
 // Semantics:
 //   - advances integer or float loop state
 //   - jumps back by sBx when the loop continues
-fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+inline fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    // Inline integer fast path; the float fallback stays out of line so the
+    // dispatch loop only carries the common case.
     const a = inst.getA();
     const sbx = inst.getSBx();
     const idx = &vm.stack[vm.base + a];
@@ -3088,18 +3221,22 @@ fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
         }
-    } else {
-        const i = idx.toNumber() orelse return error.InvalidForLoopInit;
-        const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
-        const s = step.toNumber() orelse return error.InvalidForLoopStep;
+        return .Continue;
+    }
+    return opFORLOOPFloat(vm, ci, a, sbx, idx, limit, step);
+}
 
-        const new_i = i + s;
-        const cont = if (s > 0) (new_i <= l) else (new_i >= l);
-        if (cont) {
-            idx.* = .{ .number = new_i };
-            vm.stack[vm.base + a + 3] = .{ .number = new_i };
-            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-        }
+fn opFORLOOPFloat(vm: *VM, ci: *CallInfo, a: u8, sbx: i17, idx: *TValue, limit: *TValue, step: *TValue) !ExecuteResult {
+    const i = idx.toNumber() orelse return error.InvalidForLoopInit;
+    const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
+    const s = step.toNumber() orelse return error.InvalidForLoopStep;
+
+    const new_i = i + s;
+    const cont = if (s > 0) (new_i <= l) else (new_i >= l);
+    if (cont) {
+        idx.* = .{ .number = new_i };
+        vm.stack[vm.base + a + 3] = .{ .number = new_i };
+        if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
     }
     return .Continue;
 }
@@ -3959,9 +4096,42 @@ fn mmEventFromOpcode(a: u8) ?MetaEvent {
     };
 }
 
-/// Arithmetic with metamethod fallback
-/// Tries fast path first, then checks for metamethod
-fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, comptime event: MetaEvent) !ExecuteResult {
+/// Arithmetic with metamethod fallback.
+/// The pure-numeric fast paths are inlined into the dispatch switch; string
+/// coercion, metamethods, and error reporting stay out of line.
+inline fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, comptime event: MetaEvent) !ExecuteResult {
+    const vb = &vm.stack[vm.base + inst.getB()];
+    const vc = &vm.stack[vm.base + inst.getC()];
+
+    if (arith_op == .add or arith_op == .sub or arith_op == .mul) {
+        if (vb.isInteger() and vc.isInteger()) {
+            const res = switch (arith_op) {
+                .add => vb.integer +% vc.integer,
+                .sub => vb.integer -% vc.integer,
+                .mul => vb.integer *% vc.integer,
+                else => unreachable,
+            };
+            vm.stack[vm.base + inst.getA()] = .{ .integer = res };
+            return .Continue;
+        }
+    }
+    if (arith_op == .add or arith_op == .sub or arith_op == .mul or arith_op == .div) {
+        if (vb.isNumber() and vc.isNumber()) {
+            const res = switch (arith_op) {
+                .add => vb.number + vc.number,
+                .sub => vb.number - vc.number,
+                .mul => vb.number * vc.number,
+                .div => vb.number / vc.number,
+                else => unreachable,
+            };
+            vm.stack[vm.base + inst.getA()] = .{ .number = res };
+            return .Continue;
+        }
+    }
+    return dispatchArithMMSlow(vm, inst, arith_op, event);
+}
+
+fn dispatchArithMMSlow(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, comptime event: MetaEvent) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -4000,6 +4170,12 @@ fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime ev
     const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
         return null;
     };
+    // Match the register-operand path: a non-callable metamethod reports
+    // "attempt to call a ... value (metamethod 'x')" instead of a raw error.
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+        try raiseMetamethodNotCallable(vm, mm, metamethodEventName(event));
+        unreachable;
+    }
     return try callBinMetamethod(vm, mm, vb, vc, result_reg, metamethodEventName(event));
 }
 

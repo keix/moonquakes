@@ -96,7 +96,7 @@ pub fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
                 target_reg = inst.getB();
                 continue;
             },
-            .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => {
+            .ADDI, .ADDK, .SUBK, .MULK, .MODK, .POWK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => {
                 target_reg = inst.getB();
                 continue;
             },

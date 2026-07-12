@@ -33,6 +33,12 @@ pub fn reset(vm: *VM) void {
 }
 
 pub fn rememberFieldAccess(vm: *VM, reg: u8, key: *StringObject, is_global: bool, is_method: bool) void {
+    // exec_tick advances per recorded field access, not per instruction, so
+    // the freshness window in consumers means "within the last N field
+    // accesses" rather than "within the last N instructions". It only feeds
+    // error-message diagnostics; paying an RMW on every instruction for it
+    // was measured at ~2 instructions per executed Lua instruction.
+    vm.field_cache.exec_tick +%= 1;
     vm.field_cache.last_field_reg = reg;
     vm.field_cache.last_field_key = key;
     vm.field_cache.last_field_is_global = is_global;
