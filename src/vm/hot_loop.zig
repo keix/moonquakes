@@ -27,6 +27,7 @@ const VM = @import("vm.zig").VM;
 const CallInfo = @import("execution.zig").CallInfo;
 const interrupt = @import("../interrupt.zig");
 const mutation = @import("../runtime/gc/mutation.zig");
+const call_debug = @import("call_debug.zig");
 
 pub fn run(vm: *VM, ci: *CallInfo) void {
     // Safe builds validate the PC on every fetch (CallInfo.validatePC);
@@ -35,14 +36,16 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
     // passing/all.lua run.
     if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) return;
 
-    var pc = ci.pc;
-    defer ci.pc = pc;
+    // Frame-local state. The CALL/RETURN fast paths switch frames without
+    // leaving the loop, swapping these in place; everything else about the
+    // frame (vm.ci, vm.base, vm.top, callstack) is kept in sync eagerly.
+    var cur = ci;
+    var pc = cur.pc;
+    defer cur.pc = pc;
 
-    // Stable for the whole run: fast ops cannot reallocate the stack or
-    // switch frames.
     const stack = &vm.stack;
-    const base = vm.base;
-    const k = ci.func.k;
+    var base = vm.base;
+    var k = cur.func.k;
 
     var inst = pc[0];
     dispatch: switch (inst.getOpCode()) {
@@ -165,13 +168,13 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // Emitted at every loop back-edge by the compiler. With no
             // to-be-closed slots on this frame and no open upvalues at all,
             // there is nothing to close.
-            if (ci.tbc_bitmap != 0 or vm.open_upvalues != null) return;
+            if (cur.tbc_bitmap != 0 or vm.open_upvalues != null) return;
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .GETUPVAL => {
-            const closure = ci.closure orelse return;
+            const closure = cur.closure orelse return;
             const b = inst.getB();
             stack[base + inst.getA()] = if (b < closure.upvalues.len)
                 closure.upvalues[b].get()
@@ -182,7 +185,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .SETUPVAL => {
-            const closure = ci.closure orelse return;
+            const closure = cur.closure orelse return;
             const b = inst.getB();
             if (b < closure.upvalues.len) {
                 mutation.upvalueSet(vm.gc(), closure.upvalues[b], stack[base + inst.getA()]);
@@ -343,6 +346,99 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             }
             const skip = (is_true and negate == 0) or (!is_true and negate != 0);
             pc += if (skip) 2 else 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .CALL => {
+            // Fast path: fixed-arg call of a non-vararg Lua closure. Vararg
+            // callees, top-defined argument counts (B == 0), native/pcall
+            // callees, and a full callstack take the outer handler. Calls
+            // are also safepoints (recursion has no back-edges).
+            const func_val = &stack[base + inst.getA()];
+            if (!func_val.isObject()) return;
+            const func_closure = func_val.asClosure() orelse return;
+            const proto = func_closure.proto;
+            if (proto.is_vararg) return;
+            const b = inst.getB();
+            if (b == 0) return;
+            if (vm.callstack_size >= vm.callstack.len) return;
+            if (vm.slow_work_signal or interrupt.isPending()) return;
+
+            const a = inst.getA();
+            pc += 1;
+            cur.pc = pc;
+
+            // Mirror stageLuaCallFrameFromStack's non-vararg path: shift
+            // the arguments one slot down over the function value.
+            const new_base = base + a;
+            const nargs: u32 = b - 1;
+            const params_to_copy = @min(nargs, @as(u32, proto.numparams));
+            var i: u32 = 0;
+            while (i < params_to_copy) : (i += 1) {
+                stack[new_base + i] = stack[new_base + 1 + i];
+            }
+            while (i < proto.numparams) : (i += 1) {
+                stack[new_base + i] = .nil;
+            }
+
+            const c = inst.getC();
+            const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
+            const new_ci = &vm.callstack[vm.callstack_size];
+            new_ci.* = CallInfo.init(proto, func_closure, new_base, new_base, nresults, cur, 0, 0);
+            call_debug.applyToCallInfo(vm, new_ci);
+            vm.callstack_size += 1;
+            vm.ci = new_ci;
+            vm.base = new_base;
+            vm.top = new_base + proto.maxstacksize;
+
+            cur = new_ci;
+            base = new_base;
+            k = proto.k;
+            pc = proto.code.ptr;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .RETURN0, .RETURN1 => {
+            // Fast path mirrors prepareReturn's no-suspend case plus
+            // finishReturnToCaller and popCallInfo for non-protected frames.
+            if (cur.tbc_bitmap != 0 or cur.continuation != .none) return;
+            if (cur.is_protected) return;
+            if (vm.open_upvalues != null) return;
+            const prev = cur.previous orelse return;
+
+            const is_return1 = inst.getOpCode() == .RETURN1;
+            const ret_val = if (is_return1) stack[base + inst.getA()] else TValue.nil;
+            const nresults = cur.nresults;
+            const dst = cur.ret_base;
+
+            vm.callstack_size -= 1;
+            vm.ci = prev;
+            vm.base = prev.base;
+
+            if (nresults < 0) {
+                if (is_return1) {
+                    stack[dst] = ret_val;
+                    vm.top = dst + 1;
+                } else {
+                    vm.top = dst;
+                }
+            } else {
+                const n: u32 = @intCast(nresults);
+                var j: u32 = 0;
+                if (is_return1 and n >= 1) {
+                    stack[dst] = ret_val;
+                    j = 1;
+                }
+                while (j < n) : (j += 1) {
+                    stack[dst + j] = .nil;
+                }
+                vm.top = prev.base + prev.func.maxstacksize;
+            }
+
+            cur = prev;
+            base = prev.base;
+            k = prev.func.k;
+            pc = prev.pc;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
