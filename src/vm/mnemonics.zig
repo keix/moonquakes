@@ -2248,7 +2248,25 @@ fn opSHRI(vm: *VM, inst: Instruction) !ExecuteResult {
     return error.ArithmeticError;
 }
 
-fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+inline fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
+    // Inline integer fast path; coercion and metamethods stay out of line.
+    if (op == .add or op == .sub or op == .mul) {
+        const vb = &vm.stack[vm.base + inst.getB()];
+        const vc = &ci.func.k[inst.getC()];
+        if (vb.isInteger() and vc.isInteger()) {
+            vm.stack[vm.base + inst.getA()] = .{ .integer = switch (op) {
+                .add => vb.integer +% vc.integer,
+                .sub => vb.integer -% vc.integer,
+                .mul => vb.integer *% vc.integer,
+                else => unreachable,
+            } };
+            return .Continue;
+        }
+    }
+    return execArithKSlow(vm, ci, inst, op);
+}
+
+fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithOp) !ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -4152,6 +4170,12 @@ fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime ev
     const mm = metamethod.getBinMetamethod(vb, vc, event, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
         return null;
     };
+    // Match the register-operand path: a non-callable metamethod reports
+    // "attempt to call a ... value (metamethod 'x')" instead of a raw error.
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+        try raiseMetamethodNotCallable(vm, mm, metamethodEventName(event));
+        unreachable;
+    }
     return try callBinMetamethod(vm, mm, vb, vc, result_reg, metamethodEventName(event));
 }
 

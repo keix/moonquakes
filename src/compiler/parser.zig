@@ -1095,6 +1095,24 @@ pub const ProtoBuilder = struct {
         return operand;
     }
 
+    /// If the last emitted instruction is a LOADK of a numeric constant
+    /// into temp register `reg` whose constant index fits the C operand,
+    /// return that index so the caller can pop the load and emit a
+    /// K-operand arithmetic opcode (ADDK, MULK, ...) instead.
+    fn trailingNumericConstIndex(self: *ProtoBuilder, reg: u8) ?u8 {
+        if (reg < self.locals_top) return null;
+        const n = self.code.items.len;
+        if (n == 0) return null;
+        const inst = self.code.items[n - 1];
+        if (inst.getOpCode() != .LOADK or inst.getA() != reg) return null;
+        const const_idx = inst.getBx();
+        if (const_idx > std.math.maxInt(u8)) return null;
+        if (const_idx >= self.const_refs.items.len) return null;
+        const cref = self.const_refs.items[const_idx];
+        if (cref.kind != .integer and cref.kind != .number) return null;
+        return @intCast(const_idx);
+    }
+
     fn trailingSmallIntegerLoad(self: *ProtoBuilder, reg: u8) ?i8 {
         if (self.code.items.len == 0) return null;
         const last = self.code.items[self.code.items.len - 1];
@@ -3726,6 +3744,24 @@ pub const Parser = struct {
                 left = folded;
                 continue;
             }
+            // Constant RHS: use the K-operand opcode and drop the LOADK, so
+            // `x * 2` costs one dispatch instead of two.
+            if (self.proto.trailingNumericConstIndex(right)) |k_idx| {
+                self.proto.popLastInstruction();
+                const dst = self.proto.allocTemp();
+                if (std.mem.eql(u8, op, "*")) {
+                    try self.proto.emit(.MULK, dst, left, k_idx);
+                } else if (std.mem.eql(u8, op, "//")) {
+                    try self.proto.emit(.IDIVK, dst, left, k_idx);
+                } else if (std.mem.eql(u8, op, "/")) {
+                    try self.proto.emit(.DIVK, dst, left, k_idx);
+                } else {
+                    try self.proto.emit(.MODK, dst, left, k_idx);
+                }
+                self.proto.updateMaxStack(dst + 1);
+                left = dst;
+                continue;
+            }
             const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
@@ -3785,7 +3821,16 @@ pub const Parser = struct {
                     try self.proto.emitMOVE(acc.?, left);
                 }
             }
-            if (std.mem.eql(u8, op, "+")) {
+            // Constant RHS: use the K-operand opcode and drop the LOADK, so
+            // `x + 1` costs one dispatch instead of two.
+            if (self.proto.trailingNumericConstIndex(right)) |k_idx| {
+                self.proto.popLastInstruction();
+                if (std.mem.eql(u8, op, "+")) {
+                    try self.proto.emit(.ADDK, acc.?, acc.?, k_idx);
+                } else {
+                    try self.proto.emit(.SUBK, acc.?, acc.?, k_idx);
+                }
+            } else if (std.mem.eql(u8, op, "+")) {
                 try self.proto.emitAdd(acc.?, acc.?, right);
             } else {
                 try self.proto.emitSub(acc.?, acc.?, right);

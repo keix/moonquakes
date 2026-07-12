@@ -87,7 +87,7 @@ fn firstArithmeticBadOperand(vm: *VM, inst: Instruction) ?TValue {
             if (vc.toNumber() == null) break :blk vc;
             break :blk null;
         },
-        .ADDI, .ADDK, .SUBK, .MULK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => blk: {
+        .ADDI, .ADDK, .SUBK, .MULK, .MODK, .POWK, .DIVK, .IDIVK, .BANDK, .BORK, .BXORK, .SHLI, .SHRI, .UNM, .BNOT => blk: {
             const vb = vm.stack[vm.base + inst.getB()];
             if (vb.toNumber() == null) break :blk vb;
             break :blk null;
@@ -198,15 +198,19 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8, toIn
         const op = inst.getOpCode();
         if (op == .ADD or op == .SUB or op == .MUL or op == .DIV or op == .MOD or op == .POW or op == .IDIV or
             op == .BAND or op == .BOR or op == .BXOR or op == .SHL or op == .SHR or
-            op == .MMBIN or op == .MMBINI or op == .MMBINK)
+            op == .MMBIN or op == .MMBINI or op == .MMBINK or
+            op == .ADDI or op == .ADDK or op == .SUBK or op == .MULK or op == .MODK or
+            op == .POWK or op == .DIVK or op == .IDIVK)
         {
             const r1: u8 = switch (op) {
                 .MMBIN, .MMBINI, .MMBINK => inst.getA(),
                 else => inst.getB(),
             };
+            // K/I variants have a constant in C, not a register.
             const r2: ?u8 = switch (op) {
                 .MMBIN => inst.getB(),
                 .MMBINI, .MMBINK => null,
+                .ADDI, .ADDK, .SUBK, .MULK, .MODK, .POWK, .DIVK, .IDIVK => null,
                 else => inst.getC(),
             };
 
