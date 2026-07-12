@@ -63,6 +63,7 @@ fn enqueueMatchingFinalizers(self: anytype, only_white: bool) void {
                         .obj = obj,
                     })) |_| {
                         obj.finalizer_queued = true;
+                        if (self.slow_signal) |signal| signal.* = true;
 
                         // Keep object and finalizer function alive.
                         self.markGray(obj);

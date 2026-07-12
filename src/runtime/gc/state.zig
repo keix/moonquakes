@@ -189,6 +189,9 @@ pub const GC = struct {
     /// Active executor for running finalizers (typically current VM)
     finalizer_executor: ?FinalizerExecutor = null,
 
+    /// Raised when finalizers are enqueued; see setSlowSignal.
+    slow_signal: ?*bool = null,
+
     /// Prevent re-entering finalizer drain (e.g. collectgarbage() inside __gc).
     finalizer_draining: bool = false,
 
@@ -429,6 +432,12 @@ pub const GC = struct {
     /// When null, finalizers are queued but not executed.
     pub fn setFinalizerExecutor(self: *GC, executor: ?FinalizerExecutor) void {
         self.finalizer_executor = executor;
+    }
+
+    /// Register a flag that is raised whenever finalizers are enqueued, so
+    /// the interpreter loop can poll one byte instead of the queue length.
+    pub fn setSlowSignal(self: *GC, signal: ?*bool) void {
+        self.slow_signal = signal;
     }
 
     /// True if there are pending finalizers waiting to run.
