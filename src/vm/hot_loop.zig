@@ -26,6 +26,7 @@ const TValue = @import("../runtime/value.zig").TValue;
 const VM = @import("vm.zig").VM;
 const CallInfo = @import("execution.zig").CallInfo;
 const interrupt = @import("../interrupt.zig");
+const mutation = @import("../runtime/gc/mutation.zig");
 
 pub fn run(vm: *VM, ci: *CallInfo) void {
     // Safe builds validate the PC on every fetch (CallInfo.validatePC);
@@ -180,6 +181,60 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        .SETUPVAL => {
+            const closure = ci.closure orelse return;
+            const b = inst.getB();
+            if (b < closure.upvalues.len) {
+                mutation.upvalueSet(vm.gc(), closure.upvalues[b], stack[base + inst.getA()]);
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETTABLE => {
+            // Only integer keys: string keys record a field-cache hint in
+            // the full handler (error diagnostics), nil/float keys have
+            // their own semantics there. Misses may need __index and exit.
+            const table = stack[base + inst.getB()].asTable() orelse return;
+            const key = &stack[base + inst.getC()];
+            if (!key.isInteger()) return;
+            const value = table.get(key.*) orelse return;
+            stack[base + inst.getA()] = value;
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETI => {
+            // Table read with an integer immediate key; only the direct hit
+            // stays here (opGETI records no field-cache hint, so semantics
+            // match). Misses may need __index and exit.
+            const table = stack[base + inst.getB()].asTable() orelse return;
+            const value = table.get(.{ .integer = @as(i64, inst.getC()) }) orelse return;
+            stack[base + inst.getA()] = value;
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .NOT => {
+            stack[base + inst.getA()] = .{ .boolean = !stack[base + inst.getB()].toBoolean() };
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .UNM => {
+            const vb = &stack[base + inst.getB()];
+            if (vb.isInteger()) {
+                stack[base + inst.getA()] = .{ .integer = 0 -% vb.integer };
+            } else if (vb.isNumber()) {
+                stack[base + inst.getA()] = .{ .number = -vb.number };
+            } else {
+                // String coercion / __unm: full handler.
+                return;
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
         .TEST => {
             const skip = stack[base + inst.getA()].toBoolean() != inst.getk();
             pc += if (skip) 2 else 1;
@@ -232,16 +287,31 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         .LTI, .LEI, .GTI, .GEI => {
             const left = &stack[base + inst.getB()];
-            if (!left.isInteger()) return;
             const a = inst.getA();
             const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
-            const is_true = switch (inst.getOpCode()) {
-                .LTI => left.integer < imm,
-                .LEI => left.integer <= imm,
-                .GTI => imm < left.integer,
-                .GEI => imm <= left.integer,
-                else => unreachable,
-            };
+            var is_true: bool = undefined;
+            if (left.isInteger()) {
+                is_true = switch (inst.getOpCode()) {
+                    .LTI => left.integer < imm,
+                    .LEI => left.integer <= imm,
+                    .GTI => imm < left.integer,
+                    .GEI => imm <= left.integer,
+                    else => unreachable,
+                };
+            } else if (left.isNumber()) {
+                // The i8 immediate converts to f64 exactly, so the plain
+                // float compare matches ltOp/leOp (NaN compares false).
+                const fimm: f64 = @floatFromInt(imm);
+                is_true = switch (inst.getOpCode()) {
+                    .LTI => left.number < fimm,
+                    .LEI => left.number <= fimm,
+                    .GTI => fimm < left.number,
+                    .GEI => fimm <= left.number,
+                    else => unreachable,
+                };
+            } else {
+                return;
+            }
             const skip = (is_true and a == 0) or (!is_true and a != 0);
             pc += if (skip) 2 else 1;
             inst = pc[0];
@@ -250,14 +320,27 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .EQ, .LT, .LE => {
             const left = &stack[base + inst.getB()];
             const right = &stack[base + inst.getC()];
-            if (!(left.isInteger() and right.isInteger())) return;
             const negate = inst.getA();
-            const is_true = switch (inst.getOpCode()) {
-                .EQ => left.integer == right.integer,
-                .LT => left.integer < right.integer,
-                .LE => left.integer <= right.integer,
-                else => unreachable,
-            };
+            var is_true: bool = undefined;
+            if (left.isInteger() and right.isInteger()) {
+                is_true = switch (inst.getOpCode()) {
+                    .EQ => left.integer == right.integer,
+                    .LT => left.integer < right.integer,
+                    .LE => left.integer <= right.integer,
+                    else => unreachable,
+                };
+            } else if (left.isNumber() and right.isNumber()) {
+                is_true = switch (inst.getOpCode()) {
+                    .EQ => left.number == right.number,
+                    .LT => left.number < right.number,
+                    .LE => left.number <= right.number,
+                    else => unreachable,
+                };
+            } else {
+                // Mixed int/float exactness, strings, and metamethods take
+                // the full handler.
+                return;
+            }
             const skip = (is_true and negate == 0) or (!is_true and negate != 0);
             pc += if (skip) 2 else 1;
             inst = pc[0];
