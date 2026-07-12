@@ -87,6 +87,9 @@ pub fn allocConstString(self: anytype, str: []const u8) !*StringObject {
 
 fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*StringObject {
     // Lua-compatible policy: intern only short strings.
+    // Note: raising this toward PUC's LUAI_MAXSHORTLEN (40) was measured to
+    // regress unique-string churn 12x — std.StringHashMap degrades under
+    // heavy insert/remove. Revisit only with a purpose-built string table.
     const short_string_max_len: usize = 16;
     const should_intern = force_intern or str.len <= short_string_max_len;
     if (should_intern) {

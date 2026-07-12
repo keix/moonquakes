@@ -192,10 +192,17 @@ pub fn finishSweepCycle(self: anytype) void {
 
 /// Free a GC object and update accounting
 fn freeObject(self: anytype, obj: *GCObject) void {
-    // For strings, remove from intern table before freeing
+    // For strings, remove from intern table before freeing. Guard on
+    // pointer identity: a dying non-interned string with the same content
+    // (e.g. a long runtime string matching a force-interned constant) must
+    // not evict the live interned entry.
     if (obj.type == .string) {
         const str_obj: *StringObject = @fieldParentPtr("header", obj);
-        _ = self.strings.remove(str_obj.asSlice());
+        if (self.strings.get(str_obj.asSlice())) |interned| {
+            if (interned == str_obj) {
+                _ = self.strings.remove(str_obj.asSlice());
+            }
+        }
     }
     freeObjectFinal(self, obj);
 }

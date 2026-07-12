@@ -796,6 +796,33 @@ test "remembered set prunes old table at the next minor cycle after overwriting 
     try std.testing.expect(!parent.header.remembered);
 }
 
+test "dying non-interned string does not evict the interned entry with equal content" {
+    var gc = GC.init(std.testing.allocator);
+    defer gc.deinit();
+
+    // Longer than the short-string intern threshold, so allocString does not
+    // dedup against the force-interned constant and creates a second object.
+    const content = "a-long-string-constant-beyond-intern";
+    const interned = try gc.allocConstString(content);
+
+    var root_slot = [_]TValue{TValue.fromString(interned)};
+    var roots = TestRoots{
+        .values = root_slot[0..],
+    };
+    try gc.addRootProvider(roots.provider());
+
+    const transient = try gc.allocString(content);
+    try std.testing.expect(transient != interned);
+
+    // Two full cycles free the unreachable duplicate. Its removal from the
+    // intern table must not evict the live constant's entry.
+    try std.testing.expect(gc.stepSized(0));
+    try std.testing.expect(gc.stepSized(0));
+
+    const again = try gc.allocConstString(content);
+    try std.testing.expectEqual(interned, again);
+}
+
 test "remembered set prunes old table at the next minor cycle after clearing young metatable" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
