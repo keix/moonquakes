@@ -204,6 +204,12 @@ pub const ProtoBuilder = struct {
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
     local_decl_seq: u32 = 0,
+    // True once this function's locals can need closing: a nested function
+    // captured one of them (open upvalues can exist over this frame) or a
+    // to-be-closed slot was declared. While false, every CLOSE this
+    // function would emit is a guaranteed runtime no-op and is skipped
+    // (see emitCloseIfNeeded).
+    needs_close: bool = false,
     // Constant deduplication maps (string content -> const_refs index)
     string_constants: std.StringHashMap(u32),
     // Label tracking for goto support
@@ -352,6 +358,19 @@ pub const ProtoBuilder = struct {
         const instr = Instruction.initABC(op, a, b, c);
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
+    }
+
+    /// Emit CLOSE only when this function's frame can actually have
+    /// something to close (a captured local or a to-be-closed slot, see
+    /// needs_close). Block ends and loop back-edges otherwise emit CLOSE
+    /// unconditionally, costing one dispatched no-op per iteration.
+    /// Soundness: an open upvalue at a bytecode position requires a
+    /// CLOSURE instruction executed before it, and every backward jump's
+    /// CLOSE is emitted after its body was parsed — so any capture inside
+    /// the body has already set the flag by the time the CLOSE is emitted.
+    pub fn emitCloseIfNeeded(self: *ProtoBuilder, reg: u8) !void {
+        if (!self.needs_close) return;
+        try self.emit(.CLOSE, reg, 0, 0);
     }
 
     pub fn emitWithK(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8, k: bool) !void {
@@ -1435,7 +1454,10 @@ pub const ProtoBuilder = struct {
         const upval_idx: u8 = @intCast(self.upvalues.items.len);
         switch (parent_loc) {
             .local => |reg| {
-                // Parent has it as a local - capture from parent's stack
+                // Parent has it as a local - capture from parent's stack.
+                // The parent frame can now hold open upvalues, so its CLOSE
+                // instructions become meaningful.
+                parent.needs_close = true;
                 try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg, .name = name });
             },
             .upvalue => |idx| {
@@ -2596,7 +2618,7 @@ pub const Parser = struct {
 
         // Emit CLOSE to close upvalues and TBC variables from this scope
         if (self.proto.locals_top > scope_base) {
-            try self.proto.emit(.CLOSE, scope_base, 0, 0);
+            try self.proto.emitCloseIfNeeded(scope_base);
         }
         self.leaveScope();
 
@@ -4148,7 +4170,7 @@ pub const Parser = struct {
         try self.parseStatements();
 
         if (self.proto.locals_top > then_scope_base) {
-            try self.proto.emit(.CLOSE, then_scope_base, 0, 0);
+            try self.proto.emitCloseIfNeeded(then_scope_base);
         }
         // Release then branch scope and temporaries
         self.leaveScope();
@@ -4208,7 +4230,7 @@ pub const Parser = struct {
             try self.parseStatements();
 
             if (self.proto.locals_top > elseif_scope_base) {
-                try self.proto.emit(.CLOSE, elseif_scope_base, 0, 0);
+                try self.proto.emitCloseIfNeeded(elseif_scope_base);
             }
             // Release elseif body scope and temporaries
             self.leaveScope();
@@ -4244,7 +4266,7 @@ pub const Parser = struct {
             try self.parseStatements();
 
             if (self.proto.locals_top > else_scope_base) {
-                try self.proto.emit(.CLOSE, else_scope_base, 0, 0);
+                try self.proto.emitCloseIfNeeded(else_scope_base);
             }
             // Release else body scope and temporaries
             self.leaveScope();
@@ -4391,7 +4413,7 @@ pub const Parser = struct {
         // Close upvalues for the loop variable before FORLOOP
         // This ensures closures capture the value, not the register
         self.proto.current_line = do_line;
-        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
+        try self.proto.emitCloseIfNeeded(base_reg + 3);
 
         // FORLOOP: increment and check, jump back if continuing
         self.proto.current_line = do_line;
@@ -4403,12 +4425,14 @@ pub const Parser = struct {
         // Patch FORLOOP to jump back to loop start
         self.proto.patchFORInstr(forloop_addr, loop_start);
 
-        // Close upvalues when loop exits (after FORLOOP falls through)
+        // Close upvalues when loop exits (after FORLOOP falls through).
+        // Break jumps target this position: the CLOSE when one is emitted
+        // (so to-be-closed state is finalized), the loop exit otherwise —
+        // the address must be taken before the conditional emission.
         self.proto.current_line = end_line;
-        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
+        const end_addr = @as(u32, @intCast(self.proto.code.items.len));
+        try self.proto.emitCloseIfNeeded(base_reg + 3);
 
-        // Patch break jumps to the final CLOSE so to-be-closed state is finalized.
-        const end_addr = @as(u32, @intCast(self.proto.code.items.len - 1));
         for (self.break_jumps.items[break_count..]) |jmp| {
             self.proto.patchJMP(jmp, end_addr);
         }
@@ -4529,6 +4553,7 @@ pub const Parser = struct {
         // Mark to-be-closed state before loop dispatch.
         // Must run before TFORPREP, otherwise empty iterators skip TBC.
         self.proto.current_line = do_line;
+        self.proto.needs_close = true;
         try self.proto.emit(.TBC, base_reg + 3, 0, 0);
         self.active_tbc_count += 1;
         defer self.active_tbc_count -= 1;
@@ -4579,7 +4604,7 @@ pub const Parser = struct {
 
         // Close upvalues and TBC state before TFORCALL (end of iteration)
         self.proto.current_line = do_line;
-        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
+        try self.proto.emitCloseIfNeeded(base_reg + 3);
 
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4598,7 +4623,7 @@ pub const Parser = struct {
 
         // Close upvalues and TBC state when loop exits (after TFORLOOP falls through)
         self.proto.current_line = end_line;
-        try self.proto.emit(.CLOSE, base_reg + 3, 0, 0);
+        try self.proto.emitCloseIfNeeded(base_reg + 3);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4669,7 +4694,7 @@ pub const Parser = struct {
         // Close loop-scope locals/upvalues at end of each iteration before
         // jumping back to reevaluate the condition.
         self.proto.current_line = do_line;
-        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
+        try self.proto.emitCloseIfNeeded(break_close_reg);
 
         // Jump back to loop start
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
@@ -4738,13 +4763,13 @@ pub const Parser = struct {
         const continue_jmp = try self.proto.emitPatchableJMP();
 
         // Exit path (condition true): close loop-scope locals and leave loop.
-        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
+        try self.proto.emitCloseIfNeeded(break_close_reg);
         const end_jmp = try self.proto.emitPatchableJMP();
 
         // Continue path (condition false): close and jump back to loop start.
         const continue_addr = @as(u32, @intCast(self.proto.code.items.len));
         self.proto.patchJMP(continue_jmp, continue_addr);
-        try self.proto.emit(.CLOSE, break_close_reg, 0, 0);
+        try self.proto.emitCloseIfNeeded(break_close_reg);
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
         try self.proto.emitJMP(@intCast(back_offset));
 
@@ -4777,7 +4802,7 @@ pub const Parser = struct {
         // Using CLOSE 0 would also close unrelated outer upvalues.
         const close_reg = self.loop_close_regs.items[self.loop_close_regs.items.len - 1];
         self.proto.current_line = break_line;
-        try self.proto.emit(.CLOSE, close_reg, 0, 0);
+        try self.proto.emitCloseIfNeeded(close_reg);
 
         // Emit JMP to be patched later at end of loop
         self.proto.current_line = break_line;
@@ -4807,7 +4832,7 @@ pub const Parser = struct {
             if (target.code_pos <= self.proto.code.items.len) {
                 // Backward jump may leave scope of locals: close them before jumping.
                 if (self.crossedLocalCloseReg(target.next_decl_seq)) |close_reg| {
-                    try self.proto.emit(.CLOSE, close_reg, 0, 0);
+                    try self.proto.emitCloseIfNeeded(close_reg);
                 }
             }
             // Backward jump - emit JMP directly
@@ -5218,6 +5243,7 @@ pub const Parser = struct {
         i = 0;
         while (i < var_count) : (i += 1) {
             if (var_is_close[i]) {
+                self.proto.needs_close = true;
                 try self.proto.emit(.TBC, first_reg + i, 0, 0);
                 self.active_tbc_count += 1;
             }
