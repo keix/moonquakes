@@ -1481,14 +1481,29 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
     // Finalizers are executed by the currently running VM.
     vm.gc().setFinalizerExecutor(vm_gc.finalizerExecutor(vm));
     defer vm.gc().setFinalizerExecutor(null);
+    vm.gc().setSlowSignal(&vm.slow_work_signal);
+    defer vm.gc().setSlowSignal(null);
+    if (vm.gc().hasPendingFinalizers() or vm.errors.pending_error_unwind) {
+        vm.slow_work_signal = true;
+    }
 
     while (true) {
-        if (vm.gc().hasPendingFinalizers()) {
-            vm.gc().drainFinalizers();
-        }
-        if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
-            if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
-            return error.LuaException;
+        // Rare-event work (pending finalizers, protected-error unwind) is
+        // gated behind a single byte so the per-instruction path pays one
+        // load instead of re-deriving both conditions.
+        if (vm.slow_work_signal) {
+            if (vm.gc().hasPendingFinalizers()) {
+                vm.gc().drainFinalizers();
+            }
+            if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
+                if (try continueIfLuaExceptionHandled(vm, error.LuaException)) continue;
+                return error.LuaException;
+            }
+            // An unwind pending for a different frame keeps the signal
+            // raised (and pays the old per-instruction cost) until it fires.
+            if (!vm.errors.pending_error_unwind and !vm.gc().hasPendingFinalizers()) {
+                vm.slow_work_signal = false;
+            }
         }
         const ci = vm.ci orelse return error.LuaException;
         const inst = advanceFrame(vm, ci, true) catch |err| {

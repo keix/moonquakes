@@ -82,6 +82,11 @@ pub const VM = struct {
     open_upvalues: ?*UpvalueObject,
 
     // Grouped auxiliary state
+    /// Rare-event signal checked once per instruction by the main loop.
+    /// Producers: error_state.setPendingUnwind and the GC's finalizer
+    /// enqueue (via GC.setSlowSignal). The loop re-derives the actual
+    /// conditions and clears the flag when neither remains.
+    slow_work_signal: bool = false,
     yield: YieldState = .{},
     errors: ErrorState = .{},
     hooks: HookState = .{},

@@ -64,6 +64,8 @@ pub fn endHandling(vm: *VM) void {
 pub fn setPendingUnwind(vm: *VM, ci: *CallInfo) void {
     vm.errors.pending_error_unwind = true;
     vm.errors.pending_error_unwind_ci = ci;
+    // Wake the main loop's rare-event poll (see VM.slow_work_signal).
+    vm.slow_work_signal = true;
 }
 
 pub fn clearPendingUnwind(vm: *VM) void {
