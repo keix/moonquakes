@@ -764,7 +764,7 @@ test "remembered set prunes old table after child ages out of young generation" 
     try std.testing.expect(!parent.header.remembered);
 }
 
-test "remembered set forgets old table immediately after overwriting young value" {
+test "remembered set prunes old table at the next minor cycle after overwriting young value" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
     gc.mode = .generational;
@@ -785,12 +785,18 @@ test "remembered set forgets old table immediately after overwriting young value
     try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
     try std.testing.expect(parent.header.remembered);
 
+    // The write barrier never eagerly forgets: the entry stays until the
+    // next minor cycle's pruneRememberedSet sees no young refs.
     try gc.tableSet(parent, .{ .integer = 1 }, .nil);
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(parent.header.remembered);
+
+    try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
     try std.testing.expect(!parent.header.remembered);
 }
 
-test "remembered set forgets old table immediately after clearing young metatable" {
+test "remembered set prunes old table at the next minor cycle after clearing young metatable" {
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
     gc.mode = .generational;
@@ -811,7 +817,13 @@ test "remembered set forgets old table immediately after clearing young metatabl
     try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
     try std.testing.expect(parent.header.remembered);
 
+    // The write barrier never eagerly forgets: the entry stays until the
+    // next minor cycle's pruneRememberedSet sees no young refs.
     gc.tableSetMetatable(parent, null);
+    try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
+    try std.testing.expect(parent.header.remembered);
+
+    try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(@as(usize, 0), gc.remembered_set.items.len);
     try std.testing.expect(!parent.header.remembered);
 }

@@ -23,6 +23,7 @@ const FileObject = object.FileObject;
 const Upvaldesc = object.Upvaldesc;
 const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const TValue = @import("../value.zig").TValue;
+const mark_mod = @import("mark.zig");
 
 fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
     return self.current_cycle_kind == .major or obj.generation != .old;
@@ -147,6 +148,7 @@ pub fn sweepStep(self: anytype, budget: usize) bool {
 pub fn finishSweepCycle(self: anytype) void {
     var current = self.objects;
     while (current) |obj| {
+        const was_old = obj.generation == .old;
         obj.generation = switch (self.current_cycle_kind) {
             .major => .old,
             .minor => switch (obj.generation) {
@@ -154,6 +156,15 @@ pub fn finishSweepCycle(self: anytype) void {
                 .survival, .old => .old,
             },
         };
+        // A table promoted to old here may still hold non-old children that
+        // no write barrier has seen (its stores happened while it was not
+        // old yet). Remember it conservatively; pruneRememberedSet below
+        // drops it again when it holds no young refs.
+        if (self.current_cycle_kind == .minor and !was_old and
+            obj.generation == .old and obj.type == .table)
+        {
+            mark_mod.rememberObject(self, obj);
+        }
         current = obj.next;
     }
 
