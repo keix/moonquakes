@@ -38,6 +38,10 @@ fn tableHasYoungRefs(table: *const TableObject) bool {
         if (mt.header.generation != .old) return true;
     }
 
+    for (table.array.items) |value| {
+        if (valueIsYoung(value)) return true;
+    }
+
     var iter = table.hash_part.iterator();
     while (iter.next()) |entry| {
         if (valueIsYoung(entry.key_ptr.*) or valueIsYoung(entry.value_ptr.*)) return true;

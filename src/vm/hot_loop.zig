@@ -197,12 +197,20 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .GETTABLE => {
             // Only integer keys: string keys record a field-cache hint in
             // the full handler (error diagnostics), nil/float keys have
-            // their own semantics there. Misses may need __index and exit.
+            // their own semantics there. Array hits are read inline; hash
+            // hits go through get(); misses may need __index and exit.
             const table = stack[base + inst.getB()].asTable() orelse return;
             const key = &stack[base + inst.getC()];
             if (!key.isInteger()) return;
-            const value = table.get(key.*) orelse return;
-            stack[base + inst.getA()] = value;
+            const i = key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
+                const value = table.array.items[@intCast(i - 1)];
+                if (value.isNil()) return;
+                stack[base + inst.getA()] = value;
+            } else {
+                const value = table.get(key.*) orelse return;
+                stack[base + inst.getA()] = value;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -212,8 +220,15 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // stays here (opGETI records no field-cache hint, so semantics
             // match). Misses may need __index and exit.
             const table = stack[base + inst.getB()].asTable() orelse return;
-            const value = table.get(.{ .integer = @as(i64, inst.getC()) }) orelse return;
-            stack[base + inst.getA()] = value;
+            const i = @as(i64, inst.getC());
+            if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
+                const value = table.array.items[@intCast(i - 1)];
+                if (value.isNil()) return;
+                stack[base + inst.getA()] = value;
+            } else {
+                const value = table.get(.{ .integer = i }) orelse return;
+                stack[base + inst.getA()] = value;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -439,6 +454,31 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             base = prev.base;
             k = prev.func.k;
             pc = prev.pc;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SETTABLE, .SETI => {
+            // Array-part write with no side channel: integer key within the
+            // sequence border, non-nil slot (an absent key would need
+            // __newindex), and a non-collectable value (an object value
+            // would need the GC write barrier). Everything else exits.
+            const table = stack[base + inst.getA()].asTable() orelse return;
+            const i: i64 = if (inst.getOpCode() == .SETI)
+                @as(i64, inst.getB())
+            else blk: {
+                const key = &stack[base + inst.getB()];
+                if (!key.isInteger()) return;
+                break :blk key.integer;
+            };
+            const value = stack[base + inst.getC()];
+            if (value == .object or value.isNil()) return;
+            if (i < 1 or i > table.seq_len) return;
+            if (i > @as(i64, @intCast(table.array.items.len))) return;
+            const slot = &table.array.items[@intCast(i - 1)];
+            if (slot.isNil()) return;
+            slot.* = value;
+            table.mod_count +%= 1;
+            pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },

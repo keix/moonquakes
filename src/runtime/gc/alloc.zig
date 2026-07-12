@@ -128,6 +128,7 @@ pub fn allocTable(self: anytype) !*TableObject {
 
     // Initialize GC header (black = survives current cycle)
     obj.header = newObjectHeader(self, .table);
+    obj.array = .{};
     obj.hash_part = TableObject.HashMap.init(tracking_allocator);
     obj.deleted_keys = TableObject.DeletedKeySet.init(tracking_allocator);
     obj.iter_keys = .{};
