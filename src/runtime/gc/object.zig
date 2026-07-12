@@ -335,7 +335,7 @@ pub const TableObject = struct {
     }
 
     /// True when the key currently holds a non-nil value (either part).
-    fn rawHas(self: *const TableObject, i: i64) bool {
+    pub fn rawHas(self: *const TableObject, i: i64) bool {
         if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
             return !self.array.items[@intCast(i - 1)].isNil();
         }
