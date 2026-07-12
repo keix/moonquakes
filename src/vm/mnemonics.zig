@@ -4357,8 +4357,16 @@ fn dispatchNewindexMMValue(vm: *VM, table: *object.TableObject, key_val: TValue,
 fn dispatchNewindexMMValueDepth(vm: *VM, table: *object.TableObject, key_val: TValue, table_val: TValue, value: TValue, depth: u16) !?ExecuteResult {
     // Logical recursion guard for __newindex chains, independent of call stack depth.
     if (depth >= 2000) return error.InvalidTableOperation;
-    // Fast path: key already exists in table - just update it
-    if (table.get(key_val) != null) {
+    // Fast path: key already exists in table - update the slot in place
+    // instead of paying a second hash lookup through set(). Nil values
+    // (removals) keep the full path for border/tombstone bookkeeping.
+    if (table.getPtr(key_val)) |slot| {
+        if (!value.isNil()) {
+            slot.* = value;
+            table.mod_count +%= 1;
+            vm.gc().barrierBackValue(&table.header, value);
+            return null; // Continue
+        }
         try tableSet(vm, table, key_val, value);
         return null; // Continue
     }

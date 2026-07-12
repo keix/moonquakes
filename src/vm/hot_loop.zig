@@ -28,6 +28,7 @@ const CallInfo = @import("execution.zig").CallInfo;
 const interrupt = @import("../interrupt.zig");
 const mutation = @import("../runtime/gc/mutation.zig");
 const call_debug = @import("call_debug.zig");
+const field_cache = @import("field_cache.zig");
 
 pub fn run(vm: *VM, ci: *CallInfo) void {
     // Safe builds validate the PC on every fetch (CallInfo.validatePC);
@@ -454,6 +455,52 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             base = prev.base;
             k = prev.func.k;
             pc = prev.pc;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETFIELD => {
+            // String-key table read. The diagnostic hint is recorded like
+            // the full handler does (before the lookup); a miss may need
+            // __index and exits.
+            const table = stack[base + inst.getB()].asTable() orelse return;
+            const key_val = k[inst.getC()];
+            const key = key_val.asString() orelse return;
+            field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
+            const value = table.get(key_val) orelse return;
+            stack[base + inst.getA()] = value;
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETTABUP => {
+            // Global (or _ENV field) read through an upvalue table.
+            const closure = cur.closure orelse return;
+            const b = inst.getB();
+            if (b >= closure.upvalues.len) return;
+            const table = closure.upvalues[b].get().asTable() orelse return;
+            const key_val = k[inst.getC()];
+            const key = key_val.asString() orelse return;
+            field_cache.rememberFieldAccess(vm, inst.getA(), key, true, false);
+            const value = table.get(key_val) orelse return;
+            stack[base + inst.getA()] = value;
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SETFIELD => {
+            // String-key write to an existing slot: in-place update through
+            // the write barrier. Absent keys (possible __newindex) and nil
+            // stores (removal bookkeeping) exit to the full handler.
+            const table = stack[base + inst.getA()].asTable() orelse return;
+            const key_val = k[inst.getB()];
+            if (key_val.asString() == null) return;
+            const value = stack[base + inst.getC()];
+            if (value.isNil()) return;
+            const slot = table.getPtr(key_val) orelse return;
+            slot.* = value;
+            table.mod_count +%= 1;
+            vm.gc().barrierBackValue(&table.header, value);
+            pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },

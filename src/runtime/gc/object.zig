@@ -334,6 +334,32 @@ pub const TableObject = struct {
         return null;
     }
 
+    /// Pointer to the slot currently holding a non-nil value for the key,
+    /// or null when the key is absent. Valid until the next structural
+    /// mutation (insert/remove/rehash); callers must write through it
+    /// immediately.
+    pub fn getPtr(self: *TableObject, key: TValue) ?*TValue {
+        if (key == .integer) {
+            const i = key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const slot = &self.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return null;
+                return slot;
+            }
+            return self.hash_part.getPtr(key);
+        }
+        const canonical_key = canonicalizeLookupKey(key);
+        if (canonical_key == .integer) {
+            const i = canonical_key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const slot = &self.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return null;
+                return slot;
+            }
+        }
+        return self.hash_part.getPtr(canonical_key);
+    }
+
     /// True when the key currently holds a non-nil value (either part).
     pub fn rawHas(self: *const TableObject, i: i64) bool {
         if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
