@@ -1505,20 +1505,33 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
                 vm.slow_work_signal = false;
             }
         }
+        // Manually flattened advanceFrame + runInstructionInMainLoop: the
+        // happy path fetches and dispatches without the NextInstruction /
+        // MainLoopStep round-trips.
         const ci = vm.ci orelse return error.LuaException;
-        const inst = advanceFrame(vm, ci, true) catch |err| {
-            if (try continueIfLuaExceptionHandled(vm, err)) continue;
-            return err;
+        if (ci.continuation != .none) {
+            const handled = continueFrameContinuationSlow(vm, ci) catch |err| {
+                if (try continueIfLuaExceptionHandled(vm, err)) continue;
+                return err;
+            };
+            if (handled) continue;
+        }
+        const inst = ci.fetch() catch |err| {
+            if (err != error.PcOutOfRange) {
+                if (try continueIfLuaExceptionHandled(vm, err)) continue;
+                return err;
+            }
+            if (ci.previous == null) return .none;
+            popCallInfo(vm);
+            if (vm.ci) |prev_ci| {
+                vm.base = prev_ci.ret_base;
+                vm.top = prev_ci.ret_base + prev_ci.func.maxstacksize + prev_ci.vararg_count;
+            }
+            continue;
         };
-        switch (inst) {
+        switch (try runInstructionInMainLoop(vm, ci, inst)) {
             .continue_loop => continue,
-            .top_frame_exhausted => return .none,
-            .instruction => |fetched| {
-                switch (try runInstructionInMainLoop(vm, ci, fetched)) {
-                    .continue_loop => continue,
-                    .return_vm => |ret| return ret,
-                }
-            },
+            .return_vm => |ret| return ret,
         }
     }
 }
