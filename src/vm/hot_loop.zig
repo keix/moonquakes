@@ -29,6 +29,7 @@ const interrupt = @import("../interrupt.zig");
 const mutation = @import("../runtime/gc/mutation.zig");
 const call_debug = @import("call_debug.zig");
 const field_cache = @import("field_cache.zig");
+const object = @import("../runtime/gc/object.zig");
 
 pub fn run(vm: *VM, ci: *CallInfo) void {
     // Safe builds validate the PC on every fetch (CallInfo.validatePC);
@@ -362,6 +363,63 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             }
             const skip = (is_true and negate == 0) or (!is_true and negate != 0);
             pc += if (skip) 2 else 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .TFORCALL => {
+            // Specialized for the builtin ipairs iterator: the whole step
+            // (index increment, array read, result placement) runs inline
+            // instead of a native call frame per element. ipairs honors
+            // __index, so a raw miss on a table with a metatable exits.
+            const a = inst.getA();
+            const func_val = &stack[base + a];
+            if (!func_val.isObject() or func_val.object.type != .native_closure) return;
+            const nc = object.getObject(object.NativeClosureObject, func_val.object);
+            if (nc.func.id != .ipairs_iterator) return;
+            const table = stack[base + a + 1].asTable() orelse return;
+            const control = &stack[base + a + 2];
+            if (!control.isInteger()) return;
+            const next_index = control.integer +% 1;
+
+            var value: TValue = .nil;
+            if (next_index >= 1 and next_index <= @as(i64, @intCast(table.array.items.len))) {
+                value = table.array.items[@intCast(next_index - 1)];
+            } else if (table.get(.{ .integer = next_index })) |v| {
+                value = v;
+            }
+            if (value.isNil() and table.metatable != null) return;
+
+            const c = inst.getC();
+            const nresults: u32 = if (c > 0) c else 1;
+            const res = base + a + 4;
+            if (value.isNil()) {
+                var j: u32 = 0;
+                while (j < nresults) : (j += 1) stack[res + j] = .nil;
+            } else {
+                stack[res] = .{ .integer = next_index };
+                if (nresults > 1) stack[res + 1] = value;
+                var j: u32 = 2;
+                while (j < nresults) : (j += 1) stack[res + j] = .nil;
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .TFORLOOP => {
+            const a = inst.getA();
+            const first_var = stack[base + a + 4];
+            pc += 1;
+            if (!first_var.isNil()) {
+                stack[base + a + 2] = first_var;
+                const sbx = inst.getSBx();
+                if (sbx >= 0) {
+                    pc += @as(usize, @intCast(sbx));
+                } else {
+                    pc -= @as(usize, @intCast(-sbx));
+                }
+                // Loop back-edge: safepoint.
+                if (vm.slow_work_signal or interrupt.isPending()) return;
+            }
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
