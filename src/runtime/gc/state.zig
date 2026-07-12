@@ -593,6 +593,7 @@ pub const GC = struct {
     pub const allocConstString = alloc_mod.allocConstString;
     pub const allocTable = alloc_mod.allocTable;
     pub const allocClosure = alloc_mod.allocClosure;
+    pub const allocClosureWithUpvalues = alloc_mod.allocClosureWithUpvalues;
     pub const allocProto = alloc_mod.allocProto;
     pub const allocUpvalue = alloc_mod.allocUpvalue;
     pub const allocClosedUpvalue = alloc_mod.allocClosedUpvalue;
