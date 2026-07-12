@@ -14,6 +14,10 @@ pub const HookState = struct {
     func_value: TValue = .nil,
     mask: u8 = 0, // 1=call, 2=return, 4=line
     count: u32 = 0,
+    // Derived from mask/count; must be refreshed via syncActive() after any
+    // write to those fields. Read on every instruction, so it is a single
+    // byte instead of re-deriving from two fields.
+    active: bool = false,
     countdown: u32 = 0,
     in_hook: bool = false,
     transfer_start: u32 = 1,
@@ -36,6 +40,10 @@ pub const HookTransfer = union(enum) {
         values: []const TValue,
     },
 };
+
+pub fn syncActive(state: *HookState) void {
+    state.active = state.mask != 0 or state.count != 0;
+}
 
 fn clearTransfer(vm: *VM) void {
     vm.hooks.transfer_start = 1;

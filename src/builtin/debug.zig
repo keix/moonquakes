@@ -12,6 +12,7 @@ const TableObject = object.TableObject;
 const UpvalueObject = object.UpvalueObject;
 const UserdataObject = object.UserdataObject;
 const error_state = @import("../vm/error_state.zig");
+const hook = @import("../vm/hook.zig");
 const metamethod = @import("../vm/metamethod.zig");
 const pipeline = @import("../compiler/pipeline.zig");
 const call = @import("../vm/call.zig");
@@ -2068,6 +2069,7 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         target_vm.hooks.transfer_start = 1;
         target_vm.hooks.transfer_count = 0;
         for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
+        hook.syncActive(&target_vm.hooks);
         return;
     }
 
@@ -2086,6 +2088,7 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         target_vm.hooks.transfer_start = 1;
         target_vm.hooks.transfer_count = 0;
         for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
+        hook.syncActive(&target_vm.hooks);
         return;
     }
 
@@ -2130,6 +2133,7 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     target_vm.hooks.transfer_start = 1;
     target_vm.hooks.transfer_count = 0;
     for (&target_vm.hooks.transfer_values) |*slot| slot.* = TValue.nil;
+    hook.syncActive(&target_vm.hooks);
     if (target_vm.ci) |ci| {
         if ((mask & 0x04) != 0) {
             ci.hook_last_line = if (ci.func.numparams == 0 and ci.func.is_vararg) -1 else currentLineForCallInfo(ci);

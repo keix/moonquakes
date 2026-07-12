@@ -244,11 +244,18 @@ fn finishReturnToCaller(vm: *VM, ret: PreparedReturn) ExecuteResult {
     return .LoopContinue;
 }
 
-pub fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
-    // Fast path for common case
+pub inline fn continueFrameContinuation(vm: *VM, ci: *CallInfo) !bool {
+    // Inline fast path: this tag check runs on every executed instruction.
+    // Keeping the handler bodies in this function made it too big to
+    // inline, turning the check into an out-of-line call (measured ~36
+    // instructions per executed Lua instruction).
     if (ci.continuation == .none) return false;
+    return continueFrameContinuationSlow(vm, ci);
+}
+
+fn continueFrameContinuationSlow(vm: *VM, ci: *CallInfo) !bool {
     switch (ci.continuation) {
-        .none => unreachable,
+        .none => return false,
         .return_ => return false,
         .compare => |compare| {
             var is_true = vm.stack[compare.result_slot].toBoolean();
@@ -1615,9 +1622,10 @@ inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
 }
 
 inline fn runHooksIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
-    // Fast path: skip all hook processing when no hooks are registered
-    // Note: count hooks use hooks.count, not hooks.mask
-    if (vm.hooks.mask == 0 and vm.hooks.count == 0) return;
+    // Fast path: skip all hook processing when no hooks are registered.
+    // `active` is derived from mask/count (see hook.syncActive) so the
+    // per-instruction guard is a single load.
+    if (!vm.hooks.active) return;
     try runCountHookIfNeeded(vm);
     try runLineHookIfNeeded(vm, ci, inst);
 }
@@ -1628,7 +1636,6 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
     if (interrupt.consume()) {
         return vm.raiseString("interrupted!");
     }
-    vm.field_cache.exec_tick +%= 1;
     const ci = vm.ci.?;
     try runHooksIfNeeded(vm, ci, inst);
 
