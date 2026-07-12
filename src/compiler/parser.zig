@@ -938,6 +938,163 @@ pub const ProtoBuilder = struct {
         return true;
     }
 
+    const NumConst = union(enum) {
+        integer: i64,
+        number: f64,
+    };
+
+    const FoldOp = enum { add, sub, mul, div, idiv, mod, pow };
+
+    fn foldOpFromLexeme(lexeme: []const u8) ?FoldOp {
+        if (lexeme.len == 1) {
+            return switch (lexeme[0]) {
+                '+' => .add,
+                '-' => .sub,
+                '*' => .mul,
+                '/' => .div,
+                '%' => .mod,
+                '^' => .pow,
+                else => null,
+            };
+        }
+        if (std.mem.eql(u8, lexeme, "//")) return .idiv;
+        return null;
+    }
+
+    /// Decode the numeric constant loaded into `reg` by the instruction
+    /// `back` slots from the end of the emitted code (0 = last).
+    /// Only matches temp registers: a load into a named local is an
+    /// observable assignment and must stay.
+    fn trailingNumericLoad(self: *ProtoBuilder, back: usize, reg: u8) ?NumConst {
+        if (reg < self.locals_top) return null;
+        const n = self.code.items.len;
+        if (n <= back) return null;
+        const inst = self.code.items[n - 1 - back];
+        if (inst.getOpCode() != .LOADK or inst.getA() != reg) return null;
+        const const_idx = inst.getBx();
+        if (const_idx >= self.const_refs.items.len) return null;
+        const cref = self.const_refs.items[const_idx];
+        return switch (cref.kind) {
+            .integer => if (cref.index < self.integers.items.len)
+                NumConst{ .integer = self.integers.items[cref.index] }
+            else
+                null,
+            .number => if (cref.index < self.numbers.items.len)
+                NumConst{ .number = self.numbers.items[cref.index] }
+            else
+                null,
+            else => null,
+        };
+    }
+
+    fn addConstNumeric(self: *ProtoBuilder, value: NumConst) !u32 {
+        switch (value) {
+            .integer => |i| {
+                const idx: u32 = @intCast(self.integers.items.len);
+                try self.integers.append(self.allocator, i);
+                try self.const_refs.append(self.allocator, .{ .kind = .integer, .index = idx });
+            },
+            .number => |f| {
+                const idx: u32 = @intCast(self.numbers.items.len);
+                try self.numbers.append(self.allocator, f);
+                try self.const_refs.append(self.allocator, .{ .kind = .number, .index = idx });
+            },
+        }
+        return @intCast(self.const_refs.items.len - 1);
+    }
+
+    /// Compute `l op r` with Lua 5.4 constant semantics, or null when the
+    /// operation must be left to the VM:
+    ///   - `/`, `//`, `%` with a zero divisor (runtime error / inf stays
+    ///     runtime behavior)
+    ///   - float results that are NaN or zero (avoids -0.0 constants),
+    ///     mirroring PUC Lua's constfolding rule
+    fn foldNumeric(op: FoldOp, l: NumConst, r: NumConst) ?NumConst {
+        if (l == .integer and r == .integer) {
+            const a = l.integer;
+            const b = r.integer;
+            switch (op) {
+                .add => return NumConst{ .integer = a +% b },
+                .sub => return NumConst{ .integer = a -% b },
+                .mul => return NumConst{ .integer = a *% b },
+                .idiv, .mod => {
+                    if (b == 0) return null;
+                    // minint // -1 wraps; minint % -1 is 0. @divFloor/@mod
+                    // would overflow on that pair.
+                    if (b == -1) {
+                        return NumConst{ .integer = if (op == .idiv) 0 -% a else 0 };
+                    }
+                    return NumConst{
+                        .integer = if (op == .idiv) @divFloor(a, b) else @mod(a, b),
+                    };
+                },
+                .div, .pow => {},
+            }
+        }
+        const x: f64 = switch (l) {
+            .integer => |i| @floatFromInt(i),
+            .number => |f| f,
+        };
+        const y: f64 = switch (r) {
+            .integer => |i| @floatFromInt(i),
+            .number => |f| f,
+        };
+        if ((op == .div or op == .idiv or op == .mod) and y == 0) return null;
+        const n: f64 = switch (op) {
+            .add => x + y,
+            .sub => x - y,
+            .mul => x * y,
+            .div => x / y,
+            .idiv => @floor(x / y),
+            .mod => blk: {
+                // Lua's luai_nummod: fmod adjusted when the result and the
+                // divisor have opposite signs.
+                var m = @rem(x, y);
+                if (if (m > 0) y < 0 else (m < 0 and y > 0)) m += y;
+                break :blk m;
+            },
+            .pow => std.math.pow(f64, x, y),
+        };
+        if (std.math.isNan(n) or n == 0) return null;
+        return NumConst{ .number = n };
+    }
+
+    /// Fold `left op right` when both operands are numeric literals just
+    /// loaded into temp registers (`... LOADK left ; LOADK right`). Pops
+    /// the two loads and reloads the computed constant into `left`.
+    /// Returns the result register, or null when nothing was folded.
+    fn tryFoldTrailingArith(self: *ProtoBuilder, left: u8, right: u8, op_lexeme: []const u8) !?u8 {
+        const op = foldOpFromLexeme(op_lexeme) orelse return null;
+        const rv = self.trailingNumericLoad(0, right) orelse return null;
+        const lv = self.trailingNumericLoad(1, left) orelse return null;
+        const folded = foldNumeric(op, lv, rv) orelse return null;
+        self.popLastInstruction();
+        self.popLastInstruction();
+        const const_idx = try self.addConstNumeric(folded);
+        try self.emitLoadK(left, const_idx);
+        self.next_reg = @max(self.locals_top, left + 1);
+        return left;
+    }
+
+    /// Fold unary minus applied to a numeric literal just loaded into a
+    /// temp register. Returns the result register, or null.
+    fn tryFoldTrailingUnm(self: *ProtoBuilder, operand: u8) !?u8 {
+        const v = self.trailingNumericLoad(0, operand) orelse return null;
+        const folded: NumConst = switch (v) {
+            .integer => |i| .{ .integer = 0 -% i },
+            .number => |f| blk: {
+                const n = -f;
+                if (std.math.isNan(n) or n == 0) return null;
+                break :blk .{ .number = n };
+            },
+        };
+        self.popLastInstruction();
+        const const_idx = try self.addConstNumeric(folded);
+        try self.emitLoadK(operand, const_idx);
+        self.next_reg = @max(self.locals_top, operand + 1);
+        return operand;
+    }
+
     fn trailingSmallIntegerLoad(self: *ProtoBuilder, reg: u8) ?i8 {
         if (self.code.items.len == 0) return null;
         const last = self.code.items[self.code.items.len - 1];
@@ -3205,9 +3362,13 @@ pub const Parser = struct {
             self.advance(); // consume '^'
             const right = try self.parsePowRight(); // use parsePowRight for right operand
 
-            const dst = self.proto.allocTemp();
-            try self.proto.emitPOW(dst, left, right);
-            left = dst;
+            if (try self.proto.tryFoldTrailingArith(left, right, "^")) |folded| {
+                left = folded;
+            } else {
+                const dst = self.proto.allocTemp();
+                try self.proto.emitPOW(dst, left, right);
+                left = dst;
+            }
         }
 
         return left;
@@ -3229,6 +3390,9 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
             self.advance();
             const operand = try self.parsePowRight();
+            if (try self.proto.tryFoldTrailingUnm(operand)) |folded| {
+                return folded;
+            }
             const dst = self.proto.allocTemp();
             try self.proto.emitUNM(dst, operand);
             return dst;
@@ -3258,9 +3422,13 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "^")) {
             self.advance();
             const right = try self.parsePowRight();
-            const dst = self.proto.allocTemp();
-            try self.proto.emitPOW(dst, left, right);
-            left = dst;
+            if (try self.proto.tryFoldTrailingArith(left, right, "^")) |folded| {
+                left = folded;
+            } else {
+                const dst = self.proto.allocTemp();
+                try self.proto.emitPOW(dst, left, right);
+                left = dst;
+            }
         }
 
         return left;
@@ -3281,6 +3449,9 @@ pub const Parser = struct {
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "-")) {
             self.advance(); // consume '-'
             const operand = try self.parsePrimary(); // recursive for chained: --x
+            if (try self.proto.tryFoldTrailingUnm(operand)) |folded| {
+                return folded;
+            }
             const dst = self.proto.allocTemp();
             try self.proto.emitUNM(dst, operand);
             return dst;
@@ -3550,8 +3721,12 @@ pub const Parser = struct {
             self.advance(); // consume operator
             const right = try self.parsePrimary();
 
-            const dst = self.proto.allocTemp();
             self.proto.current_line = op_line;
+            if (try self.proto.tryFoldTrailingArith(left, right, op)) |folded| {
+                left = folded;
+                continue;
+            }
+            const dst = self.proto.allocTemp();
             if (std.mem.eql(u8, op, "*")) {
                 try self.proto.emitMul(dst, left, right);
             } else if (std.mem.eql(u8, op, "//")) {
@@ -3570,19 +3745,24 @@ pub const Parser = struct {
     }
 
     fn parseAdd(self: *Parser) ParseError!u8 {
-        const first = try self.parseMul();
-        if (!(self.current.kind == .Symbol and
-            (std.mem.eql(u8, self.current.lexeme, "+") or
-                std.mem.eql(u8, self.current.lexeme, "-"))))
-        {
-            return first;
-        }
+        var left = try self.parseMul();
 
-        // Fold long additive chains into a single accumulator register to avoid
+        // Accumulator register that folds long additive chains to avoid
         // unbounded temporary growth (e.g. a1 + a2 + ... + a200).
-        const acc = self.proto.allocTemp();
-        if (acc != first) {
-            try self.proto.emitMOVE(acc, first);
+        // Its allocation is deferred only while a constant fold is still
+        // possible (left is a just-loaded numeric literal); otherwise it is
+        // allocated up front so non-folded chains keep their exact register
+        // layout.
+        var acc: ?u8 = null;
+        if (self.current.kind == .Symbol and
+            (std.mem.eql(u8, self.current.lexeme, "+") or
+                std.mem.eql(u8, self.current.lexeme, "-")) and
+            self.proto.trailingNumericLoad(0, left) == null)
+        {
+            acc = self.proto.allocTemp();
+            if (acc.? != left) {
+                try self.proto.emitMOVE(acc.?, left);
+            }
         }
 
         while (self.current.kind == .Symbol and
@@ -3595,19 +3775,27 @@ pub const Parser = struct {
             const right = try self.parseMul();
 
             self.proto.current_line = op_line;
+            if (acc == null) {
+                if (try self.proto.tryFoldTrailingArith(left, right, op)) |folded| {
+                    left = folded;
+                    continue;
+                }
+                acc = self.proto.allocTemp();
+                if (acc.? != left) {
+                    try self.proto.emitMOVE(acc.?, left);
+                }
+            }
             if (std.mem.eql(u8, op, "+")) {
-                try self.proto.emitAdd(acc, acc, right);
-            } else if (std.mem.eql(u8, op, "-")) {
-                try self.proto.emitSub(acc, acc, right);
+                try self.proto.emitAdd(acc.?, acc.?, right);
             } else {
-                return error.UnsupportedOperator;
+                try self.proto.emitSub(acc.?, acc.?, right);
             }
 
             // Release temporaries created for the RHS; keep only accumulator.
-            self.proto.next_reg = @max(self.proto.locals_top, acc + 1);
+            self.proto.next_reg = @max(self.proto.locals_top, acc.? + 1);
         }
 
-        return acc;
+        return acc orelse left;
     }
 
     /// Parse bitwise OR: a | b
