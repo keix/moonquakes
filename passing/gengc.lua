@@ -126,6 +126,10 @@ end
 if T == nil then
   (Message or print)('\n >>> testC not active: \z
                              skipping some generational tests <<<\n')
+  -- Restore the GC mode before this early return; otherwise every test
+  -- after this file keeps running under generational mode. Upstream only
+  -- reaches the restore at the bottom of this file when testC is present.
+  collectgarbage(oldmode)
   print 'OK'
   return
 end

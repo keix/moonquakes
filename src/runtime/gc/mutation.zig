@@ -13,51 +13,19 @@ const StringObject = object.StringObject;
 const GCObject = object.GCObject;
 const TValue = @import("../value.zig").TValue;
 
-fn valueIsYoung(value: TValue) bool {
-    return value == .object and value.object.generation != .old;
-}
-
-fn tableHasYoungRefs(table: *const TableObject) bool {
-    if (table.metatable) |mt| {
-        if (mt.header.generation != .old) return true;
-    }
-
-    var iter = table.hash_part.iterator();
-    while (iter.next()) |entry| {
-        if (valueIsYoung(entry.key_ptr.*) or valueIsYoung(entry.value_ptr.*)) return true;
-    }
-
-    var deleted_iter = table.deleted_keys.iterator();
-    while (deleted_iter.next()) |entry| {
-        if (valueIsYoung(entry.key_ptr.*)) return true;
-    }
-
-    for (table.iter_keys.items) |key| {
-        if (valueIsYoung(key)) return true;
-    }
-
-    return false;
-}
-
-fn updateRememberedTable(gc: anytype, table: *TableObject) void {
-    if (gc.mode != .generational or table.header.generation != .old) return;
-
-    if (tableHasYoungRefs(table)) {
-        gc.rememberObject(&table.header);
-    } else {
-        gc.forgetObject(&table.header);
-    }
-}
-
 pub fn tableSet(gc: anytype, table: *TableObject, key: TValue, value: TValue) !void {
     try table.set(key, value);
-    updateRememberedTable(gc, table);
+    // Old-table stores rely on the O(1) backward barrier: barrierBack adds
+    // the table to the remembered set when a non-old key or value is written
+    // into an old table. The key barrier also covers deletions, whose keys
+    // stay referenced through deleted_keys. Stale remembered entries are
+    // dropped by pruneRememberedSet at the end of each minor cycle.
+    gc.barrierBackValue(&table.header, key);
     gc.barrierBackValue(&table.header, value);
 }
 
 pub fn tableSetMetatable(gc: anytype, table: *TableObject, new_mt: ?*TableObject) void {
     table.metatable = new_mt;
-    updateRememberedTable(gc, table);
     if (new_mt) |mt| {
         gc.barrierBack(&table.header, &mt.header);
     }

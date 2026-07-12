@@ -3868,8 +3868,7 @@ fn opCLOSURE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         }
     }
 
-    const closure = try vm.gc().allocClosure(child_proto);
-    @memcpy(closure.upvalues[0..nups], upvals_buf[0..nups]);
+    const closure = try vm.gc().allocClosureWithUpvalues(child_proto, upvals_buf[0..nups]);
 
     vm.stack[vm.base + a] = TValue.fromClosure(closure);
     return .Continue;

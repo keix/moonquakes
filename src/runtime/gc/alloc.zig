@@ -87,6 +87,9 @@ pub fn allocConstString(self: anytype, str: []const u8) !*StringObject {
 
 fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*StringObject {
     // Lua-compatible policy: intern only short strings.
+    // Note: raising this toward PUC's LUAI_MAXSHORTLEN (40) was measured to
+    // regress unique-string churn 12x — std.StringHashMap degrades under
+    // heavy insert/remove. Revisit only with a purpose-built string table.
     const short_string_max_len: usize = 16;
     const should_intern = force_intern or str.len <= short_string_max_len;
     if (should_intern) {
@@ -142,7 +145,12 @@ pub fn allocTable(self: anytype) !*TableObject {
     return obj;
 }
 
-/// Allocate a new closure object with upvalues array
+/// Allocate a new closure object with placeholder closed upvalues.
+/// Callers that already hold the real upvalues should use
+/// allocClosureWithUpvalues instead.
+/// (Co-allocating the upvalue array after the struct was measured to
+/// regress allocation-heavy workloads ~30%: the combined size crosses into
+/// the next GeneralPurposeAllocator size class.)
 pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
     const obj = try allocObject(self, ClosureObject, 0);
 
@@ -159,6 +167,34 @@ pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
         }
         obj.upvalues = upvals;
         self.bytes_allocated += proto.nups * @sizeOf(*UpvalueObject);
+    } else {
+        obj.upvalues = &.{};
+    }
+
+    // Add to GC object list
+    obj.header.next = self.objects;
+    self.objects = &obj.header;
+
+    return obj;
+}
+
+/// Allocate a closure and install the provided upvalues directly, without
+/// allocClosure's placeholder upvalue objects (which callers like OP_CLOSURE
+/// would immediately overwrite and turn into garbage). The upvalues must
+/// each be kept alive by their own roots (open-upvalue lists or an
+/// enclosing closure) until this call returns.
+pub fn allocClosureWithUpvalues(self: anytype, proto: *ProtoObject, upvals: []const *UpvalueObject) !*ClosureObject {
+    std.debug.assert(upvals.len == proto.nups);
+    const obj = try allocObject(self, ClosureObject, 0);
+
+    obj.header = GCObject.initWithMark(.closure, null, self.current_mark);
+    obj.proto = proto;
+
+    if (upvals.len > 0) {
+        const arr = try self.allocator.alloc(*UpvalueObject, upvals.len);
+        @memcpy(arr, upvals);
+        obj.upvalues = arr;
+        self.bytes_allocated += upvals.len * @sizeOf(*UpvalueObject);
     } else {
         obj.upvalues = &.{};
     }
