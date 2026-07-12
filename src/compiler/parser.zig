@@ -908,6 +908,36 @@ pub const ProtoBuilder = struct {
         _ = self.lineinfo.pop();
     }
 
+    /// Fuse a boolean-materializing comparison into a conditional branch.
+    ///
+    /// parseCompare lowers `a < b` into:
+    ///     CMP        ; skips next instruction when the comparison holds
+    ///     LFALSESKIP reg
+    ///     LOADTRUE   reg
+    /// When that value is only consumed by an immediately following
+    /// `TEST reg, false` + `JMP`, the two materializing instructions and the
+    /// TEST are redundant: the comparison's skip can target the JMP directly.
+    /// Only fires for temp registers — a named local must keep its
+    /// materialized boolean.
+    ///
+    /// Returns true when fused; the caller must then emit only the JMP.
+    fn tryFuseCompareJump(self: *ProtoBuilder, reg: u8) bool {
+        if (reg < self.locals_top) return false;
+        const n = self.code.items.len;
+        if (n < 3) return false;
+        const load_true = self.code.items[n - 1];
+        const false_skip = self.code.items[n - 2];
+        if (load_true.getOpCode() != .LOADTRUE or load_true.getA() != reg) return false;
+        if (false_skip.getOpCode() != .LFALSESKIP or false_skip.getA() != reg) return false;
+        switch (self.code.items[n - 3].getOpCode()) {
+            .EQ, .LT, .LE, .LTI, .LEI, .GTI, .GEI => {},
+            else => return false,
+        }
+        self.popLastInstruction();
+        self.popLastInstruction();
+        return true;
+    }
+
     fn trailingSmallIntegerLoad(self: *ProtoBuilder, reg: u8) ?i8 {
         if (self.code.items.len == 0) return null;
         const last = self.code.items[self.code.items.len - 1];
@@ -3860,9 +3890,11 @@ pub const Parser = struct {
         const then_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'then'
 
-        // TEST condition, skip if false
+        // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = then_line;
-        try self.proto.emitTEST(condition_reg, false);
+        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+            try self.proto.emitTEST(condition_reg, false);
+        }
         const false_jmp = try self.proto.emitPatchableJMP();
 
         // Drop temporary condition value before branch bodies so GC does not
@@ -3924,9 +3956,11 @@ pub const Parser = struct {
             const elseif_then_line: u32 = @intCast(self.current.line);
             self.advance(); // consume 'then'
 
-            // TEST elseif condition, skip if false
+            // TEST elseif condition, skip if false (or branch on a fused comparison)
             self.proto.current_line = elseif_then_line;
-            try self.proto.emitTEST(elseif_condition_reg, false);
+            if (!self.proto.tryFuseCompareJump(elseif_condition_reg)) {
+                try self.proto.emitTEST(elseif_condition_reg, false);
+            }
             current_false_jmp = try self.proto.emitPatchableJMP();
 
             // Release elseif condition temporaries
@@ -4364,9 +4398,11 @@ pub const Parser = struct {
         const do_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'do'
 
-        // TEST condition, skip if false
+        // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = do_line;
-        try self.proto.emitTEST(condition_reg, false);
+        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+            try self.proto.emitTEST(condition_reg, false);
+        }
         const exit_jmp = try self.proto.emitPatchableJMP();
 
         // Condition temporaries are dead after TEST/JMP dispatch.
@@ -4463,7 +4499,9 @@ pub const Parser = struct {
         // cond true  -> skip first JMP, close locals, jump to end.
         // cond false -> take first JMP to continue path, close locals, jump back.
         self.proto.current_line = until_line;
-        try self.proto.emitTEST(condition_reg, false);
+        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+            try self.proto.emitTEST(condition_reg, false);
+        }
         const continue_jmp = try self.proto.emitPatchableJMP();
 
         // Exit path (condition true): close loop-scope locals and leave loop.
