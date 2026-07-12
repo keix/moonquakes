@@ -1518,16 +1518,19 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
             if (handled) continue;
         }
         // Run straight-line fast-path opcodes in the tight inner loop; it
-        // leaves ci.pc at the first instruction it did not execute.
-        if (!vm.hooks.active) {
+        // leaves the current frame's pc at the first instruction it did not
+        // execute. It can switch frames (fast CALL/RETURN), so the frame
+        // must be re-derived afterwards.
+        const cur_ci = if (vm.hooks.active) ci else blk: {
             hot_loop.run(vm, ci);
-        }
-        const inst = ci.fetch() catch |err| {
+            break :blk vm.ci orelse return error.LuaException;
+        };
+        const inst = cur_ci.fetch() catch |err| {
             if (err != error.PcOutOfRange) {
                 if (try continueIfLuaExceptionHandled(vm, err)) continue;
                 return err;
             }
-            if (ci.previous == null) return .none;
+            if (cur_ci.previous == null) return .none;
             popCallInfo(vm);
             if (vm.ci) |prev_ci| {
                 vm.base = prev_ci.ret_base;
@@ -1535,7 +1538,7 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
             }
             continue;
         };
-        switch (try runInstructionInMainLoop(vm, ci, inst)) {
+        switch (try runInstructionInMainLoop(vm, cur_ci, inst)) {
             .continue_loop => continue,
             .return_vm => |ret| return ret,
         }
