@@ -59,6 +59,7 @@ const hook_state = @import("hook.zig");
 const protected_call = @import("protected_call.zig");
 const traceback_state = @import("traceback.zig");
 const vm_gc = @import("gc.zig");
+const hot_loop = @import("hot_loop.zig");
 const interrupt = @import("../interrupt.zig");
 
 pub const ArithOp = enum { add, sub, mul, div, idiv, mod, pow };
@@ -1515,6 +1516,11 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
                 return err;
             };
             if (handled) continue;
+        }
+        // Run straight-line fast-path opcodes in the tight inner loop; it
+        // leaves ci.pc at the first instruction it did not execute.
+        if (!vm.hooks.active) {
+            hot_loop.run(vm, ci);
         }
         const inst = ci.fetch() catch |err| {
             if (err != error.PcOutOfRange) {
