@@ -1581,16 +1581,22 @@ pub fn nativeStringRep(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const buf = try vm.gc().allocator.alloc(u8, result_len);
     defer vm.gc().allocator.free(buf);
 
-    // Build result
-    var pos: usize = 0;
-    for (0..count) |i| {
-        if (i > 0 and sep.len > 0) {
-            @memcpy(buf[pos..][0..sep.len], sep);
-            pos += sep.len;
+    // Build result as (str .. sep) x (count-1) .. str: seed one unit, then
+    // double the filled prefix so large counts need O(log n) copies instead
+    // of one memcpy per repetition.
+    const unit_len = str.len + sep.len;
+    const unit_total = unit_len * (count - 1);
+    if (unit_total > 0) {
+        @memcpy(buf[0..str.len], str);
+        @memcpy(buf[str.len..][0..sep.len], sep);
+        var filled: usize = unit_len;
+        while (filled < unit_total) {
+            const chunk = @min(filled, unit_total - filled);
+            @memcpy(buf[filled..][0..chunk], buf[0..chunk]);
+            filled += chunk;
         }
-        @memcpy(buf[pos..][0..str.len], str);
-        pos += str.len;
     }
+    @memcpy(buf[unit_total..][0..str.len], str);
 
     const result = try vm.gc().allocString(buf);
     vm.stack[vm.base + func_reg] = TValue.fromString(result);
