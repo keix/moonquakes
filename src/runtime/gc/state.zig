@@ -22,6 +22,7 @@ const MetamethodKeys = metamethod.MetamethodKeys;
 
 const alloc_mod = @import("alloc.zig");
 const mark_mod = @import("mark.zig");
+const StringTable = @import("string_table.zig").StringTable;
 const sweep_mod = @import("sweep.zig");
 const finalizer_mod = @import("finalizer.zig");
 const weak_mod = @import("weak.zig");
@@ -166,7 +167,7 @@ pub const GC = struct {
 
     /// String intern table for deduplication
     /// Maps string content to existing StringObject for pointer equality
-    strings: std.StringHashMap(*StringObject),
+    strings: StringTable,
 
     /// Total bytes currently allocated
     bytes_allocated: usize,
@@ -267,7 +268,7 @@ pub const GC = struct {
         return .{
             .allocator = allocator,
             .objects = null,
-            .strings = std.StringHashMap(*StringObject).init(allocator),
+            .strings = StringTable.init(allocator),
             .bytes_allocated = 0,
             .next_gc = GC_THRESHOLD,
             .root_providers = .{},
@@ -501,7 +502,7 @@ pub const GC = struct {
 
     pub fn deinit(self: *GC) void {
         // Clear intern table first (objects will be freed below)
-        self.strings.clearAndFree();
+        self.strings.deinit();
 
         // Clear weak tables list
         self.weak_tables.deinit(self.allocator);

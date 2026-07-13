@@ -206,10 +206,8 @@ fn freeObject(self: anytype, obj: *GCObject) void {
     // not evict the live interned entry.
     if (obj.type == .string) {
         const str_obj: *StringObject = @fieldParentPtr("header", obj);
-        if (self.strings.get(str_obj.asSlice())) |interned| {
-            if (interned == str_obj) {
-                _ = self.strings.remove(str_obj.asSlice());
-            }
+        if (str_obj.interned) {
+            self.strings.remove(str_obj);
         }
     }
     freeObjectFinal(self, obj);
