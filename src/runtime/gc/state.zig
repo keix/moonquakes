@@ -200,6 +200,18 @@ pub const GC = struct {
     /// Prevent re-entering finalizer drain (e.g. collectgarbage() inside __gc).
     finalizer_draining: bool = false,
 
+    /// Freelists of dead fixed-size objects kept for reuse instead of being
+    /// returned to the allocator. Sweep pushes, allocObject pops. Nodes are
+    /// already unlinked from `objects` and chained through header.next;
+    /// their deinit and byte accounting happened at push time, so GC.deinit
+    /// must free their raw memory directly (never freeObjectFinal).
+    free_tables: ?*GCObject = null,
+    free_closures: ?*GCObject = null,
+    free_upvalues: ?*GCObject = null,
+    free_tables_len: usize = 0,
+    free_closures_len: usize = 0,
+    free_upvalues_len: usize = 0,
+
     // GC tuning parameters
     gc_multiplier: f64 = 2.0, // Heap growth factor
     gc_min_threshold: usize = GC_THRESHOLD,
@@ -500,6 +512,10 @@ pub const GC = struct {
         self.bytes_allocated -= size;
     }
 
+    /// Per-class cap on pooled objects; the excess is really freed at sweep
+    /// so a one-off allocation burst cannot pin its peak memory forever.
+    pub const FREE_POOL_MAX: usize = 32768;
+
     pub fn deinit(self: *GC) void {
         // Clear intern table first (objects will be freed below)
         self.strings.deinit();
@@ -522,6 +538,21 @@ pub const GC = struct {
         while (current) |obj| {
             const next = obj.next;
             self.freeObjectFinal(obj);
+            current = next;
+        }
+
+        // Pooled objects were deinited at push time; free raw memory only.
+        freePoolRaw(self, self.free_tables, @sizeOf(TableObject));
+        freePoolRaw(self, self.free_closures, @sizeOf(object.ClosureObject));
+        freePoolRaw(self, self.free_upvalues, @sizeOf(object.UpvalueObject));
+    }
+
+    fn freePoolRaw(self: *GC, head: ?*GCObject, size: usize) void {
+        var current = head;
+        while (current) |obj| {
+            const next = obj.next;
+            const memory = @as([*]u8, @ptrCast(obj))[0..size];
+            self.allocator.free(memory);
             current = next;
         }
     }
@@ -594,6 +625,7 @@ pub const GC = struct {
     pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
 
     pub const tableSet = mutation_mod.tableSet;
+    pub const tableInitArray = mutation_mod.tableInitArray;
     pub const tableSetMetatable = mutation_mod.tableSetMetatable;
     pub const userdataSetMetatable = mutation_mod.userdataSetMetatable;
     pub const initClosedUpvalue = mutation_mod.initClosedUpvalue;

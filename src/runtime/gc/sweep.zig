@@ -210,6 +210,48 @@ fn freeObject(self: anytype, obj: *GCObject) void {
             self.strings.remove(str_obj);
         }
     }
+
+    // Pool dead fixed-size, high-churn objects for reuse instead of paying
+    // an allocator round trip. The object is deinited and its bytes
+    // deaccounted here, so the pooled node holds raw memory only; the next
+    // alloc of the same class fully reinitializes every field.
+    switch (obj.type) {
+        .table => {
+            if (self.free_tables_len < @TypeOf(self.*).FREE_POOL_MAX) {
+                const table_obj: *TableObject = @fieldParentPtr("header", obj);
+                table_obj.deinit();
+                self.bytes_allocated -= @sizeOf(TableObject);
+                obj.next = self.free_tables;
+                self.free_tables = obj;
+                self.free_tables_len += 1;
+                return;
+            }
+        },
+        .closure => {
+            if (self.free_closures_len < @TypeOf(self.*).FREE_POOL_MAX) {
+                const closure_obj: *ClosureObject = @fieldParentPtr("header", obj);
+                if (closure_obj.upvalues.len > 0) {
+                    self.bytes_allocated -= closure_obj.upvalues.len * @sizeOf(*UpvalueObject);
+                    self.allocator.free(closure_obj.upvalues);
+                }
+                self.bytes_allocated -= @sizeOf(ClosureObject);
+                obj.next = self.free_closures;
+                self.free_closures = obj;
+                self.free_closures_len += 1;
+                return;
+            }
+        },
+        .upvalue => {
+            if (self.free_upvalues_len < @TypeOf(self.*).FREE_POOL_MAX) {
+                self.bytes_allocated -= @sizeOf(UpvalueObject);
+                obj.next = self.free_upvalues;
+                self.free_upvalues = obj;
+                self.free_upvalues_len += 1;
+                return;
+            }
+        },
+        else => {},
+    }
     freeObjectFinal(self, obj);
 }
 

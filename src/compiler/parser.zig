@@ -3526,10 +3526,15 @@ pub const Parser = struct {
 
         // Allocate register for table
         const table_reg = self.proto.allocTemp();
+        const newtable_addr = self.proto.code.items.len;
         try self.proto.emitNEWTABLE(table_reg);
 
         // List index counter (Lua arrays start at 1)
         var list_index: u32 = 1;
+        // True when the constructor ends in a multret SETLIST flush (call
+        // or vararg tail); it contributes at least one array item that
+        // list_index does not count.
+        var multret_tail = false;
 
         // Parse fields until '}'
         while (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "}"))) {
@@ -3602,6 +3607,7 @@ pub const Parser = struct {
                 // When k=1: start_index = EXTRAARG value (not (C-1)*50+1)
                 try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);
                 try self.proto.emitExtraArg(@intCast(list_index));
+                multret_tail = true;
 
                 // After vararg expansion, no more list elements expected
                 // (vararg should be last in constructor)
@@ -3633,6 +3639,7 @@ pub const Parser = struct {
                             // Use SETLIST to assign all return values starting at list_index
                             try self.proto.emitWithK(.SETLIST, table_reg, 0, 0, true);
                             try self.proto.emitExtraArg(@intCast(list_index));
+                            multret_tail = true;
 
                             // Consume trailing separator if present (e.g., "f();}" or "f(),}")
                             if (self.current.kind == .Symbol and
@@ -3679,6 +3686,17 @@ pub const Parser = struct {
             return error.ExpectedCloseBrace;
         }
         self.advance();
+
+        // Backpatch the array-size hint (C operand, as in PUC's NEWTABLE)
+        // now that the positional item count is known, so the runtime can
+        // size the array part exactly instead of growing it per append.
+        const tail_extra: u32 = @intFromBool(multret_tail);
+        const array_hint: u32 = @min(list_index - 1 + tail_extra, 255);
+        if (array_hint > 0) {
+            const old = self.proto.code.items[newtable_addr];
+            self.proto.code.items[newtable_addr] =
+                Instruction.initABC(.NEWTABLE, old.getA(), old.getB(), @intCast(array_hint));
+        }
 
         return table_reg;
     }

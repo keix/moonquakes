@@ -2167,6 +2167,12 @@ fn opSETFIELD(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 fn opNEWTABLE(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
     const table = try vm.gc().allocTable();
+    // C carries the parser's positional-item count (as in PUC's NEWTABLE):
+    // size the array part exactly instead of growing it per append.
+    const array_hint = inst.getC();
+    if (array_hint > 0) {
+        try table.array.ensureTotalCapacityPrecise(table.allocator, array_hint);
+    }
     vm.stack[vm.base + a] = TValue.fromTable(table);
     return .Continue;
 }
@@ -4006,6 +4012,20 @@ fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const table_val = vm.stack[vm.base + a];
     const table = table_val.asTable() orelse return error.InvalidTableOperation;
     const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
+
+    // Constructor fast path: first flush into a still-empty table with no
+    // nil holes takes one exact-capacity bulk store instead of n generic
+    // sets (each of which probes the empty hash parts and re-walks seq_len).
+    if (start_index == 1 and table.array.items.len == 0 and table.hash_part.count() == 0) {
+        const values = vm.stack[vm.base + a + 1 ..][0..n];
+        const has_nil = for (values) |v| {
+            if (v.isNil()) break true;
+        } else false;
+        if (!has_nil) {
+            try vm.gc().tableInitArray(table, values);
+            return .Continue;
+        }
+    }
 
     for (0..n) |i| {
         const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];

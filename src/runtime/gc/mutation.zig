@@ -24,8 +24,21 @@ pub fn tableSet(gc: anytype, table: *TableObject, key: TValue, value: TValue) !v
     gc.barrierBackValue(&table.header, value);
 }
 
+/// Bulk store for constructor SETLIST flushes into a fresh table; see
+/// TableObject.initArrayFromSlice for the state the caller guarantees.
+/// Integer keys need no barrier, so only the values are routed through it.
+pub fn tableInitArray(gc: anytype, table: *TableObject, values: []const TValue) !void {
+    try table.initArrayFromSlice(values);
+    for (values) |value| {
+        gc.barrierBackValue(&table.header, value);
+    }
+}
+
 pub fn tableSetMetatable(gc: anytype, table: *TableObject, new_mt: ?*TableObject) void {
     table.metatable = new_mt;
+    // A metatable change alters lookup resolution; structural version
+    // bumps so inline caches keyed on shape_count drop their entries.
+    table.shape_count +%= 1;
     if (new_mt) |mt| {
         gc.barrierBack(&table.header, &mt.header);
     }

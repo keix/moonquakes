@@ -574,6 +574,18 @@ pub const TableObject = struct {
         return error.InvalidKey;
     }
 
+    /// Bulk array initialization for constructor SETLIST flushes.
+    /// Caller guarantees fresh state — empty array and hash parts, keys
+    /// 1..n, no nil values — so per-element canonicalization, absorb and
+    /// hole handling are all skipped and capacity is allocated exactly.
+    pub fn initArrayFromSlice(self: *TableObject, values: []const TValue) !void {
+        try self.array.ensureTotalCapacityPrecise(self.allocator, values.len);
+        self.array.appendSliceAssumeCapacity(values);
+        self.seq_len = @intCast(values.len);
+        self.mod_count +%= 1;
+        self.shape_count +%= 1;
+    }
+
     /// Set a value by TValue key
     /// Note: nil and NaN keys are not allowed (Lua 5.4 semantics)
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
@@ -620,6 +632,17 @@ pub const TableObject = struct {
                 return;
             }
             if (i == alen + 1 and !value.isNil()) {
+                // Fresh-append fast path (constructor fills): empty hash
+                // and deleted-key parts mean no absorb, no deleted-key
+                // bookkeeping and nothing beyond the array to probe for
+                // the sequence walk.
+                if (self.hash_part.count() == 0 and self.deleted_keys.count() == 0) {
+                    try self.array.append(self.allocator, value);
+                    self.mod_count +%= 1;
+                    self.shape_count +%= 1;
+                    if (i == self.seq_len + 1) self.seq_len = i;
+                    return;
+                }
                 try self.array.append(self.allocator, value);
                 _ = self.deleted_keys.remove(canonical_key);
                 var next: i64 = i + 1;
