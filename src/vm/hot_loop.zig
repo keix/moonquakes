@@ -524,8 +524,27 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
-            const value = table.get(key_val) orelse return;
-            stack[base + inst.getA()] = value;
+            // Slot-pointer inline cache: valid while the table's structure
+            // (shape_count) and the GC epoch are unchanged. In-place value
+            // writes keep the cache hot; a nil slot means the key became
+            // absent (array hole), which falls back to the lookup.
+            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
+                !entry.slot.isNil())
+            {
+                stack[base + inst.getA()] = entry.slot.*;
+            } else {
+                const slot = table.getPtr(key_val) orelse return;
+                stack[base + inst.getA()] = slot.*;
+                entry.* = .{
+                    .pc = @intFromPtr(pc),
+                    .table = @intFromPtr(table),
+                    .shape = table.shape_count,
+                    .epoch = vm.ic_epoch,
+                    .slot = slot,
+                };
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -539,8 +558,23 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, true, false);
-            const value = table.get(key_val) orelse return;
-            stack[base + inst.getA()] = value;
+            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
+                !entry.slot.isNil())
+            {
+                stack[base + inst.getA()] = entry.slot.*;
+            } else {
+                const slot = table.getPtr(key_val) orelse return;
+                stack[base + inst.getA()] = slot.*;
+                entry.* = .{
+                    .pc = @intFromPtr(pc),
+                    .table = @intFromPtr(table),
+                    .shape = table.shape_count,
+                    .epoch = vm.ic_epoch,
+                    .slot = slot,
+                };
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();

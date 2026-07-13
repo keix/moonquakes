@@ -171,6 +171,7 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
             try table.array.insert(table.allocator, @intCast(pos - 1), value);
             vm.gc().barrierBackValue(&table.header, value);
             table.mod_count +%= 1;
+            table.shape_count +%= 1;
             if (pos <= table.seq_len) {
                 table.seq_len += 1;
             } else if (pos == table.seq_len + 1 and !value.isNil()) {
@@ -251,6 +252,7 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     if (table.metatable == null and len <= @as(i64, @intCast(table.array.items.len))) {
         const removed_value = table.array.orderedRemove(@intCast(pos - 1));
         table.mod_count +%= 1;
+        table.shape_count +%= 1;
         if (pos <= table.seq_len and table.seq_len > 0) {
             table.seq_len -= 1;
         }

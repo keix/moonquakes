@@ -1484,6 +1484,8 @@ pub fn executeMainChunk(vm: *VM, proto: *const ProtoObject, main_args: []const T
     defer vm.gc().setFinalizerExecutor(null);
     vm.gc().setSlowSignal(&vm.slow_work_signal);
     defer vm.gc().setSlowSignal(null);
+    vm.gc().setIcEpochSignal(&vm.ic_epoch);
+    defer vm.gc().setIcEpochSignal(null);
     if (vm.gc().hasPendingFinalizers() or vm.errors.pending_error_unwind) {
         vm.slow_work_signal = true;
     }

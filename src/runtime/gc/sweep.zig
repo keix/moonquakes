@@ -185,6 +185,10 @@ pub fn finishSweepCycle(self: anytype) void {
         pruneRememberedSet(self);
     }
 
+    if (self.ic_epoch_signal) |epoch| {
+        epoch.* +%= 1;
+    }
+
     self.gc_state = .idle;
     self.sweep_cursor = null;
     self.sweep_prev = null;

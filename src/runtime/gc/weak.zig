@@ -142,6 +142,9 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     }
 
     // Remove dead entries
+    if (to_remove.items.len > 0) {
+        table.shape_count +%= 1;
+    }
     for (to_remove.items) |key| {
         _ = table.hash_part.remove(key);
     }
@@ -150,6 +153,7 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     // storage. Release it here so collectgarbage("count") reflects reclaimed
     // memory after dead entries are cleared.
     if (table.hash_part.count() == 0) {
+        table.shape_count +%= 1;
         table.hash_part.deinit();
         table.hash_part = TableObject.HashMap.init(table.allocator);
         table.deleted_keys.deinit();

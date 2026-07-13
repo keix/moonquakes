@@ -192,6 +192,10 @@ pub const GC = struct {
     /// Raised when finalizers are enqueued; see setSlowSignal.
     slow_signal: ?*bool = null,
 
+    /// Bumped after every sweep so slot-pointer inline caches cannot
+    /// outlive freed tables; see setIcEpochSignal.
+    ic_epoch_signal: ?*u64 = null,
+
     /// Prevent re-entering finalizer drain (e.g. collectgarbage() inside __gc).
     finalizer_draining: bool = false,
 
@@ -438,6 +442,12 @@ pub const GC = struct {
     /// the interpreter loop can poll one byte instead of the queue length.
     pub fn setSlowSignal(self: *GC, signal: ?*bool) void {
         self.slow_signal = signal;
+    }
+
+    /// Register the interpreter's inline-cache epoch; bumped after every
+    /// sweep so cached slot pointers cannot dangle into freed tables.
+    pub fn setIcEpochSignal(self: *GC, signal: ?*u64) void {
+        self.ic_epoch_signal = signal;
     }
 
     /// True if there are pending finalizers waiting to run.

@@ -70,6 +70,14 @@ pub const VM = struct {
     // Optimization
     pub const FieldCache = field_cache_mod.FieldCache;
 
+    pub const FieldICEntry = struct {
+        pc: usize = 0,
+        table: usize = 0,
+        shape: u64 = 0,
+        epoch: u64 = std.math.maxInt(u64),
+        slot: *TValue = undefined,
+    };
+
     // Core execution state
     stack: [STACK_CAPACITY]TValue,
     top: u32,
@@ -92,6 +100,13 @@ pub const VM = struct {
     hooks: HookState = .{},
     traceback: TracebackState = .{},
     field_cache: FieldCache = .{},
+
+    // Direct-mapped inline cache for string-key field reads (GETFIELD /
+    // GETTABUP sites, indexed by pc bits). An entry is valid while the
+    // table's shape_count (structural version) and the VM's ic_epoch
+    // (bumped by the GC after every sweep, guarding freed slots) match.
+    field_ic: [64]FieldICEntry = [_]FieldICEntry{.{}} ** 64,
+    ic_epoch: u64 = 0,
     call_debug: CallDebugState = .{},
 
     // Shared runtime identity

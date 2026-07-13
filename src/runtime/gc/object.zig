@@ -289,6 +289,10 @@ pub const TableObject = struct {
     iter_keys: std.ArrayListUnmanaged(TValue),
     iter_index: KeyIndexMap,
     mod_count: u64 = 0,
+    /// Bumped only on structural changes that can move or retire value
+    /// slots (hash insert/remove, array growth/shift) — NOT on in-place
+    /// value overwrites. Slot-pointer inline caches key on this.
+    shape_count: u64 = 0,
     iter_cache_mod_count: u64 = std.math.maxInt(u64),
     allocator: std.mem.Allocator,
     seq_len: i64 = 0,
@@ -618,6 +622,7 @@ pub const TableObject = struct {
                     _ = self.hash_part.remove(.{ .integer = next });
                 }
                 self.mod_count +%= 1;
+                self.shape_count +%= 1;
                 if (i == self.seq_len + 1) {
                     var cursor = self.seq_len + 1;
                     while (self.rawHas(cursor + 1)) cursor += 1;
@@ -633,6 +638,7 @@ pub const TableObject = struct {
                 _ = self.hash_part.remove(canonical_key);
                 try self.deleted_keys.put(canonical_key, {});
                 self.mod_count +%= 1;
+                self.shape_count +%= 1;
                 self.pruneDeletedKeys();
                 if (seq_key) |k| {
                     if (k == self.seq_len) {
@@ -644,7 +650,9 @@ pub const TableObject = struct {
                 }
             }
         } else {
-            try self.hash_part.put(canonical_key, value);
+            const gop = try self.hash_part.getOrPut(canonical_key);
+            if (!gop.found_existing) self.shape_count +%= 1;
+            gop.value_ptr.* = value;
             _ = self.deleted_keys.remove(canonical_key);
             self.mod_count +%= 1;
             if (seq_key) |k| {
