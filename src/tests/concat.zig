@@ -82,7 +82,7 @@ test "concat: \"hello\" .. \"\" .. \"world\" = \"helloworld\"" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 5);
 
     // Set up registers beyond what we need to verify no side effects
-    ctx.vm.stack[4] = TValue{ .boolean = true };
+    ctx.vm.stack[4] = TValue.fromBool(true);
 
     var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 5);
     const result = try Mnemonics.execute(ctx.vm, proto);
@@ -114,7 +114,7 @@ test "concat: \"number: \" .. 42 = \"number: 42\"" {
 
     const constants = [_]TValue{
         TValue.fromString(prefix_str),
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     };
 
     const code = [_]Instruction{
@@ -134,7 +134,7 @@ test "concat: \"number: \" .. 42 = \"number: 42\"" {
 
     // Verify register changes with specific values
     try trace.expectRegisterChanged(0, TValue.fromString(prefix_str));
-    try trace.expectRegisterChanged(1, TValue{ .integer = 42 });
+    try trace.expectRegisterChanged(1, TValue.fromInt(42));
     try trace.expectRegisterChanged(2, TValue.fromString(expected_str));
 
     // VM state verification
@@ -150,9 +150,9 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
     const expected_str = try ctx.vm.gc().allocString("123");
 
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -168,7 +168,7 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
     // Initialize extra registers to test side effects
     const untouched_str = try ctx.vm.gc().allocString("untouched");
     ctx.vm.stack[4] = TValue.fromString(untouched_str);
-    ctx.vm.stack[5] = TValue{ .number = 9.99 };
+    ctx.vm.stack[5] = TValue.fromFloat(9.99);
 
     var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 6);
     const result = try Mnemonics.execute(ctx.vm, proto);
@@ -178,9 +178,9 @@ test "concat: 1 .. 2 .. 3 = \"123\"" {
 
     // Verify all register states
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .integer = 1 }, // R0
-        .{ .integer = 2 }, // R1
-        .{ .integer = 3 }, // R2
+        TValue.fromInt(1), // R0
+        TValue.fromInt(2), // R1
+        TValue.fromInt(3), // R2
         TValue.fromString(expected_str), // R3
     });
 
@@ -200,7 +200,7 @@ test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
     const expected_str = try ctx.vm.gc().allocString("3.14 is pi");
 
     const constants = [_]TValue{
-        .{ .number = 3.14 },
+        TValue.fromFloat(3.14),
         TValue.fromString(suffix_str),
     };
 
@@ -220,7 +220,7 @@ test "concat: 3.14 .. \" is pi\" = \"3.14 is pi\"" {
     try expectSingleResult(result, TValue.fromString(expected_str));
 
     // Detailed register verification
-    try trace.expectRegisterChanged(0, TValue{ .number = 3.14 });
+    try trace.expectRegisterChanged(0, TValue.fromFloat(3.14));
     try trace.expectRegisterChanged(1, TValue.fromString(suffix_str));
     try trace.expectRegisterChanged(2, TValue.fromString(expected_str));
 

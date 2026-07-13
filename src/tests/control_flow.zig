@@ -21,8 +21,8 @@ test "control flow: JMP forward" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -35,7 +35,7 @@ test "control flow: JMP forward" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 1 });
+    try expectSingleResult(result, TValue.fromInt(1));
 }
 
 test "control flow: JMP 0 goes to next instruction" {
@@ -44,9 +44,9 @@ test "control flow: JMP 0 goes to next instruction" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 0 },
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromInt(0),
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     // Test JMP relative offset: sJ=0 should go to next instruction
@@ -62,7 +62,7 @@ test "control flow: JMP 0 goes to next instruction" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 1 });
+    try expectSingleResult(result, TValue.fromInt(1));
 }
 
 test "control flow: JMP out of bounds should error" {
@@ -71,7 +71,7 @@ test "control flow: JMP out of bounds should error" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 0 },
+        TValue.fromInt(0),
     };
 
     // Test JMP that goes out of bounds
@@ -93,9 +93,9 @@ test "control flow: JMP backward (real loop)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 0 }, // counter
-        .{ .integer = 1 }, // increment
-        .{ .integer = 3 }, // limit
+        TValue.fromInt(0), // counter
+        TValue.fromInt(1), // increment
+        TValue.fromInt(3), // limit
     };
 
     // Real backward loop with condition
@@ -114,7 +114,7 @@ test "control flow: JMP backward (real loop)" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 3 });
+    try expectSingleResult(result, TValue.fromInt(3));
 }
 
 test "control flow: TEST with true value" {
@@ -123,9 +123,9 @@ test "control flow: TEST with true value" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .boolean = true },
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromBool(true),
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -139,7 +139,7 @@ test "control flow: TEST with true value" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 2 });
+    try expectSingleResult(result, TValue.fromInt(2));
 }
 
 test "control flow: TEST with false value" {
@@ -148,9 +148,9 @@ test "control flow: TEST with false value" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .boolean = false },
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromBool(false),
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -164,7 +164,7 @@ test "control flow: TEST with false value" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 2 });
+    try expectSingleResult(result, TValue.fromInt(2));
 }
 
 test "control flow: TEST with k=true (inverted)" {
@@ -173,9 +173,9 @@ test "control flow: TEST with k=true (inverted)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .boolean = false },
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromBool(false),
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -189,7 +189,7 @@ test "control flow: TEST with k=true (inverted)" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 2 });
+    try expectSingleResult(result, TValue.fromInt(2));
 }
 
 test "control flow: TESTSET with true value" {
@@ -198,8 +198,8 @@ test "control flow: TESTSET with true value" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .boolean = true },
-        .{ .integer = 99 },
+        TValue.fromBool(true),
+        TValue.fromInt(99),
     };
 
     const code = [_]Instruction{
@@ -214,7 +214,7 @@ test "control flow: TESTSET with true value" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // TESTSET should not have copied, R1 is replaced with 99 again
-    try expectSingleResult(result, TValue{ .integer = 99 });
+    try expectSingleResult(result, TValue.fromInt(99));
 }
 
 test "control flow: if-then-else simulation" {
@@ -223,10 +223,10 @@ test "control flow: if-then-else simulation" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 10 },
-        .{ .integer = 100 },
-        .{ .integer = 200 },
+        TValue.fromInt(5),
+        TValue.fromInt(10),
+        TValue.fromInt(100),
+        TValue.fromInt(200),
     };
 
     // Simulate: if (5 < 10) then return 100 else return 200
@@ -249,5 +249,5 @@ test "control flow: if-then-else simulation" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 100 });
+    try expectSingleResult(result, TValue.fromInt(100));
 }

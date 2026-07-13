@@ -36,10 +36,10 @@ test "metatable __index table chains lookup through fallback table" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 20 },
+        TValue.fromInt(10),
+        TValue.fromInt(20),
         .nil,
-        .{ .integer = 10 },
+        TValue.fromInt(10),
     });
 }
 
@@ -60,7 +60,7 @@ test "metatable __newindex function intercepts writes" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
         .nil,
     });
 }
@@ -79,7 +79,7 @@ test "metatable __newindex table redirects writes to target table" {
 
     try api.expectMultiple(result, &[_]TValue{
         .nil,
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     });
 }
 
@@ -98,9 +98,9 @@ test "metatable raw access bypasses metamethods" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 7 },
-        .{ .integer = 7 },
-        .{ .integer = 5 },
+        TValue.fromInt(7),
+        TValue.fromInt(7),
+        TValue.fromInt(5),
     });
 }
 
@@ -119,8 +119,8 @@ test "metatable __len __call and __tostring are honored" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 99 },
-        .{ .integer = 10 },
+        TValue.fromInt(99),
+        TValue.fromInt(10),
         TValue.fromString(try ctx.base.gc().allocString("META")),
     });
 }
@@ -144,10 +144,10 @@ test "metatable protection via __metatable hides and locks the real metatable" {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 5), values.len);
             try testing.expect(values[0].eql(TValue.fromString(try ctx.base.gc().allocString("locked"))));
-            try testing.expect(values[1].eql(.{ .boolean = false }));
+            try testing.expect(values[1].eql(TValue.fromBool(false)));
             const err = values[2].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "protected metatable");
-            try testing.expect(values[3].eql(.{ .boolean = true }));
+            try testing.expect(values[3].eql(TValue.fromBool(true)));
             try testing.expect(values[4].eql(TValue.fromString(try ctx.base.gc().allocString("real"))));
         },
         else => return error.TestUnexpectedResult,

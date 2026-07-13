@@ -42,7 +42,7 @@ test "simple function call without arguments" {
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
     const func_constants = [_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -72,7 +72,7 @@ test "simple function call without arguments" {
 
     const result = try Mnemonics.execute(ctx.vm, main_proto);
 
-    try test_utils.ReturnTest.expectSingle(result, .{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 }
 
 test "function call with arguments" {
@@ -94,8 +94,8 @@ test "function call with arguments" {
     // Build constants at runtime
     var main_constants = [_]TValue{
         TValue.fromClosure(add_closure),
-        .{ .integer = 10 },
-        .{ .integer = 20 },
+        TValue.fromInt(10),
+        TValue.fromInt(20),
     };
 
     // Main function that calls add(10, 20)
@@ -110,5 +110,5 @@ test "function call with arguments" {
 
     const result = try Mnemonics.execute(ctx.vm, main_proto);
 
-    try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(30));
 }

@@ -14,11 +14,11 @@ const name_resolver = @import("name_resolver.zig");
 const VM = @import("vm.zig").VM;
 
 fn valueTypeName(v: TValue) []const u8 {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -31,11 +31,11 @@ fn valueTypeName(v: TValue) []const u8 {
 }
 
 pub fn callableValueTypeName(v: TValue) []const u8 {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -48,10 +48,10 @@ pub fn callableValueTypeName(v: TValue) []const u8 {
 
 pub fn namedValueTypeName(vm: *VM, v: TValue) []const u8 {
     if (!v.isObject()) return valueTypeName(v);
-    const mt_opt: ?*object.TableObject = switch (v.object.type) {
-        .table => object.getObject(object.TableObject, v.object).metatable,
-        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
-        .file => object.getObject(object.FileObject, v.object).metatable,
+    const mt_opt: ?*object.TableObject = switch (v.asObjectPtr().type) {
+        .table => object.getObject(object.TableObject, v.asObjectPtr()).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.asObjectPtr()).metatable,
+        .file => object.getObject(object.FileObject, v.asObjectPtr()).metatable,
         else => null,
     };
     if (mt_opt) |mt| {

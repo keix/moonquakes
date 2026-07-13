@@ -44,7 +44,7 @@ test "return: no values (RETURN with B=1)" {
 
 test "return: single value (RETURN with B=2)" {
     const constants = [_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     };
 
     const code = [_]Instruction{
@@ -59,14 +59,14 @@ test "return: single value (RETURN with B=2)" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 42 });
+    try expectSingleResult(result, TValue.fromInt(42));
 }
 
 test "return: multiple values (RETURN with B=4)" {
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -84,9 +84,9 @@ test "return: multiple values (RETURN with B=4)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     const expected = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
     };
     try expectMultipleResults(result, &expected);
 }
@@ -108,7 +108,7 @@ test "return: RETURN0 - no values" {
 
 test "return: RETURN1 - single value" {
     const constants = [_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     };
 
     const code = [_]Instruction{
@@ -123,5 +123,5 @@ test "return: RETURN1 - single value" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 42 });
+    try expectSingleResult(result, TValue.fromInt(42));
 }

@@ -39,7 +39,7 @@ test "local: single variable" {
         \\return test()
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 10 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(10));
 }
 
 test "local: two variables return first" {
@@ -59,7 +59,7 @@ test "local: two variables return first" {
         \\return test()
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 10 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(10));
 }
 
 test "local: two variables return second" {
@@ -79,7 +79,7 @@ test "local: two variables return second" {
         \\return test()
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 20 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(20));
 }
 
 test "local: expression in initializer" {
@@ -99,7 +99,7 @@ test "local: expression in initializer" {
         \\return test()
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 30 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(30));
 }
 
 test "local: computed value" {
@@ -120,7 +120,7 @@ test "local: computed value" {
         \\return test()
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 30 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(30));
 }
 
 test "local: with parameter" {
@@ -139,7 +139,7 @@ test "local: with parameter" {
         \\return add(10)
     ;
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(15));
 }
 
 test "local: multiple params and locals" {
@@ -160,7 +160,7 @@ test "local: multiple params and locals" {
     ;
     // sum = 13, diff = 7, result = 91
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 91 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(91));
 }
 
 test "local: registers not reused incorrectly" {
@@ -183,7 +183,7 @@ test "local: registers not reused incorrectly" {
     ;
     // 111 + 222 + 333 = 666
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 666 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(666));
 }
 
 test "local: complex expression does not overwrite locals" {
@@ -206,5 +206,5 @@ test "local: complex expression does not overwrite locals" {
     // a=2, b=3
     // 2*3 + 2 - 3 = 6 + 2 - 3 = 5
     const result = try parseAndExecute(&ctx, arena.allocator(), source);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 5 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(5));
 }

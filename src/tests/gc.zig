@@ -145,7 +145,7 @@ test "table internal allocations are tracked by GC accounting" {
 
     var i: usize = 0;
     while (i < 32) : (i += 1) {
-        try table.set(.{ .integer = @intCast(i + 1) }, .{ .integer = @intCast(i + 10) });
+        try table.set(TValue.fromInt(@intCast(i + 1)), TValue.fromInt(@intCast(i + 10)));
     }
 
     const after_insert = gc.getStats().bytes_allocated;
@@ -239,7 +239,7 @@ test "closed upvalue write barrier keeps white child reachable from black upvalu
     upvalue.close();
 
     var roots = TestRoots{
-        .values = &[_]TValue{TValue{ .object = &upvalue.header }},
+        .values = &[_]TValue{TValue.fromObject(&upvalue.header)},
     };
     try gc.addRootProvider(roots.provider());
 
@@ -585,8 +585,8 @@ test "generational minor enqueues finalizer for unreachable young object" {
 
     const obj = try gc.allocTable();
     gc.tableSetMetatable(obj, mt);
-    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
-    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+    try gc.tableSet(holder, TValue.fromInt(1), TValue.fromTable(obj));
+    try gc.tableSet(holder, TValue.fromInt(1), .nil);
 
     try std.testing.expect(gc.stepSized(0));
     try std.testing.expect(gc.hasPendingFinalizers());
@@ -619,8 +619,8 @@ test "queued finalizer survives subsequent minor cycle" {
 
     const obj = try gc.allocTable();
     gc.tableSetMetatable(obj, mt);
-    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
-    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+    try gc.tableSet(holder, TValue.fromInt(1), TValue.fromTable(obj));
+    try gc.tableSet(holder, TValue.fromInt(1), .nil);
 
     try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
@@ -656,8 +656,8 @@ test "queued finalizer keeps young __gc function alive across minor cycle" {
 
     const obj = try gc.allocTable();
     gc.tableSetMetatable(obj, mt);
-    try gc.tableSet(holder, .{ .integer = 1 }, TValue.fromTable(obj));
-    try gc.tableSet(holder, .{ .integer = 1 }, .nil);
+    try gc.tableSet(holder, TValue.fromInt(1), TValue.fromTable(obj));
+    try gc.tableSet(holder, TValue.fromInt(1), .nil);
 
     try std.testing.expect(gc.stepSized(0));
     const queued_count = gc.getStats().object_count;
@@ -781,13 +781,13 @@ test "remembered set prunes old table at the next minor cycle after overwriting 
     try std.testing.expectEqual(object.ObjectGeneration.old, parent.header.generation);
 
     const child = try gc.allocString("young");
-    try gc.tableSet(parent, .{ .integer = 1 }, TValue.fromString(child));
+    try gc.tableSet(parent, TValue.fromInt(1), TValue.fromString(child));
     try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
     try std.testing.expect(parent.header.remembered);
 
     // The write barrier never eagerly forgets: the entry stays until the
     // next minor cycle's pruneRememberedSet sees no young refs.
-    try gc.tableSet(parent, .{ .integer = 1 }, .nil);
+    try gc.tableSet(parent, TValue.fromInt(1), .nil);
     try std.testing.expectEqual(@as(usize, 1), gc.remembered_set.items.len);
     try std.testing.expect(parent.header.remembered);
 

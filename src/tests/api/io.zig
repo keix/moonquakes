@@ -61,7 +61,7 @@ test "io.open read mode exposes file type and read formats" {
         TValue.fromString(try ctx.base.gc().allocString("file")),
         TValue.fromString(try ctx.base.gc().allocString("alpha")),
         TValue.fromString(try ctx.base.gc().allocString("beta\n")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("closed file")),
     });
 }
@@ -88,9 +88,9 @@ test "io.open write mode persists writes on close" {
 
     const result = try ctx.exec(source);
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("file")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("closed file")),
     });
 

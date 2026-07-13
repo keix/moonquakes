@@ -178,11 +178,11 @@ pub export fn mq_settop(state: ?*mq_State, idx: c_int) void {
 // ----------------------------------------------------------------------------
 
 fn tvalueTypeTag(v: TValue) c_int {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => constants.MQ_TNIL,
         .boolean => constants.MQ_TBOOLEAN,
         .integer, .number => constants.MQ_TNUMBER,
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => constants.MQ_TSTRING,
             .table => constants.MQ_TTABLE,
             .closure, .native_closure, .c_closure => constants.MQ_TFUNCTION,
@@ -253,7 +253,7 @@ pub export fn mq_isnumber(state: ?*mq_State, idx: c_int) c_int {
 pub export fn mq_isinteger(state: ?*mq_State, idx: c_int) c_int {
     const vm = vmOf(state) orelse return 0;
     const abs = absIndex(vm, idx) orelse return 0;
-    return @intFromBool(vm.stack[abs] == .integer);
+    return @intFromBool(vm.stack[abs].isInteger());
 }
 
 /// True when the value is a string, or any number (matches Lua's
@@ -261,9 +261,9 @@ pub export fn mq_isinteger(state: ?*mq_State, idx: c_int) c_int {
 pub export fn mq_isstring(state: ?*mq_State, idx: c_int) c_int {
     const vm = vmOf(state) orelse return 0;
     const abs = absIndex(vm, idx) orelse return 0;
-    return switch (vm.stack[abs]) {
+    return switch (vm.stack[abs].kind()) {
         .integer, .number => 1,
-        .object => |obj| @intFromBool(obj.type == .string),
+        .object => @intFromBool(vm.stack[abs].asObjectPtr().type == .string),
         else => 0,
     };
 }
@@ -287,17 +287,17 @@ pub export fn mq_pushnil(state: ?*mq_State) void {
 
 pub export fn mq_pushboolean(state: ?*mq_State, b: c_int) void {
     const vm = vmOf(state) orelse return;
-    pushTValue(vm, .{ .boolean = b != 0 });
+    pushTValue(vm, TValue.fromBool(b != 0));
 }
 
 pub export fn mq_pushinteger(state: ?*mq_State, n: i64) void {
     const vm = vmOf(state) orelse return;
-    pushTValue(vm, .{ .integer = n });
+    pushTValue(vm, TValue.fromInt(n));
 }
 
 pub export fn mq_pushnumber(state: ?*mq_State, n: f64) void {
     const vm = vmOf(state) orelse return;
-    pushTValue(vm, .{ .number = n });
+    pushTValue(vm, TValue.fromFloat(n));
 }
 
 /// Push a string of explicit length. Returns a **borrowed** pointer to the
@@ -464,9 +464,9 @@ pub export fn mq_tolstring(state: ?*mq_State, idx: c_int, len: ?*usize) ?[*]cons
     }
 
     var buf: [64]u8 = undefined;
-    const rendered: []const u8 = switch (slot.*) {
-        .integer => |i| std.fmt.bufPrint(&buf, "{d}", .{i}) catch return null,
-        .number => |n| formatLuaFloat(&buf, n),
+    const rendered: []const u8 = switch (slot.*.kind()) {
+        .integer => std.fmt.bufPrint(&buf, "{d}", .{slot.*.asInt()}) catch return null,
+        .number => formatLuaFloat(&buf, slot.*.asFloat()),
         else => return null,
     };
     const str_obj = vm.gc().allocString(rendered) catch return null;
@@ -616,7 +616,7 @@ pub export fn mq_pcall(
 fn finishPCallError(vm: *VM, func_idx: u32, err: anyerror) c_int {
     vm.top = func_idx;
     const raised = error_state.takeRaisedValue(vm);
-    if (raised == .nil) {
+    if (raised.isNil()) {
         const synth = vm.gc().allocString(@errorName(err)) catch {
             pushTValue(vm, .nil);
             return mqStatusFromError(err);
@@ -660,7 +660,7 @@ pub export fn mq_geti(state: ?*mq_State, idx: c_int, n: i64) c_int {
         pushTValue(vm, .nil);
         return constants.MQ_TNIL;
     };
-    const v = tbl.get(.{ .integer = n }) orelse TValue.nil;
+    const v = tbl.get(TValue.fromInt(n)) orelse TValue.nil;
     pushTValue(vm, v);
     return tvalueTypeTag(v);
 }
@@ -693,7 +693,7 @@ pub export fn mq_seti(state: ?*mq_State, idx: c_int, n: i64) void {
     const abs = absIndex(vm, idx) orelse return;
     const tbl = vm.stack[abs].asTable() orelse return;
     const top_val = vm.stack[vm.top - 1];
-    vm.gc().tableSet(tbl, .{ .integer = n }, top_val) catch return;
+    vm.gc().tableSet(tbl, TValue.fromInt(n), top_val) catch return;
     vm.top -= 1;
 }
 
@@ -714,7 +714,7 @@ pub export fn mq_len(state: ?*mq_State, idx: c_int) c_int {
         pushTValue(vm, .nil);
         return constants.MQ_TNIL;
     };
-    pushTValue(vm, .{ .integer = len });
+    pushTValue(vm, TValue.fromInt(len));
     return constants.MQ_TNUMBER;
 }
 

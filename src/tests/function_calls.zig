@@ -17,7 +17,7 @@ test "CALL returns multiple values" {
         Instruction.initABx(.LOADK, 1, 1), // R[1] = 20
         Instruction.initABC(.RETURN, 0, 3, 0), // return R[0], R[1]
     };
-    const func_constants = [_]TValue{ .{ .integer = 10 }, .{ .integer = 20 } };
+    const func_constants = [_]TValue{ TValue.fromInt(10), TValue.fromInt(20) };
 
     const func_proto = try test_utils.createTestProto(ctx.vm, &func_constants, &func_code, 0, false, 2);
     const func_closure = try ctx.vm.gc().allocClosure(func_proto);
@@ -31,7 +31,7 @@ test "CALL returns multiple values" {
     const main_proto = try test_utils.createTestProto(ctx.vm, &main_constants, &main_code, 0, false, 2);
 
     const result = try Mnemonics.execute(ctx.vm, main_proto);
-    try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ .{ .integer = 10 }, .{ .integer = 20 } });
+    try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ TValue.fromInt(10), TValue.fromInt(20) });
 }
 
 test "CALL fills nil when callee returns no values" {
@@ -67,7 +67,7 @@ test "CALL pads missing results with nil" {
         Instruction.initABx(.LOADK, 0, 0), // R[0] = 99
         Instruction.initABC(.RETURN, 0, 2, 0), // return R[0]
     };
-    const func_constants = [_]TValue{.{ .integer = 99 }};
+    const func_constants = [_]TValue{TValue.fromInt(99)};
 
     const func_proto = try test_utils.createTestProto(ctx.vm, &func_constants, &func_code, 0, false, 1);
     const func_closure = try ctx.vm.gc().allocClosure(func_proto);
@@ -81,7 +81,7 @@ test "CALL pads missing results with nil" {
     const main_proto = try test_utils.createTestProto(ctx.vm, &main_constants, &main_code, 0, false, 2);
 
     const result = try Mnemonics.execute(ctx.vm, main_proto);
-    try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ .{ .integer = 99 }, .nil });
+    try test_utils.ReturnTest.expectMultiple(result, &[_]TValue{ TValue.fromInt(99), .nil });
 }
 
 test "callNative can project top-defined multret results" {
@@ -97,10 +97,10 @@ test "callNative can project top-defined multret results" {
         TValue.fromNativeClosure(nc),
         nc,
         &[_]TValue{
-            .{ .integer = 2 },
-            .{ .integer = 10 },
-            .{ .integer = 20 },
-            .{ .integer = 30 },
+            TValue.fromInt(2),
+            TValue.fromInt(10),
+            TValue.fromInt(20),
+            TValue.fromInt(30),
         },
         .top_defined,
     );
@@ -108,8 +108,8 @@ test "callNative can project top-defined multret results" {
     switch (outcome) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .integer = 20 }));
-            try testing.expect(values[1].eql(.{ .integer = 30 }));
+            try testing.expect(values[0].eql(TValue.fromInt(20)));
+            try testing.expect(values[1].eql(TValue.fromInt(30)));
         },
         else => return error.TestUnexpectedResult,
     }

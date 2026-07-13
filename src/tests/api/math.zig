@@ -16,8 +16,8 @@ test "math table exposes core constants" {
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("integer")),
         TValue.fromString(try ctx.base.gc().allocString("integer")),
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -31,11 +31,11 @@ test "math abs ceil floor max and min preserve numeric behavior" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 4 },
-        .{ .integer = 3 },
-        .{ .integer = 2 },
-        .{ .integer = 9 },
-        .{ .integer = 1 },
+        TValue.fromInt(4),
+        TValue.fromInt(3),
+        TValue.fromInt(2),
+        TValue.fromInt(9),
+        TValue.fromInt(1),
     });
 }
 
@@ -52,13 +52,13 @@ test "math modf tointeger type and ult expose Lua numeric contracts" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 5), values.len);
-            try testing.expect(values[0].eql(.{ .integer = 3 }));
-            try testing.expect(values[2].eql(.{ .integer = 42 }));
+            try testing.expect(values[0].eql(TValue.fromInt(3)));
+            try testing.expect(values[2].eql(TValue.fromInt(42)));
             const ty = values[3].asString() orelse return error.TestUnexpectedResult;
             try testing.expectEqualStrings("float", ty.asSlice());
-            try testing.expect(values[4].eql(.{ .boolean = false }));
-            switch (values[1]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 0.25), n, 1e-12),
+            try testing.expect(values[4].eql(TValue.fromBool(false)));
+            switch (values[1].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 0.25), values[1].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
         },
@@ -78,20 +78,20 @@ test "math trig and conversion helpers return expected values" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 4), values.len);
-            switch (values[0]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 0.0), n, 1e-12),
+            switch (values[0].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 0.0), values[0].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[1]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 3.0), n, 1e-12),
+            switch (values[1].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 3.0), values[1].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[2]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 180.0), n, 1e-9),
+            switch (values[2].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 180.0), values[2].asFloat(), 1e-9),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[3]) {
-                .number => |n| try testing.expectApproxEqAbs(std.math.pi, n, 1e-12),
+            switch (values[3].kind()) {
+                .number => try testing.expectApproxEqAbs(std.math.pi, values[3].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
         },
@@ -115,9 +115,9 @@ test "math randomseed makes random sequence reproducible" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -136,9 +136,9 @@ test "math random supports zero one and two argument forms" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("number")),
-        .{ .boolean = true },
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -154,25 +154,25 @@ test "math fmod log exp cos and atan expose stable numeric behavior" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 5), values.len);
-            switch (values[0]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 2.0), n, 1e-12),
-                .integer => |i| try testing.expectEqual(@as(i64, 2), i),
+            switch (values[0].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 2.0), values[0].asFloat(), 1e-12),
+                .integer => try testing.expectEqual(@as(i64, 2), values[0].asInt()),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[1]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 3.0), n, 1e-12),
+            switch (values[1].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 3.0), values[1].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[2]) {
-                .number => |n| try testing.expect(n > 2.7 and n < 2.8),
+            switch (values[2].kind()) {
+                .number => try testing.expect(values[2].asFloat() > 2.7 and values[2].asFloat() < 2.8),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[3]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 1.0), n, 1e-12),
+            switch (values[3].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 1.0), values[3].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
-            switch (values[4]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 0.0), n, 1e-12),
+            switch (values[4].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 0.0), values[4].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
         },

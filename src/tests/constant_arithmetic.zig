@@ -22,8 +22,8 @@ test "ADDK: integer + integer constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 25 },
+        TValue.fromInt(10),
+        TValue.fromInt(25),
     };
 
     const code = [_]Instruction{
@@ -35,7 +35,7 @@ test "ADDK: integer + integer constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 35 });
+    try expectSingleResult(result, TValue.fromInt(35));
 }
 
 test "ADDK: number + number constant" {
@@ -44,8 +44,8 @@ test "ADDK: number + number constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = 10.5 },
-        .{ .number = 2.25 },
+        TValue.fromFloat(10.5),
+        TValue.fromFloat(2.25),
     };
 
     const code = [_]Instruction{
@@ -57,7 +57,7 @@ test "ADDK: number + number constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 12.75 });
+    try expectSingleResult(result, TValue.fromFloat(12.75));
 }
 
 test "SUBK: integer - integer constant" {
@@ -66,8 +66,8 @@ test "SUBK: integer - integer constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 50 },
-        .{ .integer = 15 },
+        TValue.fromInt(50),
+        TValue.fromInt(15),
     };
 
     const code = [_]Instruction{
@@ -79,7 +79,7 @@ test "SUBK: integer - integer constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 35 });
+    try expectSingleResult(result, TValue.fromInt(35));
 }
 
 test "MULK: integer * integer constant" {
@@ -88,8 +88,8 @@ test "MULK: integer * integer constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 7 },
-        .{ .integer = 6 },
+        TValue.fromInt(7),
+        TValue.fromInt(6),
     };
 
     const code = [_]Instruction{
@@ -101,7 +101,7 @@ test "MULK: integer * integer constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 42 });
+    try expectSingleResult(result, TValue.fromInt(42));
 }
 
 test "DIVK: number / number constant" {
@@ -110,8 +110,8 @@ test "DIVK: number / number constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = 100.0 },
-        .{ .number = 4.0 },
+        TValue.fromFloat(100.0),
+        TValue.fromFloat(4.0),
     };
 
     const code = [_]Instruction{
@@ -123,7 +123,7 @@ test "DIVK: number / number constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 25.0 });
+    try expectSingleResult(result, TValue.fromFloat(25.0));
 }
 
 test "IDIVK: integer // constant" {
@@ -132,8 +132,8 @@ test "IDIVK: integer // constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 17 },
-        .{ .integer = 5 },
+        TValue.fromInt(17),
+        TValue.fromInt(5),
     };
 
     const code = [_]Instruction{
@@ -145,7 +145,7 @@ test "IDIVK: integer // constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 3.0 });
+    try expectSingleResult(result, TValue.fromFloat(3.0));
 }
 
 test "MODK: integer % constant" {
@@ -154,8 +154,8 @@ test "MODK: integer % constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 17 },
-        .{ .integer = 5 },
+        TValue.fromInt(17),
+        TValue.fromInt(5),
     };
 
     const code = [_]Instruction{
@@ -167,7 +167,7 @@ test "MODK: integer % constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 2.0 });
+    try expectSingleResult(result, TValue.fromFloat(2.0));
 }
 
 test "Constant arithmetic: mixed types" {
@@ -176,8 +176,8 @@ test "Constant arithmetic: mixed types" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .number = 2.5 },
+        TValue.fromInt(10),
+        TValue.fromFloat(2.5),
     };
 
     const code = [_]Instruction{
@@ -189,7 +189,7 @@ test "Constant arithmetic: mixed types" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 25.0 });
+    try expectSingleResult(result, TValue.fromFloat(25.0));
 }
 
 test "Constant arithmetic: chain operations" {
@@ -198,9 +198,9 @@ test "Constant arithmetic: chain operations" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 100 },
-        .{ .integer = 10 },
-        .{ .integer = 3 },
+        TValue.fromInt(100),
+        TValue.fromInt(10),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -213,7 +213,7 @@ test "Constant arithmetic: chain operations" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 30.0 });
+    try expectSingleResult(result, TValue.fromFloat(30.0));
 }
 
 test "MODK: Lua-style negative modulo" {
@@ -222,8 +222,8 @@ test "MODK: Lua-style negative modulo" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = -7.0 },
-        .{ .number = 5.0 },
+        TValue.fromFloat(-7.0),
+        TValue.fromFloat(5.0),
     };
 
     const code = [_]Instruction{
@@ -235,7 +235,7 @@ test "MODK: Lua-style negative modulo" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 3.0 });
+    try expectSingleResult(result, TValue.fromFloat(3.0));
 }
 
 test "IDIVK: Lua-style floor division with negative" {
@@ -244,8 +244,8 @@ test "IDIVK: Lua-style floor division with negative" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = -7.0 },
-        .{ .number = 5.0 },
+        TValue.fromFloat(-7.0),
+        TValue.fromFloat(5.0),
     };
 
     const code = [_]Instruction{
@@ -257,7 +257,7 @@ test "IDIVK: Lua-style floor division with negative" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = -2.0 });
+    try expectSingleResult(result, TValue.fromFloat(-2.0));
 }
 
 test "POWK: power with constant" {
@@ -266,8 +266,8 @@ test "POWK: power with constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = 3.0 },
-        .{ .number = 4.0 },
+        TValue.fromFloat(3.0),
+        TValue.fromFloat(4.0),
     };
 
     const code = [_]Instruction{
@@ -279,7 +279,7 @@ test "POWK: power with constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 81.0 });
+    try expectSingleResult(result, TValue.fromFloat(81.0));
 }
 
 test "POWK: integer base with constant exponent" {
@@ -288,8 +288,8 @@ test "POWK: integer base with constant exponent" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 2 },
-        .{ .integer = 5 },
+        TValue.fromInt(2),
+        TValue.fromInt(5),
     };
 
     const code = [_]Instruction{
@@ -301,5 +301,5 @@ test "POWK: integer base with constant exponent" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 32.0 });
+    try expectSingleResult(result, TValue.fromFloat(32.0));
 }

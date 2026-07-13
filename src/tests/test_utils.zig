@@ -192,7 +192,7 @@ pub fn expectNilRange(vm: *const VM, start_reg: u8, count: u8) !void {
     var i: u8 = 0;
     while (i < count) : (i += 1) {
         const actual = vm.stack[vm.base + start_reg + i];
-        try testing.expect(actual == .nil);
+        try testing.expect(actual.isNil());
     }
 }
 
@@ -442,7 +442,7 @@ pub const ComparisonTest = struct {
         // If comparison skips, LFALSESKIP is skipped, LOADFALSE executes
         // R0 should be false
         try testing.expect(result == .single);
-        try testing.expect(result.single.eql(TValue{ .boolean = false }));
+        try testing.expect(result.single.eql(TValue.fromBool(false)));
     }
 
     pub fn expectNoSkip(vm: *VM, inst: Instruction, reg_a_val: TValue, reg_b_val: TValue, constants: []const TValue) !void {
@@ -466,7 +466,7 @@ pub const ComparisonTest = struct {
         // If comparison doesn't skip, LFALSESKIP executes (sets R0=false and skips LOADTRUE)
         // R0 should be false
         try testing.expect(result == .single);
-        try testing.expect(result.single.eql(TValue{ .boolean = false }));
+        try testing.expect(result.single.eql(TValue.fromBool(false)));
     }
 };
 
@@ -496,7 +496,7 @@ pub const ForLoopTrace = struct {
     }
 
     pub fn expectFloatPath(self: *const ForLoopTrace) !void {
-        try testing.expect(self.init_val == .number or self.limit_val == .number or self.step_val == .number);
+        try testing.expect(self.init_val.isNumber() or self.limit_val.isNumber() or self.step_val.isNumber());
     }
 };
 

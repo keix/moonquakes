@@ -18,9 +18,9 @@ test "SETLIST basic - set array elements" {
     const table = try ctx.vm.gc().allocTable();
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
-    ctx.vm.stack[1] = .{ .integer = 10 };
-    ctx.vm.stack[2] = .{ .integer = 20 };
-    ctx.vm.stack[3] = .{ .integer = 30 };
+    ctx.vm.stack[1] = TValue.fromInt(10);
+    ctx.vm.stack[2] = TValue.fromInt(20);
+    ctx.vm.stack[3] = TValue.fromInt(30);
 
     const code = [_]Instruction{
         // SETLIST R0, 3, 1: set table[1]=R1, table[2]=R2, table[3]=R3
@@ -36,13 +36,13 @@ test "SETLIST basic - set array elements" {
     // Check table contents (SETLIST now uses integer keys)
     const result_table = result.single.asTable().?;
 
-    const v1 = result_table.get(TValue{ .integer = 1 }).?;
-    const v2 = result_table.get(TValue{ .integer = 2 }).?;
-    const v3 = result_table.get(TValue{ .integer = 3 }).?;
+    const v1 = result_table.get(TValue.fromInt(1)).?;
+    const v2 = result_table.get(TValue.fromInt(2)).?;
+    const v3 = result_table.get(TValue.fromInt(3)).?;
 
-    try testing.expect(v1.eql(.{ .integer = 10 }));
-    try testing.expect(v2.eql(.{ .integer = 20 }));
-    try testing.expect(v3.eql(.{ .integer = 30 }));
+    try testing.expect(v1.eql(TValue.fromInt(10)));
+    try testing.expect(v2.eql(TValue.fromInt(20)));
+    try testing.expect(v3.eql(TValue.fromInt(30)));
 }
 
 test "SETLIST with B=0 - variable count from top" {
@@ -54,8 +54,8 @@ test "SETLIST with B=0 - variable count from top" {
     const table = try ctx.vm.gc().allocTable();
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set
-    ctx.vm.stack[1] = .{ .integer = 100 };
-    ctx.vm.stack[2] = .{ .integer = 200 };
+    ctx.vm.stack[1] = TValue.fromInt(100);
+    ctx.vm.stack[2] = TValue.fromInt(200);
     ctx.vm.top = 3; // Set top to indicate 2 values
 
     const code = [_]Instruction{
@@ -71,11 +71,11 @@ test "SETLIST with B=0 - variable count from top" {
 
     const result_table = result.single.asTable().?;
 
-    const v1 = result_table.get(TValue{ .integer = 1 }).?;
-    const v2 = result_table.get(TValue{ .integer = 2 }).?;
+    const v1 = result_table.get(TValue.fromInt(1)).?;
+    const v2 = result_table.get(TValue.fromInt(2)).?;
 
-    try testing.expect(v1.eql(.{ .integer = 100 }));
-    try testing.expect(v2.eql(.{ .integer = 200 }));
+    try testing.expect(v1.eql(TValue.fromInt(100)));
+    try testing.expect(v2.eql(TValue.fromInt(200)));
 }
 
 test "SETLIST with offset mode (k=1, C=0)" {
@@ -85,12 +85,12 @@ test "SETLIST with offset mode (k=1, C=0)" {
 
     // Create a table with first element already set (using integer key)
     const table = try ctx.vm.gc().allocTable();
-    try table.set(TValue{ .integer = 1 }, .{ .integer = 1 });
+    try table.set(TValue.fromInt(1), TValue.fromInt(1));
 
     ctx.vm.stack[0] = TValue.fromTable(table);
     // Values to set starting at index 2
-    ctx.vm.stack[1] = .{ .integer = 2 };
-    ctx.vm.stack[2] = .{ .integer = 3 };
+    ctx.vm.stack[1] = TValue.fromInt(2);
+    ctx.vm.stack[2] = TValue.fromInt(3);
     ctx.vm.top = 3;
 
     const code = [_]Instruction{
@@ -108,12 +108,12 @@ test "SETLIST with offset mode (k=1, C=0)" {
     const result_table = result.single.asTable().?;
 
     // Original index 1 should be preserved
-    const v1 = result_table.get(TValue{ .integer = 1 }).?;
-    try testing.expect(v1.eql(.{ .integer = 1 }));
+    const v1 = result_table.get(TValue.fromInt(1)).?;
+    try testing.expect(v1.eql(TValue.fromInt(1)));
 
     // New values at indices 2 and 3
-    const v2 = result_table.get(TValue{ .integer = 2 }).?;
-    const v3 = result_table.get(TValue{ .integer = 3 }).?;
-    try testing.expect(v2.eql(.{ .integer = 2 }));
-    try testing.expect(v3.eql(.{ .integer = 3 }));
+    const v2 = result_table.get(TValue.fromInt(2)).?;
+    const v3 = result_table.get(TValue.fromInt(3)).?;
+    try testing.expect(v2.eql(TValue.fromInt(2)));
+    try testing.expect(v3.eql(TValue.fromInt(3)));
 }

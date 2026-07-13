@@ -103,7 +103,6 @@ const TrailingResultPatch = struct {
     result_count: u8,
 };
 
-
 /// Free a RawProto and all its owned memory
 pub fn freeRawProto(allocator: std.mem.Allocator, proto: *RawProto) void {
     allocator.free(proto.code);

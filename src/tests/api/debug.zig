@@ -17,7 +17,7 @@ test "debug.getregistry returns the registry table" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("table")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 
@@ -34,8 +34,8 @@ test "debug.setmetatable and debug.getmetatable work for primitive values" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .boolean = true },
+        TValue.fromInt(1),
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("num")),
     });
 }
@@ -55,10 +55,10 @@ test "debug.getinfo exposes function identity and arity metadata" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("table")),
-        .{ .boolean = true },
-        .{ .integer = 2 },
-        .{ .boolean = true },
-        .{ .integer = 0 },
+        TValue.fromBool(true),
+        TValue.fromInt(2),
+        TValue.fromBool(true),
+        TValue.fromInt(0),
     });
 }
 
@@ -77,12 +77,12 @@ test "debug.sethook and debug.gethook roundtrip hook settings" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("cr")),
-        .{ .integer = 7 },
-        .{ .boolean = true },
+        TValue.fromInt(7),
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("")),
-        .{ .integer = 0 },
+        TValue.fromInt(0),
     });
 }
 
@@ -103,9 +103,9 @@ test "debug.getupvalue and debug.setupvalue expose and update closure state" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("x")),
-        .{ .integer = 41 },
+        TValue.fromInt(41),
         TValue.fromString(try ctx.base.gc().allocString("x")),
-        .{ .integer = 99 },
+        TValue.fromInt(99),
     });
 }
 
@@ -127,10 +127,10 @@ test "debug.upvalueid and debug.upvaluejoin can merge upvalue identity" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = false },
-        .{ .boolean = true },
-        .{ .integer = 77 },
-        .{ .integer = 77 },
+        TValue.fromBool(false),
+        TValue.fromBool(true),
+        TValue.fromInt(77),
+        TValue.fromInt(77),
     });
 }
 
@@ -179,9 +179,9 @@ test "debug.getlocal and debug.setlocal can inspect and mutate active caller loc
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("a")),
-        .{ .integer = 41 },
+        TValue.fromInt(41),
         TValue.fromString(try ctx.base.gc().allocString("a")),
-        .{ .integer = 99 },
+        TValue.fromInt(99),
     });
 }
 
@@ -205,10 +205,10 @@ test "debug.getlocal and debug.setlocal distinguish missing locals from bad leve
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 5), values.len);
-            try testing.expect(values[0] == .nil);
-            try testing.expect(values[1] == .nil);
-            try testing.expect(values[2] == .nil);
-            try testing.expect(values[3].eql(.{ .boolean = false }));
+            try testing.expect(values[0].isNil());
+            try testing.expect(values[1].isNil());
+            try testing.expect(values[2].isNil());
+            try testing.expect(values[3].eql(TValue.fromBool(false)));
             const err = values[4].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "level out of range");
         },
@@ -233,12 +233,12 @@ test "debug.newuserdata and uservalue accessors expose userdata state" {
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("userdata")),
         .nil,
-        .{ .boolean = true },
+        TValue.fromBool(true),
         .nil,
-        .{ .boolean = false },
-        .{ .boolean = true },
+        TValue.fromBool(false),
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("hello")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 

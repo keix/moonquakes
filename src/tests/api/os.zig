@@ -32,8 +32,8 @@ test "os clock time and difftime expose numeric time contracts" {
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("number")),
         TValue.fromString(try ctx.base.gc().allocString("number")),
-        .{ .boolean = true },
-        .{ .number = 7.0 },
+        TValue.fromBool(true),
+        TValue.fromFloat(7.0),
     });
 }
 
@@ -52,16 +52,16 @@ test "os date formats and time table normalization follow Lua contracts" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("1970-01-01 00:00:00")),
-        .{ .integer = 1970 },
-        .{ .integer = 1 },
-        .{ .integer = 1 },
-        .{ .integer = 0 },
-        .{ .integer = 0 },
-        .{ .integer = 0 },
-        .{ .integer = 1735689600 },
-        .{ .integer = 2025 },
-        .{ .integer = 1 },
-        .{ .integer = 1 },
+        TValue.fromInt(1970),
+        TValue.fromInt(1),
+        TValue.fromInt(1),
+        TValue.fromInt(0),
+        TValue.fromInt(0),
+        TValue.fromInt(0),
+        TValue.fromInt(1735689600),
+        TValue.fromInt(2025),
+        TValue.fromInt(1),
+        TValue.fromInt(1),
     });
 }
 
@@ -111,9 +111,9 @@ test "os rename and remove operate on filesystem paths" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 4), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = true }));
-            try testing.expect(values[1].eql(.{ .boolean = true }));
-            try testing.expect(values[2] == .nil);
+            try testing.expect(values[0].eql(TValue.fromBool(true)));
+            try testing.expect(values[1].eql(TValue.fromBool(true)));
+            try testing.expect(values[2].isNil());
             const err = values[3].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "No such file or directory");
         },

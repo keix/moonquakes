@@ -18,7 +18,7 @@ test "gc collectgarbage exposes count running and step contracts" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("number")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("boolean")),
     });
 }
@@ -38,8 +38,8 @@ test "gc collectgarbage stop and restart toggle running state" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("boolean")),
-        .{ .boolean = false },
-        .{ .boolean = true },
+        TValue.fromBool(false),
+        TValue.fromBool(true),
     });
 }
 
@@ -101,8 +101,8 @@ test "gc collectgarbage rejects invalid options and non integer tuning args" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 4), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
-            try testing.expect(values[2].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
+            try testing.expect(values[2].eql(TValue.fromBool(false)));
             const err1 = values[1].asString() orelse return error.TestUnexpectedResult;
             const err2 = values[3].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err1.asSlice(), "invalid option");

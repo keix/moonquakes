@@ -21,8 +21,8 @@ fn expectNoResult(result: ReturnValue) !void {
 
 test "basic: 1 + 2 = 3" {
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -39,7 +39,7 @@ test "basic: 1 + 2 = 3" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 3 });
+    try expectSingleResult(result, TValue.fromInt(3));
 
     // Optional: print success for debugging
     // std.debug.print("basic: 1 + 2 = 3\n", .{});

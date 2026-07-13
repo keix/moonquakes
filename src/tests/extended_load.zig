@@ -15,7 +15,7 @@ test "LOADKX with EXTRAARG loads large constant index" {
     // Create constants array with value at large index
     const constants = [_]TValue{
         .nil, .nil, .nil, .nil, .nil, // Padding to create large index
-        .{ .integer = 42 }, // Index 5
+        TValue.fromInt(42), // Index 5
     };
 
     // LOADKX R[0] := K[EXTRAARG], EXTRAARG ax=5, RETURN
@@ -30,7 +30,7 @@ test "LOADKX with EXTRAARG loads large constant index" {
     _ = try Mnemonics.execute(ctx.vm, proto);
 
     // Verify R[0] contains the constant value from index 5
-    try test_utils.expectRegister(ctx.vm, 0, .{ .integer = 42 });
+    try test_utils.expectRegister(ctx.vm, 0, TValue.fromInt(42));
 
     // Verify other registers remain uninitialized
     try test_utils.expectNilRange(ctx.vm, 1, 5);
@@ -94,10 +94,10 @@ test "Multiple LOADKX operations" {
     // Create constants with multiple values
     const constants = [_]TValue{
         TValue.fromString(hello_str), // Index 0
-        .{ .number = 3.14 }, // Index 1
+        TValue.fromFloat(3.14), // Index 1
         .nil, .nil, .nil, // Padding
-        .{ .integer = 100 }, // Index 5
-        .{ .boolean = true }, // Index 6
+        TValue.fromInt(100), // Index 5
+        TValue.fromBool(true), // Index 6
     };
 
     // Load multiple constants using LOADKX
@@ -122,8 +122,8 @@ test "Multiple LOADKX operations" {
 
     // Verify all loaded values
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .integer = 100 }, // R[0]
-        .{ .boolean = true }, // R[1]
+        TValue.fromInt(100), // R[0]
+        TValue.fromBool(true), // R[1]
         TValue.fromString(hello_str), // R[2]
     });
 

@@ -398,27 +398,27 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
     // Use wrapping arithmetic per Lua 5.4 semantics (two's complement)
     if (tag == .add or tag == .sub or tag == .mul) {
         if (vb.isInteger() and vc.isInteger()) {
-            const ib = vb.integer;
-            const ic = vc.integer;
+            const ib = vb.asInt();
+            const ic = vc.asInt();
             const res = switch (tag) {
                 .add => ib +% ic,
                 .sub => ib -% ic,
                 .mul => ib *% ic,
                 else => unreachable,
             };
-            vm.stack[vm.base + a] = .{ .integer = res };
+            vm.stack[vm.base + a] = TValue.fromInt(res);
             return;
         }
     }
     if (tag == .idiv or tag == .mod) {
         if (vb.isInteger() and vc.isInteger()) {
-            const ib = vb.integer;
-            const ic = vc.integer;
+            const ib = vb.asInt();
+            const ic = vc.asInt();
             const res = if (tag == .idiv)
                 try idivInt(ib, ic)
             else
                 try modInt(ib, ic);
-            vm.stack[vm.base + a] = .{ .integer = res };
+            vm.stack[vm.base + a] = TValue.fromInt(res);
             return;
         }
     }
@@ -432,7 +432,7 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
             if (floatToIntExact(nc)) |ic| {
                 if (ic != 0) {
                     const res_i = try modInt(ib, ic);
-                    vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(res_i)) };
+                    vm.stack[vm.base + a] = TValue.fromFloat(@as(f64, @floatFromInt(res_i)));
                     return;
                 }
             }
@@ -449,7 +449,7 @@ pub fn arithBinary(vm: *VM, inst: Instruction, comptime tag: ArithOp) !void {
         .pow => std.math.pow(f64, nb, nc),
     };
 
-    vm.stack[vm.base + a] = .{ .number = res };
+    vm.stack[vm.base + a] = TValue.fromFloat(res);
 }
 
 pub fn bitwiseBinary(vm: *VM, inst: Instruction, comptime tag: BitwiseOp) !void {
@@ -478,14 +478,14 @@ pub fn bitwiseBinary(vm: *VM, inst: Instruction, comptime tag: BitwiseOp) !void 
         .bxor => ib ^ ic,
     };
 
-    vm.stack[vm.base + a] = .{ .integer = res };
+    vm.stack[vm.base + a] = TValue.fromInt(res);
 }
 
 fn toIntForBitwise(v: *const TValue) !i64 {
     if (v.isInteger()) {
-        return v.integer;
-    } else if (v.* == .object and v.object.type == .string) {
-        const str = object.getObject(StringObject, v.object);
+        return v.asInt();
+    } else if (v.*.isObject() and v.asObjectPtr().type == .string) {
+        const str = object.getObject(StringObject, v.asObjectPtr());
         const slice = std.mem.trim(u8, str.asSlice(), " \t\n\r");
         return parseStringIntForBitwise(slice);
     } else if (v.toNumber()) |n| {
@@ -801,16 +801,16 @@ fn raiseOrderComparison(vm: *VM, left: TValue, right: TValue) !bool {
 
 pub fn ltOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
-        return a.integer < b.integer;
+        return a.asInt() < b.asInt();
     }
     if (a.isNumber() and b.isNumber()) {
-        return a.number < b.number;
+        return a.asFloat() < b.asFloat();
     }
     if (a.isInteger() and b.isNumber()) {
-        return compareIntFloat(a.integer, b.number, false);
+        return compareIntFloat(a.asInt(), b.asFloat(), false);
     }
     if (a.isNumber() and b.isInteger()) {
-        return compareFloatInt(a.number, b.integer, false);
+        return compareFloatInt(a.asFloat(), b.asInt(), false);
     }
     if (a.asString()) |as| {
         if (b.asString()) |bs| {
@@ -822,16 +822,16 @@ pub fn ltOp(a: TValue, b: TValue) !bool {
 
 pub fn leOp(a: TValue, b: TValue) !bool {
     if (a.isInteger() and b.isInteger()) {
-        return a.integer <= b.integer;
+        return a.asInt() <= b.asInt();
     }
     if (a.isNumber() and b.isNumber()) {
-        return a.number <= b.number;
+        return a.asFloat() <= b.asFloat();
     }
     if (a.isInteger() and b.isNumber()) {
-        return compareIntFloat(a.integer, b.number, true);
+        return compareIntFloat(a.asInt(), b.asFloat(), true);
     }
     if (a.isNumber() and b.isInteger()) {
-        return compareFloatInt(a.number, b.integer, true);
+        return compareFloatInt(a.asFloat(), b.asInt(), true);
     }
     if (a.asString()) |as| {
         if (b.asString()) |bs| {
@@ -1240,8 +1240,8 @@ pub fn closeTBCVariables(vm: *VM, ci: *CallInfo, from_reg: u8, err_obj: TValue) 
                     },
                     else => return err,
                 };
-            } else if (mm.isObject() and mm.object.type == .native_closure) {
-                const nc = object.getObject(NativeClosureObject, mm.object);
+            } else if (mm.isObject() and mm.asObjectPtr().type == .native_closure) {
+                const nc = object.getObject(NativeClosureObject, mm.asObjectPtr());
                 // Set up arguments for native call
                 const temp = vm.top;
                 vm.stack[temp] = mm;
@@ -1347,10 +1347,10 @@ pub fn handleLuaException(vm: *VM) error{Yield}!bool {
             try unwindErrorFramesToProtectedTarget(vm, target_ci, vm.errors.lua_error_value);
 
             var handled_error = vm.errors.lua_error_value;
-            const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil();
+            const already_handled = vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].asBool() and !vm.stack[ret_base + 1].isNil();
             // Defensive: avoid clobbering a previously captured non-nil error in the
             // same protected return slot when a reentrant handler path reports nil.
-            if (handled_error.isNil() and vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].boolean and !vm.stack[ret_base + 1].isNil()) {
+            if (handled_error.isNil() and vm.stack[ret_base].isBoolean() and !vm.stack[ret_base].asBool() and !vm.stack[ret_base + 1].isNil()) {
                 handled_error = vm.stack[ret_base + 1];
             }
             if (already_handled) {
@@ -1811,7 +1811,7 @@ fn opLOADKX(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 fn opLOADI(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
-    vm.stack[vm.base + a] = .{ .integer = @as(i64, sbx) };
+    vm.stack[vm.base + a] = TValue.fromInt(@as(i64, sbx));
     return .Continue;
 }
 
@@ -1823,7 +1823,7 @@ fn opLOADI(vm: *VM, inst: Instruction) ExecuteResult {
 fn opLOADF(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const sbx = inst.getSBx();
-    vm.stack[vm.base + a] = .{ .number = @as(f64, @floatFromInt(sbx)) };
+    vm.stack[vm.base + a] = TValue.fromFloat(@as(f64, @floatFromInt(sbx)));
     return .Continue;
 }
 
@@ -1834,7 +1834,7 @@ fn opLOADF(vm: *VM, inst: Instruction) ExecuteResult {
 //   - boolean load only
 fn opLOADFALSE(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
-    vm.stack[vm.base + a] = .{ .boolean = false };
+    vm.stack[vm.base + a] = TValue.fromBool(false);
     return .Continue;
 }
 
@@ -1845,7 +1845,7 @@ fn opLOADFALSE(vm: *VM, inst: Instruction) ExecuteResult {
 //   - boolean load plus control-flow skip
 fn opLFALSESKIP(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
     const a = inst.getA();
-    vm.stack[vm.base + a] = .{ .boolean = false };
+    vm.stack[vm.base + a] = TValue.fromBool(false);
     ci.skip();
     return .Continue;
 }
@@ -1857,7 +1857,7 @@ fn opLFALSESKIP(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
 //   - boolean load only
 fn opLOADTRUE(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
-    vm.stack[vm.base + a] = .{ .boolean = true };
+    vm.stack[vm.base + a] = TValue.fromBool(true);
     return .Continue;
 }
 
@@ -1992,7 +1992,7 @@ fn opGETI(vm: *VM, inst: Instruction) !ExecuteResult {
     const table_val = vm.stack[vm.base + b];
 
     if (table_val.asTable()) |table| {
-        const key = TValue{ .integer = @intCast(c) };
+        const key = TValue.fromInt(@intCast(c));
         if (table.get(key)) |value| {
             vm.stack[vm.base + a] = value;
         } else {
@@ -2099,7 +2099,7 @@ fn opSETTABLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             }
         }
     } else {
-        const key = TValue{ .integer = @intCast(c) };
+        const key = TValue.fromInt(@intCast(c));
         if (try dispatchSharedIndexMMValue(vm, table_val, key, a)) |result| {
             return result;
         }
@@ -2121,7 +2121,7 @@ fn opSETI(vm: *VM, inst: Instruction) !ExecuteResult {
     const value = vm.stack[vm.base + c];
 
     if (table_val.asTable()) |table| {
-        const key = TValue{ .integer = @intCast(b) };
+        const key = TValue.fromInt(@intCast(b));
         if (try dispatchNewindexMMValue(vm, table, key, table_val, value)) |result| {
             return result;
         }
@@ -2222,9 +2222,9 @@ fn opADDI(vm: *VM, inst: Instruction) !ExecuteResult {
     const imm = @as(i8, @bitCast(@as(u8, sc)));
 
     if (vb.isInteger()) {
-        vm.stack[vm.base + a] = .{ .integer = vb.integer +% @as(i64, imm) };
+        vm.stack[vm.base + a] = TValue.fromInt(vb.asInt() +% @as(i64, imm));
     } else if (vb.toNumber()) |n| {
-        vm.stack[vm.base + a] = .{ .number = n + @as(f64, @floatFromInt(imm)) };
+        vm.stack[vm.base + a] = TValue.fromFloat(n + @as(f64, @floatFromInt(imm)));
     } else {
         return error.ArithmeticError;
     }
@@ -2245,16 +2245,16 @@ fn opSHLI(vm: *VM, inst: Instruction) !ExecuteResult {
 
     if (vb.isInteger()) {
         const shift: i64 = @intCast(sc);
-        vm.stack[vm.base + a] = .{ .integer = shlInt(vb.integer, shift) };
+        vm.stack[vm.base + a] = TValue.fromInt(shlInt(vb.asInt(), shift));
         return .Continue;
     } else if (vb.toNumber()) |n| {
         if (@floor(n) == n) {
             const shift: i64 = @intCast(sc);
-            vm.stack[vm.base + a] = .{ .integer = shlInt(@intFromFloat(n), shift) };
+            vm.stack[vm.base + a] = TValue.fromInt(shlInt(@intFromFloat(n), shift));
             return .Continue;
         }
     }
-    const shift_val = TValue{ .integer = @as(i64, sc) };
+    const shift_val = TValue.fromInt(@as(i64, sc));
     if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shl)) |result| return result;
     return error.ArithmeticError;
 }
@@ -2273,16 +2273,16 @@ fn opSHRI(vm: *VM, inst: Instruction) !ExecuteResult {
 
     if (vb.isInteger()) {
         const shift: i64 = @intCast(sc);
-        vm.stack[vm.base + a] = .{ .integer = shrInt(vb.integer, shift) };
+        vm.stack[vm.base + a] = TValue.fromInt(shrInt(vb.asInt(), shift));
         return .Continue;
     } else if (vb.toNumber()) |n| {
         if (@floor(n) == n) {
             const shift: i64 = @intCast(sc);
-            vm.stack[vm.base + a] = .{ .integer = shrInt(@intFromFloat(n), shift) };
+            vm.stack[vm.base + a] = TValue.fromInt(shrInt(@intFromFloat(n), shift));
             return .Continue;
         }
     }
-    const shift_val = TValue{ .integer = @as(i64, sc) };
+    const shift_val = TValue.fromInt(@as(i64, sc));
     if (try dispatchBitwiseMM(vm, vb, shift_val, a, .shr)) |result| return result;
     return error.ArithmeticError;
 }
@@ -2293,12 +2293,12 @@ inline fn execArithK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: Ari
         const vb = &vm.stack[vm.base + inst.getB()];
         const vc = &ci.func.k[inst.getC()];
         if (vb.isInteger() and vc.isInteger()) {
-            vm.stack[vm.base + inst.getA()] = .{ .integer = switch (op) {
-                .add => vb.integer +% vc.integer,
-                .sub => vb.integer -% vc.integer,
-                .mul => vb.integer *% vc.integer,
+            vm.stack[vm.base + inst.getA()] = TValue.fromInt(switch (op) {
+                .add => vb.asInt() +% vc.asInt(),
+                .sub => vb.asInt() -% vc.asInt(),
+                .mul => vb.asInt() *% vc.asInt(),
                 else => unreachable,
-            } };
+            });
             return .Continue;
         }
     }
@@ -2315,12 +2315,12 @@ fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithO
     switch (op) {
         .add, .sub, .mul => {
             if (vb.isInteger() and vc.isInteger()) {
-                vm.stack[vm.base + a] = .{ .integer = switch (op) {
-                    .add => vb.integer +% vc.integer,
-                    .sub => vb.integer -% vc.integer,
-                    .mul => vb.integer *% vc.integer,
+                vm.stack[vm.base + a] = TValue.fromInt(switch (op) {
+                    .add => vb.asInt() +% vc.asInt(),
+                    .sub => vb.asInt() -% vc.asInt(),
+                    .mul => vb.asInt() *% vc.asInt(),
                     else => unreachable,
-                } };
+                });
                 return .Continue;
             }
             const nb_opt = vb.toNumber();
@@ -2331,12 +2331,12 @@ fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithO
             }
             const nb = nb_opt.?;
             const nc = nc_opt.?;
-            vm.stack[vm.base + a] = .{ .number = switch (op) {
+            vm.stack[vm.base + a] = TValue.fromFloat(switch (op) {
                 .add => nb + nc,
                 .sub => nb - nc,
                 .mul => nb * nc,
                 else => unreachable,
-            } };
+            });
             return .Continue;
         },
         .div, .pow => {
@@ -2348,17 +2348,17 @@ fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithO
             }
             const nb = nb_opt.?;
             const nc = nc_opt.?;
-            vm.stack[vm.base + a] = .{ .number = switch (op) {
+            vm.stack[vm.base + a] = TValue.fromFloat(switch (op) {
                 .div => nb / nc,
                 .pow => std.math.pow(f64, nb, nc),
                 else => unreachable,
-            } };
+            });
             return .Continue;
         },
         .idiv => {
             if (vb.isInteger() and vc.isInteger()) {
-                const res = try idivInt(vb.integer, vc.integer);
-                vm.stack[vm.base + a] = .{ .integer = res };
+                const res = try idivInt(vb.asInt(), vc.asInt());
+                vm.stack[vm.base + a] = TValue.fromInt(res);
                 return .Continue;
             }
             const nb_opt = vb.toNumber();
@@ -2367,13 +2367,13 @@ fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithO
                 if (try dispatchArithKMM(vm, vb.*, vc.*, a, .idiv)) |result| return result;
                 return error.ArithmeticError;
             }
-            vm.stack[vm.base + a] = .{ .number = luaFloorDiv(nb_opt.?, nc_opt.?) };
+            vm.stack[vm.base + a] = TValue.fromFloat(luaFloorDiv(nb_opt.?, nc_opt.?));
             return .Continue;
         },
         .mod => {
             if (vb.isInteger() and vc.isInteger()) {
-                const res = try modInt(vb.integer, vc.integer);
-                vm.stack[vm.base + a] = .{ .integer = res };
+                const res = try modInt(vb.asInt(), vc.asInt());
+                vm.stack[vm.base + a] = TValue.fromInt(res);
                 return .Continue;
             }
             const nb_opt = vb.toNumber();
@@ -2382,7 +2382,7 @@ fn execArithKSlow(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: ArithO
                 if (try dispatchArithKMM(vm, vb.*, vc.*, a, .mod)) |result| return result;
                 return error.ArithmeticError;
             }
-            vm.stack[vm.base + a] = .{ .number = luaMod(nb_opt.?, nc_opt.?) };
+            vm.stack[vm.base + a] = TValue.fromFloat(luaMod(nb_opt.?, nc_opt.?));
             return .Continue;
         },
     }
@@ -2413,11 +2413,11 @@ fn execBitwiseK(vm: *VM, ci: *CallInfo, inst: Instruction, comptime op: BitwiseO
     }
     if (ib_opt) |ib| {
         if (ic_opt) |ic| {
-            vm.stack[vm.base + a] = .{ .integer = switch (op) {
+            vm.stack[vm.base + a] = TValue.fromInt(switch (op) {
                 .band => ib & ic,
                 .bor => ib | ic,
                 .bxor => ib ^ ic,
-            } };
+            });
             return .Continue;
         }
     }
@@ -2474,7 +2474,7 @@ fn execShift(vm: *VM, inst: Instruction, comptime is_left: bool) !ExecuteResult 
     }
     if (value_opt) |value| {
         if (shift_opt) |shift| {
-            vm.stack[vm.base + a] = .{ .integer = if (is_left) shlInt(value, shift) else shrInt(value, shift) };
+            vm.stack[vm.base + a] = TValue.fromInt(if (is_left) shlInt(value, shift) else shrInt(value, shift));
             return .Continue;
         }
     }
@@ -2538,7 +2538,7 @@ fn opMMBINI(vm: *VM, inst: Instruction) !ExecuteResult {
     const c = inst.getC();
     const k = inst.getk();
     const va = vm.stack[vm.base + a];
-    const vb = TValue{ .integer = @as(i64, sb) };
+    const vb = TValue.fromInt(@as(i64, sb));
     const event = mmEventFromOpcode(c) orelse return error.UnknownOpcode;
     const left = if (k) vb else va;
     const right = if (k) va else vb;
@@ -2574,9 +2574,9 @@ fn opUNM(vm: *VM, inst: Instruction) !ExecuteResult {
     const b = inst.getB();
     const vb = vm.stack[vm.base + b];
     if (vb.isInteger()) {
-        vm.stack[vm.base + a] = .{ .integer = 0 -% vb.integer };
+        vm.stack[vm.base + a] = TValue.fromInt(0 -% vb.asInt());
     } else if (vb.toNumber()) |n| {
-        vm.stack[vm.base + a] = .{ .number = -n };
+        vm.stack[vm.base + a] = TValue.fromFloat(-n);
     } else {
         const mm = metamethod.getMetamethod(vb, .unm, &vm.gc().mm_keys, &vm.gc().shared_mt) orelse {
             return error.ArithmeticError;
@@ -2599,7 +2599,7 @@ fn opBNOT(vm: *VM, inst: Instruction) !ExecuteResult {
 
     var conv_err: ?anyerror = null;
     if (toIntForBitwise(&vb)) |value| {
-        vm.stack[vm.base + a] = .{ .integer = ~value };
+        vm.stack[vm.base + a] = TValue.fromInt(~value);
         return .Continue;
     } else |err| {
         if (err == error.IntegerRepresentation) {
@@ -2622,7 +2622,7 @@ fn opNOT(vm: *VM, inst: Instruction) ExecuteResult {
     const a = inst.getA();
     const b = inst.getB();
     const vb = &vm.stack[vm.base + b];
-    vm.stack[vm.base + a] = .{ .boolean = !vb.toBoolean() };
+    vm.stack[vm.base + a] = TValue.fromBool(!vb.toBoolean());
     return .Continue;
 }
 
@@ -2638,12 +2638,12 @@ fn opLEN(vm: *VM, inst: Instruction) !ExecuteResult {
     const vb = &vm.stack[vm.base + b];
 
     if (vb.asString()) |str| {
-        vm.stack[vm.base + a] = .{ .integer = @as(i64, @intCast(str.asSlice().len)) };
+        vm.stack[vm.base + a] = TValue.fromInt(@as(i64, @intCast(str.asSlice().len)));
     } else if (vb.asTable()) |table| {
         if (try dispatchLenMM(vm, table, vb.*, a)) |result| {
             return result;
         }
-        vm.stack[vm.base + a] = .{ .integer = table.rawLen() };
+        vm.stack[vm.base + a] = TValue.fromInt(table.rawLen());
     } else {
         if (metamethod.getMetamethod(vb.*, .len, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
             return try callUnaryMetamethod(vm, mm, vb.*, a, "len");
@@ -2683,11 +2683,11 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 total_len += str.asSlice().len;
             } else if (val.isInteger()) {
                 var buf: [32]u8 = undefined;
-                const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return error.ArithmeticError;
+                const str = std.fmt.bufPrint(&buf, "{d}", .{val.asInt()}) catch return error.ArithmeticError;
                 total_len += str.len;
             } else if (val.isNumber()) {
                 var buf: [32]u8 = undefined;
-                const str = formatConcatNumber(&buf, val.number);
+                const str = formatConcatNumber(&buf, val.asFloat());
                 total_len += str.len;
             }
         }
@@ -2703,10 +2703,10 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 @memcpy(result_buf[offset .. offset + str_slice.len], str_slice);
                 offset += str_slice.len;
             } else if (val.isInteger()) {
-                const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.integer}) catch return error.ArithmeticError;
+                const str = std.fmt.bufPrint(result_buf[offset..], "{d}", .{val.asInt()}) catch return error.ArithmeticError;
                 offset += str.len;
             } else if (val.isNumber()) {
-                const str = formatConcatNumber(result_buf[offset..], val.number);
+                const str = formatConcatNumber(result_buf[offset..], val.asFloat());
                 offset += str.len;
             }
         }
@@ -2766,7 +2766,7 @@ inline fn opEQ(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const right = &vm.stack[vm.base + inst.getC()];
     if (left.isInteger() and right.isInteger()) {
         const negate = inst.getA();
-        const is_true = left.integer == right.integer;
+        const is_true = left.asInt() == right.asInt();
         if ((is_true and negate == 0) or (!is_true and negate != 0)) {
             ci.skip();
         }
@@ -2806,7 +2806,7 @@ inline fn opLT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const right = &vm.stack[vm.base + inst.getC()];
     if (left.isInteger() and right.isInteger()) {
         const negate = inst.getA();
-        const is_true = left.integer < right.integer;
+        const is_true = left.asInt() < right.asInt();
         if ((is_true and negate == 0) or (!is_true and negate != 0)) {
             ci.skip();
         }
@@ -2853,7 +2853,7 @@ inline fn opLE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const right = &vm.stack[vm.base + inst.getC()];
     if (left.isInteger() and right.isInteger()) {
         const negate = inst.getA();
-        const is_true = left.integer <= right.integer;
+        const is_true = left.asInt() <= right.asInt();
         if ((is_true and negate == 0) or (!is_true and negate != 0)) {
             ci.skip();
         }
@@ -2976,7 +2976,7 @@ fn opEQI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const sc = inst.getC();
     const imm = @as(i8, @bitCast(@as(u8, sc)));
     const left = vm.stack[vm.base + b];
-    const right = TValue{ .integer = @as(i64, imm) };
+    const right = TValue.fromInt(@as(i64, imm));
 
     const is_true = if (left.asTable() == null)
         eqOp(left, right)
@@ -3001,7 +3001,7 @@ inline fn opLTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     if (left.isInteger()) {
         const a = inst.getA();
         const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
-        const is_true = left.integer < imm;
+        const is_true = left.asInt() < imm;
         if ((is_true and a == 0) or (!is_true and a != 0)) {
             ci.skip();
         }
@@ -3016,7 +3016,7 @@ fn opLTISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const sc = inst.getC();
     const imm = @as(i8, @bitCast(@as(u8, sc)));
     const left = vm.stack[vm.base + b];
-    const right = TValue{ .integer = @as(i64, imm) };
+    const right = TValue.fromInt(@as(i64, imm));
 
     const is_true = if (left.isInteger() or left.isNumber())
         try ltOp(left, right)
@@ -3047,7 +3047,7 @@ inline fn opLEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     if (left.isInteger()) {
         const a = inst.getA();
         const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
-        const is_true = left.integer <= imm;
+        const is_true = left.asInt() <= imm;
         if ((is_true and a == 0) or (!is_true and a != 0)) {
             ci.skip();
         }
@@ -3062,7 +3062,7 @@ fn opLEISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const sc = inst.getC();
     const imm = @as(i8, @bitCast(@as(u8, sc)));
     const left = vm.stack[vm.base + b];
-    const right = TValue{ .integer = @as(i64, imm) };
+    const right = TValue.fromInt(@as(i64, imm));
 
     const is_true = if (left.isInteger() or left.isNumber())
         try leOp(left, right)
@@ -3093,7 +3093,7 @@ inline fn opGTI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     if (right.isInteger()) {
         const a = inst.getA();
         const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
-        const is_true = imm < right.integer;
+        const is_true = imm < right.asInt();
         if ((is_true and a == 0) or (!is_true and a != 0)) {
             ci.skip();
         }
@@ -3107,7 +3107,7 @@ fn opGTISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const b = inst.getB();
     const sc = inst.getC();
     const imm = @as(i8, @bitCast(@as(u8, sc)));
-    const left = TValue{ .integer = @as(i64, imm) };
+    const left = TValue.fromInt(@as(i64, imm));
     const right = vm.stack[vm.base + b];
 
     const is_true = if (right.isInteger() or right.isNumber())
@@ -3139,7 +3139,7 @@ inline fn opGEI(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     if (right.isInteger()) {
         const a = inst.getA();
         const imm: i64 = @as(i8, @bitCast(@as(u8, inst.getC())));
-        const is_true = imm <= right.integer;
+        const is_true = imm <= right.asInt();
         if ((is_true and a == 0) or (!is_true and a != 0)) {
             ci.skip();
         }
@@ -3153,7 +3153,7 @@ fn opGEISlow(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const b = inst.getB();
     const sc = inst.getC();
     const imm = @as(i8, @bitCast(@as(u8, sc)));
-    const left = TValue{ .integer = @as(i64, imm) };
+    const left = TValue.fromInt(@as(i64, imm));
     const right = vm.stack[vm.base + b];
 
     const is_true = if (right.isInteger() or right.isNumber())
@@ -3235,17 +3235,17 @@ inline fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const step = &vm.stack[vm.base + a + 2];
 
     if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
-        const i = idx.integer;
-        const l = limit.integer;
-        const s = step.integer;
+        const i = idx.asInt();
+        const l = limit.asInt();
+        const s = step.asInt();
 
         if (s > 0) {
             if (i < l) {
                 const add_result = @addWithOverflow(i, s);
                 if (add_result[1] == 0 and add_result[0] <= l) {
                     const new_i = add_result[0];
-                    idx.* = .{ .integer = new_i };
-                    vm.stack[vm.base + a + 3] = .{ .integer = new_i };
+                    idx.* = TValue.fromInt(new_i);
+                    vm.stack[vm.base + a + 3] = TValue.fromInt(new_i);
                     if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
                 }
             }
@@ -3254,8 +3254,8 @@ inline fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 const add_result = @addWithOverflow(i, s);
                 if (add_result[1] == 0 and add_result[0] >= l) {
                     const new_i = add_result[0];
-                    idx.* = .{ .integer = new_i };
-                    vm.stack[vm.base + a + 3] = .{ .integer = new_i };
+                    idx.* = TValue.fromInt(new_i);
+                    vm.stack[vm.base + a + 3] = TValue.fromInt(new_i);
                     if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
                 }
             }
@@ -3273,8 +3273,8 @@ fn opFORLOOPFloat(vm: *VM, ci: *CallInfo, a: u8, sbx: i17, idx: *TValue, limit: 
     const new_i = i + s;
     const cont = if (s > 0) (new_i <= l) else (new_i >= l);
     if (cont) {
-        idx.* = .{ .number = new_i };
-        vm.stack[vm.base + a + 3] = .{ .number = new_i };
+        idx.* = TValue.fromFloat(new_i);
+        vm.stack[vm.base + a + 3] = TValue.fromFloat(new_i);
         if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
     }
     return .Continue;
@@ -3295,13 +3295,13 @@ fn opFORPREP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const v_step = vm.stack[vm.base + a + 2];
 
     if (v_init.isInteger() and v_step.isInteger()) {
-        const ii = v_init.integer;
-        const is = v_step.integer;
+        const ii = v_init.asInt();
+        const is = v_step.asInt();
         if (is == 0) return error.InvalidForLoopStep;
 
         var il: i64 = undefined;
         if (v_limit.isInteger()) {
-            il = v_limit.integer;
+            il = v_limit.asInt();
         } else {
             const lnum = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
             if (std.math.isNan(lnum)) return error.InvalidForLoopLimit;
@@ -3337,26 +3337,26 @@ fn opFORPREP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
         }
-        vm.stack[vm.base + a + 1] = .{ .integer = il };
+        vm.stack[vm.base + a + 1] = TValue.fromInt(il);
 
         const sub_result = @subWithOverflow(ii, is);
         if (sub_result[1] == 0) {
-            vm.stack[vm.base + a] = .{ .integer = sub_result[0] };
+            vm.stack[vm.base + a] = TValue.fromInt(sub_result[0]);
         } else {
             const should_run = if (is > 0) (ii <= il) else (ii >= il);
             if (!should_run) {
                 try ci.jumpRel(sbx);
                 return .Continue;
             }
-            vm.stack[vm.base + a] = .{ .integer = ii };
-            vm.stack[vm.base + a + 3] = .{ .integer = ii };
+            vm.stack[vm.base + a] = TValue.fromInt(ii);
+            vm.stack[vm.base + a + 3] = TValue.fromInt(ii);
             return .Continue;
         }
     } else {
         const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
         const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
         if (s == 0) return error.InvalidForLoopStep;
-        vm.stack[vm.base + a] = .{ .number = i - s };
+        vm.stack[vm.base + a] = TValue.fromFloat(i - s);
     }
 
     try ci.jumpRel(sbx);
@@ -3396,7 +3396,7 @@ fn opTFORCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const nresults: u32 = if (c > 0) c else 1;
 
     if (func_val.isObject()) {
-        const obj = func_val.object;
+        const obj = func_val.asObjectPtr();
         if (obj.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, obj);
             const frame_max = vm.base + ci.func.maxstacksize;
@@ -3494,7 +3494,7 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const func_val = vm.stack[vm.base + a];
     // Fast path: native closure
     if (func_val.isObject()) {
-        const obj = func_val.object;
+        const obj = func_val.asObjectPtr();
         if (obj.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, obj);
             if (nc.func.id == .pcall or nc.func.id == .xpcall) {
@@ -3577,8 +3577,8 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         return .LoopContinue;
     }
 
-    if (func_val.isObject() and func_val.object.type == .c_closure) {
-        const cc = object.getObject(CClosureObject, func_val.object);
+    if (func_val.isObject() and func_val.asObjectPtr().type == .c_closure) {
+        const cc = object.getObject(CClosureObject, func_val.asObjectPtr());
         const nargs: u32 = if (b > 0) b - 1 else blk: {
             const arg_start = vm.base + a + 1;
             break :blk if (vm.top >= arg_start) vm.top - arg_start else 0;
@@ -3733,7 +3733,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 
     var call_chain_depth: u16 = 0;
     while (tail_func.asClosure() == null and !(tail_func.isObject() and
-        (tail_func.object.type == .native_closure or tail_func.object.type == .c_closure)))
+        (tail_func.asObjectPtr().type == .native_closure or tail_func.asObjectPtr().type == .c_closure)))
     {
         if (call_chain_depth >= 2000) {
             return raiseCallNotFunction(vm, current_ci, inst, a, original_func_val);
@@ -3752,7 +3752,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 
         if (call_mm.asTable() != null or
             call_mm.asClosure() != null or
-            (call_mm.isObject() and (call_mm.object.type == .native_closure or call_mm.object.type == .c_closure)))
+            (call_mm.isObject() and (call_mm.asObjectPtr().type == .native_closure or call_mm.asObjectPtr().type == .c_closure)))
         {
             try ensureStackTop(vm, vm.base + a + nargs + 2);
 
@@ -3780,7 +3780,7 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     if (tail_func.isObject()) {
-        const obj = tail_func.object;
+        const obj = tail_func.asObjectPtr();
         if (obj.type == .native_closure) {
             const nc = object.getObject(NativeClosureObject, obj);
             if (nc.func.id == .pcall or nc.func.id == .xpcall) {
@@ -4010,7 +4010,7 @@ fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     for (0..n) |i| {
         const value = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
         const index: i64 = start_index + @as(i64, @intCast(i));
-        const key = TValue{ .integer = index };
+        const key = TValue.fromInt(index);
         try tableSet(vm, table, key, value);
     }
 
@@ -4145,25 +4145,25 @@ inline fn dispatchArithMM(vm: *VM, inst: Instruction, comptime arith_op: ArithOp
     if (arith_op == .add or arith_op == .sub or arith_op == .mul) {
         if (vb.isInteger() and vc.isInteger()) {
             const res = switch (arith_op) {
-                .add => vb.integer +% vc.integer,
-                .sub => vb.integer -% vc.integer,
-                .mul => vb.integer *% vc.integer,
+                .add => vb.asInt() +% vc.asInt(),
+                .sub => vb.asInt() -% vc.asInt(),
+                .mul => vb.asInt() *% vc.asInt(),
                 else => unreachable,
             };
-            vm.stack[vm.base + inst.getA()] = .{ .integer = res };
+            vm.stack[vm.base + inst.getA()] = TValue.fromInt(res);
             return .Continue;
         }
     }
     if (arith_op == .add or arith_op == .sub or arith_op == .mul or arith_op == .div) {
         if (vb.isNumber() and vc.isNumber()) {
             const res = switch (arith_op) {
-                .add => vb.number + vc.number,
-                .sub => vb.number - vc.number,
-                .mul => vb.number * vc.number,
-                .div => vb.number / vc.number,
+                .add => vb.asFloat() + vc.asFloat(),
+                .sub => vb.asFloat() - vc.asFloat(),
+                .mul => vb.asFloat() * vc.asFloat(),
+                .div => vb.asFloat() / vc.asFloat(),
                 else => unreachable,
             };
-            vm.stack[vm.base + inst.getA()] = .{ .number = res };
+            vm.stack[vm.base + inst.getA()] = TValue.fromFloat(res);
             return .Continue;
         }
     }
@@ -4196,7 +4196,7 @@ fn dispatchArithMMSlow(vm: *VM, inst: Instruction, comptime arith_op: ArithOp, c
         return error.ArithmeticError;
     };
 
-    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.asObjectPtr().type == .native_closure))) {
         try raiseMetamethodNotCallable(vm, mm, metamethodEventName(event));
         unreachable;
     }
@@ -4211,7 +4211,7 @@ fn dispatchArithKMM(vm: *VM, vb: TValue, vc: TValue, result_reg: u8, comptime ev
     };
     // Match the register-operand path: a non-callable metamethod reports
     // "attempt to call a ... value (metamethod 'x')" instead of a raw error.
-    if (!(mm.asClosure() != null or (mm.isObject() and mm.object.type == .native_closure))) {
+    if (!(mm.asClosure() != null or (mm.isObject() and mm.asObjectPtr().type == .native_closure))) {
         try raiseMetamethodNotCallable(vm, mm, metamethodEventName(event));
         unreachable;
     }
@@ -4403,11 +4403,11 @@ inline fn resolveCallableValue(value: TValue) ?ResolvedCallable {
     if (value.asClosure()) |closure| {
         return .{ .closure = closure };
     }
-    if (value.isObject() and value.object.type == .native_closure) {
-        return .{ .native = object.getObject(NativeClosureObject, value.object) };
+    if (value.isObject() and value.asObjectPtr().type == .native_closure) {
+        return .{ .native = object.getObject(NativeClosureObject, value.asObjectPtr()) };
     }
-    if (value.isObject() and value.object.type == .c_closure) {
-        return .{ .c_closure = object.getObject(CClosureObject, value.object) };
+    if (value.isObject() and value.asObjectPtr().type == .c_closure) {
+        return .{ .c_closure = object.getObject(CClosureObject, value.asObjectPtr()) };
     }
     return null;
 }
@@ -4536,8 +4536,8 @@ fn dispatchLenMM(vm: *VM, table: *object.TableObject, table_val: TValue, result_
         return try scheduleMetamethodClosureResult(vm, closure, &[_]TValue{ table_val, table_val }, vm.base + result_reg, "len");
     }
 
-    if (len_mm.isObject() and len_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, len_mm.object);
+    if (len_mm.isObject() and len_mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, len_mm.asObjectPtr());
         return try callNativeClosureToAbs(vm, len_mm, nc, &[_]TValue{ table_val, table_val }, vm.base + result_reg);
     }
 
@@ -4556,13 +4556,13 @@ fn appendConcatValue(out: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
     }
     if (val.isInteger()) {
         var buf: [32]u8 = undefined;
-        const str = std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return error.ArithmeticError;
+        const str = std.fmt.bufPrint(&buf, "{d}", .{val.asInt()}) catch return error.ArithmeticError;
         try out.appendSlice(allocator, str);
         return;
     }
     if (val.isNumber()) {
         var buf: [32]u8 = undefined;
-        const str = formatConcatNumber(&buf, val.number);
+        const str = formatConcatNumber(&buf, val.asFloat());
         try out.appendSlice(allocator, str);
         return;
     }
@@ -4594,8 +4594,8 @@ fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
             .debug_namewhat = "metamethod",
         });
     }
-    if (concat_mm.isObject() and concat_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, concat_mm.object);
+    if (concat_mm.isObject() and concat_mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, concat_mm.asObjectPtr());
         return try callNativeClosureSync(vm, concat_mm, nc, &[_]TValue{ left, right });
     }
     return vm.raiseString("attempt to concatenate a non-string value");
@@ -4665,8 +4665,8 @@ fn dispatchConcatMM(vm: *VM, left: TValue, right: TValue, result_reg: u8) !?Exec
         return try scheduleMetamethodClosureResult(vm, closure, &[_]TValue{ left, right }, vm.base + result_reg, "concat");
     }
 
-    if (concat_mm.isObject() and concat_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, concat_mm.object);
+    if (concat_mm.isObject() and concat_mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, concat_mm.asObjectPtr());
         return try callNativeClosureToAbs(vm, concat_mm, nc, &[_]TValue{ left, right }, vm.base + result_reg);
     }
 
@@ -4697,8 +4697,8 @@ fn dispatchEqMM(vm: *VM, left: TValue, right: TValue) !?bool {
     // Lua 5.4 requires both operands to share the same __eq metamethod.
     const eq_mm = getEqMM(vm, left) orelse getEqMM(vm, right) orelse return null;
 
-    if (eq_mm.isObject() and eq_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, eq_mm.object);
+    if (eq_mm.isObject() and eq_mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, eq_mm.asObjectPtr());
         const result = try callNativeClosureSync(vm, eq_mm, nc, &[_]TValue{ TValue.fromTable(left_table), TValue.fromTable(right_table) });
         return result.toBoolean();
     }
@@ -4736,8 +4736,8 @@ fn dispatchLtMM(vm: *VM, left: TValue, right: TValue) !?bool {
     // Try metamethod - check left first, then right
     const lt_mm = getLtMM(vm, left) orelse getLtMM(vm, right) orelse return null;
 
-    if (lt_mm.isObject() and lt_mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, lt_mm.object);
+    if (lt_mm.isObject() and lt_mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, lt_mm.asObjectPtr());
         const result = try callNativeClosureSync(vm, lt_mm, nc, &[_]TValue{ left, right });
         return result.toBoolean();
     }
@@ -4837,8 +4837,8 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // Try __le metamethod first
     if (getLeMM(vm, left) orelse getLeMM(vm, right)) |le_mm| {
-        if (le_mm.isObject() and le_mm.object.type == .native_closure) {
-            const nc = object.getObject(NativeClosureObject, le_mm.object);
+        if (le_mm.isObject() and le_mm.asObjectPtr().type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, le_mm.asObjectPtr());
             const result = try callNativeClosureSync(vm, le_mm, nc, &[_]TValue{ left, right });
             return result.toBoolean();
         }
@@ -4858,8 +4858,8 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 
     // No __le, try using __lt: a <= b iff not (b < a)
     if (getLtMM(vm, right) orelse getLtMM(vm, left)) |lt_mm| {
-        if (lt_mm.isObject() and lt_mm.object.type == .native_closure) {
-            const nc = object.getObject(NativeClosureObject, lt_mm.object);
+        if (lt_mm.isObject() and lt_mm.asObjectPtr().type == .native_closure) {
+            const nc = object.getObject(NativeClosureObject, lt_mm.asObjectPtr());
             const result = try callNativeClosureSync(vm, lt_mm, nc, &[_]TValue{ right, left });
             return !result.toBoolean(); // negate: a <= b iff !(b < a)
         }
@@ -4900,8 +4900,8 @@ fn dispatchBitwiseMM(vm: *VM, left: TValue, right: TValue, result_reg: u8, compt
         return try scheduleMetamethodClosureResult(vm, closure, &[_]TValue{ left, right }, vm.base + result_reg, event.toKey()[2..]);
     }
 
-    if (mm.isObject() and mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, mm.object);
+    if (mm.isObject() and mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.asObjectPtr());
         return try callNativeClosureToAbs(vm, mm, nc, &[_]TValue{ left, right }, vm.base + result_reg);
     }
 
@@ -4916,8 +4916,8 @@ fn dispatchBnotMM(vm: *VM, operand: TValue, result_reg: u8) !?ExecuteResult {
         return try scheduleMetamethodClosureResult(vm, closure, &[_]TValue{ operand, operand }, vm.base + result_reg, "bnot");
     }
 
-    if (mm.isObject() and mm.object.type == .native_closure) {
-        const nc = object.getObject(NativeClosureObject, mm.object);
+    if (mm.isObject() and mm.asObjectPtr().type == .native_closure) {
+        const nc = object.getObject(NativeClosureObject, mm.asObjectPtr());
         return try callNativeClosureToAbs(vm, mm, nc, &[_]TValue{ operand, operand }, vm.base + result_reg);
     }
 

@@ -36,7 +36,7 @@ test "parser: return 42" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 42");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 }
 
 test "parser: return 1 + 2" {
@@ -49,7 +49,7 @@ test "parser: return 1 + 2" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 1 + 2");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 3 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(3));
 }
 
 test "parser: return 2 * 3" {
@@ -62,7 +62,7 @@ test "parser: return 2 * 3" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 2 * 3");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 6 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(6));
 }
 
 test "parser: return 1 + 2 * 3 (precedence)" {
@@ -76,7 +76,7 @@ test "parser: return 1 + 2 * 3 (precedence)" {
 
     const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 * 3");
     // Should be 1 + (2 * 3) = 1 + 6 = 7, not (1 + 2) * 3 = 9
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 7 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(7));
 }
 
 test "parser: return 2 * 3 + 1 (precedence reverse)" {
@@ -90,7 +90,7 @@ test "parser: return 2 * 3 + 1 (precedence reverse)" {
 
     const result = try parseAndExecute(&ctx, allocator, "return 2 * 3 + 1");
     // Should be (2 * 3) + 1 = 6 + 1 = 7
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 7 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(7));
 }
 
 test "parser: return 1 + 2 + 3 (left associative)" {
@@ -104,7 +104,7 @@ test "parser: return 1 + 2 + 3 (left associative)" {
 
     const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 + 3");
     // Should be ((1 + 2) + 3) = (3 + 3) = 6
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 6 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(6));
 }
 
 test "parser: return 2 * 3 * 4 (left associative)" {
@@ -118,7 +118,7 @@ test "parser: return 2 * 3 * 4 (left associative)" {
 
     const result = try parseAndExecute(&ctx, allocator, "return 2 * 3 * 4");
     // Should be ((2 * 3) * 4) = (6 * 4) = 24
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 24 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(24));
 }
 
 test "parser: return 1 + 2 + 3 * 4 (complex)" {
@@ -132,7 +132,7 @@ test "parser: return 1 + 2 + 3 * 4 (complex)" {
 
     const result = try parseAndExecute(&ctx, allocator, "return 1 + 2 + 3 * 4");
     // Should be ((1 + 2) + (3 * 4)) = (3 + 12) = 15
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(15));
 }
 
 test "parser: return 0 + 0" {
@@ -145,7 +145,7 @@ test "parser: return 0 + 0" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 0 + 0");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0));
 }
 
 test "parser: return 5 * 0" {
@@ -158,7 +158,7 @@ test "parser: return 5 * 0" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 5 * 0");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0));
 }
 
 test "parser: return 100 + 200" {
@@ -171,7 +171,7 @@ test "parser: return 100 + 200" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 100 + 200");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 300 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(300));
 }
 
 test "parser: local x = 42" {
@@ -187,7 +187,7 @@ test "parser: local x = 42" {
         \\local x = 42
         \\return x
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 }
 
 test "parser: return + 5 (unexpected token)" {
@@ -245,7 +245,7 @@ test "parser: return 6 / 2 (division)" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 6 / 2");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .number = 3.0 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromFloat(3.0));
 }
 
 test "parser: return 5 - 3 (subtraction)" {
@@ -258,7 +258,7 @@ test "parser: return 5 - 3 (subtraction)" {
     const allocator = arena.allocator();
 
     const result = try parseAndExecute(&ctx, allocator, "return 5 - 3");
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 2 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(2));
 }
 
 test "parser: local variable assignment" {
@@ -275,7 +275,7 @@ test "parser: local variable assignment" {
         \\x = 20
         \\return x
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 20 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(20));
 }
 
 test "parser: local variable assignment with expression" {
@@ -292,7 +292,7 @@ test "parser: local variable assignment with expression" {
         \\x = x + 10
         \\return x
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(15));
 }
 
 test "parser: table field assignment" {
@@ -309,7 +309,7 @@ test "parser: table field assignment" {
         \\t.x = 42
         \\return t.x
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 }
 
 test "parser: table nested field assignment" {
@@ -326,7 +326,7 @@ test "parser: table nested field assignment" {
         \\t.inner.value = 100
         \\return t.inner.value
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 100 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(100));
 }
 
 test "parser: table index assignment" {
@@ -344,7 +344,7 @@ test "parser: table index assignment" {
         \\t[key] = 42
         \\return t.x
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 }
 
 test "parser: mixed field and index assignment" {
@@ -362,5 +362,5 @@ test "parser: mixed field and index assignment" {
         \\t.data[key] = 50
         \\return t.data.value
     );
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 50 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(50));
 }

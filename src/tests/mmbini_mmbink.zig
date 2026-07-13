@@ -29,7 +29,7 @@ fn createTableWithAddMM(vm: *VM, value: i64) !*object.TableObject {
 
     // Store value in table
     const value_key = try vm.gc.allocString("value");
-    try table.set(TValue.fromString(value_key), .{ .integer = value }, &vm.gc);
+    try table.set(TValue.fromString(value_key), TValue.fromInt(value), &vm.gc);
 
     // Set metatable (simplified - full test would need closure)
     table.metatable = mt;
@@ -46,7 +46,7 @@ test "MMBINI - add with immediate (basic structure)" {
     defer ctx.deinit();
 
     // Test that MMBINI with non-table value raises error
-    ctx.vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[0] = TValue.fromInt(10);
 
     const code = [_]Instruction{
         // MMBINI A=0, sB=5, C=6 (add event), k=0 (R[A] + sB)
@@ -67,11 +67,11 @@ test "MMBINK - add with constant (basic structure)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 100 },
+        TValue.fromInt(100),
     };
 
     // Test that MMBINK with non-table value raises error
-    ctx.vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[0] = TValue.fromInt(10);
 
     const code = [_]Instruction{
         // MMBINK A=0, B=0 (constant index), C=6 (add event), k=0 (R[A] + K[B])
@@ -95,7 +95,7 @@ test "MMBINI operand order with k flag" {
     // With k=1: sB op R[A]
     // Both should fail for integers (no metamethod)
 
-    ctx.vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[0] = TValue.fromInt(10);
 
     // k=0: R[0] + 5, C=6 (add event)
     const code_k0 = [_]Instruction{

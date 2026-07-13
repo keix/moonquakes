@@ -42,8 +42,8 @@ pub fn propagateEphemerons(self: anytype) bool {
         // values propagate unless values are weak too.
         if (!table.hasWeakValues()) {
             for (table.array.items) |value| {
-                if (value == .object and self.isWhite(value.object)) {
-                    self.markGray(value.object);
+                if (value.isObject() and self.isWhite(value.asObjectPtr())) {
+                    self.markGray(value.asObjectPtr());
                     changed = true;
                 }
             }
@@ -54,16 +54,16 @@ pub fn propagateEphemerons(self: anytype) bool {
             const key = entry.key_ptr.*;
 
             // Check if key is marked (only objects can be unmarked)
-            const key_marked = switch (key) {
-                .object => |o| if (o.type == .string) true else self.isAliveInCurrentCycle(o),
+            const key_marked = switch (key.kind()) {
+                .object => if (key.asObjectPtr().type == .string) true else self.isAliveInCurrentCycle(key.asObjectPtr()),
                 else => true, // Non-objects (nil, bool, int, number) are always "marked"
             };
 
             // If key is marked, mark the value (unless weak values)
             if (key_marked and !table.hasWeakValues()) {
                 const value = entry.value_ptr.*;
-                if (value == .object and self.isWhite(value.object)) {
-                    self.markGray(value.object);
+                if (value.isObject() and self.isWhite(value.asObjectPtr())) {
+                    self.markGray(value.asObjectPtr());
                     changed = true;
                 }
             }
@@ -95,8 +95,8 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
 
         // Check weak key (only objects can be collected)
         if (table.hasWeakKeys()) {
-            if (key == .object and key.object.type != .string and self.isWhite(key.object)) {
-                remove = !self.isAliveInCurrentCycle(key.object);
+            if (key.isObject() and key.asObjectPtr().type != .string and self.isWhite(key.asObjectPtr())) {
+                remove = !self.isAliveInCurrentCycle(key.asObjectPtr());
             }
         }
 
@@ -106,8 +106,8 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
             // Minor cycles must not clear old values just because they are
             // white in the flipped mark scheme; old objects that did not
             // participate in the current cycle are still alive.
-            if (val == .object and val.object.type != .string and self.isWhite(val.object)) {
-                if (!self.isAliveInCurrentCycle(val.object) and !(key == .object and key.object == val.object)) {
+            if (val.isObject() and val.asObjectPtr().type != .string and self.isWhite(val.asObjectPtr())) {
+                if (!self.isAliveInCurrentCycle(val.asObjectPtr()) and !(key.isObject() and key.asObjectPtr() == val.asObjectPtr())) {
                     remove = true;
                 }
             }
@@ -115,13 +115,13 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
 
         if (!remove and table.hasWeakKeys()) {
             // String keys are not weak keys; keep surviving ones alive.
-            if (key == .object and key.object.type == .string) {
-                self.markGray(key.object);
+            if (key.isObject() and key.asObjectPtr().type == .string) {
+                self.markGray(key.asObjectPtr());
             }
         }
 
         if (remove) {
-            if (key == .integer and key.integer > 0) {
+            if (key.isInteger() and key.asInt() > 0) {
                 removed_positive_integer_key = true;
             }
             to_remove.append(self.allocator, key) catch {};
@@ -132,8 +132,8 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     if (table.hasWeakValues()) {
         for (table.array.items) |*slot| {
             const val = slot.*;
-            if (val == .object and val.object.type != .string and self.isWhite(val.object)) {
-                if (!self.isAliveInCurrentCycle(val.object)) {
+            if (val.isObject() and val.asObjectPtr().type != .string and self.isWhite(val.asObjectPtr())) {
+                if (!self.isAliveInCurrentCycle(val.asObjectPtr())) {
                     slot.* = .nil;
                     removed_positive_integer_key = true;
                 }

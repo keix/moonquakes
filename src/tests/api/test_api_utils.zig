@@ -53,7 +53,7 @@ pub const ApiContext = struct {
 
 pub fn expectSingleInteger(result: ReturnValue, expected: i64) !void {
     try testing.expect(result == .single);
-    try testing.expectEqual(expected, result.single.integer);
+    try testing.expectEqual(expected, result.single.asInt());
 }
 
 pub fn expectMultiple(result: ReturnValue, expected: []const TValue) !void {

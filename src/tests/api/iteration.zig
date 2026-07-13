@@ -18,10 +18,10 @@ test "iteration next walks sequential array slots and ends with nil" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 10 },
-        .{ .integer = 2 },
-        .{ .integer = 20 },
+        TValue.fromInt(1),
+        TValue.fromInt(10),
+        TValue.fromInt(2),
+        TValue.fromInt(20),
         .nil,
         .nil,
     });
@@ -41,10 +41,10 @@ test "iteration pairs default path returns next table and nil seed" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("function")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
         .nil,
         TValue.fromString(try ctx.base.gc().allocString("a")),
-        .{ .integer = 1 },
+        TValue.fromInt(1),
     });
 }
 
@@ -97,11 +97,11 @@ test "iteration ipairs uses shared iterator and stops at first nil" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
-        .{ .integer = 1 },
-        .{ .integer = 11 },
-        .{ .integer = 2 },
-        .{ .integer = 22 },
+        TValue.fromBool(true),
+        TValue.fromInt(1),
+        TValue.fromInt(11),
+        TValue.fromInt(2),
+        TValue.fromInt(22),
         .nil,
         .nil,
     });
@@ -178,7 +178,7 @@ test "iteration next rejects invalid continuation keys" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "invalid key");
         },
@@ -201,7 +201,7 @@ test "iteration next rejects non table first argument with Lua error shape" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 3), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             try testing.expect(values[1].eql(TValue.fromString(try ctx.base.gc().allocString("string"))));
             const err = values[2].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "table expected");

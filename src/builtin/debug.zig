@@ -457,12 +457,13 @@ fn isConsistentLevelName(vm: *VM, level: i64, target: *ClosureObject, name: []co
 
 /// Helper to print a TValue
 fn printValue(writer: anytype, val: TValue) !void {
-    switch (val) {
+    switch (val.kind()) {
         .nil => try writer.writeAll("nil"),
-        .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
-        .integer => |i| try writer.print("{d}", .{i}),
-        .number => |n| try writer.print("{d}", .{n}),
-        .object => |obj| {
+        .boolean => try writer.writeAll(if ((val).asBool()) "true" else "false"),
+        .integer => try writer.print("{d}", .{(val).asInt()}),
+        .number => try writer.print("{d}", .{(val).asFloat()}),
+        .object => {
+            const obj = val.asObjectPtr();
             switch (obj.type) {
                 .string => {
                     const str: *object.StringObject = @fieldParentPtr("header", obj);
@@ -1108,7 +1109,7 @@ pub fn nativeDebugGethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Return count
     if (nresults > 2 or want_all) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(target_vm.hooks.count) };
+        vm.stack[vm.base + func_reg + 2] = TValue.fromInt(@intCast(target_vm.hooks.count));
     }
     if (want_all) {
         vm.top = vm.base + func_reg + 3;
@@ -1511,30 +1512,30 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 } else |_| {}
             }
             const linedefined_key = try vm.gc().allocString("linedefined");
-            try tableSet(vm, result_table, TValue.fromString(linedefined_key), .{ .integer = linedefined });
+            try tableSet(vm, result_table, TValue.fromString(linedefined_key), TValue.fromInt(linedefined));
             const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
-            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), .{ .integer = lastlinedefined });
+            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), TValue.fromInt(lastlinedefined));
         }
 
         if (want_line) {
             const currentline_key = try vm.gc().allocString("currentline");
-            try tableSet(vm, result_table, TValue.fromString(currentline_key), .{ .integer = current_line });
+            try tableSet(vm, result_table, TValue.fromString(currentline_key), TValue.fromInt(current_line));
         }
 
         if (want_tailcall) {
             const istailcall_key = try vm.gc().allocString("istailcall");
-            try tableSet(vm, result_table, TValue.fromString(istailcall_key), .{ .boolean = is_tailcall });
+            try tableSet(vm, result_table, TValue.fromString(istailcall_key), TValue.fromBool(is_tailcall));
         }
 
         if (want_upvalue) {
             const nups_key = try vm.gc().allocString("nups");
             var reps: [256]usize = undefined;
             const visible_nups = collectVisibleUpvalueReps(closure, &reps);
-            try tableSet(vm, result_table, TValue.fromString(nups_key), .{ .integer = @intCast(visible_nups) });
+            try tableSet(vm, result_table, TValue.fromString(nups_key), TValue.fromInt(@intCast(visible_nups)));
             const nparams_key = try vm.gc().allocString("nparams");
-            try tableSet(vm, result_table, TValue.fromString(nparams_key), .{ .integer = @intCast(proto.numparams) });
+            try tableSet(vm, result_table, TValue.fromString(nparams_key), TValue.fromInt(@intCast(proto.numparams)));
             const isvararg_key = try vm.gc().allocString("isvararg");
-            try tableSet(vm, result_table, TValue.fromString(isvararg_key), .{ .boolean = proto.is_vararg });
+            try tableSet(vm, result_table, TValue.fromString(isvararg_key), TValue.fromBool(proto.is_vararg));
         }
 
         if (want_func) {
@@ -1544,9 +1545,9 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_transfer) {
             const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hooks.transfer_start) });
+            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_start)));
             const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hooks.transfer_count) });
+            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_count)));
         }
 
         if (want_activelines) {
@@ -1555,7 +1556,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 for (proto.lineinfo, 0..) |ln, pc| {
                     if (ln > 0) {
                         if (pc < proto.code.len and proto.code[pc].getOpCode() == .VARARGPREP) continue;
-                        try tableSet(vm, act_tbl, .{ .integer = @intCast(ln) }, .{ .boolean = true });
+                        try tableSet(vm, act_tbl, TValue.fromInt(@intCast(ln)), TValue.fromBool(true));
                     }
                 }
             }
@@ -1591,19 +1592,19 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             const short_src_key = try vm.gc().allocString("short_src");
             try tableSet(vm, result_table, TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString("[C]")));
             const linedefined_key = try vm.gc().allocString("linedefined");
-            try tableSet(vm, result_table, TValue.fromString(linedefined_key), .{ .integer = -1 });
+            try tableSet(vm, result_table, TValue.fromString(linedefined_key), TValue.fromInt(-1));
             const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
-            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), .{ .integer = -1 });
+            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), TValue.fromInt(-1));
         }
 
         if (want_line) {
             const currentline_key = try vm.gc().allocString("currentline");
-            try tableSet(vm, result_table, TValue.fromString(currentline_key), .{ .integer = -1 });
+            try tableSet(vm, result_table, TValue.fromString(currentline_key), TValue.fromInt(-1));
         }
 
         if (want_tailcall) {
             const istailcall_key = try vm.gc().allocString("istailcall");
-            try tableSet(vm, result_table, TValue.fromString(istailcall_key), .{ .boolean = false });
+            try tableSet(vm, result_table, TValue.fromString(istailcall_key), TValue.fromBool(false));
         }
 
         if (want_upvalue) {
@@ -1612,11 +1613,11 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 .string_gmatch_iterator => 1,
                 else => 0,
             };
-            try tableSet(vm, result_table, TValue.fromString(nups_key), .{ .integer = nups_val });
+            try tableSet(vm, result_table, TValue.fromString(nups_key), TValue.fromInt(nups_val));
             const nparams_key = try vm.gc().allocString("nparams");
-            try tableSet(vm, result_table, TValue.fromString(nparams_key), .{ .integer = 0 });
+            try tableSet(vm, result_table, TValue.fromString(nparams_key), TValue.fromInt(0));
             const isvararg_key = try vm.gc().allocString("isvararg");
-            try tableSet(vm, result_table, TValue.fromString(isvararg_key), .{ .boolean = true });
+            try tableSet(vm, result_table, TValue.fromString(isvararg_key), TValue.fromBool(true));
         }
 
         if (want_func) {
@@ -1626,9 +1627,9 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
         if (want_transfer) {
             const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), .{ .integer = @intCast(vm.hooks.transfer_start) });
+            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_start)));
             const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), .{ .integer = @intCast(vm.hooks.transfer_count) });
+            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_count)));
         }
     }
 
@@ -2003,7 +2004,7 @@ pub fn nativeDebugGetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
         // Not userdata - return nil, false
         vm.stack[vm.base + func_reg] = TValue.nil;
         if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromBool(false);
         }
         return;
     };
@@ -2021,7 +2022,7 @@ pub fn nativeDebugGetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
     if (n < 1 or n > ud.nuvalue) {
         vm.stack[vm.base + func_reg] = TValue.nil;
         if (nresults > 1) {
-            vm.stack[vm.base + func_reg + 1] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg + 1] = TValue.fromBool(false);
         }
         return;
     }
@@ -2030,7 +2031,7 @@ pub fn nativeDebugGetuservalue(vm: anytype, func_reg: u32, nargs: u32, nresults:
     const user_values = ud.userValues();
     vm.stack[vm.base + func_reg] = user_values[n - 1];
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromBool(true);
     }
 }
 
@@ -2685,7 +2686,7 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         const id: i64 = @intCast(@intFromPtr(upval_ptr));
 
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = id };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(id);
         }
         return;
     }
@@ -2694,7 +2695,7 @@ pub fn nativeDebugUpvalueid(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     if (func_arg.asNativeClosure()) |nc| {
         if (nresults > 0) {
             if (n_int == 1) {
-                vm.stack[vm.base + func_reg] = .{ .integer = @intCast(@intFromPtr(nc)) };
+                vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(@intFromPtr(nc)));
             } else {
                 vm.stack[vm.base + func_reg] = TValue.nil;
             }

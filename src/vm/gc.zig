@@ -122,14 +122,16 @@ fn writeFinalizerWarningValue(stderr_file: std.fs.File, value: TValue) void {
     }
 
     var buf: [64]u8 = undefined;
-    switch (value) {
+    switch (value.kind()) {
         .nil => stderr_file.writeAll("nil") catch {},
-        .boolean => |b| stderr_file.writeAll(if (b) "true" else "false") catch {},
-        .integer => |i| {
+        .boolean => stderr_file.writeAll(if (value.asBool()) "true" else "false") catch {},
+        .integer => {
+            const i = value.asInt();
             const s = std.fmt.bufPrint(&buf, "{d}", .{i}) catch return;
             stderr_file.writeAll(s) catch {};
         },
-        .number => |n| {
+        .number => {
+            const n = value.asFloat();
             const s = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return;
             stderr_file.writeAll(s) catch {};
         },

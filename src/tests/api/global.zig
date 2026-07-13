@@ -28,9 +28,9 @@ test "global.assert returns all arguments on success" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
+        TValue.fromInt(1),
         TValue.fromString(try ctx.base.gc().allocString("ok")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 
@@ -45,9 +45,9 @@ test "global compatibility surface presents Lua 5.4 identity" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("Lua 5.4")),
-        .{ .boolean = true },
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -66,8 +66,8 @@ test "global writes through _G are reflected by global name resolution" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
-        .{ .integer = 99 },
+        TValue.fromInt(42),
+        TValue.fromInt(99),
         .nil,
     });
 }
@@ -89,8 +89,8 @@ test "global local _ENV shadows global lookup without mutating _G" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 99 },
-        .{ .integer = 10 },
+        TValue.fromInt(99),
+        TValue.fromInt(10),
         .nil,
     });
 }
@@ -128,9 +128,9 @@ test "global load environment remains isolated from _G" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
-        .{ .integer = 5 },
-        .{ .integer = 42 },
+        TValue.fromInt(42),
+        TValue.fromInt(5),
+        TValue.fromInt(42),
         .nil,
     });
 }
@@ -184,7 +184,7 @@ test "global.tonumber parses numbers and returns nil for invalid input" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
         .nil,
     });
 }
@@ -202,7 +202,7 @@ test "global.pcall returns false and error message on Lua error" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "boom");
         },
@@ -226,7 +226,7 @@ test "global.xpcall returns handler result" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "handled:");
             try api.expectStringContains(err_str.asSlice(), "boom");
@@ -261,7 +261,7 @@ test "global.load reports syntax errors as nil plus message" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0] == .nil);
+            try testing.expect(values[0].isNil());
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try testing.expect(err_str.asSlice().len > 0);
         },
@@ -286,8 +286,8 @@ test "global.load supports reader functions and explicit environments" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
-        .{ .integer = 2 },
+        TValue.fromInt(42),
+        TValue.fromInt(2),
     });
 }
 
@@ -304,7 +304,7 @@ test "global.load rejects text chunks in binary-only mode" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0] == .nil);
+            try testing.expect(values[0].isNil());
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "text chunk");
         },
@@ -354,7 +354,7 @@ test "global.dofile executes file chunks and returns all results" {
 
     const result = try ctx.exec(source);
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 7 },
+        TValue.fromInt(7),
         TValue.fromString(try ctx.base.gc().allocString("ok")),
     });
 }

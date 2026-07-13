@@ -58,13 +58,13 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .LOADI => {
-            stack[base + inst.getA()] = .{ .integer = @as(i64, inst.getSBx()) };
+            stack[base + inst.getA()] = TValue.fromInt(@as(i64, inst.getSBx()));
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LOADF => {
-            stack[base + inst.getA()] = .{ .number = @as(f64, @floatFromInt(inst.getSBx())) };
+            stack[base + inst.getA()] = TValue.fromFloat(@as(f64, @floatFromInt(inst.getSBx())));
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -76,19 +76,19 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .LOADTRUE => {
-            stack[base + inst.getA()] = .{ .boolean = true };
+            stack[base + inst.getA()] = TValue.fromBool(true);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LOADFALSE => {
-            stack[base + inst.getA()] = .{ .boolean = false };
+            stack[base + inst.getA()] = TValue.fromBool(false);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LFALSESKIP => {
-            stack[base + inst.getA()] = .{ .boolean = false };
+            stack[base + inst.getA()] = TValue.fromBool(false);
             pc += 2;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -127,9 +127,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 // outer loop re-executes it through the full handler.
                 return;
             }
-            const i = idx.integer;
-            const l = limit.integer;
-            const s = step.integer;
+            const i = idx.asInt();
+            const l = limit.asInt();
+            const s = step.asInt();
             const sbx = inst.getSBx();
             pc += 1;
             var continues = false;
@@ -138,8 +138,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     const add_result = @addWithOverflow(i, s);
                     if (add_result[1] == 0 and add_result[0] <= l) {
                         const new_i = add_result[0];
-                        idx.* = .{ .integer = new_i };
-                        stack[base + a + 3] = .{ .integer = new_i };
+                        idx.* = TValue.fromInt(new_i);
+                        stack[base + a + 3] = TValue.fromInt(new_i);
                         continues = true;
                     }
                 }
@@ -148,8 +148,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     const add_result = @addWithOverflow(i, s);
                     if (add_result[1] == 0 and add_result[0] >= l) {
                         const new_i = add_result[0];
-                        idx.* = .{ .integer = new_i };
-                        stack[base + a + 3] = .{ .integer = new_i };
+                        idx.* = TValue.fromInt(new_i);
+                        stack[base + a + 3] = TValue.fromInt(new_i);
                         continues = true;
                     }
                 }
@@ -204,7 +204,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const table = stack[base + inst.getB()].asTable() orelse return;
             const key = &stack[base + inst.getC()];
             if (!key.isInteger()) return;
-            const i = key.integer;
+            const i = key.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
                 const value = table.array.items[@intCast(i - 1)];
                 if (value.isNil()) return;
@@ -228,7 +228,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 if (value.isNil()) return;
                 stack[base + inst.getA()] = value;
             } else {
-                const value = table.get(.{ .integer = i }) orelse return;
+                const value = table.get(TValue.fromInt(i)) orelse return;
                 stack[base + inst.getA()] = value;
             }
             pc += 1;
@@ -236,7 +236,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .NOT => {
-            stack[base + inst.getA()] = .{ .boolean = !stack[base + inst.getB()].toBoolean() };
+            stack[base + inst.getA()] = TValue.fromBool(!stack[base + inst.getB()].toBoolean());
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -244,9 +244,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .UNM => {
             const vb = &stack[base + inst.getB()];
             if (vb.isInteger()) {
-                stack[base + inst.getA()] = .{ .integer = 0 -% vb.integer };
+                stack[base + inst.getA()] = TValue.fromInt(0 -% vb.asInt());
             } else if (vb.isNumber()) {
-                stack[base + inst.getA()] = .{ .number = -vb.number };
+                stack[base + inst.getA()] = TValue.fromFloat(-vb.asFloat());
             } else {
                 // String coercion / __unm: full handler.
                 return;
@@ -266,20 +266,20 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const vc = &stack[base + inst.getC()];
             if (vb.isInteger() and vc.isInteger()) {
                 const res = switch (inst.getOpCode()) {
-                    .ADD => vb.integer +% vc.integer,
-                    .SUB => vb.integer -% vc.integer,
-                    .MUL => vb.integer *% vc.integer,
+                    .ADD => vb.asInt() +% vc.asInt(),
+                    .SUB => vb.asInt() -% vc.asInt(),
+                    .MUL => vb.asInt() *% vc.asInt(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = .{ .integer = res };
+                stack[base + inst.getA()] = TValue.fromInt(res);
             } else if (vb.isNumber() and vc.isNumber()) {
                 const res = switch (inst.getOpCode()) {
-                    .ADD => vb.number + vc.number,
-                    .SUB => vb.number - vc.number,
-                    .MUL => vb.number * vc.number,
+                    .ADD => vb.asFloat() + vc.asFloat(),
+                    .SUB => vb.asFloat() - vc.asFloat(),
+                    .MUL => vb.asFloat() * vc.asFloat(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = .{ .number = res };
+                stack[base + inst.getA()] = TValue.fromFloat(res);
             } else {
                 // Mixed/coercion/metamethod: full handler re-executes it.
                 return;
@@ -293,12 +293,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const vc = &k[inst.getC()];
             if (vb.isInteger() and vc.isInteger()) {
                 const res = switch (inst.getOpCode()) {
-                    .ADDK => vb.integer +% vc.integer,
-                    .SUBK => vb.integer -% vc.integer,
-                    .MULK => vb.integer *% vc.integer,
+                    .ADDK => vb.asInt() +% vc.asInt(),
+                    .SUBK => vb.asInt() -% vc.asInt(),
+                    .MULK => vb.asInt() *% vc.asInt(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = .{ .integer = res };
+                stack[base + inst.getA()] = TValue.fromInt(res);
                 pc += 1;
                 inst = pc[0];
                 continue :dispatch inst.getOpCode();
@@ -312,10 +312,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             var is_true: bool = undefined;
             if (left.isInteger()) {
                 is_true = switch (inst.getOpCode()) {
-                    .LTI => left.integer < imm,
-                    .LEI => left.integer <= imm,
-                    .GTI => imm < left.integer,
-                    .GEI => imm <= left.integer,
+                    .LTI => left.asInt() < imm,
+                    .LEI => left.asInt() <= imm,
+                    .GTI => imm < left.asInt(),
+                    .GEI => imm <= left.asInt(),
                     else => unreachable,
                 };
             } else if (left.isNumber()) {
@@ -323,10 +323,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 // float compare matches ltOp/leOp (NaN compares false).
                 const fimm: f64 = @floatFromInt(imm);
                 is_true = switch (inst.getOpCode()) {
-                    .LTI => left.number < fimm,
-                    .LEI => left.number <= fimm,
-                    .GTI => fimm < left.number,
-                    .GEI => fimm <= left.number,
+                    .LTI => left.asFloat() < fimm,
+                    .LEI => left.asFloat() <= fimm,
+                    .GTI => fimm < left.asFloat(),
+                    .GEI => fimm <= left.asFloat(),
                     else => unreachable,
                 };
             } else {
@@ -344,16 +344,16 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             var is_true: bool = undefined;
             if (left.isInteger() and right.isInteger()) {
                 is_true = switch (inst.getOpCode()) {
-                    .EQ => left.integer == right.integer,
-                    .LT => left.integer < right.integer,
-                    .LE => left.integer <= right.integer,
+                    .EQ => left.asInt() == right.asInt(),
+                    .LT => left.asInt() < right.asInt(),
+                    .LE => left.asInt() <= right.asInt(),
                     else => unreachable,
                 };
             } else if (left.isNumber() and right.isNumber()) {
                 is_true = switch (inst.getOpCode()) {
-                    .EQ => left.number == right.number,
-                    .LT => left.number < right.number,
-                    .LE => left.number <= right.number,
+                    .EQ => left.asFloat() == right.asFloat(),
+                    .LT => left.asFloat() < right.asFloat(),
+                    .LE => left.asFloat() <= right.asFloat(),
                     else => unreachable,
                 };
             } else {
@@ -373,18 +373,18 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // __index, so a raw miss on a table with a metatable exits.
             const a = inst.getA();
             const func_val = &stack[base + a];
-            if (!func_val.isObject() or func_val.object.type != .native_closure) return;
-            const nc = object.getObject(object.NativeClosureObject, func_val.object);
+            if (!func_val.isObject() or func_val.asObjectPtr().type != .native_closure) return;
+            const nc = object.getObject(object.NativeClosureObject, func_val.asObjectPtr());
             if (nc.func.id != .ipairs_iterator) return;
             const table = stack[base + a + 1].asTable() orelse return;
             const control = &stack[base + a + 2];
             if (!control.isInteger()) return;
-            const next_index = control.integer +% 1;
+            const next_index = control.asInt() +% 1;
 
             var value: TValue = .nil;
             if (next_index >= 1 and next_index <= @as(i64, @intCast(table.array.items.len))) {
                 value = table.array.items[@intCast(next_index - 1)];
-            } else if (table.get(.{ .integer = next_index })) |v| {
+            } else if (table.get(TValue.fromInt(next_index))) |v| {
                 value = v;
             }
             if (value.isNil() and table.metatable != null) return;
@@ -396,7 +396,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 var j: u32 = 0;
                 while (j < nresults) : (j += 1) stack[res + j] = .nil;
             } else {
-                stack[res] = .{ .integer = next_index };
+                stack[res] = TValue.fromInt(next_index);
                 if (nresults > 1) stack[res + 1] = value;
                 var j: u32 = 2;
                 while (j < nresults) : (j += 1) stack[res + j] = .nil;
@@ -607,10 +607,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             else blk: {
                 const key = &stack[base + inst.getB()];
                 if (!key.isInteger()) return;
-                break :blk key.integer;
+                break :blk key.asInt();
             };
             const value = stack[base + inst.getC()];
-            if (value == .object or value.isNil()) return;
+            if (value.isObject() or value.isNil()) return;
             if (i < 1 or i > table.seq_len) return;
             if (i > @as(i64, @intCast(table.array.items.len))) return;
             const slot = &table.array.items[@intCast(i - 1)];

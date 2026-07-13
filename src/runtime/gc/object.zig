@@ -176,11 +176,12 @@ pub const TableObject = struct {
     /// Supports all Lua key types: strings, numbers, booleans, objects
     pub const TValueKeyContext = struct {
         pub fn hash(_: TValueKeyContext, key: TValue) u64 {
-            return switch (key) {
+            return switch (key.kind()) {
                 .nil => 0, // nil can't be a key, but need a hash for HashMap
-                .boolean => |b| if (b) 1 else 2,
-                .integer => |i| @bitCast(i),
-                .number => |n| blk: {
+                .boolean => if (key.asBool()) 1 else 2,
+                .integer => @bitCast(key.asInt()),
+                .number => blk: {
+                    const n = key.asFloat();
                     // Check if float is actually an integer value
                     if (n == @floor(n) and n >= -9007199254740992 and n <= 9007199254740992) {
                         // Use same hash as integer for int-representable floats
@@ -189,7 +190,8 @@ pub const TableObject = struct {
                     }
                     break :blk @bitCast(n);
                 },
-                .object => |obj| blk: {
+                .object => blk: {
+                    const obj = key.asObjectPtr();
                     if (obj.type == .string) {
                         // Use string's pre-computed hash for consistency
                         const str: *StringObject = @fieldParentPtr("header", obj);
@@ -247,9 +249,9 @@ pub const TableObject = struct {
     }
 
     fn canonicalizeLookupKey(key: TValue) TValue {
-        return switch (key) {
-            .number => |n| blk: {
-                if (floatToExactIntKey(n)) |i| break :blk TValue{ .integer = i };
+        return switch (key.kind()) {
+            .number => blk: {
+                if (floatToExactIntKey((key).asFloat())) |i| break :blk TValue.fromInt(i);
                 break :blk key;
             },
             else => key,
@@ -260,14 +262,14 @@ pub const TableObject = struct {
         const lookup_key = canonicalizeLookupKey(key);
         // Preserve Lua behavior for numeric keys: if a number key compares equal
         // to an existing integer key, update that integer slot.
-        if (lookup_key == .number) {
-            const n = lookup_key.number;
+        if (lookup_key.isNumber()) {
+            const n = lookup_key.asFloat();
             var iter = self.hash_part.iterator();
             while (iter.next()) |entry| {
-                if (entry.key_ptr.* == .integer) {
-                    const i = entry.key_ptr.*.integer;
+                if (entry.key_ptr.*.isInteger()) {
+                    const i = entry.key_ptr.*.asInt();
                     const as_num: f64 = @floatFromInt(i);
-                    if (as_num == n) return TValue{ .integer = i };
+                    if (as_num == n) return TValue.fromInt(i);
                 }
             }
         }
@@ -319,8 +321,8 @@ pub const TableObject = struct {
     pub fn get(self: *const TableObject, key: TValue) ?TValue {
         // Integer keys are already canonical; check the array part before
         // paying for canonicalization or hashing.
-        if (key == .integer) {
-            const i = key.integer;
+        if (key.isInteger()) {
+            const i = key.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
                 const v = self.array.items[@intCast(i - 1)];
                 if (v.isNil()) return null;
@@ -330,8 +332,8 @@ pub const TableObject = struct {
             return null;
         }
         const canonical_key = canonicalizeLookupKey(key);
-        if (canonical_key == .integer) {
-            const i = canonical_key.integer;
+        if (canonical_key.isInteger()) {
+            const i = canonical_key.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
                 const v = self.array.items[@intCast(i - 1)];
                 if (v.isNil()) return null;
@@ -347,8 +349,8 @@ pub const TableObject = struct {
     /// mutation (insert/remove/rehash); callers must write through it
     /// immediately.
     pub fn getPtr(self: *TableObject, key: TValue) ?*TValue {
-        if (key == .integer) {
-            const i = key.integer;
+        if (key.isInteger()) {
+            const i = key.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
                 const slot = &self.array.items[@intCast(i - 1)];
                 if (slot.isNil()) return null;
@@ -357,8 +359,8 @@ pub const TableObject = struct {
             return self.hash_part.getPtr(key);
         }
         const canonical_key = canonicalizeLookupKey(key);
-        if (canonical_key == .integer) {
-            const i = canonical_key.integer;
+        if (canonical_key.isInteger()) {
+            const i = canonical_key.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
                 const slot = &self.array.items[@intCast(i - 1)];
                 if (slot.isNil()) return null;
@@ -373,7 +375,7 @@ pub const TableObject = struct {
         if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
             return !self.array.items[@intCast(i - 1)].isNil();
         }
-        return self.hash_part.get(.{ .integer = i }) != null;
+        return self.hash_part.get(TValue.fromInt(i)) != null;
     }
 
     pub fn rawLen(self: *const TableObject) i64 {
@@ -390,19 +392,19 @@ pub const TableObject = struct {
     }
 
     fn keyLessThan(a: TValue, b: TValue) bool {
-        const ta = std.meta.activeTag(a);
-        const tb = std.meta.activeTag(b);
+        const ta = a.kind();
+        const tb = b.kind();
         if (ta != tb) return @intFromEnum(ta) < @intFromEnum(tb);
 
-        return switch (a) {
+        return switch (a.kind()) {
             .nil => false,
-            .boolean => |ab| (!ab) and b.boolean,
-            .integer => |ai| ai < b.integer,
-            .number => |an| an < b.number,
-            .object => |ao| blk: {
-                const bo = b.object;
-                if (ao.type != bo.type) break :blk @intFromEnum(ao.type) < @intFromEnum(bo.type);
-                break :blk @intFromPtr(ao) < @intFromPtr(bo);
+            .boolean => (!(a).asBool()) and b.asBool(),
+            .integer => (a).asInt() < b.asInt(),
+            .number => (a).asFloat() < b.asFloat(),
+            .object => blk: {
+                const bo = b.asObjectPtr();
+                if ((a).asObjectPtr().type != bo.type) break :blk @intFromEnum((a).asObjectPtr().type) < @intFromEnum(bo.type);
+                break :blk @intFromPtr((a).asObjectPtr()) < @intFromPtr(bo);
             },
         };
     }
@@ -413,7 +415,7 @@ pub const TableObject = struct {
 
         for (self.array.items, 1..) |value, ui| {
             if (value.isNil()) continue;
-            const key = TValue{ .integer = @intCast(ui) };
+            const key = TValue.fromInt(@intCast(ui));
             if (after) |pivot| {
                 if (!keyLessThan(pivot, key)) continue;
             }
@@ -447,7 +449,7 @@ pub const TableObject = struct {
 
         for (self.array.items, 1..) |value, i| {
             if (value.isNil()) continue;
-            try self.iter_keys.append(self.allocator, .{ .integer = @intCast(i) });
+            try self.iter_keys.append(self.allocator, TValue.fromInt(@intCast(i)));
         }
 
         var iter = self.hash_part.iterator();
@@ -472,19 +474,19 @@ pub const TableObject = struct {
     }
 
     fn keyExactEq(a: TValue, b: TValue) bool {
-        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
-        return switch (a) {
+        if (a.kind() != b.kind()) return false;
+        return switch (a.kind()) {
             .nil => true,
-            .boolean => |v| v == b.boolean,
-            .integer => |v| v == b.integer,
-            .number => |v| v == b.number,
-            .object => |v| v == b.object,
+            .boolean => a.asBool() == b.asBool(),
+            .integer => a.asInt() == b.asInt(),
+            .number => a.asFloat() == b.asFloat(),
+            .object => a.asObjectPtr() == b.asObjectPtr(),
         };
     }
 
     fn hasExactKey(self: *const TableObject, target: TValue) bool {
-        if (target == .integer) {
-            const i = target.integer;
+        if (target.isInteger()) {
+            const i = target.asInt();
             if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
                 return !self.array.items[@intCast(i - 1)].isNil();
             }
@@ -517,7 +519,7 @@ pub const TableObject = struct {
             if (prev == null) {
                 var i: i64 = 1;
                 while (i <= self.seq_len) : (i += 1) {
-                    const key = TValue{ .integer = i };
+                    const key = TValue.fromInt(i);
                     if (self.get(key)) |v| {
                         if (!v.isNil()) return .{ .key = key, .value = v };
                     }
@@ -525,10 +527,10 @@ pub const TableObject = struct {
                 return null;
             }
             const prev_key = prev.?;
-            if (prev_key == .integer and prev_key.integer >= 1 and prev_key.integer <= self.seq_len) {
-                var i: i64 = prev_key.integer + 1;
+            if (prev_key.isInteger() and prev_key.asInt() >= 1 and prev_key.asInt() <= self.seq_len) {
+                var i: i64 = prev_key.asInt() + 1;
                 while (i <= self.seq_len) : (i += 1) {
-                    const key = TValue{ .integer = i };
+                    const key = TValue.fromInt(i);
                     if (self.get(key)) |v| {
                         if (!v.isNil()) return .{ .key = key, .value = v };
                     }
@@ -578,10 +580,10 @@ pub const TableObject = struct {
         // TODO(gc): When enabling true incremental/generational collection,
         // route table mutations through a write barrier helper here.
         if (key.isNil()) return error.InvalidTableKey;
-        if (key == .number and std.math.isNan(key.number)) return error.InvalidTableKey;
+        if (key.isNumber() and std.math.isNan(key.asFloat())) return error.InvalidTableKey;
         const canonical_key = canonicalizeStoreKey(self, key);
-        const seq_key: ?i64 = switch (canonical_key) {
-            .integer => |i| if (i > 0) i else null,
+        const seq_key: ?i64 = switch (canonical_key.kind()) {
+            .integer => if (canonical_key.asInt() > 0) canonical_key.asInt() else null,
             else => null,
         };
 
@@ -621,9 +623,9 @@ pub const TableObject = struct {
                 try self.array.append(self.allocator, value);
                 _ = self.deleted_keys.remove(canonical_key);
                 var next: i64 = i + 1;
-                while (self.hash_part.get(.{ .integer = next })) |hv| : (next += 1) {
+                while (self.hash_part.get(TValue.fromInt(next))) |hv| : (next += 1) {
                     try self.array.append(self.allocator, hv);
-                    _ = self.hash_part.remove(.{ .integer = next });
+                    _ = self.hash_part.remove(TValue.fromInt(next));
                 }
                 self.mod_count +%= 1;
                 self.shape_count +%= 1;

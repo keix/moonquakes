@@ -17,9 +17,9 @@ test "error pcall preserves success flag and all return values" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
-        .{ .integer = 1 },
-        .{ .integer = 2 },
+        TValue.fromBool(true),
+        TValue.fromInt(1),
+        TValue.fromInt(2),
     });
 }
 
@@ -36,7 +36,7 @@ test "error pcall failure shape is false plus string error object" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = false },
+        TValue.fromBool(false),
         TValue.fromString(try ctx.base.gc().allocString("string")),
     });
 }
@@ -56,7 +56,7 @@ test "error level zero returns raw message without source prefix" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err = values[1].asString() orelse return error.TestUnexpectedResult;
             try testing.expectEqualStrings("boom", err.asSlice());
         },
@@ -79,7 +79,7 @@ test "error default level includes source information" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "boom");
             try api.expectStringContains(err.asSlice(), "(api-test)");
@@ -107,7 +107,7 @@ test "error raised with higher level shifts blame outward" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err.asSlice(), "boom");
             try api.expectStringContains(err.asSlice(), "[protected call bootstrap]");
@@ -134,7 +134,7 @@ test "error xpcall handler receives message and can transform it" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = false },
+        TValue.fromBool(false),
         TValue.fromString(try ctx.base.gc().allocString("handled:boom")),
     });
 }
@@ -157,7 +157,7 @@ test "error xpcall reports handler failures with canonical message" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = false },
+        TValue.fromBool(false),
         TValue.fromString(try ctx.base.gc().allocString("error in error handling")),
     });
 }

@@ -31,7 +31,7 @@ pub fn writeSuccessTupleFromStack(vm: *VM, ret_base: u32, nresults: i16, payload
     const expected: u32 = if (nresults < 0) 0 else @intCast(nresults);
     const copy_count: u32 = if (nresults < 0) payload_count else @min(payload_count, expected);
 
-    vm.stack[ret_base] = .{ .boolean = true };
+    vm.stack[ret_base] = TValue.fromBool(true);
     if (copy_count > 0) {
         for (0..copy_count) |i| {
             vm.stack[ret_base + 1 + i] = vm.stack[payload_base + i];
@@ -46,7 +46,7 @@ pub fn writeSuccessTupleFromStack(vm: *VM, ret_base: u32, nresults: i16, payload
 }
 
 pub fn writeErrorTuple(vm: *VM, ret_base: u32, nresults: i16, err_value: TValue, caller_frame_top: u32) void {
-    vm.stack[ret_base] = .{ .boolean = false };
+    vm.stack[ret_base] = TValue.fromBool(false);
     vm.stack[ret_base + 1] = err_value;
     if (nresults >= 0) {
         const expected: u32 = @intCast(nresults);
@@ -92,7 +92,7 @@ pub fn dispatch(vm: *VM, ci: *CallInfo, a: u8, total_args: u32, total_results: u
 // so the protected bootstrap sees just func(...), while preserving the handler.
 pub fn prepareXpcall(vm: *VM, a: u8, total_args: u32, fail_base: u32) !PreparedXpcall {
     if (total_args < 2) {
-        vm.stack[fail_base] = .{ .boolean = false };
+        vm.stack[fail_base] = TValue.fromBool(false);
         vm.stack[fail_base + 1] = TValue.fromString(try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)"));
         return error.InvalidXpcallHandler;
     }

@@ -50,32 +50,32 @@ fn testParserExpression(source: []const u8, expected: TValue) !void {
 }
 
 test "parser comparison: == operator with equal values" {
-    try testParserExpression("return 5 == 5", TValue{ .boolean = true });
+    try testParserExpression("return 5 == 5", TValue.fromBool(true));
 }
 
 test "parser comparison: == operator with different values" {
-    try testParserExpression("return 5 == 3", TValue{ .boolean = false });
+    try testParserExpression("return 5 == 3", TValue.fromBool(false));
 }
 
 test "parser comparison: != operator with equal values" {
-    try testParserExpression("return 5 != 5", TValue{ .boolean = false });
+    try testParserExpression("return 5 != 5", TValue.fromBool(false));
 }
 
 test "parser comparison: != operator with different values" {
-    try testParserExpression("return 5 != 3", TValue{ .boolean = true });
+    try testParserExpression("return 5 != 3", TValue.fromBool(true));
 }
 
 test "parser comparison: complex arithmetic with ==" {
-    try testParserExpression("return 3 % 3 == 0", TValue{ .boolean = true });
+    try testParserExpression("return 3 % 3 == 0", TValue.fromBool(true));
 }
 
 test "parser comparison: complex arithmetic false case should not return nil" {
-    try testParserExpression("return 4 % 3 == 0", TValue{ .boolean = false });
+    try testParserExpression("return 4 % 3 == 0", TValue.fromBool(false));
 }
 
 test "parser comparison: != operator edge case that was returning nil" {
     // This was the specific case that returned nil before our fix
-    try testParserExpression("return 5 != 3", TValue{ .boolean = true });
+    try testParserExpression("return 5 != 3", TValue.fromBool(true));
 }
 
 test "parser comparison: zero comparisons" {
@@ -90,7 +90,7 @@ test "parser comparison: zero comparisons" {
     };
 
     for (testCases) |case| {
-        try testParserExpression(case.source, TValue{ .boolean = case.expected });
+        try testParserExpression(case.source, TValue.fromBool(case.expected));
     }
 }
 
@@ -110,50 +110,50 @@ test "parser comparison: modulo edge cases" {
     };
 
     for (testCases) |case| {
-        try testParserExpression(case.source, TValue{ .boolean = case.expected });
+        try testParserExpression(case.source, TValue.fromBool(case.expected));
     }
 }
 
 test "parser comparison: chained operations" {
     // Test more complex expressions that could break comparison logic
-    try testParserExpression("return 2 + 3 == 5", TValue{ .boolean = true });
-    try testParserExpression("return 2 * 3 != 5", TValue{ .boolean = true });
-    try testParserExpression("return 10 / 2 == 5", TValue{ .boolean = true });
-    try testParserExpression("return 7 % 3 == 1", TValue{ .boolean = true });
+    try testParserExpression("return 2 + 3 == 5", TValue.fromBool(true));
+    try testParserExpression("return 2 * 3 != 5", TValue.fromBool(true));
+    try testParserExpression("return 10 / 2 == 5", TValue.fromBool(true));
+    try testParserExpression("return 7 % 3 == 1", TValue.fromBool(true));
 }
 
 test "parser comparison: negative numbers" {
-    try testParserExpression("return 0 - 5 == 0 - 5", TValue{ .boolean = true });
-    try testParserExpression("return 0 - 3 != 0 - 5", TValue{ .boolean = true });
+    try testParserExpression("return 0 - 5 == 0 - 5", TValue.fromBool(true));
+    try testParserExpression("return 0 - 3 != 0 - 5", TValue.fromBool(true));
 }
 
 test "parser comparison: < operator" {
-    try testParserExpression("return 5 < 10", TValue{ .boolean = true });
-    try testParserExpression("return 10 < 5", TValue{ .boolean = false });
-    try testParserExpression("return 5 < 5", TValue{ .boolean = false });
+    try testParserExpression("return 5 < 10", TValue.fromBool(true));
+    try testParserExpression("return 10 < 5", TValue.fromBool(false));
+    try testParserExpression("return 5 < 5", TValue.fromBool(false));
 }
 
 test "parser comparison: > operator" {
-    try testParserExpression("return 10 > 5", TValue{ .boolean = true });
-    try testParserExpression("return 5 > 10", TValue{ .boolean = false });
-    try testParserExpression("return 5 > 5", TValue{ .boolean = false });
+    try testParserExpression("return 10 > 5", TValue.fromBool(true));
+    try testParserExpression("return 5 > 10", TValue.fromBool(false));
+    try testParserExpression("return 5 > 5", TValue.fromBool(false));
 }
 
 test "parser comparison: <= operator" {
-    try testParserExpression("return 5 <= 10", TValue{ .boolean = true });
-    try testParserExpression("return 5 <= 5", TValue{ .boolean = true });
-    try testParserExpression("return 10 <= 5", TValue{ .boolean = false });
+    try testParserExpression("return 5 <= 10", TValue.fromBool(true));
+    try testParserExpression("return 5 <= 5", TValue.fromBool(true));
+    try testParserExpression("return 10 <= 5", TValue.fromBool(false));
 }
 
 test "parser comparison: >= operator" {
-    try testParserExpression("return 10 >= 5", TValue{ .boolean = true });
-    try testParserExpression("return 5 >= 5", TValue{ .boolean = true });
-    try testParserExpression("return 5 >= 10", TValue{ .boolean = false });
+    try testParserExpression("return 10 >= 5", TValue.fromBool(true));
+    try testParserExpression("return 5 >= 5", TValue.fromBool(true));
+    try testParserExpression("return 5 >= 10", TValue.fromBool(false));
 }
 
 test "parser comparison: order operators with arithmetic" {
-    try testParserExpression("return 3 + 2 < 10", TValue{ .boolean = true });
-    try testParserExpression("return 2 * 5 > 8", TValue{ .boolean = true });
-    try testParserExpression("return 15 / 3 <= 5", TValue{ .boolean = true });
-    try testParserExpression("return 7 % 3 >= 1", TValue{ .boolean = true });
+    try testParserExpression("return 3 + 2 < 10", TValue.fromBool(true));
+    try testParserExpression("return 2 * 5 > 8", TValue.fromBool(true));
+    try testParserExpression("return 15 / 3 <= 5", TValue.fromBool(true));
+    try testParserExpression("return 7 % 3 >= 1", TValue.fromBool(true));
 }

@@ -88,9 +88,9 @@ fn materializeConstants(raw: *const RawProto, gc: *GC) MaterializeError![]const 
     for (raw.const_refs, 0..) |ref, i| {
         k[i] = switch (ref.kind) {
             .nil => TValue.nil,
-            .boolean => .{ .boolean = raw.booleans[ref.index] },
-            .integer => .{ .integer = raw.integers[ref.index] },
-            .number => .{ .number = raw.numbers[ref.index] },
+            .boolean => TValue.fromBool(raw.booleans[ref.index]),
+            .integer => TValue.fromInt(raw.integers[ref.index]),
+            .number => TValue.fromFloat(raw.numbers[ref.index]),
             // Constant strings are interned across protos so equal literals share one object.
             .string => TValue.fromString(gc.allocConstString(raw.strings[ref.index]) catch return error.OutOfMemory),
             .native_fn => TValue.fromNativeClosure(

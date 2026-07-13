@@ -165,11 +165,11 @@ fn coalesceEquivalentUpvalues(closure: anytype) void {
 }
 
 fn setNotCallableErrorValue(vm: *VM, val: TValue) !void {
-    const ty: []const u8 = switch (val) {
+    const ty: []const u8 = switch (val.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((val).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -443,12 +443,12 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     }
 
     // Default type names
-    const type_name_str: []const u8 = switch (arg) {
+    const type_name_str: []const u8 = switch (arg.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer => "number",
         .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((arg).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -467,7 +467,7 @@ pub fn nativeType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 /// Returns: (true, results...) on success, (false, error_value) on failure
 pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 1) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(false);
         if (nresults == 0 or nresults > 1) {
             const err_str = try vm.gc().allocString("bad argument #1 to 'pcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
@@ -489,7 +489,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
     if (call.callValueFixed(vm, func_val, args[0..arg_count], .{ .out = payload[0..out_len] })) |_| {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         if (nresults == 0) {
             var payload_len = out_len;
             while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
@@ -513,7 +513,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 try setNotCallableErrorValue(vm, func_val);
             }
             // Lua error: return (false, error_value)
-            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg] = TValue.fromBool(false);
             if (nresults == 0 or nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = error_state.getRaisedValue(vm);
                 var i: u32 = 2;
@@ -532,7 +532,7 @@ pub fn nativePcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 /// Returns: (true, results...) on success, (false, handler_result) on failure
 pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     if (nargs < 2) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(false);
         if (nresults == 0 or nresults > 1) {
             const err_str = try vm.gc().allocString("bad argument #2 to 'xpcall' (value expected)");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
@@ -555,7 +555,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const out_len: u32 = @min(payload_cap, @as(u32, payload.len));
 
     if (call.callValueFixed(vm, func_val, args[0..arg_count], .{ .out = payload[0..out_len] })) |_| {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         if (nresults == 0) {
             var payload_len = out_len;
             while (payload_len > 0 and payload[payload_len - 1].isNil()) : (payload_len -= 1) {}
@@ -589,7 +589,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 error.LuaException => {
                     // Lua-compatible behavior: if message handler fails,
                     // xpcall returns "error in error handling".
-                    vm.stack[vm.base + func_reg] = .{ .boolean = false };
+                    vm.stack[vm.base + func_reg] = TValue.fromBool(false);
                     if (nresults == 0 or nresults > 1) {
                         const err_str = try vm.gc().allocString("error in error handling");
                         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
@@ -601,7 +601,7 @@ pub fn nativeXpcall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
             };
 
             // Return (false, handler_result)
-            vm.stack[vm.base + func_reg] = .{ .boolean = false };
+            vm.stack[vm.base + func_reg] = TValue.fromBool(false);
             if (nresults == 0 or nresults > 1) {
                 vm.stack[vm.base + func_reg + 1] = handler_result;
                 var i: u32 = 2;
@@ -750,7 +750,7 @@ pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Return 0 as initial index
     if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = 0 };
+        vm.stack[vm.base + func_reg + 2] = TValue.fromInt(0);
     }
     if (nresults > 3) {
         var i: u32 = 3;
@@ -789,7 +789,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     const next_index = current_index +% 1;
 
     // Use integer key directly (Lua 5.4 supports any TValue as key)
-    const key = TValue{ .integer = next_index };
+    const key = TValue.fromInt(next_index);
     const value = try call.lookupIndexValueSync(vm, table_arg, key);
 
     if (value == null or value.?.isNil()) {
@@ -800,7 +800,7 @@ pub fn nativeIpairsIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 
     // Return index and value
-    vm.stack[vm.base + func_reg] = .{ .integer = next_index };
+    vm.stack[vm.base + func_reg] = TValue.fromInt(next_index);
     if (nresults > 1) {
         vm.stack[vm.base + func_reg + 1] = value.?;
     }
@@ -900,7 +900,7 @@ pub fn nativeRawset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     const key_arg = vm.stack[vm.base + func_reg + 2];
     const value_arg = vm.stack[vm.base + func_reg + 3];
 
-    if (key_arg.isNil() or (key_arg == .number and std.math.isNan(key_arg.number))) {
+    if (key_arg.isNil() or (key_arg.isNumber() and std.math.isNan(key_arg.asFloat()))) {
         return vm.raiseString("table index is nil or NaN");
     }
 
@@ -930,7 +930,7 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // String length
     if (arg.asString()) |s| {
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(s.asSlice().len));
         }
         return;
     }
@@ -938,7 +938,7 @@ pub fn nativeRawlen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Table length: count sequential integer keys from 1
     if (arg.asTable()) |table| {
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = table.rawLen() };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(table.rawLen());
         }
         return;
     }
@@ -960,7 +960,7 @@ pub fn nativeSelect(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Check for "#" which returns count
     if (index_arg.asString()) |str| {
         if (std.mem.eql(u8, str.asSlice(), "#")) {
-            vm.stack[vm.base + func_reg] = .{ .integer = @intCast(extra_args) };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(extra_args));
             vm.top = vm.base + func_reg + 1;
             return;
         }
@@ -1030,11 +1030,11 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const arg = vm.stack[vm.base + func_reg + 1];
 
     // If already a number, return it
-    if (arg == .integer) {
+    if (arg.isInteger()) {
         vm.stack[vm.base + func_reg] = arg;
         return;
     }
-    if (arg == .number) {
+    if (arg.isNumber()) {
         vm.stack[vm.base + func_reg] = arg;
         return;
     }
@@ -1063,7 +1063,7 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // If base is explicitly provided, only accept integer numerals for that base.
         if (has_base) {
             if (std.fmt.parseInt(i64, str, base)) |i| {
-                vm.stack[vm.base + func_reg] = .{ .integer = i };
+                vm.stack[vm.base + func_reg] = TValue.fromInt(i);
                 return;
             } else |_| {}
 
@@ -1073,19 +1073,19 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Try integer first for base 10 (preserves large integer strings)
         if (std.fmt.parseInt(i64, str, 10)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
             return;
         } else |_| {}
 
         // Hex integer literals: parse and wrap modulo 2^64 (Lua 5.4 semantics)
         if (parseHexIntegerWrap(str)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
             return;
         }
 
         // Hex floating literals: parse as float when format includes '.' or 'p'
         if (parseHexFloat(str)) |n| {
-            vm.stack[vm.base + func_reg] = .{ .number = n };
+            vm.stack[vm.base + func_reg] = TValue.fromFloat(n);
             return;
         }
 
@@ -1096,7 +1096,7 @@ pub fn nativeTonumber(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Fall back to float for base 10
         if (std.fmt.parseFloat(f64, str)) |n| {
-            vm.stack[vm.base + func_reg] = .{ .number = n };
+            vm.stack[vm.base + func_reg] = TValue.fromFloat(n);
             return;
         } else |_| {}
 
@@ -1112,7 +1112,7 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (nresults == 0) return;
 
     if (nargs < 2) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = false };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(false);
         return;
     }
 
@@ -1120,7 +1120,7 @@ pub fn nativeRawequal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const v2 = vm.stack[vm.base + func_reg + 2];
 
     // Use primitive equality (no metamethods)
-    vm.stack[vm.base + func_reg] = .{ .boolean = v1.eql(v2) };
+    vm.stack[vm.base + func_reg] = TValue.fromBool(v1.eql(v2));
 }
 
 /// load(chunk [, chunkname [, mode [, env]]]) - Loads a chunk
@@ -1591,7 +1591,7 @@ pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         const arg = vm.stack[vm.base + func_reg + 1 + i];
-        if (arg.asString() != null or arg == .integer or arg == .number) continue;
+        if (arg.asString() != null or arg.isInteger() or arg.isNumber()) continue;
         return vm.raiseString("bad argument to 'warn' (string expected)");
     }
 
@@ -1607,13 +1607,13 @@ pub fn nativeWarn(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
 
         if (arg.asString()) |str_obj| {
             try stderr_file.writeAll(str_obj.asSlice());
-        } else if (arg == .integer) {
+        } else if (arg.isInteger()) {
             var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.integer}) catch "";
+            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.asInt()}) catch "";
             try stderr_file.writeAll(s);
-        } else if (arg == .number) {
+        } else if (arg.isNumber()) {
             var buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.number}) catch "";
+            const s = std.fmt.bufPrint(&buf, "{d}", .{arg.asFloat()}) catch "";
             try stderr_file.writeAll(s);
         }
     }
@@ -1688,12 +1688,12 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
             vm.collectGarbage();
             break :blk .nil;
         },
-        .stop => TValue{ .boolean = gc.stop() },
+        .stop => TValue.fromBool(gc.stop()),
         .restart => blk: {
             gc.restart();
             break :blk .nil;
         },
-        .count => TValue{ .number = @as(f64, @floatFromInt(gc.bytes_allocated)) / 1024.0 },
+        .count => TValue.fromFloat(@as(f64, @floatFromInt(gc.bytes_allocated)) / 1024.0),
         .step => blk: {
             const step_arg: usize = if (nargs >= 2) blk2: {
                 const arg = vm.stack[vm.base + func_reg + 2];
@@ -1702,7 +1702,7 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 }
                 break :blk2 0;
             } else 0;
-            break :blk TValue{ .boolean = gc.stepSized(step_arg) };
+            break :blk TValue.fromBool(gc.stepSized(step_arg));
         },
         .setpause => blk: {
             const prev = gc.pause;
@@ -1714,7 +1714,7 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 };
                 gc.pause = v;
             }
-            break :blk TValue{ .integer = prev };
+            break :blk TValue.fromInt(prev);
         },
         .setstepmul => blk: {
             const prev = gc.stepmul;
@@ -1726,9 +1726,9 @@ pub fn nativeCollectGarbage(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
                 };
                 gc.stepmul = v;
             }
-            break :blk TValue{ .integer = prev };
+            break :blk TValue.fromInt(prev);
         },
-        .isrunning => TValue{ .boolean = gc.is_running },
+        .isrunning => TValue.fromBool(gc.is_running),
         .incremental => blk: {
             const prev = modeName(gc.mode);
             gc.mode = .incremental;

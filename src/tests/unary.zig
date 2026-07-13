@@ -17,7 +17,7 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 
 test "unary: -5 = -5" {
     const constants = [_]TValue{
-        .{ .integer = 5 },
+        TValue.fromInt(5),
     };
 
     const code = [_]Instruction{
@@ -33,12 +33,12 @@ test "unary: -5 = -5" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = -5 });
+    try expectSingleResult(result, TValue.fromInt(-5));
 }
 
 test "unary: -3.5 = -3.5" {
     const constants = [_]TValue{
-        .{ .number = 3.5 },
+        TValue.fromFloat(3.5),
     };
 
     const code = [_]Instruction{
@@ -54,12 +54,12 @@ test "unary: -3.5 = -3.5" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = -3.5 });
+    try expectSingleResult(result, TValue.fromFloat(-3.5));
 }
 
 test "unary: not true = false" {
     const constants = [_]TValue{
-        .{ .boolean = true },
+        TValue.fromBool(true),
     };
 
     const code = [_]Instruction{
@@ -75,7 +75,7 @@ test "unary: not true = false" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "unary: not nil = true" {
@@ -96,12 +96,12 @@ test "unary: not nil = true" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "unary: not 0 = false" {
     const constants = [_]TValue{
-        .{ .integer = 0 },
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -117,13 +117,13 @@ test "unary: not 0 = false" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "unary: -5 + 3 = -2" {
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 3 },
+        TValue.fromInt(5),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -141,7 +141,7 @@ test "unary: -5 + 3 = -2" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = -2 });
+    try expectSingleResult(result, TValue.fromInt(-2));
 }
 
 test "unary: #\"hello\" = 5 (string length)" {
@@ -166,7 +166,7 @@ test "unary: #\"hello\" = 5 (string length)" {
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 5 });
+    try expectSingleResult(result, TValue.fromInt(5));
 }
 
 test "unary: #\"\" = 0 (empty string length)" {
@@ -191,5 +191,5 @@ test "unary: #\"\" = 0 (empty string length)" {
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 0 });
+    try expectSingleResult(result, TValue.fromInt(0));
 }

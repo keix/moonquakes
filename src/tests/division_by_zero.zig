@@ -26,7 +26,7 @@ fn expectInf(result: anyerror!ReturnValue) !void {
         .none => return error.TestExpectedValue,
     };
     if (val.isNumber()) {
-        try testing.expect(std.math.isInf(val.number));
+        try testing.expect(std.math.isInf(val.asFloat()));
     } else {
         return error.TestExpectedNumber;
     }
@@ -38,8 +38,8 @@ test "DIV: division by zero (integer) returns inf" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 0 },
+        TValue.fromInt(10),
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -62,8 +62,8 @@ test "DIV: division by zero (float) returns inf" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = 10.5 },
-        .{ .number = 0.0 },
+        TValue.fromFloat(10.5),
+        TValue.fromFloat(0.0),
     };
 
     const code = [_]Instruction{
@@ -86,8 +86,8 @@ test "IDIV: integer division by zero" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 20 },
-        .{ .integer = 0 },
+        TValue.fromInt(20),
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -109,8 +109,8 @@ test "MOD: modulo by zero" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 15 },
-        .{ .integer = 0 },
+        TValue.fromInt(15),
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -132,8 +132,8 @@ test "DIVK: division by zero constant returns inf" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 25 },
-        .{ .number = 0.0 },
+        TValue.fromInt(25),
+        TValue.fromFloat(0.0),
     };
 
     const code = [_]Instruction{
@@ -155,8 +155,8 @@ test "IDIVK: integer division by zero constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 30 },
-        .{ .integer = 0 },
+        TValue.fromInt(30),
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -177,8 +177,8 @@ test "MODK: modulo by zero constant" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 35 },
-        .{ .integer = 0 },
+        TValue.fromInt(35),
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -199,8 +199,8 @@ test "Division operations with non-zero divisors should succeed" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 20 },
-        .{ .integer = 4 },
+        TValue.fromInt(20),
+        TValue.fromInt(4),
     };
 
     const code = [_]Instruction{
@@ -217,7 +217,7 @@ test "Division operations with non-zero divisors should succeed" {
 
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);
-    try testing.expect(result.multiple[0].eql(TValue{ .number = 5.0 }));
-    try testing.expect(result.multiple[1].eql(TValue{ .number = 5.0 }));
-    try testing.expect(result.multiple[2].eql(TValue{ .number = 0.0 }));
+    try testing.expect(result.multiple[0].eql(TValue.fromFloat(5.0)));
+    try testing.expect(result.multiple[1].eql(TValue.fromFloat(5.0)));
+    try testing.expect(result.multiple[2].eql(TValue.fromFloat(0.0)));
 }

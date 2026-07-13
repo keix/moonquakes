@@ -16,7 +16,7 @@ test "string library is available through string metatable index" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("table")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 
@@ -30,7 +30,7 @@ test "string.len and string.sub follow Lua indexing rules" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 5 },
+        TValue.fromInt(5),
         TValue.fromString(try ctx.base.gc().allocString("ell")),
         TValue.fromString(try ctx.base.gc().allocString("lo")),
         TValue.fromString(try ctx.base.gc().allocString("")),
@@ -64,8 +64,8 @@ test "string.byte and string.char roundtrip byte values" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 65 },
-        .{ .integer = 90 },
+        TValue.fromInt(65),
+        TValue.fromInt(90),
         TValue.fromString(try ctx.base.gc().allocString("AZ")),
     });
 }
@@ -100,8 +100,8 @@ test "string.find and string.match return expected captures" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 7 },
-        .{ .integer = 11 },
+        TValue.fromInt(7),
+        TValue.fromInt(11),
         TValue.fromString(try ctx.base.gc().allocString("123")),
     });
 }
@@ -118,7 +118,7 @@ test "string.gsub returns replaced string and replacement count" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("x b x")),
-        .{ .integer = 2 },
+        TValue.fromInt(2),
     });
 }
 
@@ -175,8 +175,8 @@ test "string.dump produces a loadable bytecode string" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("string")),
-        .{ .boolean = true },
-        .{ .integer = 42 },
+        TValue.fromBool(true),
+        TValue.fromInt(42),
     });
 }
 
@@ -192,10 +192,10 @@ test "string.pack unpack and packsize roundtrip fixed binary layouts" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 7 },
-        .{ .integer = 7 },
-        .{ .integer = 42 },
+        TValue.fromInt(7),
+        TValue.fromInt(7),
+        TValue.fromInt(42),
         TValue.fromString(try ctx.base.gc().allocString("hey")),
-        .{ .integer = 8 },
+        TValue.fromInt(8),
     });
 }

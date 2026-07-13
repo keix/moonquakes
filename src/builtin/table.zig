@@ -154,7 +154,7 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     if (nargs == 2) {
         // table.insert(list, value): insert at end
         const value = vm.stack[vm.base + func_reg + 2];
-        const key = TValue{ .integer = len + 1 };
+        const key = TValue.fromInt(len + 1);
         try setAt(vm, tbl_arg, table, key, value);
     } else {
         // table.insert(list, pos, value): insert at pos, shift elements
@@ -184,14 +184,14 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         // Shift elements from len down to pos
         var i: i64 = len;
         while (i >= pos) : (i -= 1) {
-            const src_key = TValue{ .integer = i };
-            const dst_key = TValue{ .integer = i + 1 };
+            const src_key = TValue.fromInt(i);
+            const dst_key = TValue.fromInt(i + 1);
             const val = try getAt(vm, tbl_arg, table, src_key);
             try setAt(vm, tbl_arg, table, dst_key, val);
         }
 
         // Insert the new value at pos
-        const key = TValue{ .integer = pos };
+        const key = TValue.fromInt(pos);
         try setAt(vm, tbl_arg, table, key, value);
     }
 
@@ -221,7 +221,7 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     // - table.remove(t, 0) returns nil
     if (len == 0) {
         if (nargs < 2) {
-            const zero_key = TValue{ .integer = 0 };
+            const zero_key = TValue.fromInt(0);
             const removed_value = try getAt(vm, tbl_arg, table, zero_key);
             try setAt(vm, tbl_arg, table, zero_key, .nil);
             if (nresults > 0) {
@@ -263,20 +263,20 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     // Get the element to remove (to return it)
-    const remove_key = TValue{ .integer = pos };
+    const remove_key = TValue.fromInt(pos);
     const removed_value = try getAt(vm, tbl_arg, table, remove_key);
 
     // Shift elements down from pos+1 to len
     var i: i64 = pos;
     while (i < len) : (i += 1) {
-        const src_key = TValue{ .integer = i + 1 };
-        const dst_key = TValue{ .integer = i };
+        const src_key = TValue.fromInt(i + 1);
+        const dst_key = TValue.fromInt(i);
         const val = try getAt(vm, tbl_arg, table, src_key);
         try setAt(vm, tbl_arg, table, dst_key, val);
     }
 
     // Remove the last element (now duplicated)
-    const last_key = TValue{ .integer = len };
+    const last_key = TValue.fromInt(len);
     try setAt(vm, tbl_arg, table, last_key, .nil);
 
     // Return the removed value
@@ -324,7 +324,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     var i: i64 = 1;
     while (i <= len) : (i += 1) {
-        const key = TValue{ .integer = i };
+        const key = TValue.fromInt(i);
         const val = try getAt(vm, tbl_arg, table, key);
         elements.appendAssumeCapacity(val);
     }
@@ -337,7 +337,7 @@ pub fn nativeTableSort(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     // Write sorted elements back to table
     i = 1;
     for (elements.items) |val| {
-        const key = TValue{ .integer = i };
+        const key = TValue.fromInt(i);
         try setAt(vm, tbl_arg, table, key, val);
         i += 1;
     }
@@ -407,7 +407,7 @@ pub fn nativeTableConcat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
             };
         }
 
-        const key = TValue{ .integer = i };
+        const key = TValue.fromInt(i);
         const val = try getAt(vm, tbl_arg, table, key);
 
         // Convert value to string
@@ -507,8 +507,8 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         // Copy backwards to avoid overwriting source before reading
         var i: i64 = count - 1;
         while (i >= 0) : (i -= 1) {
-            const src_key = TValue{ .integer = f + i };
-            const dst_key = TValue{ .integer = t + i };
+            const src_key = TValue.fromInt(f + i);
+            const dst_key = TValue.fromInt(t + i);
             const val = try getAt(vm, src_arg, src_table, src_key);
             try setAt(vm, dst_table_arg, dst_table, dst_key, val);
         }
@@ -516,8 +516,8 @@ pub fn nativeTableMove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         // Copy forwards
         var i: i64 = 0;
         while (i < count) : (i += 1) {
-            const src_key = TValue{ .integer = f + i };
-            const dst_key = TValue{ .integer = t + i };
+            const src_key = TValue.fromInt(f + i);
+            const dst_key = TValue.fromInt(t + i);
             const val = try getAt(vm, src_arg, src_table, src_key);
             try setAt(vm, dst_table_arg, dst_table, dst_key, val);
         }
@@ -541,13 +541,13 @@ pub fn nativeTablePack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     var i: u32 = 0;
     while (i < nargs) : (i += 1) {
         const val = vm.stack[vm.base + func_reg + 1 + i];
-        const key = TValue{ .integer = @as(i64, i) + 1 };
+        const key = TValue.fromInt(@as(i64, i) + 1);
         try rawSet(vm, table, key, val);
     }
 
     // Set the "n" field to the count of arguments
     const n_key = try vm.gc().allocString("n");
-    try rawSet(vm, table, TValue.fromString(n_key), .{ .integer = @intCast(nargs) });
+    try rawSet(vm, table, TValue.fromString(n_key), TValue.fromInt(@intCast(nargs)));
 
     // Return the table
     vm.stack[vm.base + func_reg] = TValue.fromTable(table);
@@ -602,7 +602,7 @@ pub fn nativeTableUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     // Store values in result registers
     var i: u32 = 0;
     while (i < actual_count) : (i += 1) {
-        const key = TValue{ .integer = start + @as(i64, i) };
+        const key = TValue.fromInt(start + @as(i64, i));
         const val = try getAt(vm, tbl_arg, table, key);
         vm.stack[vm.base + func_reg + i] = val;
     }

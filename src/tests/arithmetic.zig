@@ -18,14 +18,14 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 fn expectApproxResult(result: ReturnValue, expected_value: f64, tolerance: f64) !void {
     try testing.expect(result == .single);
     try testing.expect(result.single.isNumber());
-    try testing.expectApproxEqAbs(result.single.number, expected_value, tolerance);
+    try testing.expectApproxEqAbs(result.single.asFloat(), expected_value, tolerance);
 }
 
 test "arithmetic: 10 - 3 * 2 = 4" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 3 },
-        .{ .integer = 2 },
+        TValue.fromInt(10),
+        TValue.fromInt(3),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -52,14 +52,14 @@ test "arithmetic: 10 - 3 * 2 = 4" {
     trace.updateFinal(ctx.vm, 5);
 
     // Verify result
-    try test_utils.expectResultAndState(result, TValue{ .integer = 4 }, ctx.vm, 0, 5);
+    try test_utils.expectResultAndState(result, TValue.fromInt(4), ctx.vm, 0, 5);
 
     // Verify register states
-    try trace.expectRegisterChanged(0, TValue{ .integer = 10 }); // R0 loaded 10
-    try trace.expectRegisterChanged(1, TValue{ .integer = 3 }); // R1 loaded 3
-    try trace.expectRegisterChanged(2, TValue{ .integer = 2 }); // R2 loaded 2
-    try trace.expectRegisterChanged(3, TValue{ .integer = 6 }); // R3 = 3 * 2 = 6
-    try trace.expectRegisterChanged(4, TValue{ .integer = 4 }); // R4 = 10 - 6 = 4
+    try trace.expectRegisterChanged(0, TValue.fromInt(10)); // R0 loaded 10
+    try trace.expectRegisterChanged(1, TValue.fromInt(3)); // R1 loaded 3
+    try trace.expectRegisterChanged(2, TValue.fromInt(2)); // R2 loaded 2
+    try trace.expectRegisterChanged(3, TValue.fromInt(6)); // R3 = 3 * 2 = 6
+    try trace.expectRegisterChanged(4, TValue.fromInt(4)); // R4 = 10 - 6 = 4
 
     // Verify no other registers were affected
     try test_utils.expectRegistersUnchanged(&trace, 5, &[_]u8{ 0, 1, 2, 3, 4 });
@@ -67,8 +67,8 @@ test "arithmetic: 10 - 3 * 2 = 4" {
 
 test "arithmetic: 10 / 3 with side effect verification" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 3 },
+        TValue.fromInt(10),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -85,9 +85,9 @@ test "arithmetic: 10 / 3 with side effect verification" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 6);
 
     // Set up registers beyond what we need to verify no side effects
-    ctx.vm.stack[3] = TValue{ .integer = 999 };
-    ctx.vm.stack[4] = TValue{ .boolean = true };
-    ctx.vm.stack[5] = TValue{ .number = 3.14 };
+    ctx.vm.stack[3] = TValue.fromInt(999);
+    ctx.vm.stack[4] = TValue.fromBool(true);
+    ctx.vm.stack[5] = TValue.fromFloat(3.14);
 
     var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 6);
     const result = try Mnemonics.execute(ctx.vm, proto);
@@ -96,13 +96,13 @@ test "arithmetic: 10 / 3 with side effect verification" {
     // Verify result
     try testing.expect(result == .single);
     try testing.expect(result.single.isNumber());
-    try testing.expectApproxEqAbs(result.single.number, 3.333333, 0.00001);
+    try testing.expectApproxEqAbs(result.single.asFloat(), 3.333333, 0.00001);
 
     // Verify only expected registers changed
-    try trace.expectRegisterChanged(0, TValue{ .integer = 10 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 3 });
+    try trace.expectRegisterChanged(0, TValue.fromInt(10));
+    try trace.expectRegisterChanged(1, TValue.fromInt(3));
     try testing.expect(ctx.vm.stack[ctx.vm.base + 2].isNumber());
-    try testing.expectApproxEqAbs(ctx.vm.stack[ctx.vm.base + 2].number, 3.333333, 0.00001);
+    try testing.expectApproxEqAbs(ctx.vm.stack[ctx.vm.base + 2].asFloat(), 3.333333, 0.00001);
 
     // Verify registers 3-5 are unchanged (side effect check)
     try trace.expectRegisterUnchanged(3);
@@ -115,8 +115,8 @@ test "arithmetic: 10 / 3 with side effect verification" {
 
 test "arithmetic: 10 // 3 = 3" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 3 },
+        TValue.fromInt(10),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -140,12 +140,12 @@ test "arithmetic: 10 // 3 = 3" {
     trace.updateFinal(ctx.vm, 3);
 
     // Existing verification
-    try expectSingleResult(result, TValue{ .number = 3 });
+    try expectSingleResult(result, TValue.fromFloat(3));
 
     // Added: Register state verification
-    try trace.expectRegisterChanged(0, TValue{ .integer = 10 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 3 });
-    try trace.expectRegisterChanged(2, TValue{ .number = 3 }); // IDIV always returns float
+    try trace.expectRegisterChanged(0, TValue.fromInt(10));
+    try trace.expectRegisterChanged(1, TValue.fromInt(3));
+    try trace.expectRegisterChanged(2, TValue.fromFloat(3)); // IDIV always returns float
 
     // VM state verification
     try test_utils.expectVMState(ctx.vm, 0, 3);
@@ -153,8 +153,8 @@ test "arithmetic: 10 // 3 = 3" {
 
 test "arithmetic: 10 % 3 = 1" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 3 },
+        TValue.fromInt(10),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -176,13 +176,13 @@ test "arithmetic: 10 % 3 = 1" {
     trace.updateFinal(ctx.vm, 3);
 
     // Existing verification
-    try expectSingleResult(result, TValue{ .number = 1 });
+    try expectSingleResult(result, TValue.fromFloat(1));
 
     // Added: Detailed state verification
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .integer = 10 }, // R0
-        .{ .integer = 3 }, // R1
-        .{ .number = 1 }, // R2 (MOD always returns float)
+        TValue.fromInt(10), // R0
+        TValue.fromInt(3), // R1
+        TValue.fromFloat(1), // R2 (MOD always returns float)
     });
 
     // Verify all registers changed as expected
@@ -191,8 +191,8 @@ test "arithmetic: 10 % 3 = 1" {
 
 test "arithmetic: 2 ^ 3 = 8 (power operation)" {
     const constants = [_]TValue{
-        .{ .number = 2.0 },
-        .{ .number = 3.0 },
+        TValue.fromFloat(2.0),
+        TValue.fromFloat(3.0),
     };
 
     const code = [_]Instruction{
@@ -212,20 +212,20 @@ test "arithmetic: 2 ^ 3 = 8 (power operation)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
     trace.updateFinal(ctx.vm, 3);
 
-    try expectSingleResult(result, TValue{ .number = 8.0 });
+    try expectSingleResult(result, TValue.fromFloat(8.0));
 
     // Verify register states
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .number = 2.0 }, // R0
-        .{ .number = 3.0 }, // R1
-        .{ .number = 8.0 }, // R2
+        TValue.fromFloat(2.0), // R0
+        TValue.fromFloat(3.0), // R1
+        TValue.fromFloat(8.0), // R2
     });
 }
 
 test "arithmetic: 5 ^ 2 with integer inputs" {
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 2 },
+        TValue.fromInt(5),
+        TValue.fromInt(2),
     };
 
     const code = [_]Instruction{
@@ -242,5 +242,5 @@ test "arithmetic: 5 ^ 2 with integer inputs" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 25.0 });
+    try expectSingleResult(result, TValue.fromFloat(25.0));
 }

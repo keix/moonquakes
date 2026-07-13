@@ -52,11 +52,11 @@ var rng_seed2: u64 = 0;
 var rng_initialized: bool = false;
 
 fn valueTypeName(v: TValue) []const u8 {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -70,10 +70,10 @@ fn valueTypeName(v: TValue) []const u8 {
 
 fn namedValueTypeName(vm: anytype, v: TValue) []const u8 {
     if (!v.isObject()) return valueTypeName(v);
-    const mt_opt: ?*object.TableObject = switch (v.object.type) {
-        .table => object.getObject(object.TableObject, v.object).metatable,
-        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
-        .file => object.getObject(object.FileObject, v.object).metatable,
+    const mt_opt: ?*object.TableObject = switch (v.asObjectPtr().type) {
+        .table => object.getObject(object.TableObject, v.asObjectPtr()).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.asObjectPtr()).metatable,
+        .file => object.getObject(object.FileObject, v.asObjectPtr()).metatable,
         else => null,
     };
     if (mt_opt) |mt| {
@@ -225,15 +225,15 @@ fn compareFloatInt(f: f64, i: i64, comptime le: bool) bool {
 
 fn coerceToNumeric(arg: TValue) ?TValue {
     if (arg.isInteger() or arg.isNumber()) return arg;
-    if (arg.toNumber()) |n| return TValue{ .number = n };
+    if (arg.toNumber()) |n| return TValue.fromFloat(n);
     return null;
 }
 
 fn numLess(a: TValue, b: TValue) bool {
-    if (a.isInteger() and b.isInteger()) return a.integer < b.integer;
-    if (a.isNumber() and b.isNumber()) return a.number < b.number;
-    if (a.isInteger() and b.isNumber()) return compareIntFloat(a.integer, b.number, false);
-    if (a.isNumber() and b.isInteger()) return compareFloatInt(a.number, b.integer, false);
+    if (a.isInteger() and b.isInteger()) return a.asInt() < b.asInt();
+    if (a.isNumber() and b.isNumber()) return a.asFloat() < b.asFloat();
+    if (a.isInteger() and b.isNumber()) return compareIntFloat(a.asInt(), b.asFloat(), false);
+    if (a.isNumber() and b.isInteger()) return compareFloatInt(a.asFloat(), b.asInt(), false);
     return false;
 }
 
@@ -251,12 +251,12 @@ pub fn nativeMathAbs(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Try integer first to preserve integer type
     if (arg.toInteger()) |i| {
-        vm.stack[vm.base + func_reg] = .{ .integer = if (i < 0) 0 -% i else i };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(if (i < 0) 0 -% i else i);
         return;
     }
 
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = @abs(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@abs(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -270,7 +270,7 @@ pub fn nativeMathCeil(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const arg = vm.stack[vm.base + func_reg + 1];
 
     // Integer is already integral
-    if (arg == .integer) {
+    if (arg.isInteger()) {
         vm.stack[vm.base + func_reg] = arg;
         return;
     }
@@ -278,9 +278,9 @@ pub fn nativeMathCeil(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (arg.toNumber()) |n| {
         const result = @ceil(n);
         if (floatToIntExact(result)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
         } else {
-            vm.stack[vm.base + func_reg] = .{ .number = result };
+            vm.stack[vm.base + func_reg] = TValue.fromFloat(result);
         }
     } else {
         return vm.raiseString("number expected");
@@ -295,7 +295,7 @@ pub fn nativeMathFloor(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const arg = vm.stack[vm.base + func_reg + 1];
 
     // Integer is already integral
-    if (arg == .integer) {
+    if (arg.isInteger()) {
         vm.stack[vm.base + func_reg] = arg;
         return;
     }
@@ -303,9 +303,9 @@ pub fn nativeMathFloor(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (arg.toNumber()) |n| {
         const result = @floor(n);
         if (floatToIntExact(result)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
         } else {
-            vm.stack[vm.base + func_reg] = .{ .number = result };
+            vm.stack[vm.base + func_reg] = TValue.fromFloat(result);
         }
     } else {
         return vm.raiseString("number expected");
@@ -361,7 +361,7 @@ pub fn nativeMathSqrt(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = @sqrt(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@sqrt(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -374,7 +374,7 @@ pub fn nativeMathAcos(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.acos(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.acos(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -387,7 +387,7 @@ pub fn nativeMathAsin(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.asin(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.asin(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -410,10 +410,10 @@ pub fn nativeMathAtan(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             vm.stack[vm.base + func_reg] = .nil;
             return;
         };
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.atan2(y, x) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.atan2(y, x));
     } else {
         // atan(y)
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.atan(y) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.atan(y));
     }
 }
 
@@ -424,7 +424,7 @@ pub fn nativeMathCos(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = @cos(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@cos(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -437,7 +437,7 @@ pub fn nativeMathDeg(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.radiansToDegrees(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.radiansToDegrees(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -450,7 +450,7 @@ pub fn nativeMathExp(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = @exp(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@exp(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -465,14 +465,14 @@ pub fn nativeMathFmod(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     const y_arg = vm.stack[vm.base + func_reg + 2];
 
     if (x_arg.isInteger() and y_arg.isInteger()) {
-        const x = x_arg.integer;
-        const y = y_arg.integer;
+        const x = x_arg.asInt();
+        const y = y_arg.asInt();
         if (y == 0) return vm.raiseString("divide by zero");
         if (y == -1) {
-            vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(0);
             return;
         }
-        vm.stack[vm.base + func_reg] = .{ .integer = @rem(x, y) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@rem(x, y));
         return;
     }
 
@@ -487,7 +487,7 @@ pub fn nativeMathFmod(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (y == 0.0) return vm.raiseString("divide by zero");
 
     // fmod: remainder with quotient truncated toward zero
-    vm.stack[vm.base + func_reg] = .{ .number = @rem(x, y) };
+    vm.stack[vm.base + func_reg] = TValue.fromFloat(@rem(x, y));
 }
 
 /// math.log(x [, base]) - Returns the logarithm of x in the given base
@@ -507,10 +507,10 @@ pub fn nativeMathLog(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
             vm.stack[vm.base + func_reg] = .nil;
             return;
         };
-        vm.stack[vm.base + func_reg] = .{ .number = @log(x) / @log(base) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@log(x) / @log(base));
     } else {
         // Natural logarithm
-        vm.stack[vm.base + func_reg] = .{ .number = @log(x) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@log(x));
     }
 }
 
@@ -533,14 +533,14 @@ pub fn nativeMathModf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
     if (integral >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
         integral <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
     {
-        vm.stack[vm.base + func_reg] = .{ .integer = @intFromFloat(integral) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@intFromFloat(integral));
     } else {
-        vm.stack[vm.base + func_reg] = .{ .number = integral };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(integral);
     }
 
     // Second result: fractional part
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .{ .number = fractional };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromFloat(fractional);
     }
 }
 
@@ -551,7 +551,7 @@ pub fn nativeMathRad(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = std.math.degreesToRadians(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(std.math.degreesToRadians(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -564,17 +564,17 @@ pub fn nativeMathRandom(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
     if (nargs == 0) {
         // No args: return [0, 1)
-        vm.stack[vm.base + func_reg] = .{ .number = randFloat() };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(randFloat());
     } else if (nargs == 1) {
         // One arg: return [1, m] (or raw int if m == 0)
         const m_arg = vm.stack[vm.base + func_reg + 1];
         const m = m_arg.toInteger() orelse return vm.raiseString("number expected");
         if (m == 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = randRawInt() };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(randRawInt());
             return;
         }
         if (m < 1) return vm.raiseString("interval is empty");
-        vm.stack[vm.base + func_reg] = .{ .integer = randRange(1, m) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(randRange(1, m));
     } else {
         // Two args: return [m, n]
         const m_arg = vm.stack[vm.base + func_reg + 1];
@@ -582,7 +582,7 @@ pub fn nativeMathRandom(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         const m = m_arg.toInteger() orelse return vm.raiseString("number expected");
         const n = n_arg.toInteger() orelse return vm.raiseString("number expected");
         if (m > n) return vm.raiseString("interval is empty");
-        vm.stack[vm.base + func_reg] = .{ .integer = randRange(m, n) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(randRange(m, n));
     }
 }
 
@@ -608,10 +608,10 @@ pub fn nativeMathRandomseed(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
     }
 
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .integer = @bitCast(rng_seed1) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@bitCast(rng_seed1));
     }
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .{ .integer = @bitCast(rng_seed2) };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromInt(@bitCast(rng_seed2));
     }
 }
 
@@ -626,7 +626,7 @@ pub fn nativeMathSin(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         return vm.raiseString(msg);
     };
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .number = @sin(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@sin(n));
     }
 }
 
@@ -637,7 +637,7 @@ pub fn nativeMathTan(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.toNumber()) |n| {
-        vm.stack[vm.base + func_reg] = .{ .number = @tan(n) };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(@tan(n));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -651,15 +651,15 @@ pub fn nativeMathTointeger(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     const arg = vm.stack[vm.base + func_reg + 1];
 
     // If already an integer, return it
-    if (arg == .integer) {
+    if (arg.isInteger()) {
         vm.stack[vm.base + func_reg] = arg;
         return;
     }
 
     // Try to convert number to integer (only if it's an exact integer)
-    if (arg == .number) {
-        if (floatToIntExact(arg.number)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+    if (arg.isNumber()) {
+        if (floatToIntExact(arg.asFloat())) |i| {
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
             return;
         }
     }
@@ -668,12 +668,12 @@ pub fn nativeMathTointeger(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
     if (arg.asString()) |s| {
         const slice = std.mem.trim(u8, s.asSlice(), " \t\n\r");
         if (std.fmt.parseInt(i64, slice, 10)) |i| {
-            vm.stack[vm.base + func_reg] = .{ .integer = i };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(i);
             return;
         } else |_| {}
         if (std.fmt.parseFloat(f64, slice)) |n| {
             if (floatToIntExact(n)) |i| {
-                vm.stack[vm.base + func_reg] = .{ .integer = i };
+                vm.stack[vm.base + func_reg] = TValue.fromInt(i);
                 return;
             }
         } else |_| {}
@@ -689,10 +689,10 @@ pub fn nativeMathType(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     const arg = vm.stack[vm.base + func_reg + 1];
 
-    if (arg == .integer) {
+    if (arg.isInteger()) {
         const str = try vm.gc().allocString("integer");
         vm.stack[vm.base + func_reg] = TValue.fromString(str);
-    } else if (arg == .number) {
+    } else if (arg.isNumber()) {
         const str = try vm.gc().allocString("float");
         vm.stack[vm.base + func_reg] = TValue.fromString(str);
     } else {
@@ -720,7 +720,7 @@ pub fn nativeMathUlt(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Compare as unsigned
     const um: u64 = @bitCast(m);
     const un: u64 = @bitCast(n);
-    vm.stack[vm.base + func_reg] = .{ .boolean = um < un };
+    vm.stack[vm.base + func_reg] = TValue.fromBool(um < un);
 }
 
 // Exported constants used during library registration.

@@ -324,12 +324,13 @@ pub const REPL = struct {
 
     /// Print a TValue
     fn printValue(stdout: anytype, val: TValue) !void {
-        switch (val) {
+        switch (val.kind()) {
             .nil => try stdout.writeAll("nil"),
-            .boolean => |b| try stdout.writeAll(if (b) "true" else "false"),
-            .integer => |i| try stdout.print("{d}", .{i}),
-            .number => |n| try stdout.print("{d}", .{n}),
-            .object => |obj| {
+            .boolean => try stdout.writeAll(if ((val).asBool()) "true" else "false"),
+            .integer => try stdout.print("{d}", .{(val).asInt()}),
+            .number => try stdout.print("{d}", .{(val).asFloat()}),
+            .object => {
+                const obj = val.asObjectPtr();
                 switch (obj.type) {
                     .string => {
                         const str: *object.StringObject = @fieldParentPtr("header", obj);
@@ -401,11 +402,11 @@ pub const REPL = struct {
     }
 
     fn writePromptValue(self: *Self, stdout: anytype, val: TValue) !void {
-        switch (val) {
+        switch (val.kind()) {
             .nil => try stdout.writeAll("nil"),
-            .boolean => |b| try stdout.writeAll(if (b) "true" else "false"),
-            .integer => |i| try stdout.print("{d}", .{i}),
-            .number => |n| try stdout.print("{d}", .{n}),
+            .boolean => try stdout.writeAll(if (val.asBool()) "true" else "false"),
+            .integer => try stdout.print("{d}", .{val.asInt()}),
+            .number => try stdout.print("{d}", .{val.asFloat()}),
             else => {
                 if (metamethod.getMetamethod(val, .tostring, &self.vm.gc().mm_keys, &self.vm.gc().shared_mt)) |mm| {
                     if (!self.vm.pushTempRoot(mm)) return error.OutOfMemory;

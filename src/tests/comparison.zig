@@ -21,10 +21,10 @@ test "comparison: 5 == 5 = true" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(5),
+        TValue.fromInt(5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     // Using new EQ semantics: EQ A B C means "if (R[B] == R[C]) != A then skip next"
@@ -49,12 +49,12 @@ test "comparison: 5 == 5 = true" {
     trace.updateFinal(ctx.vm, 3);
 
     // Existing verification
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 
     // Added: Register and PC behavior verification
-    try trace.expectRegisterChanged(0, TValue{ .integer = 5 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 5 });
-    try trace.expectRegisterChanged(2, TValue{ .boolean = true }); // EQ didn't skip, so true was set
+    try trace.expectRegisterChanged(0, TValue.fromInt(5));
+    try trace.expectRegisterChanged(1, TValue.fromInt(5));
+    try trace.expectRegisterChanged(2, TValue.fromBool(true)); // EQ didn't skip, so true was set
 
     // VM final state
     try test_utils.expectVMState(ctx.vm, 0, 3);
@@ -66,10 +66,10 @@ test "comparison: 5 == 3 = false" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 3 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(5),
+        TValue.fromInt(3),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     // Using new EQ semantics: EQ A B C means "if (R[B] == R[C]) != A then skip next"
@@ -86,7 +86,7 @@ test "comparison: 5 == 3 = false" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "comparison: 3 < 5 = true" {
@@ -95,10 +95,10 @@ test "comparison: 3 < 5 = true" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 3 },
-        .{ .integer = 5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(3),
+        TValue.fromInt(5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     // Using new LT semantics: LT A B C means "if (R[B] < R[C]) != A then skip next"
@@ -115,7 +115,7 @@ test "comparison: 3 < 5 = true" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "comparison: 5 < 3 = false" {
@@ -124,10 +124,10 @@ test "comparison: 5 < 3 = false" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 3 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(5),
+        TValue.fromInt(3),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -143,7 +143,7 @@ test "comparison: 5 < 3 = false" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "comparison: 3 <= 5 = true" {
@@ -152,10 +152,10 @@ test "comparison: 3 <= 5 = true" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 3 },
-        .{ .integer = 5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(3),
+        TValue.fromInt(5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -171,7 +171,7 @@ test "comparison: 3 <= 5 = true" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "comparison: 5 <= 5 = true" {
@@ -180,10 +180,10 @@ test "comparison: 5 <= 5 = true" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 },
-        .{ .integer = 5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(5),
+        TValue.fromInt(5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -199,7 +199,7 @@ test "comparison: 5 <= 5 = true" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "comparison: mixed types 3 < 3.5 = true" {
@@ -208,10 +208,10 @@ test "comparison: mixed types 3 < 3.5 = true" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 3 },
-        .{ .number = 3.5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(3),
+        TValue.fromFloat(3.5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -227,7 +227,7 @@ test "comparison: mixed types 3 < 3.5 = true" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "comparison: different types nil == false = false" {
@@ -237,9 +237,9 @@ test "comparison: different types nil == false = false" {
 
     const constants = [_]TValue{
         .nil,
-        .{ .boolean = false },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromBool(false),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -255,7 +255,7 @@ test "comparison: different types nil == false = false" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
@@ -264,10 +264,10 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .number = 1.0 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(1),
+        TValue.fromFloat(1.0),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -284,7 +284,7 @@ test "EQ instruction: Lua 5.3+ integer == float (1 == 1.0)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // In Lua 5.3+, 1 == 1.0 is true
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "EQ instruction: integer != non-integer float (42 != 42.5)" {
@@ -293,10 +293,10 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 42 },
-        .{ .number = 42.5 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(42),
+        TValue.fromFloat(42.5),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -313,7 +313,7 @@ test "EQ instruction: integer != non-integer float (42 != 42.5)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // 42 != 42.5, so should return false
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "EQ instruction: negative integer == float (-100 == -100.0)" {
@@ -322,10 +322,10 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = -100 },
-        .{ .number = -100.0 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromInt(-100),
+        TValue.fromFloat(-100.0),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -342,7 +342,7 @@ test "EQ instruction: negative integer == float (-100 == -100.0)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // -100 == -100.0 should be true in Lua 5.3+
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 // Added: Concise test using ComparisonTest helper
@@ -353,12 +353,12 @@ test "comparison: EQ with skip behavior verification" {
 
     // Test 1: Equal values with A=0 (should skip)
     try test_utils.ComparisonTest.expectSkip(ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == 0 then skip
-        TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
+        TValue.fromInt(42), TValue.fromInt(42), &[_]TValue{});
 
     // Test 2: Different values with A=0 (should not skip)
     ctx.deinit();
     try ctx.init();
-    try test_utils.ComparisonTest.expectNoSkip(ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), TValue{ .integer = 42 }, TValue{ .integer = 24 }, &[_]TValue{});
+    try test_utils.ComparisonTest.expectNoSkip(ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), TValue.fromInt(42), TValue.fromInt(24), &[_]TValue{});
 }
 
 test "comparison: LT with side effect verification" {
@@ -377,10 +377,10 @@ test "comparison: LT with side effect verification" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 10 },
-        .{ .integer = 20 },
-        .{ .integer = 100 },
-        .{ .integer = 200 },
+        TValue.fromInt(10),
+        TValue.fromInt(20),
+        TValue.fromInt(100),
+        TValue.fromInt(200),
     };
 
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
@@ -394,10 +394,10 @@ test "comparison: LT with side effect verification" {
     trace.updateFinal(ctx.vm, 4);
 
     // Verify registers
-    try trace.expectRegisterChanged(0, TValue{ .integer = 10 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 20 });
+    try trace.expectRegisterChanged(0, TValue.fromInt(10));
+    try trace.expectRegisterChanged(1, TValue.fromInt(20));
     try trace.expectRegisterUnchanged(2); // R2 was skipped so remains nil
-    try trace.expectRegisterChanged(3, TValue{ .integer = 200 }); // R3 was executed
+    try trace.expectRegisterChanged(3, TValue.fromInt(200)); // R3 was executed
 
     // Verify result
     try testing.expect(result == .multiple);

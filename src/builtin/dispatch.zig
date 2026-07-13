@@ -285,10 +285,10 @@ fn initMathLibrary(globals: *TableObject, gc: *GC) !void {
     const math_table = try gc.allocTable();
 
     // Exported math constants remain explicit.
-    try setStringKey(math_table, gc, "pi", .{ .number = math.MATH_PI });
-    try setStringKey(math_table, gc, "huge", .{ .number = math.MATH_HUGE });
-    try setStringKey(math_table, gc, "maxinteger", .{ .integer = math.MATH_MAXINTEGER });
-    try setStringKey(math_table, gc, "mininteger", .{ .integer = math.MATH_MININTEGER });
+    try setStringKey(math_table, gc, "pi", TValue.fromFloat(math.MATH_PI));
+    try setStringKey(math_table, gc, "huge", TValue.fromFloat(math.MATH_HUGE));
+    try setStringKey(math_table, gc, "maxinteger", TValue.fromInt(math.MATH_MAXINTEGER));
+    try setStringKey(math_table, gc, "mininteger", TValue.fromInt(math.MATH_MININTEGER));
 
     // Dispatcher-backed math functions.
     const math_entries = [_]BuiltinEntry{
