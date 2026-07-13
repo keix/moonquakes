@@ -429,9 +429,46 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     .LE => left.asFloat() <= right.asFloat(),
                     else => unreachable,
                 };
+            } else if (inst.getOpCode() == .EQ) {
+                const l_num = left.isInteger() or left.isNumber();
+                const r_num = right.isInteger() or right.isNumber();
+                if (l_num and r_num) {
+                    // Mixed int/float needs exact mathematical comparison:
+                    // full handler.
+                    return;
+                }
+                if (left.kind() != right.kind()) {
+                    // Different types never compare equal and __eq is not
+                    // consulted (it needs two tables or two userdata).
+                    is_true = false;
+                } else switch (left.kind()) {
+                    .nil => is_true = true,
+                    .boolean => is_true = left.asBool() == right.asBool(),
+                    .object => {
+                        const lp = left.asObjectPtr();
+                        const rp = right.asObjectPtr();
+                        if (lp == rp) {
+                            // rawequal: __eq is never consulted for
+                            // identical objects, exact for every type.
+                            is_true = true;
+                        } else if (lp.type == .string and rp.type == .string) {
+                            // Interned strings are deduplicated, so
+                            // distinct pointers mean distinct contents. A
+                            // non-interned (long) string still needs a
+                            // content compare: exit.
+                            const ls = object.getObject(object.StringObject, lp);
+                            const rs = object.getObject(object.StringObject, rp);
+                            if (!ls.interned or !rs.interned) return;
+                            is_true = false;
+                        } else {
+                            // Distinct tables/userdata may have __eq.
+                            return;
+                        }
+                    },
+                    else => unreachable,
+                }
             } else {
-                // Mixed int/float exactness, strings, and metamethods take
-                // the full handler.
+                // LT/LE on strings and metamethods take the full handler.
                 return;
             }
             const skip = (is_true and negate == 0) or (!is_true and negate != 0);
@@ -540,6 +577,48 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
 
             cur = new_ci;
             base = new_base;
+            k = proto.k;
+            pc = proto.code.ptr;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .TAILCALL => {
+            // Frame-reuse fast path mirroring reuseTailClosureFrame's
+            // non-vararg case: fixed-arg tail call of a Lua closure with no
+            // TBC slots to close (k flag). Upvalues over this frame close
+            // in place (infallible); __call chains, natives and varargs
+            // exit. Tail calls are safepoints like CALL.
+            if (inst.getk() or cur.tbc_bitmap != 0) return;
+            const b = inst.getB();
+            if (b == 0) return;
+            const a = inst.getA();
+            const func_val = &stack[base + a];
+            if (!func_val.isObject()) return;
+            const func_closure = func_val.asClosure() orelse return;
+            const proto = func_closure.proto;
+            if (proto.is_vararg) return;
+            if (vm.slow_work_signal or interrupt.isPending()) return;
+
+            if (vm.open_upvalues) |uv| {
+                const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&stack[0])) / @sizeOf(TValue);
+                if (uv_level >= base) vm.closeUpvalues(base);
+            }
+
+            // Shift the arguments down over the reused frame's base.
+            const nargs: u32 = b - 1;
+            const params_to_copy = @min(nargs, @as(u32, proto.numparams));
+            var i: u32 = 0;
+            while (i < params_to_copy) : (i += 1) {
+                stack[base + i] = stack[base + a + 1 + i];
+            }
+            while (i < proto.numparams) : (i += 1) {
+                stack[base + i] = .nil;
+            }
+
+            cur.reset(proto, func_closure, base, cur.ret_base, cur.nresults, cur.previous, 0, 0);
+            cur.was_tail_called = true;
+            vm.top = base + proto.maxstacksize;
+
             k = proto.k;
             pc = proto.code.ptr;
             inst = pc[0];
