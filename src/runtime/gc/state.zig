@@ -625,6 +625,7 @@ pub const GC = struct {
     pub const enqueueAllFinalizers = finalizer_mod.enqueueAllFinalizers;
 
     pub const tableSet = mutation_mod.tableSet;
+    pub const tableInitArray = mutation_mod.tableInitArray;
     pub const tableSetMetatable = mutation_mod.tableSetMetatable;
     pub const userdataSetMetatable = mutation_mod.userdataSetMetatable;
     pub const initClosedUpvalue = mutation_mod.initClosedUpvalue;

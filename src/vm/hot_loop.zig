@@ -10,9 +10,11 @@
 //! Contract:
 //!   - Only entered when no debug hooks are active and the frame has no
 //!     pending continuation.
-//!   - Fast ops never allocate, never error, never change the frame, and
-//!     never grow the stack, so `vm.stack`, `vm.base`, and `ci` are stable
-//!     for the whole run.
+//!   - Fast ops never raise Lua errors and never grow the stack. The few
+//!     that allocate (NEWTABLE, SETI/SETTABLE appends) bail out on OOM
+//!     with pc still at the failing instruction so the outer handler
+//!     re-executes it; GC may run inside them, which is safe because
+//!     `vm.base`/`vm.top`/`vm.ci` are kept in sync at frame switches.
 //!   - On exit, ci.pc points at the first instruction that was NOT
 //!     executed; the outer loop resumes with its normal fetch + dispatch.
 //!   - Backward jumps (loop back-edges) poll the slow-work signal and the
@@ -614,10 +616,13 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .SETTABLE, .SETI => {
-            // Array-part write with no side channel: integer key within the
-            // sequence border, non-nil slot (an absent key would need
-            // __newindex), and a non-collectable value (an object value
-            // would need the GC write barrier). Everything else exits.
+            // Two array-part cases stay in the loop; everything else exits.
+            // In-place: integer key within the sequence border and a non-nil
+            // slot (an absent key would need __newindex). Fresh append: one
+            // past the end of a table with empty hash and deleted-key parts
+            // and no metatable — the constructor-fill shape, mirroring
+            // TableObject.set's fast path. Object values take the backward
+            // barrier (infallible); nil writes are removals and exit.
             const table = stack[base + inst.getA()].asTable() orelse return;
             const i: i64 = if (inst.getOpCode() == .SETI)
                 @as(i64, inst.getB())
@@ -627,13 +632,42 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 break :blk key.asInt();
             };
             const value = stack[base + inst.getC()];
-            if (value.isObject() or value.isNil()) return;
-            if (i < 1 or i > table.seq_len) return;
-            if (i > @as(i64, @intCast(table.array.items.len))) return;
-            const slot = &table.array.items[@intCast(i - 1)];
-            if (slot.isNil()) return;
-            slot.* = value;
-            table.mod_count +%= 1;
+            if (value.isNil()) return;
+            const alen: i64 = @intCast(table.array.items.len);
+            if (i >= 1 and i <= table.seq_len and i <= alen) {
+                const slot = &table.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return;
+                slot.* = value;
+                table.mod_count +%= 1;
+            } else if (i == alen + 1 and table.metatable == null and
+                table.hash_part.count() == 0 and table.deleted_keys.count() == 0)
+            {
+                // On OOM the table is untouched; the defer leaves pc at
+                // this SETI so the outer handler re-executes it.
+                table.array.append(table.allocator, value) catch return;
+                table.mod_count +%= 1;
+                table.shape_count +%= 1;
+                if (i == table.seq_len + 1) table.seq_len = i;
+            } else return;
+            if (value.isObject()) {
+                vm.gc().barrierBackValue(&table.header, value);
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .NEWTABLE => {
+            // Allocation may run a GC cycle; vm.base/top/ci are kept in
+            // sync at frame switches, so roots are consistent mid-loop. On
+            // OOM the defer leaves pc at this NEWTABLE and the outer
+            // handler re-executes it, raising through the normal path.
+            const table = vm.gc().allocTable() catch return;
+            const array_hint = inst.getC();
+            if (array_hint > 0) {
+                // Bail on OOM; the orphaned table is collected normally.
+                table.array.ensureTotalCapacityPrecise(table.allocator, array_hint) catch return;
+            }
+            stack[base + inst.getA()] = TValue.fromTable(table);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
