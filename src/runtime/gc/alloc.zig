@@ -86,15 +86,14 @@ pub fn allocConstString(self: anytype, str: []const u8) !*StringObject {
 }
 
 fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*StringObject {
-    // Lua-compatible policy: intern only short strings.
-    // Note: raising this toward PUC's LUAI_MAXSHORTLEN (40) was measured to
-    // regress unique-string churn 12x — std.StringHashMap degrades under
-    // heavy insert/remove. Revisit only with a purpose-built string table.
-    const short_string_max_len: usize = 16;
+    // Lua-compatible policy: intern short strings, matching PUC's
+    // LUAI_MAXSHORTLEN. The chained intern table has no tombstone churn,
+    // which is what previously capped this at 16.
+    const short_string_max_len: usize = 40;
     const should_intern = force_intern or str.len <= short_string_max_len;
+    const hash = StringObject.hashString(str);
     if (should_intern) {
-        // Check intern table for existing short string
-        if (self.strings.get(str)) |existing| {
+        if (self.strings.find(str, hash)) |existing| {
             return existing;
         }
     }
@@ -105,7 +104,9 @@ fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*S
     // Initialize GC header (black = survives current cycle)
     obj.header = newObjectHeader(self, .string);
     obj.len = str.len;
-    obj.hash = StringObject.hashString(str);
+    obj.hash = hash;
+    obj.interned = false;
+    obj.next_interned = null;
 
     // Copy string data inline
     @memcpy(obj.data()[0..str.len], str);
@@ -113,9 +114,8 @@ fn allocStringWithPolicy(self: anytype, str: []const u8, force_intern: bool) !*S
     // Add to GC object list
     self.objects = &obj.header;
 
-    // Add short strings to intern table (key is inline string data)
     if (should_intern) {
-        try self.strings.put(obj.asSlice(), obj);
+        try self.strings.insert(obj);
     }
 
     return obj;

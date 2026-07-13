@@ -800,9 +800,10 @@ test "dying non-interned string does not evict the interned entry with equal con
     var gc = GC.init(std.testing.allocator);
     defer gc.deinit();
 
-    // Longer than the short-string intern threshold, so allocString does not
-    // dedup against the force-interned constant and creates a second object.
-    const content = "a-long-string-constant-beyond-intern";
+    // Longer than the short-string intern threshold (40), so allocString
+    // does not dedup against the force-interned constant and creates a
+    // second object.
+    const content = "a-long-string-constant-beyond-the-intern-threshold";
     const interned = try gc.allocConstString(content);
 
     var root_slot = [_]TValue{TValue.fromString(interned)};

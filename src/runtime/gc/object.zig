@@ -137,6 +137,10 @@ pub const StringObject = struct {
     header: GCObject,
     len: usize,
     hash: u32, // FNV-1a hash for fast comparison and table keys
+    /// True while this string is in the GC's intern table.
+    interned: bool,
+    /// Intrusive bucket chain for the intern table (see string_table.zig).
+    next_interned: ?*StringObject,
 
     /// Get pointer to the string data (stored inline after struct)
     pub fn data(self: *StringObject) [*]u8 {
