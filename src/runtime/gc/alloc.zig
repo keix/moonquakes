@@ -42,6 +42,25 @@ pub fn allocObject(self: anytype, comptime T: type, extra_bytes: usize) !*T {
         tryCollect(self);
     }
 
+    // Serve fixed-size classes from the sweep freelists when possible.
+    // Pooled nodes are raw memory (deinited at sweep push); every caller
+    // reinitializes all fields including the header.
+    inline for (.{
+        .{ TableObject, "free_tables", "free_tables_len" },
+        .{ ClosureObject, "free_closures", "free_closures_len" },
+        .{ UpvalueObject, "free_upvalues", "free_upvalues_len" },
+    }) |pool| {
+        if (T == pool[0]) {
+            std.debug.assert(extra_bytes == 0);
+            if (@field(self, pool[1])) |node| {
+                @field(self, pool[1]) = node.next;
+                @field(self, pool[2]) -= 1;
+                self.bytes_allocated += size;
+                return @as(*T, @fieldParentPtr("header", node));
+            }
+        }
+    }
+
     // Allocate memory
     const memory = try self.allocator.alloc(u8, size);
     const ptr = @as(*T, @ptrCast(@alignCast(memory.ptr)));
