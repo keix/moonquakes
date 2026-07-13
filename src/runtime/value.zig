@@ -72,6 +72,22 @@ pub const TValue = union(enum) {
         return .{ .object = obj };
     }
 
+    // In-place stores: construct directly in the destination slot. Zig's
+    // result location does not flow through function returns (even inline
+    // ones), so `slot.* = fromInt(x)` materializes a temporary and copies
+    // 16 bytes; these write the slot directly.
+    pub inline fn setInt(slot: *TValue, i: i64) void {
+        slot.* = .{ .integer = i };
+    }
+
+    pub inline fn setFloat(slot: *TValue, n: f64) void {
+        slot.* = .{ .number = n };
+    }
+
+    pub inline fn setBool(slot: *TValue, b: bool) void {
+        slot.* = .{ .boolean = b };
+    }
+
     // Unchecked payload accessors: caller must have established the kind,
     // exactly like the direct field accesses they replace.
     pub inline fn asInt(self: *const TValue) i64 {

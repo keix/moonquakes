@@ -58,13 +58,13 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .LOADI => {
-            stack[base + inst.getA()] = TValue.fromInt(@as(i64, inst.getSBx()));
+            TValue.setInt(&stack[base + inst.getA()], @as(i64, inst.getSBx()));
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LOADF => {
-            stack[base + inst.getA()] = TValue.fromFloat(@as(f64, @floatFromInt(inst.getSBx())));
+            TValue.setFloat(&stack[base + inst.getA()], @as(f64, @floatFromInt(inst.getSBx())));
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -76,19 +76,19 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .LOADTRUE => {
-            stack[base + inst.getA()] = TValue.fromBool(true);
+            TValue.setBool(&stack[base + inst.getA()], true);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LOADFALSE => {
-            stack[base + inst.getA()] = TValue.fromBool(false);
+            TValue.setBool(&stack[base + inst.getA()], false);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .LFALSESKIP => {
-            stack[base + inst.getA()] = TValue.fromBool(false);
+            TValue.setBool(&stack[base + inst.getA()], false);
             pc += 2;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -138,8 +138,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     const add_result = @addWithOverflow(i, s);
                     if (add_result[1] == 0 and add_result[0] <= l) {
                         const new_i = add_result[0];
-                        idx.* = TValue.fromInt(new_i);
-                        stack[base + a + 3] = TValue.fromInt(new_i);
+                        TValue.setInt(idx, new_i);
+                        TValue.setInt(&stack[base + a + 3], new_i);
                         continues = true;
                     }
                 }
@@ -148,8 +148,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     const add_result = @addWithOverflow(i, s);
                     if (add_result[1] == 0 and add_result[0] >= l) {
                         const new_i = add_result[0];
-                        idx.* = TValue.fromInt(new_i);
-                        stack[base + a + 3] = TValue.fromInt(new_i);
+                        TValue.setInt(idx, new_i);
+                        TValue.setInt(&stack[base + a + 3], new_i);
                         continues = true;
                     }
                 }
@@ -236,7 +236,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .NOT => {
-            stack[base + inst.getA()] = TValue.fromBool(!stack[base + inst.getB()].toBoolean());
+            TValue.setBool(&stack[base + inst.getA()], !stack[base + inst.getB()].toBoolean());
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -244,9 +244,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .UNM => {
             const vb = &stack[base + inst.getB()];
             if (vb.isInteger()) {
-                stack[base + inst.getA()] = TValue.fromInt(0 -% vb.asInt());
+                TValue.setInt(&stack[base + inst.getA()], 0 -% vb.asInt());
             } else if (vb.isNumber()) {
-                stack[base + inst.getA()] = TValue.fromFloat(-vb.asFloat());
+                TValue.setFloat(&stack[base + inst.getA()], -vb.asFloat());
             } else {
                 // String coercion / __unm: full handler.
                 return;
@@ -271,7 +271,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     .MUL => vb.asInt() *% vc.asInt(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = TValue.fromInt(res);
+                TValue.setInt(&stack[base + inst.getA()], res);
             } else if (vb.isNumber() and vc.isNumber()) {
                 const res = switch (inst.getOpCode()) {
                     .ADD => vb.asFloat() + vc.asFloat(),
@@ -279,7 +279,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     .MUL => vb.asFloat() * vc.asFloat(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = TValue.fromFloat(res);
+                TValue.setFloat(&stack[base + inst.getA()], res);
             } else {
                 // Mixed/coercion/metamethod: full handler re-executes it.
                 return;
@@ -298,7 +298,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     .MULK => vb.asInt() *% vc.asInt(),
                     else => unreachable,
                 };
-                stack[base + inst.getA()] = TValue.fromInt(res);
+                TValue.setInt(&stack[base + inst.getA()], res);
                 pc += 1;
                 inst = pc[0];
                 continue :dispatch inst.getOpCode();
@@ -396,7 +396,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 var j: u32 = 0;
                 while (j < nresults) : (j += 1) stack[res + j] = .nil;
             } else {
-                stack[res] = TValue.fromInt(next_index);
+                TValue.setInt(&stack[res], next_index);
                 if (nresults > 1) stack[res + 1] = value;
                 var j: u32 = 2;
                 while (j < nresults) : (j += 1) stack[res + j] = .nil;
