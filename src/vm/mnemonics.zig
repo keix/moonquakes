@@ -4013,16 +4013,20 @@ fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     const table = table_val.asTable() orelse return error.InvalidTableOperation;
     const n: u32 = if (b > 0) b else vm.top - (vm.base + a + 1);
 
-    // Constructor fast path: first flush into a still-empty table with no
-    // nil holes takes one exact-capacity bulk store instead of n generic
-    // sets (each of which probes the empty hash parts and re-walks seq_len).
-    if (start_index == 1 and table.array.items.len == 0 and table.hash_part.count() == 0) {
+    // Constructor fast path: a flush appending right at the array end of a
+    // table with no hash/deleted entries and no nil holes takes one
+    // exact-capacity bulk store instead of n generic sets (each of which
+    // probes the empty hash parts and re-walks seq_len). Covers both the
+    // first flush (start 1) and multret tails.
+    if (start_index == @as(i64, @intCast(table.array.items.len)) + 1 and
+        table.hash_part.count() == 0 and table.deleted_keys.count() == 0)
+    {
         const values = vm.stack[vm.base + a + 1 ..][0..n];
         const has_nil = for (values) |v| {
             if (v.isNil()) break true;
         } else false;
         if (!has_nil) {
-            try vm.gc().tableInitArray(table, values);
+            try vm.gc().tableExtendArray(table, values);
             return .Continue;
         }
     }

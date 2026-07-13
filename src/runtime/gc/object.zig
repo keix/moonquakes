@@ -574,14 +574,17 @@ pub const TableObject = struct {
         return error.InvalidKey;
     }
 
-    /// Bulk array initialization for constructor SETLIST flushes.
-    /// Caller guarantees fresh state — empty array and hash parts, keys
-    /// 1..n, no nil values — so per-element canonicalization, absorb and
-    /// hole handling are all skipped and capacity is allocated exactly.
-    pub fn initArrayFromSlice(self: *TableObject, values: []const TValue) !void {
-        try self.array.ensureTotalCapacityPrecise(self.allocator, values.len);
+    /// Bulk array extension for constructor SETLIST flushes. Caller
+    /// guarantees the flush starts one past the array end with empty hash
+    /// and deleted-key parts and no nil values, so per-element
+    /// canonicalization, absorb and hole handling are all skipped and
+    /// capacity is allocated exactly.
+    pub fn appendArraySlice(self: *TableObject, values: []const TValue) !void {
+        const old_len = self.array.items.len;
+        try self.array.ensureTotalCapacityPrecise(self.allocator, old_len + values.len);
+        const was_full_seq = self.seq_len == @as(i64, @intCast(old_len));
         self.array.appendSliceAssumeCapacity(values);
-        self.seq_len = @intCast(values.len);
+        if (was_full_seq) self.seq_len = @intCast(self.array.items.len);
         self.mod_count +%= 1;
         self.shape_count +%= 1;
     }
