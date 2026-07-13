@@ -17,9 +17,9 @@ test "CLOSE opcode - no-op behavior" {
     defer ctx.deinit();
 
     // Initialize some registers
-    ctx.vm.stack[0] = .{ .integer = 42 };
-    ctx.vm.stack[1] = .{ .number = 3.14 };
-    ctx.vm.stack[2] = .{ .boolean = true };
+    ctx.vm.stack[0] = TValue.fromInt(42);
+    ctx.vm.stack[1] = TValue.fromFloat(3.14);
+    ctx.vm.stack[2] = TValue.fromBool(true);
 
     const inst = Instruction.initABC(.CLOSE, 1, 0, 0); // close from R[1] upward
 
@@ -50,7 +50,7 @@ test "TBC opcode - nil value (no-op)" {
     defer ctx.deinit();
 
     // Initialize registers - nil is a valid TBC target that does nothing
-    ctx.vm.stack[0] = .{ .integer = 42 };
+    ctx.vm.stack[0] = TValue.fromInt(42);
     ctx.vm.stack[1] = .nil; // nil doesn't require __close
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
@@ -64,7 +64,7 @@ test "TBC opcode - nil value (no-op)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(.{ .integer = 42 }));
+    try testing.expect(result.single.eql(TValue.fromInt(42)));
 }
 
 test "TBC opcode - false value (no-op)" {
@@ -73,8 +73,8 @@ test "TBC opcode - false value (no-op)" {
     defer ctx.deinit();
 
     // false is also a valid TBC target that does nothing
-    ctx.vm.stack[0] = .{ .integer = 100 };
-    ctx.vm.stack[1] = .{ .boolean = false };
+    ctx.vm.stack[0] = TValue.fromInt(100);
+    ctx.vm.stack[1] = TValue.fromBool(false);
 
     const inst = Instruction.initABC(.TBC, 1, 0, 0); // mark R[1] as to-be-closed
 
@@ -87,7 +87,7 @@ test "TBC opcode - false value (no-op)" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(.{ .integer = 100 }));
+    try testing.expect(result.single.eql(TValue.fromInt(100)));
 }
 
 test "SETUPVAL opcode - no-op behavior" {
@@ -96,8 +96,8 @@ test "SETUPVAL opcode - no-op behavior" {
     defer ctx.deinit();
 
     // Initialize some registers
-    ctx.vm.stack[0] = .{ .integer = 123 };
-    ctx.vm.stack[1] = .{ .boolean = false };
+    ctx.vm.stack[0] = TValue.fromInt(123);
+    ctx.vm.stack[1] = TValue.fromBool(false);
 
     const inst = Instruction.initABC(.SETUPVAL, 0, 1, 0); // UpValue[1] := R[0]
 
@@ -136,7 +136,7 @@ test "SETTABUP opcode - global variable assignment" {
     };
 
     // Initialize register with value to set
-    ctx.vm.stack[1] = .{ .integer = 42 };
+    ctx.vm.stack[1] = TValue.fromInt(42);
 
     const inst = Instruction.initABC(.SETTABUP, 0, 0, 1); // _ENV[K[0]] := R[1]
 
@@ -151,7 +151,7 @@ test "SETTABUP opcode - global variable assignment" {
 
     // Verify the global variable was set
     const global_val = ctx.vm.globals().get(TValue.fromString(myvar_str)).?;
-    try testing.expect(global_val.eql(.{ .integer = 42 }));
+    try testing.expect(global_val.eql(TValue.fromInt(42)));
 }
 
 test "SETTABUP opcode - multiple global assignments" {
@@ -172,9 +172,9 @@ test "SETTABUP opcode - multiple global assignments" {
     };
 
     // Initialize registers with values to set
-    ctx.vm.stack[0] = .{ .integer = 10 };
-    ctx.vm.stack[1] = .{ .number = 3.14 };
-    ctx.vm.stack[2] = .{ .boolean = true };
+    ctx.vm.stack[0] = TValue.fromInt(10);
+    ctx.vm.stack[1] = TValue.fromFloat(3.14);
+    ctx.vm.stack[2] = TValue.fromBool(true);
 
     const code = [_]Instruction{
         Instruction.initABC(.SETTABUP, 0, 0, 0), // _ENV[K[0]] := R[0]
@@ -192,9 +192,9 @@ test "SETTABUP opcode - multiple global assignments" {
     const var2 = ctx.vm.globals().get(TValue.fromString(var2_str)).?;
     const var3 = ctx.vm.globals().get(TValue.fromString(var3_str)).?;
 
-    try testing.expect(var1.eql(.{ .integer = 10 }));
-    try testing.expect(var2.eql(.{ .number = 3.14 }));
-    try testing.expect(var3.eql(.{ .boolean = true }));
+    try testing.expect(var1.eql(TValue.fromInt(10)));
+    try testing.expect(var2.eql(TValue.fromFloat(3.14)));
+    try testing.expect(var3.eql(TValue.fromBool(true)));
 }
 
 test "SETTABUP opcode - invalid key type" {
@@ -204,10 +204,10 @@ test "SETTABUP opcode - invalid key type" {
 
     // Create constant with non-string key
     const constants = [_]TValue{
-        .{ .integer = 123 }, // K[0] - invalid key type
+        TValue.fromInt(123), // K[0] - invalid key type
     };
 
-    ctx.vm.stack[1] = .{ .integer = 42 };
+    ctx.vm.stack[1] = TValue.fromInt(42);
 
     const inst = Instruction.initABC(.SETTABUP, 0, 0, 1); // _ENV[K[0]] := R[1]
 
@@ -236,8 +236,8 @@ test "All new opcodes - integration test" {
     };
 
     // Initialize registers
-    ctx.vm.stack[0] = .{ .integer = 999 };
-    ctx.vm.stack[1] = .{ .number = 2.71 };
+    ctx.vm.stack[0] = TValue.fromInt(999);
+    ctx.vm.stack[1] = TValue.fromFloat(2.71);
     ctx.vm.stack[2] = .nil; // TBC target (nil is valid without __close)
 
     const code = [_]Instruction{
@@ -255,7 +255,7 @@ test "All new opcodes - integration test" {
 
     // Only SETTABUP should have side effects
     const global_val = ctx.vm.globals().get(TValue.fromString(result_str)).?;
-    try testing.expect(global_val.eql(.{ .integer = 999 }));
+    try testing.expect(global_val.eql(TValue.fromInt(999)));
 }
 
 test "CLOSURE opcode - create closure without upvalues" {
@@ -335,7 +335,7 @@ test "CLOSURE opcode - create closure with upvalue from stack" {
 
             // The upvalue should point to the value 100
             const upval = closure.upvalues[0];
-            try testing.expect(upval.get().eql(.{ .integer = 100 }));
+            try testing.expect(upval.get().eql(TValue.fromInt(100)));
         },
         else => return error.UnexpectedResult,
     }
@@ -384,7 +384,7 @@ test "CLOSE opcode - closes open upvalues" {
             try testing.expect(upval.isClosed());
 
             // The closed value should still be 200
-            try testing.expect(upval.get().eql(.{ .integer = 200 }));
+            try testing.expect(upval.get().eql(TValue.fromInt(200)));
         },
         else => return error.UnexpectedResult,
     }
@@ -435,7 +435,7 @@ test "GETUPVAL and SETUPVAL with closure" {
             const upval = closure.upvalues[0];
 
             // Initial value should be 10
-            try testing.expect(upval.get().eql(.{ .integer = 10 }));
+            try testing.expect(upval.get().eql(TValue.fromInt(10)));
         },
         else => return error.UnexpectedResult,
     }

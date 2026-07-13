@@ -33,7 +33,7 @@ test "VARARGPREP continues execution" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 2, true, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 42 });
+    try expectSingleResult(result, TValue.fromInt(42));
 }
 
 test "VARARG loads first vararg with C=2" {
@@ -61,9 +61,9 @@ test "VARARG loads first vararg with C=2" {
     // The function has 1 fixed param, so varargs are (20, 30)
     var constants = [_]TValue{
         TValue.fromClosure(inner_closure),
-        .{ .integer = 10 }, // first arg (fixed)
-        .{ .integer = 20 }, // second arg (first vararg)
-        .{ .integer = 30 }, // third arg (second vararg)
+        TValue.fromInt(10), // first arg (fixed)
+        TValue.fromInt(20), // second arg (first vararg)
+        TValue.fromInt(30), // third arg (second vararg)
     };
 
     const code = [_]Instruction{
@@ -80,7 +80,7 @@ test "VARARG loads first vararg with C=2" {
 
     // Function receives (10, 20, 30), fixed param is 10, varargs are (20, 30)
     // VARARG with C=2 loads first vararg = 20
-    try expectSingleResult(result, TValue{ .integer = 20 });
+    try expectSingleResult(result, TValue.fromInt(20));
 }
 
 test "VARARG with no varargs returns nil" {
@@ -102,7 +102,7 @@ test "VARARG with no varargs returns nil" {
 
     var constants = [_]TValue{
         TValue.fromClosure(inner_closure),
-        .{ .integer = 42 }, // only fixed param
+        TValue.fromInt(42), // only fixed param
     };
 
     const code = [_]Instruction{
@@ -138,8 +138,8 @@ test "vararg function with no fixed params" {
 
     var constants = [_]TValue{
         TValue.fromClosure(inner_closure),
-        .{ .integer = 100 },
-        .{ .integer = 200 },
+        TValue.fromInt(100),
+        TValue.fromInt(200),
     };
 
     const code = [_]Instruction{
@@ -154,5 +154,5 @@ test "vararg function with no fixed params" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // All args are varargs, first one is 100
-    try expectSingleResult(result, TValue{ .integer = 100 });
+    try expectSingleResult(result, TValue.fromInt(100));
 }

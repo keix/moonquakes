@@ -44,7 +44,7 @@ fn setLoadlibAvailable(vm: *VM) !void {
     const package_key = try vm.gc().allocString("__moonquakes_package");
     const package_table = (vm.globals().get(TValue.fromString(package_key)) orelse return error.NotAFunction).asTable() orelse return error.NotAFunction;
     const available_key = try vm.gc().allocString("__moonquakes_loadlib_available");
-    try tableSet(vm, package_table, TValue.fromString(available_key), .{ .boolean = true });
+    try tableSet(vm, package_table, TValue.fromString(available_key), TValue.fromBool(true));
 }
 
 fn loadlibAvailable(vm: *VM) bool {
@@ -57,7 +57,7 @@ fn loadlibAvailable(vm: *VM) bool {
 fn rememberDynamicLibrary(vm: *VM, lib_obj: *DynamicLibraryObject, name: []const u8) !void {
     const handles = try getOrCreateLoadlibHandles(vm);
     const key = try vm.gc().allocString(name);
-    try tableSet(vm, handles, TValue.fromString(key), .{ .object = &lib_obj.header });
+    try tableSet(vm, handles, TValue.fromString(key), TValue.fromObject(&lib_obj.header));
 }
 
 /// Default search path (fallback if package.path is not set)
@@ -115,7 +115,7 @@ fn getScriptDir(vm: *VM) ?[]const u8 {
     const arg_table_val = vm.globals().get(TValue.fromString(arg_key)) orelse return null;
     const arg_table = arg_table_val.asTable() orelse return null;
 
-    const script_val = arg_table.get(.{ .integer = 0 }) orelse return null;
+    const script_val = arg_table.get(TValue.fromInt(0)) orelse return null;
     const script_str = script_val.asString() orelse return null;
     const script_name = script_str.asSlice();
 
@@ -388,7 +388,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                         }
                         var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
                         if (require_result.isNil()) {
-                            require_result = TValue{ .boolean = true };
+                            require_result = TValue.fromBool(true);
                             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);
                         }
 
@@ -450,7 +450,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
         var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
         if (require_result.isNil()) {
-            require_result = TValue{ .boolean = true };
+            require_result = TValue.fromBool(true);
             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);
         }
 
@@ -516,7 +516,7 @@ pub fn nativePackageLoadlib(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
         close_lib = false;
         try setLoadlibAvailable(vm);
         try rememberDynamicLibrary(vm, lib_obj, libname);
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         if (nresults > 1) {
             var i: u32 = 1;
             while (i < nresults) : (i += 1) {

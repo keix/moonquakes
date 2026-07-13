@@ -41,8 +41,8 @@ test "manual multi-proto execution - simple call and return" {
     // Proto for main function - build constants at runtime
     var main_constants = [_]TValue{
         TValue.fromClosure(add_closure),
-        .{ .integer = 10 },
-        .{ .integer = 20 },
+        TValue.fromInt(10),
+        TValue.fromInt(20),
     };
 
     const main_code = [_]Instruction{
@@ -64,11 +64,11 @@ test "manual multi-proto execution - simple call and return" {
     trace.updateFinal(ctx.vm, 4);
 
     // Should return 10 + 20 = 30
-    try test_utils.ReturnTest.expectSingle(result, .{ .integer = 30 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(30));
 
     // Verify register states
     // R[0] should contain the result (30)
-    try trace.expectRegisterChanged(0, .{ .integer = 30 });
+    try trace.expectRegisterChanged(0, TValue.fromInt(30));
 }
 
 test "VM call stack push and pop" {
@@ -174,8 +174,8 @@ test "nested function call with register tracking" {
     };
     var add_double_constants = [_]TValue{
         TValue.fromClosure(mul_closure),
-        .{ .integer = 0 }, // placeholder
-        .{ .integer = 2 },
+        TValue.fromInt(0), // placeholder
+        TValue.fromInt(2),
     };
     const add_double_proto = try test_utils.createTestProto(ctx.vm, &add_double_constants, &add_double_code, 2, false, 6);
     const add_double_closure = try ctx.vm.gc().allocClosure(add_double_proto);
@@ -190,8 +190,8 @@ test "nested function call with register tracking" {
     };
     var main_constants = [_]TValue{
         TValue.fromClosure(add_double_closure),
-        .{ .integer = 3 },
-        .{ .integer = 4 },
+        TValue.fromInt(3),
+        TValue.fromInt(4),
     };
     const main_proto = try test_utils.createTestProto(ctx.vm, &main_constants, &main_code, 0, false, 3);
 
@@ -201,7 +201,7 @@ test "nested function call with register tracking" {
     const result = try Mnemonics.execute(ctx.vm, main_proto);
 
     // (3 + 4) * 2 = 14
-    try test_utils.ReturnTest.expectSingle(result, .{ .integer = 14 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(14));
 
     // Verify call stack was properly cleaned up
     try std.testing.expect(ctx.vm.callstack_size == 0);
@@ -215,7 +215,7 @@ test "temp roots grow past inline capacity" {
 
     var i: usize = 0;
     while (i < 40) : (i += 1) {
-        try testing.expect(ctx.vm.pushTempRoot(.{ .integer = @intCast(i) }));
+        try testing.expect(ctx.vm.pushTempRoot(TValue.fromInt(@intCast(i))));
     }
 
     try testing.expectEqual(@as(u32, 40), ctx.vm.temp_roots_count);

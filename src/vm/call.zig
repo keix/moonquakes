@@ -351,7 +351,7 @@ pub fn describeNativeReturnTransfer(
             const arg = if (native_call_args.len > 0) native_call_args[0].toNumber() orelse 0 else 0;
             return .{ .value = .{
                 .start = 2,
-                .value = TValue{ .number = std.math.sin(arg) },
+                .value = TValue.fromFloat(std.math.sin(arg)),
             } };
         },
         .select => {

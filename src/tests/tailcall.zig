@@ -18,7 +18,7 @@ test "TAILCALL - basic structure" {
     // Full tail call testing requires closures, so we use the parser tests
 
     // Test that TAILCALL with non-function value raises error
-    ctx.vm.stack[0] = .{ .integer = 10 };
+    ctx.vm.stack[0] = TValue.fromInt(10);
 
     const code = [_]Instruction{
         // TAILCALL R0, 1, 0: return R0() with 0 args

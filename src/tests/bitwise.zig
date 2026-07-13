@@ -19,8 +19,8 @@ test "BNOT: basic integer negation" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0 },
-        .{ .integer = 5 },
+        TValue.fromInt(0),
+        TValue.fromInt(5),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -40,16 +40,16 @@ test "BNOT: basic integer negation" {
     // Verify result
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 3), result.multiple.len);
-    try testing.expect(result.multiple[0].eql(TValue{ .integer = ~@as(i64, 0) })); // ~0 = -1
-    try testing.expect(result.multiple[1].eql(TValue{ .integer = 5 }));
-    try testing.expect(result.multiple[2].eql(TValue{ .integer = ~@as(i64, 5) })); // ~5 = -6
+    try testing.expect(result.multiple[0].eql(TValue.fromInt(~@as(i64, 0)))); // ~0 = -1
+    try testing.expect(result.multiple[1].eql(TValue.fromInt(5)));
+    try testing.expect(result.multiple[2].eql(TValue.fromInt(~@as(i64, 5)))); // ~5 = -6
 
     // Verify register states
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .integer = 0 }, // R0: original value
-        .{ .integer = ~@as(i64, 0) }, // R1: ~0 = -1
-        .{ .integer = 5 }, // R2: loaded value
-        .{ .integer = ~@as(i64, 5) }, // R3: ~5 = -6
+        TValue.fromInt(0), // R0: original value
+        TValue.fromInt(~@as(i64, 0)), // R1: ~0 = -1
+        TValue.fromInt(5), // R2: loaded value
+        TValue.fromInt(~@as(i64, 5)), // R3: ~5 = -6
     });
 
     // Verify only expected registers changed
@@ -64,7 +64,7 @@ test "BNOT: float to integer conversion" {
     };
 
     const constants = [_]TValue{
-        .{ .number = 42.0 },
+        TValue.fromFloat(42.0),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -74,7 +74,7 @@ test "BNOT: float to integer conversion" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = ~@as(i64, 42) });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(~@as(i64, 42)));
 }
 
 test "BNOT: float with fractional part should error" {
@@ -85,7 +85,7 @@ test "BNOT: float with fractional part should error" {
     };
 
     const constants = [_]TValue{
-        .{ .number = 42.5 },
+        TValue.fromFloat(42.5),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -107,8 +107,8 @@ test "BAND: basic integer AND" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0b1111 }, // 15
-        .{ .integer = 0b1010 }, // 10
+        TValue.fromInt(0b1111), // 15
+        TValue.fromInt(0b1010), // 10
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -123,12 +123,12 @@ test "BAND: basic integer AND" {
     trace.updateFinal(ctx.vm, 3);
 
     // Verify result and VM state
-    try test_utils.expectResultAndState(result, TValue{ .integer = 0b1010 }, ctx.vm, 0, 3);
+    try test_utils.expectResultAndState(result, TValue.fromInt(0b1010), ctx.vm, 0, 3);
 
     // Verify register changes
-    try trace.expectRegisterChanged(0, TValue{ .integer = 0b1111 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 0b1010 });
-    try trace.expectRegisterChanged(2, TValue{ .integer = 0b1010 }); // Result of AND
+    try trace.expectRegisterChanged(0, TValue.fromInt(0b1111));
+    try trace.expectRegisterChanged(1, TValue.fromInt(0b1010));
+    try trace.expectRegisterChanged(2, TValue.fromInt(0b1010)); // Result of AND
 
     // Verify no other registers were affected
     try test_utils.expectRegistersUnchanged(&trace, 3, &[_]u8{ 0, 1, 2 });
@@ -143,8 +143,8 @@ test "BAND: mixed integer and float" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 255 },
-        .{ .number = 15.0 },
+        TValue.fromInt(255),
+        TValue.fromFloat(15.0),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -154,7 +154,7 @@ test "BAND: mixed integer and float" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 15 }); // 255 & 15 = 15
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(15)); // 255 & 15 = 15
 }
 
 test "BOR: basic integer OR" {
@@ -166,8 +166,8 @@ test "BOR: basic integer OR" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0b1100 }, // 12
-        .{ .integer = 0b0011 }, // 3
+        TValue.fromInt(0b1100), // 12
+        TValue.fromInt(0b0011), // 3
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -177,7 +177,7 @@ test "BOR: basic integer OR" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b1111 }); // 12 | 3 = 15
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0b1111)); // 12 | 3 = 15
 }
 
 test "BXOR: basic integer XOR" {
@@ -189,8 +189,8 @@ test "BXOR: basic integer XOR" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0b1111 }, // 15
-        .{ .integer = 0b1010 }, // 10
+        TValue.fromInt(0b1111), // 15
+        TValue.fromInt(0b1010), // 10
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -200,7 +200,7 @@ test "BXOR: basic integer XOR" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0b0101 }); // 15 ^ 10 = 5
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0b0101)); // 15 ^ 10 = 5
 }
 
 test "BANDK: AND with constant and side effect verification" {
@@ -211,8 +211,8 @@ test "BANDK: AND with constant and side effect verification" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 255 },
-        .{ .integer = 0xF0 }, // mask high nibble
+        TValue.fromInt(255),
+        TValue.fromInt(0xF0), // mask high nibble
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -222,20 +222,20 @@ test "BANDK: AND with constant and side effect verification" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
 
     // Initialize other registers to verify no side effects
-    ctx.vm.stack[2] = TValue{ .integer = 999 };
-    ctx.vm.stack[3] = TValue{ .boolean = true };
+    ctx.vm.stack[2] = TValue.fromInt(999);
+    ctx.vm.stack[3] = TValue.fromBool(true);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xF0 }); // 255 & 0xF0 = 240
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0xF0)); // 255 & 0xF0 = 240
 
     // Verify only R0 and R1 changed
-    try test_utils.expectRegister(ctx.vm, 0, TValue{ .integer = 255 });
-    try test_utils.expectRegister(ctx.vm, 1, TValue{ .integer = 0xF0 });
+    try test_utils.expectRegister(ctx.vm, 0, TValue.fromInt(255));
+    try test_utils.expectRegister(ctx.vm, 1, TValue.fromInt(0xF0));
 
     // Verify other registers unchanged
-    try test_utils.expectRegister(ctx.vm, 2, TValue{ .integer = 999 });
-    try test_utils.expectRegister(ctx.vm, 3, TValue{ .boolean = true });
+    try test_utils.expectRegister(ctx.vm, 2, TValue.fromInt(999));
+    try test_utils.expectRegister(ctx.vm, 3, TValue.fromBool(true));
 }
 
 test "BORK: OR with constant" {
@@ -246,8 +246,8 @@ test "BORK: OR with constant" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0x0F },
-        .{ .integer = 0xF0 },
+        TValue.fromInt(0x0F),
+        TValue.fromInt(0xF0),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -257,7 +257,7 @@ test "BORK: OR with constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xFF }); // 0x0F | 0xF0 = 0xFF
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0xFF)); // 0x0F | 0xF0 = 0xFF
 }
 
 test "BXORK: XOR with constant" {
@@ -268,8 +268,8 @@ test "BXORK: XOR with constant" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0xFF },
-        .{ .integer = 0x55 }, // alternating bits
+        TValue.fromInt(0xFF),
+        TValue.fromInt(0x55), // alternating bits
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -279,7 +279,7 @@ test "BXORK: XOR with constant" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 0xAA }); // 0xFF ^ 0x55 = 0xAA
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(0xAA)); // 0xFF ^ 0x55 = 0xAA
 }
 
 test "SHL: shift left basic" {
@@ -291,8 +291,8 @@ test "SHL: shift left basic" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 4 },
+        TValue.fromInt(1),
+        TValue.fromInt(4),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -307,12 +307,12 @@ test "SHL: shift left basic" {
     trace.updateFinal(ctx.vm, 3);
 
     // Verify result
-    try test_utils.expectResultAndState(result, TValue{ .integer = 16 }, ctx.vm, 0, 3);
+    try test_utils.expectResultAndState(result, TValue.fromInt(16), ctx.vm, 0, 3);
 
     // Verify register state changes
-    try trace.expectRegisterChanged(0, TValue{ .integer = 1 }); // R0: loaded value
-    try trace.expectRegisterChanged(1, TValue{ .integer = 4 }); // R1: shift amount
-    try trace.expectRegisterChanged(2, TValue{ .integer = 16 }); // R2: 1 << 4 = 16
+    try trace.expectRegisterChanged(0, TValue.fromInt(1)); // R0: loaded value
+    try trace.expectRegisterChanged(1, TValue.fromInt(4)); // R1: shift amount
+    try trace.expectRegisterChanged(2, TValue.fromInt(16)); // R2: 1 << 4 = 16
 }
 
 test "SHL: negative shift (becomes right shift)" {
@@ -324,8 +324,8 @@ test "SHL: negative shift (becomes right shift)" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 32 },
-        .{ .integer = -3 },
+        TValue.fromInt(32),
+        TValue.fromInt(-3),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -335,7 +335,7 @@ test "SHL: negative shift (becomes right shift)" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 32 >> 3 = 4
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(4)); // 32 >> 3 = 4
 }
 
 test "SHR: shift right basic" {
@@ -347,8 +347,8 @@ test "SHR: shift right basic" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 16 },
-        .{ .integer = 2 },
+        TValue.fromInt(16),
+        TValue.fromInt(2),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -358,7 +358,7 @@ test "SHR: shift right basic" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 16 >> 2 = 4
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(4)); // 16 >> 2 = 4
 }
 
 test "SHR: logical shift with negative number" {
@@ -370,8 +370,8 @@ test "SHR: logical shift with negative number" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = -16 },
-        .{ .integer = 2 },
+        TValue.fromInt(-16),
+        TValue.fromInt(2),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -381,7 +381,7 @@ test "SHR: logical shift with negative number" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4611686018427387900 }); // 0xffff...fff0 >> 2 = 0x3fff...fffc
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(4611686018427387900)); // 0xffff...fff0 >> 2 = 0x3fff...fffc
 }
 
 test "SHLI: shift left immediate" {
@@ -392,7 +392,7 @@ test "SHLI: shift left immediate" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 3 },
+        TValue.fromInt(3),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -402,7 +402,7 @@ test "SHLI: shift left immediate" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 24 }); // 3 << 3 = 24
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(24)); // 3 << 3 = 24
 }
 
 test "SHRI: shift right immediate" {
@@ -413,7 +413,7 @@ test "SHRI: shift right immediate" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 64 },
+        TValue.fromInt(64),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -423,7 +423,7 @@ test "SHRI: shift right immediate" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 4 }); // 64 >> 4 = 4
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(4)); // 64 >> 4 = 4
 }
 
 test "Bitwise: complex expression with state tracking" {
@@ -442,10 +442,10 @@ test "Bitwise: complex expression with state tracking" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 0xFF },
-        .{ .integer = 0x0F },
-        .{ .integer = 0x55 },
-        .{ .integer = 0xAA },
+        TValue.fromInt(0xFF),
+        TValue.fromInt(0x0F),
+        TValue.fromInt(0x55),
+        TValue.fromInt(0xAA),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -461,13 +461,13 @@ test "Bitwise: complex expression with state tracking" {
 
     // Calculate expected: (0xFF & 0x0F) | ((~0x55) ^ 0xAA)
     const expected = (0xFF & 0x0F) | ((~@as(i64, 0x55)) ^ 0xAA);
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = expected });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(expected));
 
     // Verify intermediate calculations in registers
-    try trace.expectRegisterChanged(4, TValue{ .integer = 0x0F }); // a & b
-    try trace.expectRegisterChanged(5, TValue{ .integer = ~@as(i64, 0x55) }); // ~c
-    try trace.expectRegisterChanged(6, TValue{ .integer = (~@as(i64, 0x55)) ^ 0xAA }); // (~c) ^ d
-    try trace.expectRegisterChanged(7, TValue{ .integer = expected }); // final result
+    try trace.expectRegisterChanged(4, TValue.fromInt(0x0F)); // a & b
+    try trace.expectRegisterChanged(5, TValue.fromInt(~@as(i64, 0x55))); // ~c
+    try trace.expectRegisterChanged(6, TValue.fromInt((~@as(i64, 0x55)) ^ 0xAA)); // (~c) ^ d
+    try trace.expectRegisterChanged(7, TValue.fromInt(expected)); // final result
 
     // Verify VM state consistency
     try test_utils.expectVMState(ctx.vm, 0, 8);
@@ -485,8 +485,8 @@ test "Bitwise operations with non-integer values should error" {
     };
 
     const constants = [_]TValue{
-        .{ .boolean = true }, // Using boolean as non-numeric type
-        .{ .integer = 5 },
+        TValue.fromBool(true), // Using boolean as non-numeric type
+        TValue.fromInt(5),
     };
 
     var ctx: test_utils.TestContext = undefined;

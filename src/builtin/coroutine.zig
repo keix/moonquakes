@@ -34,7 +34,7 @@ var coroutine_bootstrap_proto = synthetic_frame.initCallReturnProto("[coroutine 
 const resume_c_depth_limit: u32 = 197;
 
 fn threadEntryBody(thread: *object.ThreadObject, co_vm: *VM) TValue {
-    if (thread.entry_func) |entry_fn| return .{ .object = entry_fn };
+    if (thread.entry_func) |entry_fn| return TValue.fromObject(entry_fn);
     return co_vm.stack[0];
 }
 
@@ -75,7 +75,7 @@ fn writeCoroutineTransfer(vm: *VM, result_base: u32, nresults: u32, transfer: Co
         .payload => |payload| {
             const prefix: u32 = if (payload.include_success_flag) 1 else 0;
             if (payload.include_success_flag) {
-                vm.stack[result_base] = .{ .boolean = true };
+                vm.stack[result_base] = TValue.fromBool(true);
             }
 
             const stack_room: u32 = @intCast(vm.stack.len - result_base);
@@ -105,7 +105,7 @@ fn writeCoroutineTransfer(vm: *VM, result_base: u32, nresults: u32, transfer: Co
                 result_base + prefix + expected_payload;
         },
         .status => |status| {
-            vm.stack[result_base] = .{ .boolean = status.ok };
+            vm.stack[result_base] = TValue.fromBool(status.ok);
             if (status.err_val) |err| {
                 vm.stack[result_base + 1] = err;
                 vm.top = if (nresults == 0) result_base + 2 else result_base + @min(@as(u32, 2), nresults);
@@ -310,7 +310,7 @@ pub fn nativeCoroutineCreate(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
-    vm.gc().threadSetEntryFunc(new_vm.thread, if (func_arg == .object) func_arg.object else null);
+    vm.gc().threadSetEntryFunc(new_vm.thread, if (func_arg.isObject()) func_arg.asObjectPtr() else null);
 
     vm.stack[vm.base + func_reg] = TValue.fromThread(new_vm.thread);
 }
@@ -366,7 +366,7 @@ pub fn nativeCoroutineResume(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) 
     if (is_first_resume) {
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
-        const is_native_body = body.isObject() and body.object.type == .native_closure;
+        const is_native_body = body.isObject() and body.asObjectPtr().type == .native_closure;
         if (!is_lua_body and !is_native_body) {
             writeCoroutineTransfer(vm, result_base, nresults, .{ .status = .{
                 .ok = false,
@@ -436,7 +436,7 @@ pub fn nativeCoroutineRunning(vm: *VM, func_reg: u32, nargs: u32, nresults: u32)
 
     // Return whether this is the main thread
     if (nresults >= 2) {
-        vm.stack[vm.base + func_reg + 1] = .{ .boolean = is_main };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromBool(is_main);
     }
 }
 
@@ -488,7 +488,7 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     const new_vm = try VM.init(vm.rt);
     new_vm.stack[0] = func_arg;
     new_vm.top = 1;
-    vm.gc().threadSetEntryFunc(new_vm.thread, if (func_arg == .object) func_arg.object else null);
+    vm.gc().threadSetEntryFunc(new_vm.thread, if (func_arg.isObject()) func_arg.asObjectPtr() else null);
 
     // CRITICAL: Protect the new thread from GC before any more allocations.
     // VM.init may increase bytes_allocated (if tracking enabled), and subsequent
@@ -503,7 +503,7 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     defer vm.popTempRoots(1);
 
     // Store thread at index 1
-    try vm.gc().tableSet(wrapper, .{ .integer = 1 }, TValue.fromThread(new_vm.thread));
+    try vm.gc().tableSet(wrapper, TValue.fromInt(1), TValue.fromThread(new_vm.thread));
 
     // Create metatable with __call
     const metatable = try vm.gc().allocTable();
@@ -538,7 +538,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     // Preferred layout: function at func_reg, wrapper at func_reg+1, user args after that.
     // For compatibility with older call paths, also accept wrapper at func_reg.
     var wrapper_slot = vm.base + func_reg + 1;
-    if (nargs == 0 or !vm.stack[wrapper_slot].isObject() or vm.stack[wrapper_slot].object.type != .table) {
+    if (nargs == 0 or !vm.stack[wrapper_slot].isObject() or vm.stack[wrapper_slot].asObjectPtr().type != .table) {
         wrapper_slot = vm.base + func_reg;
     }
 
@@ -546,7 +546,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
     const wrapper = wrapper_val.asTable() orelse return vm.raiseString("invalid wrapped coroutine");
 
     // Get thread from wrapper[1]
-    const thread_val = wrapper.get(.{ .integer = 1 }) orelse {
+    const thread_val = wrapper.get(TValue.fromInt(1)) orelse {
         return vm.raiseString("invalid wrapped coroutine (no thread)");
     };
     const thread = thread_val.asThread() orelse {
@@ -589,7 +589,7 @@ pub fn nativeCoroutineWrapCall(vm: *VM, func_reg: u32, nargs: u32, nresults: u32
         // First resume
         co_vm.stack[0] = body;
         const is_lua_body = body.asClosure() != null;
-        const is_native_body = body.isObject() and body.object.type == .native_closure;
+        const is_native_body = body.isObject() and body.asObjectPtr().type == .native_closure;
         if (!is_lua_body and !is_native_body) {
             return vm.raiseString("coroutine body must be a Lua function");
         }
@@ -681,7 +681,7 @@ pub fn nativeCoroutineIsYieldable(vm: *VM, func_reg: u32, nargs: u32, nresults: 
         break :blk !vm.isMainThread() and vm.errors.native_call_depth <= 1;
     };
 
-    vm.stack[vm.base + func_reg] = .{ .boolean = can_yield };
+    vm.stack[vm.base + func_reg] = TValue.fromBool(can_yield);
 }
 
 /// coroutine.close(co) - Closes coroutine co (Lua 5.4 feature)

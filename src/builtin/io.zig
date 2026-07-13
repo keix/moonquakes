@@ -50,11 +50,11 @@ const IO_DEFAULT_INPUT_KEY = "_defaultInput";
 const IO_DEFAULT_OUTPUT_KEY = "_defaultOutput";
 
 fn valueTypeName(v: TValue) []const u8 {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -68,10 +68,10 @@ fn valueTypeName(v: TValue) []const u8 {
 
 fn namedValueTypeName(vm: anytype, v: TValue) []const u8 {
     if (!v.isObject()) return valueTypeName(v);
-    const mt_opt: ?*TableObject = switch (v.object.type) {
-        .table => object.getObject(TableObject, v.object).metatable,
-        .userdata => object.getObject(object.UserdataObject, v.object).metatable,
-        .file => object.getObject(FileObject, v.object).metatable,
+    const mt_opt: ?*TableObject = switch (v.asObjectPtr().type) {
+        .table => object.getObject(TableObject, v.asObjectPtr()).metatable,
+        .userdata => object.getObject(object.UserdataObject, v.asObjectPtr()).metatable,
+        .file => object.getObject(FileObject, v.asObjectPtr()).metatable,
         else => null,
     };
     if (mt_opt) |mt| {
@@ -175,7 +175,7 @@ fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
     try tableSet(gc, file_table, TValue.fromString(output_key), TValue.fromString(empty_str));
 
     const closed_key = try gc.allocString(FILE_CLOSED_KEY);
-    try tableSet(gc, file_table, TValue.fromString(closed_key), .{ .boolean = false });
+    try tableSet(gc, file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
     const mode_key = try gc.allocString(FILE_MODE_KEY);
     const mode_str = try gc.allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
@@ -193,7 +193,7 @@ fn createStdioHandleInit(gc: *GC, stdio_type: []const u8) !*TableObject {
     try tableSet(gc, file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
     const pos_key = try gc.allocString(FILE_POS_KEY);
-    try tableSet(gc, file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+    try tableSet(gc, file_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
     setTableMetatable(gc, file_table, try createFileMetatableInit(gc));
     return file_table;
@@ -228,7 +228,7 @@ fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*Tabl
     try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(empty_str));
 
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
     const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
     const mode_str = try vm.gc().allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
@@ -239,7 +239,7 @@ fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*Tabl
     try tableSet(vm.gc(), file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
     const mt = try createFileMetatable(vm, temp_slot + 1);
     setTableMetatable(vm.gc(), file_table, mt);
@@ -479,10 +479,10 @@ fn parseHexFloatLocal(str: []const u8) ?f64 {
 
 fn parseLuaNumberToken(str: []const u8) ?TValue {
     if (str.len == 0) return null;
-    if (parseHexIntegerWrapLocal(str)) |i| return TValue{ .integer = i };
-    if (parseHexFloatLocal(str)) |n| return TValue{ .number = n };
-    if (std.fmt.parseInt(i64, str, 10)) |i| return TValue{ .integer = i } else |_| {}
-    if (std.fmt.parseFloat(f64, str)) |n| return TValue{ .number = n } else |_| {}
+    if (parseHexIntegerWrapLocal(str)) |i| return TValue.fromInt(i);
+    if (parseHexFloatLocal(str)) |n| return TValue.fromFloat(n);
+    if (std.fmt.parseInt(i64, str, 10)) |i| return TValue.fromInt(i) else |_| {}
+    if (std.fmt.parseFloat(f64, str)) |n| return TValue.fromFloat(n) else |_| {}
     return null;
 }
 
@@ -565,7 +565,7 @@ fn readLuaNumberFromContent(content: []const u8, start_pos: usize) ReadNumberRes
     const token = content[begin..i];
     if (parseLuaNumberToken(token)) |num| {
         // read("n") should not accept inf/nan from overflowed decimal parsing.
-        if (num == .number and !std.math.isFinite(num.number)) {
+        if (num.isNumber() and !std.math.isFinite(num.asFloat())) {
             return .{ .value = null, .new_pos = i };
         }
         return .{ .value = num, .new_pos = i };
@@ -586,7 +586,7 @@ fn tryHandleMultiRead(
     content: []const u8,
 ) !bool {
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue{ .integer = 0 };
+    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue.fromInt(0);
     const pos_i64 = pos_val.toInteger() orelse 0;
     const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
 
@@ -676,7 +676,7 @@ fn tryHandleMultiRead(
         }
     }
 
-    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(cur_pos)));
     return true;
 }
 
@@ -730,7 +730,7 @@ fn flushToDestination(vm: anytype, file_table: *TableObject) !void {
             try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(empty));
             // Reset position to 0
             const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-            try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+            try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
             return;
         }
     }
@@ -790,7 +790,7 @@ fn createLinesIteratorWrapper(vm: anytype, temp_slot: u32, state_table: *TableOb
     const state_key = try vm.gc().allocString("_lines_state");
     try tableSet(vm.gc(), wrapper, TValue.fromString(state_key), TValue.fromTable(state_table));
     const done_key = try vm.gc().allocString("_lines_done");
-    try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), .{ .boolean = false });
+    try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), TValue.fromBool(false));
 
     const mt = try vm.gc().allocTable();
     vm.stack[vm.base + temp_slot + 1] = TValue.fromTable(mt);
@@ -925,7 +925,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                 if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                 return;
             };
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             return;
         }
         if (arg.asTable()) |file_table| {
@@ -940,8 +940,8 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                         return;
                     };
                     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-                    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
-                    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
                     return;
                 }
             }
@@ -972,7 +972,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                             if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                             return;
                         };
-                        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
                         return;
                     }
                     // Table with _impl delegation
@@ -994,8 +994,8 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                                 };
                                 // Sync table's closed flag
                                 const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-                                try tableSet(vm.gc(), out_table, TValue.fromString(closed_key), .{ .boolean = true });
-                                if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                                try tableSet(vm.gc(), out_table, TValue.fromString(closed_key), TValue.fromBool(true));
+                                if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
                                 return;
                             }
                         }
@@ -1030,7 +1030,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const default_output_key = try vm.gc().allocString(IO_DEFAULT_OUTPUT_KEY);
         const output_val = io_table.get(TValue.fromString(default_output_key)) orelse {
             // No default output set, nothing to close
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             return;
         };
         file_table = output_val.asTable() orelse {
@@ -1092,7 +1092,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                                 const err_str = try vm.gc().allocString("cannot write file");
                                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                             }
-                            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
+                            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
                             return;
                         };
                         defer file.close();
@@ -1107,7 +1107,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     }
 
     // Mark as closed
-    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
+    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
 
     // If this is a temp file, delete it
     const tmpfile_key = try vm.gc().allocString(FILE_TMPFILE_KEY);
@@ -1133,7 +1133,7 @@ pub fn nativeIoClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Return true on success
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
     }
 }
 
@@ -1152,13 +1152,13 @@ pub fn nativeIoFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
                         if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                         return;
                     };
-                    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
                     return;
                 }
                 // Handle table-based output
                 if (output_val.asTable()) |out_table| {
                     try flushBufferedFileTable(vm, out_table);
-                    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
                     return;
                 }
             }
@@ -1167,7 +1167,7 @@ pub fn nativeIoFlush(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Default: stdout is unbuffered, return true for compatibility
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
     }
 }
 
@@ -1243,7 +1243,7 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_copy));
 
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString("r");
@@ -1254,7 +1254,7 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         try tableSet(vm.gc(), file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
 
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
         const mt = try createFileMetatable(vm, func_reg + 2);
         setTableMetatable(vm.gc(), file_table, mt);
@@ -1343,7 +1343,7 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         try tableSet(vm.gc(), state_table, TValue.fromString(content_key), TValue.fromString(content_obj));
 
         const file_pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        const file_pos_val = file_table.get(TValue.fromString(file_pos_key)) orelse TValue{ .integer = 0 };
+        const file_pos_val = file_table.get(TValue.fromString(file_pos_key)) orelse TValue.fromInt(0);
         try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), file_pos_val);
 
         const file_ref_key = try vm.gc().allocString("_file_ref");
@@ -1369,7 +1369,7 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
         const content_str = try vm.gc().allocString(content);
         try tableSet(vm.gc(), state_table, TValue.fromString(content_key), TValue.fromString(content_str));
-        try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), .{ .integer = 0 });
+        try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
         // For Lua 5.4 generic-for with to-be-closed, io.lines(filename, ...)
         // provides a closeable file handle as the 4th state value.
@@ -1379,12 +1379,12 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(content_str));
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         const mode_str = try vm.gc().allocString("r");
         try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
         const pos2_key = try vm.gc().allocString(FILE_POS_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos2_key), .{ .integer = 0 });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos2_key), TValue.fromInt(0));
         const temp_slot = func_reg + nargs + 4;
         vm.reserveSlots(temp_slot, 4);
         const mt = try createFileMetatable(vm, temp_slot);
@@ -1397,12 +1397,12 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const fmt_count_key = try vm.gc().allocString("_fmt_count");
         const fmts_table = try vm.gc().allocTable();
         try tableSet(vm.gc(), state_table, TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
-        try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), .{ .integer = @intCast(fmt_count) });
+        try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), TValue.fromInt(@intCast(fmt_count)));
 
         var i: u32 = 0;
         while (i < fmt_count) : (i += 1) {
             const fmt_val = vm.stack[vm.base + fmt_start + i];
-            try tableSet(vm.gc(), fmts_table, .{ .integer = @as(i64, @intCast(i)) + 1 }, fmt_val);
+            try tableSet(vm.gc(), fmts_table, TValue.fromInt(@as(i64, @intCast(i)) + 1), fmt_val);
         }
     }
 
@@ -1565,7 +1565,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         var out_idx: u32 = 0;
         var written_count: u32 = 0;
         while (out_idx < fmt_count) : (out_idx += 1) {
-            const fmt_val = fmts_table.get(.{ .integer = @as(i64, @intCast(out_idx)) + 1 }) orelse .nil;
+            const fmt_val = fmts_table.get(TValue.fromInt(@as(i64, @intCast(out_idx)) + 1)) orelse .nil;
 
             if (fmt_val.toInteger()) |count_i| {
                 if (count_i < 0) {
@@ -1660,11 +1660,11 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
             }
         }
 
-        try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), .{ .integer = @intCast(cur_pos) });
+        try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(cur_pos)));
         if (vm.stack[vm.base + func_reg].isNil()) {
             if (wrapper_opt) |wrapper| {
                 const done_key = try vm.gc().allocString("_lines_done");
-                try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), .{ .boolean = true });
+                try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), TValue.fromBool(true));
             }
         }
         vm.top = vm.base + func_reg + written_count;
@@ -1675,7 +1675,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
     if (start_pos >= content.len) {
         if (wrapper_opt) |wrapper| {
             const done_key = try vm.gc().allocString("_lines_done");
-            try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), .{ .boolean = true });
+            try tableSet(vm.gc(), wrapper, TValue.fromString(done_key), TValue.fromBool(true));
         }
         vm.stack[vm.base + func_reg] = .nil;
         vm.top = vm.base + func_reg + 1;
@@ -1693,7 +1693,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
 
     // Update position (skip past the newline if present)
     const new_pos: i64 = @intCast(if (end_pos < content.len) end_pos + 1 else end_pos);
-    try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), .{ .integer = new_pos });
+    try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), TValue.fromInt(new_pos));
     vm.top = vm.base + func_reg + 1;
 }
 
@@ -1752,7 +1752,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot open file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
             return;
         };
         defer file.close();
@@ -1764,7 +1764,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot read file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
             return;
         };
         defer vm.gc().allocator.free(content);
@@ -1785,11 +1785,11 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // Store closed flag
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
         // Store exit code (0 for regular files)
         const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), .{ .integer = 0 });
+        try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), TValue.fromInt(0));
 
         // Store mode
         const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
@@ -1802,7 +1802,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // Store read position (0 for beginning)
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -1823,7 +1823,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot open file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
             return;
         };
 
@@ -1852,7 +1852,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // Store closed flag (synced with FileObject)
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -1873,7 +1873,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
                 const err_str = try vm.gc().allocString("cannot open file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
             return;
         };
 
@@ -1903,7 +1903,7 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // Store closed flag (synced with FileObject)
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -2000,7 +2000,7 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Store closed flag (synced with FileObject)
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+        try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
         // Create metatable with file methods
         const mt = try createFileMetatable(vm, func_reg + 2);
@@ -2018,7 +2018,7 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         // Flush old output if different
         if (io_table.get(TValue.fromString(default_output_key))) |old_val| {
             if (old_val.asFile()) |old_file| {
-                if (old_val.object != arg.object) {
+                if (old_val.asObjectPtr() != arg.asObjectPtr()) {
                     old_file.flush() catch {};
                 }
             } else if (old_val.asTable()) |old_file| {
@@ -2128,11 +2128,11 @@ pub fn nativeIoPopen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     // Store exit code
     const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), .{ .integer = if (result) |res| res.exit_code else 0 });
+    try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), TValue.fromInt(if (result) |res| res.exit_code else 0));
 
     // Store closed flag
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
     const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
     const mode_str_obj = try vm.gc().allocString(mode);
@@ -2258,19 +2258,19 @@ pub fn nativeIoTmpfile(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Store closed flag
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = false });
+    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
     // Store exit code (0 for regular files)
     const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), .{ .integer = 0 });
+    try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), TValue.fromInt(0));
 
     // Store position
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = 0 });
+    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
     // Mark as temp file (will be deleted on close)
     const tmpfile_key = try vm.gc().allocString(FILE_TMPFILE_KEY);
-    try tableSet(vm.gc(), file_table, TValue.fromString(tmpfile_key), .{ .boolean = true });
+    try tableSet(vm.gc(), file_table, TValue.fromString(tmpfile_key), TValue.fromBool(true));
 
     // Create metatable with file methods
     const mt = try createFileMetatable(vm, func_reg + 2);
@@ -2360,7 +2360,7 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         };
 
         // Return true on success
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         return;
     }
 
@@ -2389,8 +2389,8 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             };
             // Sync table's closed flag
             const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
-            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             return;
         }
     }
@@ -2439,11 +2439,11 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                         const err_str = try vm.gc().allocString("popen failed");
                         vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                     }
-                    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
+                    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
                     return;
                 };
                 const exitcode_key = try vm.gc().allocString(FILE_EXITCODE_KEY);
-                try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), .{ .integer = code });
+                try tableSet(vm.gc(), file_table, TValue.fromString(exitcode_key), TValue.fromInt(code));
             }
         }
     }
@@ -2473,7 +2473,7 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                             }
                             // Still mark as closed
-                            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
+                            try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
                             return;
                         };
                         defer file.close();
@@ -2488,7 +2488,7 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     }
 
     // Mark as closed
-    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), .{ .boolean = true });
+    try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(true));
 
     // If this is a temp file, delete it
     const tmpfile_key = try vm.gc().allocString(FILE_TMPFILE_KEY);
@@ -2518,7 +2518,7 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Return: ok, "exit"/"signal", code
     // ok is true only for normal exit code 0, nil otherwise.
-    const ok: TValue = if (exit_code == 0) .{ .boolean = true } else .nil;
+    const ok: TValue = if (exit_code == 0) TValue.fromBool(true) else .nil;
     const status: []const u8 = if (exit_code < 0) "signal" else "exit";
     const code_out: i64 = if (exit_code < 0) -exit_code else exit_code;
 
@@ -2530,7 +2530,7 @@ pub fn nativeFileClose(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         vm.stack[vm.base + func_reg + 1] = TValue.fromString(status_str);
     }
     if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = code_out };
+        vm.stack[vm.base + func_reg + 2] = TValue.fromInt(code_out);
     }
 }
 
@@ -2696,7 +2696,7 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     try tableSet(vm.gc(), state_table, TValue.fromString(content_key), TValue.fromString(content_obj));
 
     const pos_key = try vm.gc().allocString("_pos");
-    try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), .{ .integer = 0 });
+    try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
     // file:lines(self, fmt1, fmt2, ...) passes format args after self.
     const fmt_count: u32 = if (nargs > 1) nargs - 1 else 0;
@@ -2706,12 +2706,12 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         const fmt_count_key = try vm.gc().allocString("_fmt_count");
         const fmts_table = try vm.gc().allocTable();
         try tableSet(vm.gc(), state_table, TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
-        try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), .{ .integer = @intCast(fmt_count) });
+        try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), TValue.fromInt(@intCast(fmt_count)));
 
         var i: u32 = 0;
         while (i < fmt_count) : (i += 1) {
             const fmt_val = vm.stack[vm.base + fmt_start + i];
-            try tableSet(vm.gc(), fmts_table, .{ .integer = @as(i64, @intCast(i)) + 1 }, fmt_val);
+            try tableSet(vm.gc(), fmts_table, TValue.fromInt(@as(i64, @intCast(i)) + 1), fmt_val);
         }
     }
 
@@ -2771,7 +2771,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                     const err_str = try vm.gc().allocString("file is not readable");
                     vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                 }
-                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
                 return;
             }
         }
@@ -2802,7 +2802,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
     // Get current position
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
-    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue{ .integer = 0 };
+    const pos_val = file_table.get(TValue.fromString(pos_key)) orelse TValue.fromInt(0);
     const pos_i64 = pos_val.toInteger() orelse 0;
     const pos: usize = if (pos_i64 < 0) 0 else @intCast(@min(pos_i64, @as(i64, @intCast(content.len))));
 
@@ -2832,7 +2832,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromString(result_str);
         }
         // Update position to end
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = @intCast(content.len) });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(content.len)));
     } else if (std.mem.eql(u8, format, "l")) {
         // Read line (without newline)
         if (pos >= content.len) {
@@ -2852,7 +2852,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
 
         // Update position (skip past newline if present)
         const new_pos: i64 = @intCast(if (end < content.len) end + 1 else end);
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = new_pos });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(new_pos));
     } else if (std.mem.eql(u8, format, "L")) {
         // Read line (with newline)
         if (pos >= content.len) {
@@ -2872,11 +2872,11 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         }
 
         // Update position
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = @intCast(end) });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(end)));
     } else if (std.mem.eql(u8, format, "n")) {
         const res = readLuaNumberFromContent(content, pos);
         if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse .nil;
-        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = @intCast(res.new_pos) });
+        try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(res.new_pos)));
     } else {
         return vm.raiseString("invalid format");
     }
@@ -2904,7 +2904,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 const err_str = try vm.gc().allocString("attempt to use a closed file");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 9 }; // EBADF
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(9); // EBADF
             return;
         }
 
@@ -2915,7 +2915,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 const err_str = try vm.gc().allocString("Illegal seek");
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
             }
-            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 29 }; // ESPIPE
+            if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(29); // ESPIPE
             return;
         }
 
@@ -2968,7 +2968,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                             const err_str = try vm.gc().allocString("Invalid argument");
                             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                         }
-                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(22); // EINVAL
                         return;
                     }
                     break :blk @intCast(offset);
@@ -2989,7 +2989,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                             const err_str = try vm.gc().allocString("Invalid argument");
                             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                         }
-                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(22); // EINVAL
                         return;
                     }
                     break :blk @intCast(new_pos);
@@ -3010,7 +3010,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                             const err_str = try vm.gc().allocString("Invalid argument");
                             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                         }
-                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+                        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(22); // EINVAL
                         return;
                     }
                     break :blk @intCast(new_pos);
@@ -3031,13 +3031,13 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 if (nresults > 0) vm.stack[vm.base + func_reg] = .nil;
                 return;
             };
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .integer = @intCast(new_pos) };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(new_pos));
             return;
         } else {
             // No handle - use buffer position
             // For files that are buffered only, track position in buffer
             // For now, return 0 (start of buffer)
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromInt(0);
             return;
         }
     }
@@ -3066,7 +3066,7 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                     const err_str = try vm.gc().allocString("Illegal seek");
                     vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                 }
-                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 29 }; // ESPIPE
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(29); // ESPIPE
                 return;
             }
         }
@@ -3129,18 +3129,18 @@ pub fn nativeFileSeek(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             const err_str = try vm.gc().allocString("Invalid argument");
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
         }
-        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 22 }; // EINVAL
+        if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(22); // EINVAL
         return;
     }
     // Clamp to end of file (seeking past end is allowed, returns end position)
     if (new_pos > content_len) new_pos = content_len;
 
     // Update position
-    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = new_pos });
+    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(new_pos));
 
     // Return new position
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .integer = new_pos };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(new_pos);
     }
 }
 
@@ -3204,7 +3204,7 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
         if (bufmode == .no) {
             file_obj.flush() catch {};
         }
-        if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         return;
     }
 
@@ -3230,7 +3230,7 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
             if (bufmode == .no) {
                 file_obj.flush() catch {};
             }
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             return;
         }
     }
@@ -3255,7 +3255,7 @@ pub fn nativeFileSetvbuf(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     }
 
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
     }
 }
 
@@ -3312,7 +3312,7 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                     const err_str = try vm.gc().allocString("file is not writable");
                     vm.stack[vm.base + func_reg + 1] = TValue.fromString(err_str);
                 }
-                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = .{ .integer = 1 };
+                if (nresults > 2) vm.stack[vm.base + func_reg + 2] = TValue.fromInt(1);
                 return;
             }
         }
@@ -3380,7 +3380,7 @@ pub fn nativeFileWrite(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     // Store new content
     const new_str = try vm.gc().allocString(new_content.items);
     try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(new_str));
-    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), .{ .integer = @intCast(end_pos) });
+    try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(end_pos)));
 
     // Auto-flush based on buffering mode (unified for stdio and files)
     const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);

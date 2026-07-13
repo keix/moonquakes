@@ -16,14 +16,14 @@ test "numeric tonumber handles decimal base conversion and hex literals" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 5), values.len);
-            try testing.expect(values[0].eql(.{ .integer = 42 }));
-            try testing.expect(values[1].eql(.{ .integer = 10 }));
-            try testing.expect(values[2].eql(.{ .integer = 16 }));
-            switch (values[3]) {
-                .number => |n| try testing.expectApproxEqAbs(@as(f64, 3.0), n, 1e-12),
+            try testing.expect(values[0].eql(TValue.fromInt(42)));
+            try testing.expect(values[1].eql(TValue.fromInt(10)));
+            try testing.expect(values[2].eql(TValue.fromInt(16)));
+            switch (values[3].kind()) {
+                .number => try testing.expectApproxEqAbs(@as(f64, 3.0), values[3].asFloat(), 1e-12),
                 else => return error.TestUnexpectedResult,
             }
-            try testing.expect(values[4] == .nil);
+            try testing.expect(values[4].isNil());
         },
         else => return error.TestUnexpectedResult,
     }
@@ -62,10 +62,10 @@ test "numeric rawlen bypasses __len and rawequal ignores metamethods" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 99 },
-        .{ .integer = 3 },
-        .{ .boolean = true },
-        .{ .boolean = false },
+        TValue.fromInt(99),
+        TValue.fromInt(3),
+        TValue.fromBool(true),
+        TValue.fromBool(false),
     });
 }
 
@@ -82,10 +82,10 @@ test "numeric select returns counts suffixes and negative indexes" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 3 },
-        .{ .integer = 20 },
-        .{ .integer = 30 },
-        .{ .integer = 30 },
+        TValue.fromInt(3),
+        TValue.fromInt(20),
+        TValue.fromInt(30),
+        TValue.fromInt(30),
     });
 }
 
@@ -99,10 +99,10 @@ test "numeric equality and math type distinguish integer and float" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("integer")),
         TValue.fromString(try ctx.base.gc().allocString("float")),
-        .{ .integer = 1 },
+        TValue.fromInt(1),
         .nil,
     });
 }

@@ -26,11 +26,11 @@ const DEFAULT_LUA_PATH = "./?.lua;./?/init.lua;/usr/local/share/lua/5.4/?.lua;/u
 const DEFAULT_LUA_CPATH = "./?.so;/usr/local/lib/lua/5.4/?.so";
 
 fn errorValueTypeName(value: TValue) []const u8 {
-    return switch (value) {
+    return switch (value.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((value).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -265,22 +265,22 @@ pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
         const n: i64 = @intCast(options.pre_script_args.len);
         for (options.pre_script_args, 0..) |tok, i| {
             const s = try gc.allocString(tok);
-            try gc.tableSet(arg_table, .{ .integer = -n + @as(i64, @intCast(i)) }, TValue.fromString(s));
+            try gc.tableSet(arg_table, TValue.fromInt(-n + @as(i64, @intCast(i))), TValue.fromString(s));
         }
     } else if (options.exec_name.len > 0) {
         // Compatibility fallback
         const exec_str = try gc.allocString(options.exec_name);
-        try gc.tableSet(arg_table, .{ .integer = -1 }, TValue.fromString(exec_str));
+        try gc.tableSet(arg_table, TValue.fromInt(-1), TValue.fromString(exec_str));
     }
 
     // arg[0] = script name
     const script_str = try gc.allocString(options.script_name);
-    try gc.tableSet(arg_table, .{ .integer = 0 }, TValue.fromString(script_str));
+    try gc.tableSet(arg_table, TValue.fromInt(0), TValue.fromString(script_str));
 
     // arg[1], arg[2], ... = script arguments
     for (options.args, 0..) |arg, i| {
         const arg_str = try gc.allocString(arg);
-        try gc.tableSet(arg_table, .{ .integer = @as(i64, @intCast(i + 1)) }, TValue.fromString(arg_str));
+        try gc.tableSet(arg_table, TValue.fromInt(@as(i64, @intCast(i + 1))), TValue.fromString(arg_str));
     }
 
     // Set arg global
@@ -348,7 +348,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
         };
         var i: i64 = 1;
         while (true) : (i += 1) {
-            const v = arg_tbl.get(.{ .integer = i }) orelse break;
+            const v = arg_tbl.get(TValue.fromInt(i)) orelse break;
             if (v.isNil()) break;
             try main_args.append(allocator, v);
         }

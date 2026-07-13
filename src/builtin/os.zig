@@ -263,7 +263,7 @@ pub fn nativeOsClock(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Use nanoTimestamp as approximation of CPU time
     const time_ns = std.time.nanoTimestamp();
     const time_sec: f64 = @as(f64, @floatFromInt(time_ns)) / 1_000_000_000.0;
-    vm.stack[vm.base + func_reg] = .{ .number = time_sec };
+    vm.stack[vm.base + func_reg] = TValue.fromFloat(time_sec);
 }
 
 /// os.date([format [, time]]) - Returns a string or a table containing date and time
@@ -312,39 +312,39 @@ pub fn nativeOsDate(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // year
         const year_key = try vm.gc().allocString("year");
-        try vm.gc().tableSet(table, TValue.fromString(year_key), .{ .integer = dt.year });
+        try vm.gc().tableSet(table, TValue.fromString(year_key), TValue.fromInt(dt.year));
 
         // month (1-12)
         const month_key = try vm.gc().allocString("month");
-        try vm.gc().tableSet(table, TValue.fromString(month_key), .{ .integer = dt.month });
+        try vm.gc().tableSet(table, TValue.fromString(month_key), TValue.fromInt(dt.month));
 
         // day (1-31)
         const day_key = try vm.gc().allocString("day");
-        try vm.gc().tableSet(table, TValue.fromString(day_key), .{ .integer = dt.day });
+        try vm.gc().tableSet(table, TValue.fromString(day_key), TValue.fromInt(dt.day));
 
         // hour (0-23)
         const hour_key = try vm.gc().allocString("hour");
-        try vm.gc().tableSet(table, TValue.fromString(hour_key), .{ .integer = dt.hour });
+        try vm.gc().tableSet(table, TValue.fromString(hour_key), TValue.fromInt(dt.hour));
 
         // min (0-59)
         const min_key = try vm.gc().allocString("min");
-        try vm.gc().tableSet(table, TValue.fromString(min_key), .{ .integer = dt.min });
+        try vm.gc().tableSet(table, TValue.fromString(min_key), TValue.fromInt(dt.min));
 
         // sec (0-59)
         const sec_key = try vm.gc().allocString("sec");
-        try vm.gc().tableSet(table, TValue.fromString(sec_key), .{ .integer = dt.sec });
+        try vm.gc().tableSet(table, TValue.fromString(sec_key), TValue.fromInt(dt.sec));
 
         // wday (1-7, Sunday is 1)
         const wday_key = try vm.gc().allocString("wday");
-        try vm.gc().tableSet(table, TValue.fromString(wday_key), .{ .integer = dt.wday });
+        try vm.gc().tableSet(table, TValue.fromString(wday_key), TValue.fromInt(dt.wday));
 
         // yday (1-366)
         const yday_key = try vm.gc().allocString("yday");
-        try vm.gc().tableSet(table, TValue.fromString(yday_key), .{ .integer = dt.yday });
+        try vm.gc().tableSet(table, TValue.fromString(yday_key), TValue.fromInt(dt.yday));
 
         // isdst (daylight saving, always false for now)
         const isdst_key = try vm.gc().allocString("isdst");
-        try vm.gc().tableSet(table, TValue.fromString(isdst_key), .{ .boolean = false });
+        try vm.gc().tableSet(table, TValue.fromString(isdst_key), TValue.fromBool(false));
 
         vm.stack[vm.base + func_reg] = TValue.fromTable(table);
         return;
@@ -366,7 +366,7 @@ pub fn nativeOsDifftime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     if (nresults == 0) return;
 
     if (nargs < 2) {
-        vm.stack[vm.base + func_reg] = .{ .number = 0.0 };
+        vm.stack[vm.base + func_reg] = TValue.fromFloat(0.0);
         return;
     }
 
@@ -376,7 +376,7 @@ pub fn nativeOsDifftime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     const t2 = t2_arg.toNumber() orelse 0.0;
     const t1 = t1_arg.toNumber() orelse 0.0;
 
-    vm.stack[vm.base + func_reg] = .{ .number = t2 - t1 };
+    vm.stack[vm.base + func_reg] = TValue.fromFloat(t2 - t1);
 }
 
 /// os.execute([command]) - Executes an operating system command
@@ -386,9 +386,9 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     if (nresults == 0) return;
 
     // If no command, check if shell is available
-    if (nargs < 1 or vm.stack[vm.base + func_reg + 1] == .nil) {
+    if (nargs < 1 or vm.stack[vm.base + func_reg + 1].isNil()) {
         // Shell is available on POSIX systems
-        vm.stack[vm.base + func_reg] = .{ .boolean = true };
+        vm.stack[vm.base + func_reg] = TValue.fromBool(true);
         return;
     }
 
@@ -417,7 +417,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_key);
         }
         if (nresults >= 3) {
-            vm.stack[vm.base + func_reg + 2] = .{ .integer = 127 };
+            vm.stack[vm.base + func_reg + 2] = TValue.fromInt(127);
         }
         return;
     };
@@ -429,7 +429,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
         .Exited => |code| {
             // Normal exit
             if (code == 0) {
-                vm.stack[vm.base + func_reg] = .{ .boolean = true };
+                vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             } else {
                 vm.stack[vm.base + func_reg] = .nil;
             }
@@ -438,7 +438,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(exit_key);
             }
             if (nresults >= 3) {
-                vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(code) };
+                vm.stack[vm.base + func_reg + 2] = TValue.fromInt(@intCast(code));
             }
         },
         .Signal => |sig| {
@@ -449,7 +449,7 @@ pub fn nativeOsExecute(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
                 vm.stack[vm.base + func_reg + 1] = TValue.fromString(sig_key);
             }
             if (nresults >= 3) {
-                vm.stack[vm.base + func_reg + 2] = .{ .integer = @intCast(sig) };
+                vm.stack[vm.base + func_reg + 2] = TValue.fromInt(@intCast(sig));
             }
         },
         else => {
@@ -470,9 +470,9 @@ pub fn nativeOsExit(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     if (nargs >= 1) {
         const code_arg = vm.stack[vm.base + func_reg + 1];
-        if (code_arg == .boolean) {
+        if (code_arg.isBoolean()) {
             // true = 0 (success), false = 1 (failure)
-            exit_code = if (code_arg.boolean) 0 else 1;
+            exit_code = if (code_arg.asBool()) 0 else 1;
         } else if (code_arg.toInteger()) |code| {
             exit_code = @intCast(@mod(code, 256));
         }
@@ -557,7 +557,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
                 }
                 return;
             };
-            if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+            if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
             return;
         }
         // File deletion failed for other reason
@@ -573,7 +573,7 @@ pub fn nativeOsRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    if (nresults > 0) vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    if (nresults > 0) vm.stack[vm.base + func_reg] = TValue.fromBool(true);
 }
 
 /// os.rename(oldname, newname) - Renames file or directory from oldname to newname
@@ -631,7 +631,7 @@ pub fn nativeOsRename(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         return;
     };
 
-    vm.stack[vm.base + func_reg] = .{ .boolean = true };
+    vm.stack[vm.base + func_reg] = TValue.fromBool(true);
 }
 
 /// os.setlocale(locale [, category]) - Sets the current locale of the program
@@ -667,7 +667,7 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     // Check locale argument
     if (nargs >= 1) {
         const locale_arg = vm.stack[vm.base + func_reg + 1];
-        if (locale_arg != .nil) {
+        if (!locale_arg.isNil()) {
             if (locale_arg.asString()) |locale_obj| {
                 const locale = locale_obj.asSlice();
                 // Only "C", "POSIX", and "" (native) are supported
@@ -698,7 +698,7 @@ pub fn nativeOsSetlocale(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
 /// os.time([table]) - Returns the current time when called without arguments
 pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void {
-    if (nargs >= 1 and vm.stack[vm.base + func_reg + 1] != .nil) {
+    if (nargs >= 1 and !vm.stack[vm.base + func_reg + 1].isNil()) {
         const table = vm.stack[vm.base + func_reg + 1].asTable() orelse return vm.raiseString("table expected");
 
         var year = try readDateFieldInt(table, vm, "year", true, 1970);
@@ -741,18 +741,18 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         }
 
         // Lua 5.4 updates the date table with normalized fields.
-        try writeDateField(table, vm, "year", .{ .integer = normalized.year });
-        try writeDateField(table, vm, "month", .{ .integer = normalized.month });
-        try writeDateField(table, vm, "day", .{ .integer = normalized.day });
-        try writeDateField(table, vm, "hour", .{ .integer = normalized.hour });
-        try writeDateField(table, vm, "min", .{ .integer = normalized.min });
-        try writeDateField(table, vm, "sec", .{ .integer = normalized.sec });
-        try writeDateField(table, vm, "wday", .{ .integer = normalized.wday });
-        try writeDateField(table, vm, "yday", .{ .integer = normalized.yday });
-        try writeDateField(table, vm, "isdst", .{ .boolean = false });
+        try writeDateField(table, vm, "year", TValue.fromInt(normalized.year));
+        try writeDateField(table, vm, "month", TValue.fromInt(normalized.month));
+        try writeDateField(table, vm, "day", TValue.fromInt(normalized.day));
+        try writeDateField(table, vm, "hour", TValue.fromInt(normalized.hour));
+        try writeDateField(table, vm, "min", TValue.fromInt(normalized.min));
+        try writeDateField(table, vm, "sec", TValue.fromInt(normalized.sec));
+        try writeDateField(table, vm, "wday", TValue.fromInt(normalized.wday));
+        try writeDateField(table, vm, "yday", TValue.fromInt(normalized.yday));
+        try writeDateField(table, vm, "isdst", TValue.fromBool(false));
 
         if (nresults > 0) {
-            vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(timestamp);
         }
         return;
     }
@@ -760,7 +760,7 @@ pub fn nativeOsTime(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
     // Return current Unix timestamp (seconds since epoch)
     const timestamp = std.time.timestamp();
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = .{ .integer = timestamp };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(timestamp);
     }
 }
 

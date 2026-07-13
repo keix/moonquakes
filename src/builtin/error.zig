@@ -112,9 +112,9 @@ pub fn nativeAssert(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         }
     }
 
-    const is_truthy = switch (value) {
+    const is_truthy = switch (value.kind()) {
         .nil => false,
-        .boolean => |b| b,
+        .boolean => value.asBool(),
         else => true,
     };
 

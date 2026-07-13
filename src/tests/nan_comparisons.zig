@@ -18,10 +18,10 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 test "LT with NaN: NaN < 5.0 = false" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = nan },
-        .{ .number = 5.0 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromFloat(nan),
+        TValue.fromFloat(5.0),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -42,16 +42,16 @@ test "LT with NaN: NaN < 5.0 = false" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN < 5.0 should be false in Lua
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "LT with NaN: 5.0 < NaN = false" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = 5.0 },
-        .{ .number = nan },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromFloat(5.0),
+        TValue.fromFloat(nan),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -72,16 +72,16 @@ test "LT with NaN: 5.0 < NaN = false" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // 5.0 < NaN should be false in Lua
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "LE with NaN: NaN <= 5.0 = false" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = nan },
-        .{ .number = 5.0 },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromFloat(nan),
+        TValue.fromFloat(5.0),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -102,16 +102,16 @@ test "LE with NaN: NaN <= 5.0 = false" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN <= 5.0 should be false in Lua
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "LE with NaN: NaN <= NaN = false" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = nan },
-        .{ .number = nan },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromFloat(nan),
+        TValue.fromFloat(nan),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -132,16 +132,16 @@ test "LE with NaN: NaN <= NaN = false" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN <= NaN should be false in Lua
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "EQ with NaN: NaN == NaN = false" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = nan },
-        .{ .number = nan },
-        .{ .boolean = true }, // result for true case
-        .{ .boolean = false }, // result for false case
+        TValue.fromFloat(nan),
+        TValue.fromFloat(nan),
+        TValue.fromBool(true), // result for true case
+        TValue.fromBool(false), // result for false case
     };
 
     const code = [_]Instruction{
@@ -162,14 +162,14 @@ test "EQ with NaN: NaN == NaN = false" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // NaN == NaN should be false
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "Arithmetic with NaN propagation" {
     const nan = std.math.nan(f64);
     const constants = [_]TValue{
-        .{ .number = nan },
-        .{ .number = 5.0 },
+        TValue.fromFloat(nan),
+        TValue.fromFloat(5.0),
     };
 
     const code = [_]Instruction{
@@ -188,6 +188,6 @@ test "Arithmetic with NaN propagation" {
 
     // NaN + 5.0 should propagate NaN
     try testing.expect(result == .single);
-    try testing.expect(result.single == .number);
-    try testing.expect(std.math.isNan(result.single.number));
+    try testing.expect(result.single.isNumber());
+    try testing.expect(std.math.isNan(result.single.asFloat()));
 }

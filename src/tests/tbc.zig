@@ -16,7 +16,7 @@ test "TBC with nil - no error" {
     defer ctx.deinit();
 
     ctx.vm.stack[0] = .nil;
-    ctx.vm.stack[1] = .{ .integer = 42 };
+    ctx.vm.stack[1] = TValue.fromInt(42);
 
     const code = [_]Instruction{
         Instruction.initABC(.TBC, 0, 0, 0), // Mark nil as TBC (should be no-op)
@@ -27,7 +27,7 @@ test "TBC with nil - no error" {
 
     const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(.{ .integer = 42 }));
+    try testing.expect(result.single.eql(TValue.fromInt(42)));
 }
 
 test "TBC with false - no error" {
@@ -35,8 +35,8 @@ test "TBC with false - no error" {
     try ctx.init();
     defer ctx.deinit();
 
-    ctx.vm.stack[0] = .{ .boolean = false };
-    ctx.vm.stack[1] = .{ .integer = 100 };
+    ctx.vm.stack[0] = TValue.fromBool(false);
+    ctx.vm.stack[1] = TValue.fromInt(100);
 
     const code = [_]Instruction{
         Instruction.initABC(.TBC, 0, 0, 0), // Mark false as TBC (should be no-op)
@@ -47,7 +47,7 @@ test "TBC with false - no error" {
 
     const result = try Mnemonics.execute(ctx.vm, proto);
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(.{ .integer = 100 }));
+    try testing.expect(result.single.eql(TValue.fromInt(100)));
 }
 
 test "TBC with value without __close - error" {
@@ -56,7 +56,7 @@ test "TBC with value without __close - error" {
     defer ctx.deinit();
 
     // Integer doesn't have __close metamethod
-    ctx.vm.stack[0] = .{ .integer = 123 };
+    ctx.vm.stack[0] = TValue.fromInt(123);
 
     const code = [_]Instruction{
         Instruction.initABC(.TBC, 0, 0, 0), // Should fail - no __close
@@ -111,13 +111,13 @@ test "CLOSE triggers TBC __close" {
     // without a full Lua closure, so we just verify the structure
 
     table.metatable = mt;
-    try table.set(TValue.fromString(closed_key), .{ .boolean = false });
+    try table.set(TValue.fromString(closed_key), TValue.fromBool(false));
 
     // For now, just verify TBC accepts table with __close
     // Full integration test is in the Lua test file
     _ = close_key;
 
-    ctx.vm.stack[0] = .{ .integer = 42 };
+    ctx.vm.stack[0] = TValue.fromInt(42);
 
     const code = [_]Instruction{
         Instruction.initABC(.RETURN, 0, 2, 0),

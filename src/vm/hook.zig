@@ -110,7 +110,7 @@ pub fn onLine(vm: *VM, line: i64, invoke: anytype) !void {
 
     _ = try invoke(vm, hook, &[_]TValue{
         TValue.fromString(event_name),
-        .{ .integer = line },
+        TValue.fromInt(line),
     });
 }
 

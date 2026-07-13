@@ -17,7 +17,7 @@ test "MOVE with stack verification" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -37,11 +37,11 @@ test "MOVE with stack verification" {
     final_trace.updateFinal(ctx.vm, 2);
 
     // Verify result
-    try test_utils.ReturnTest.expectSingle(result, TValue{ .integer = 42 });
+    try test_utils.ReturnTest.expectSingle(result, TValue.fromInt(42));
 
     // Verify registers
-    try final_trace.expectRegisterChanged(0, TValue{ .integer = 42 });
-    try final_trace.expectRegisterChanged(1, TValue{ .integer = 42 });
+    try final_trace.expectRegisterChanged(0, TValue.fromInt(42));
+    try final_trace.expectRegisterChanged(1, TValue.fromInt(42));
 
     // Verify stack boundaries
     try test_utils.expectVMState(ctx.vm, 0, 2);
@@ -49,9 +49,9 @@ test "MOVE with stack verification" {
 
 test "LOADK with comprehensive state tracking" {
     const constants = [_]TValue{
-        .{ .integer = 100 },
-        .{ .number = 3.14 },
-        .{ .boolean = true },
+        TValue.fromInt(100),
+        TValue.fromFloat(3.14),
+        TValue.fromBool(true),
     };
 
     const code = [_]Instruction{
@@ -75,9 +75,9 @@ test "LOADK with comprehensive state tracking" {
 
     // Verify final state
     try test_utils.expectRegisters(ctx.vm, 0, &[_]TValue{
-        .{ .integer = 100 },
-        .{ .number = 3.14 },
-        .{ .boolean = true },
+        TValue.fromInt(100),
+        TValue.fromFloat(3.14),
+        TValue.fromBool(true),
     });
 
     // Verify VM state didn't change unexpectedly
@@ -87,16 +87,16 @@ test "LOADK with comprehensive state tracking" {
 test "ADD instruction with side effect verification" {
     const initial_regs = [_]TValue{
         .nil, // R0
-        .{ .integer = 5 }, // R1
-        .{ .integer = 7 }, // R2
-        .{ .integer = 99 }, // R3 - should not change
+        TValue.fromInt(5), // R1
+        TValue.fromInt(7), // R2
+        TValue.fromInt(99), // R3 - should not change
     };
 
     const expected_regs = [_]TValue{
-        .{ .integer = 12 }, // R0 = R1 + R2
-        .{ .integer = 5 }, // R1 unchanged
-        .{ .integer = 7 }, // R2 unchanged
-        .{ .integer = 99 }, // R3 unchanged
+        TValue.fromInt(12), // R0 = R1 + R2
+        TValue.fromInt(5), // R1 unchanged
+        TValue.fromInt(7), // R2 unchanged
+        TValue.fromInt(99), // R3 unchanged
     };
 
     try test_utils.testSingleInstruction(Instruction.initABC(.ADD, 0, 1, 2), &[_]TValue{}, // no constants needed
@@ -111,14 +111,14 @@ test "Arithmetic operation helper usage" {
     defer ctx.deinit();
 
     // Test integer addition
-    try test_utils.testArithmeticOp(ctx.vm, Instruction.initABC(.ADD, 2, 0, 1), TValue{ .integer = 10 }, TValue{ .integer = 20 }, TValue{ .integer = 30 }, &[_]TValue{});
+    try test_utils.testArithmeticOp(ctx.vm, Instruction.initABC(.ADD, 2, 0, 1), TValue.fromInt(10), TValue.fromInt(20), TValue.fromInt(30), &[_]TValue{});
 
     // Reset VM
     ctx.deinit();
     try ctx.init();
 
     // Test float multiplication
-    try test_utils.testArithmeticOp(ctx.vm, Instruction.initABC(.MUL, 2, 0, 1), TValue{ .number = 2.5 }, TValue{ .number = 4.0 }, TValue{ .number = 10.0 }, &[_]TValue{});
+    try test_utils.testArithmeticOp(ctx.vm, Instruction.initABC(.MUL, 2, 0, 1), TValue.fromFloat(2.5), TValue.fromFloat(4.0), TValue.fromFloat(10.0), &[_]TValue{});
 }
 
 test "EQ comparison with skip verification" {
@@ -128,7 +128,7 @@ test "EQ comparison with skip verification" {
 
     // Test equal values with A=0 (skip if equal)
     try test_utils.ComparisonTest.expectSkip(ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
-        TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
+        TValue.fromInt(42), TValue.fromInt(42), &[_]TValue{});
 
     // Reset VM
     ctx.deinit();
@@ -136,7 +136,7 @@ test "EQ comparison with skip verification" {
 
     // Test unequal values with A=0 (don't skip if unequal)
     try test_utils.ComparisonTest.expectNoSkip(ctx.vm, Instruction.initABC(.EQ, 0, 0, 1), // if (R0 == R1) == (A==0) then skip
-        TValue{ .integer = 42 }, TValue{ .integer = 43 }, &[_]TValue{});
+        TValue.fromInt(42), TValue.fromInt(43), &[_]TValue{});
 
     // Reset VM
     ctx.deinit();
@@ -144,7 +144,7 @@ test "EQ comparison with skip verification" {
 
     // Test equal values with A=1 (don't skip if equal, because A=1 negates)
     try test_utils.ComparisonTest.expectNoSkip(ctx.vm, Instruction.initABC(.EQ, 1, 0, 1), // if (R0 == R1) == (A==0) then skip
-        TValue{ .integer = 42 }, TValue{ .integer = 42 }, &[_]TValue{});
+        TValue.fromInt(42), TValue.fromInt(42), &[_]TValue{});
 }
 
 test "FORPREP/FORLOOP with state tracking" {
@@ -162,9 +162,9 @@ test "FORPREP/FORLOOP with state tracking" {
     };
 
     const constants = [_]TValue{
-        .{ .integer = 1 }, // init
-        .{ .integer = 3 }, // limit
-        .{ .integer = 1 }, // step
+        TValue.fromInt(1), // init
+        TValue.fromInt(3), // limit
+        TValue.fromInt(1), // step
     };
 
     var ctx: test_utils.TestContext = undefined;
@@ -188,8 +188,8 @@ test "FORPREP/FORLOOP with state tracking" {
     // Verify final loop state
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 4), result.multiple.len);
-    try testing.expect(result.multiple[0].eql(TValue{ .integer = 3 })); // init after loop (last valid value)
-    try testing.expect(result.multiple[1].eql(TValue{ .integer = 3 })); // limit
-    try testing.expect(result.multiple[2].eql(TValue{ .integer = 1 })); // step
-    try testing.expect(result.multiple[3].eql(TValue{ .integer = 3 })); // control (last value)
+    try testing.expect(result.multiple[0].eql(TValue.fromInt(3))); // init after loop (last valid value)
+    try testing.expect(result.multiple[1].eql(TValue.fromInt(3))); // limit
+    try testing.expect(result.multiple[2].eql(TValue.fromInt(1))); // step
+    try testing.expect(result.multiple[3].eql(TValue.fromInt(3))); // control (last value)
 }

@@ -138,24 +138,28 @@ fn writeProto(
 }
 
 fn writeConstant(result: *std.ArrayList(u8), allocator: std.mem.Allocator, k: TValue) !void {
-    switch (k) {
+    switch (k.kind()) {
         .nil => try result.append(allocator, @intFromEnum(ConstTag.nil)),
-        .boolean => |b| {
+        .boolean => {
+            const b = k.asBool();
             if (b) {
                 try result.append(allocator, @intFromEnum(ConstTag.boolean_true));
             } else {
                 try result.append(allocator, @intFromEnum(ConstTag.boolean_false));
             }
         },
-        .integer => |i| {
+        .integer => {
+            const i = k.asInt();
             try result.append(allocator, @intFromEnum(ConstTag.integer));
             try writeI64(result, allocator, i);
         },
-        .number => |n| {
+        .number => {
+            const n = k.asFloat();
             try result.append(allocator, @intFromEnum(ConstTag.number));
             try writeF64(result, allocator, n);
         },
-        .object => |obj| {
+        .object => {
+            const obj = k.asObjectPtr();
             if (obj.type == .string) {
                 const str: *object.StringObject = @fieldParentPtr("header", obj);
                 try result.append(allocator, @intFromEnum(ConstTag.string));
@@ -353,15 +357,15 @@ fn readConstant(reader: *ByteReader, gc: anytype) !TValue {
 
     return switch (tag) {
         .nil => .nil,
-        .boolean_false => TValue{ .boolean = false },
-        .boolean_true => TValue{ .boolean = true },
+        .boolean_false => TValue.fromBool(false),
+        .boolean_true => TValue.fromBool(true),
         .integer => blk: {
             const val = reader.readI64() orelse return error.InvalidBytecode;
-            break :blk TValue{ .integer = val };
+            break :blk TValue.fromInt(val);
         },
         .number => blk: {
             const val = reader.readF64() orelse return error.InvalidBytecode;
-            break :blk TValue{ .number = val };
+            break :blk TValue.fromFloat(val);
         },
         .string => blk: {
             const len = reader.readU32() orelse return error.InvalidBytecode;

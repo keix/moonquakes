@@ -75,44 +75,48 @@ fn toStringValue(vm: *VM, arg: TValue) !*StringObject {
     if (arg.asString()) |s| return s;
 
     var buf: [64]u8 = undefined;
-    return switch (arg) {
-        .number => |n| vm.gc().allocString(formatNumber(&buf, n)),
-        .integer => |i| vm.gc().allocString(formatInteger(&buf, i)),
-        .nil => vm.gc().allocString("nil"),
-        .boolean => |b| vm.gc().allocString(if (b) "true" else "false"),
-        .object => |obj| switch (obj.type) {
-            .string => unreachable,
-            .table, .userdata, .dynamic_library => ret: {
-                // Moonquakes file handles are tables internally; mimic Lua file tostring().
-                if (obj.type == .table) {
-                    if (arg.asTable()) |tbl| {
-                        const closed_key = try vm.gc().allocString("_closed");
-                        if (tbl.get(TValue.fromString(closed_key))) |closed_val| {
-                            const s = if (closed_val.toBoolean()) "file (closed)" else "file (open)";
-                            break :ret vm.gc().allocString(s);
-                        }
+    if (!arg.isObject()) {
+        return switch (arg.kind()) {
+            .number => vm.gc().allocString(formatNumber(&buf, arg.asFloat())),
+            .integer => vm.gc().allocString(formatInteger(&buf, arg.asInt())),
+            .nil => vm.gc().allocString("nil"),
+            .boolean => vm.gc().allocString(if (arg.asBool()) "true" else "false"),
+            .object => unreachable,
+        };
+    }
+    const obj = arg.asObjectPtr();
+    return switch (obj.type) {
+        .string => unreachable,
+        .table, .userdata, .dynamic_library => ret: {
+            // Moonquakes file handles are tables internally; mimic Lua file tostring().
+            if (obj.type == .table) {
+                if (arg.asTable()) |tbl| {
+                    const closed_key = try vm.gc().allocString("_closed");
+                    if (tbl.get(TValue.fromString(closed_key))) |closed_val| {
+                        const s = if (closed_val.toBoolean()) "file (closed)" else "file (open)";
+                        break :ret vm.gc().allocString(s);
                     }
                 }
+            }
 
-                if (metamethod.getMetamethod(arg, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
-                    const mm_result = try callMetamethodUnary(vm, mm, arg);
-                    return mm_result.asString() orelse vm.raiseString("'__tostring' must return a string");
-                }
+            if (metamethod.getMetamethod(arg, .tostring, &vm.gc().mm_keys, &vm.gc().shared_mt)) |mm| {
+                const mm_result = try callMetamethodUnary(vm, mm, arg);
+                return mm_result.asString() orelse vm.raiseString("'__tostring' must return a string");
+            }
 
-                const default_name = if (obj.type == .table) "table" else "userdata";
-                const type_name = getObjectDisplayName(vm, arg, default_name);
-                const formatted = try formatObjectAddress(vm, type_name, obj);
-                return formatted.asString().?;
-            },
-            .closure, .native_closure, .c_closure => (try formatObjectAddress(vm, "function", obj)).asString().?,
-            .upvalue => vm.gc().allocString("<upvalue>"),
-            .proto => vm.gc().allocString("<proto>"),
-            .thread => (try formatObjectAddress(vm, "thread", obj)).asString().?,
-            .file => ret: {
-                const file_obj = @import("../runtime/gc/object.zig").getObject(@import("../runtime/gc/object.zig").FileObject, obj);
-                const s = if (file_obj.closed) "file (closed)" else "file (open)";
-                break :ret vm.gc().allocString(s);
-            },
+            const default_name = if (obj.type == .table) "table" else "userdata";
+            const type_name = getObjectDisplayName(vm, arg, default_name);
+            const formatted = try formatObjectAddress(vm, type_name, obj);
+            return formatted.asString().?;
+        },
+        .closure, .native_closure, .c_closure => (try formatObjectAddress(vm, "function", obj)).asString().?,
+        .upvalue => vm.gc().allocString("<upvalue>"),
+        .proto => vm.gc().allocString("<proto>"),
+        .thread => (try formatObjectAddress(vm, "thread", obj)).asString().?,
+        .file => ret: {
+            const file_obj = @import("../runtime/gc/object.zig").getObject(@import("../runtime/gc/object.zig").FileObject, obj);
+            const s = if (file_obj.closed) "file (closed)" else "file (open)";
+            break :ret vm.gc().allocString(s);
         },
     };
 }
@@ -769,7 +773,7 @@ fn getGsubReplacement(
 
     if (repl_arg.asTable()) |repl_table| {
         const key_val = if (matcher.capture_count > 0 and matcher.captures[0].is_position)
-            TValue{ .integer = @intCast(matcher.captures[0].start + 1) }
+            TValue.fromInt(@intCast(matcher.captures[0].start + 1))
         else blk: {
             const key_str = if (matcher.capture_count > 0)
                 str[matcher.captures[0].start..matcher.captures[0].end]
@@ -781,11 +785,11 @@ fn getGsubReplacement(
 
         if (try lookupTableReplacement(vm, repl_table, key_val, 0)) |val| {
             if (val.asString()) |s| return s.asSlice();
-            if (val.isNil() or (val.isBoolean() and !val.boolean)) return null;
+            if (val.isNil() or (val.isBoolean() and !val.asBool())) return null;
             if (val.toNumber()) |num| {
                 var buf: [64]u8 = undefined;
                 const num_str = if (val.isInteger())
-                    std.fmt.bufPrint(&buf, "{d}", .{val.integer}) catch return null
+                    std.fmt.bufPrint(&buf, "{d}", .{val.asInt()}) catch return null
                 else
                     std.fmt.bufPrint(&buf, "{d}", .{num}) catch return null;
                 const str_obj = try vm.gc().allocString(num_str);
@@ -805,7 +809,7 @@ fn getGsubReplacement(
             while (i < matcher.capture_count and i < 32) : (i += 1) {
                 const cap = matcher.captures[i];
                 if (cap.is_position) {
-                    args_buf[arg_count] = .{ .integer = @intCast(cap.start + 1) };
+                    args_buf[arg_count] = TValue.fromInt(@intCast(cap.start + 1));
                 } else {
                     const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                     args_buf[arg_count] = TValue.fromString(cap_str);
@@ -824,13 +828,13 @@ fn getGsubReplacement(
         };
 
         if (result.isNil()) return null;
-        if (result.isBoolean() and !result.boolean) return null;
+        if (result.isBoolean() and !result.asBool()) return null;
         if (result.asString()) |s| return s.asSlice();
 
         if (result.toNumber()) |num| {
             var buf: [64]u8 = undefined;
             const num_str = if (result.isInteger())
-                std.fmt.bufPrint(&buf, "{d}", .{result.integer}) catch return null
+                std.fmt.bufPrint(&buf, "{d}", .{result.asInt()}) catch return null
             else
                 std.fmt.bufPrint(&buf, "{d}", .{num}) catch return null;
             const str_obj = try vm.gc().allocString(num_str);
@@ -844,11 +848,11 @@ fn getGsubReplacement(
 }
 
 fn replacementTypeName(v: TValue) []const u8 {
-    return switch (v) {
+    return switch (v.kind()) {
         .nil => "nil",
         .boolean => "boolean",
         .integer, .number => "number",
-        .object => |obj| switch (obj.type) {
+        .object => switch ((v).asObjectPtr().type) {
             .string => "string",
             .table => "table",
             .closure, .native_closure, .c_closure => "function",
@@ -1281,7 +1285,7 @@ pub fn nativeStringLen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     const arg = vm.stack[vm.base + func_reg + 1];
     if (arg.asString()) |s| {
-        vm.stack[vm.base + func_reg] = .{ .integer = @intCast(s.asSlice().len) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(s.asSlice().len));
     } else {
         vm.stack[vm.base + func_reg] = .nil;
     }
@@ -1297,11 +1301,11 @@ pub fn nativeStringSub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
-        const got = switch (str_arg) {
+        const got = switch (str_arg.kind()) {
             .nil => "nil",
             .boolean => "boolean",
             .integer, .number => "number",
-            .object => |obj| switch (obj.type) {
+            .object => switch ((str_arg).asObjectPtr().type) {
                 .string => "string",
                 .table => "table",
                 .closure, .native_closure, .c_closure => "function",
@@ -1475,7 +1479,7 @@ pub fn nativeStringByte(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     const start: usize = @intCast(i - 1);
     var result_idx: u32 = 0;
     while (result_idx < actual_count) : (result_idx += 1) {
-        vm.stack[vm.base + func_reg + result_idx] = .{ .integer = str[start + result_idx] };
+        vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(str[start + result_idx]);
     }
 
     // Fill remaining result slots with nil if needed
@@ -1646,11 +1650,11 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     // Get string
     const str_arg = vm.stack[vm.base + func_reg + 1];
     const str_obj = str_arg.asString() orelse {
-        const got = switch (str_arg) {
+        const got = switch (str_arg.kind()) {
             .nil => "nil",
             .boolean => "boolean",
             .integer, .number => "number",
-            .object => |obj| switch (obj.type) {
+            .object => switch ((str_arg).asObjectPtr().type) {
                 .string => "string",
                 .table => "table",
                 .closure, .native_closure, .c_closure => "function",
@@ -1668,11 +1672,11 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
     // Get pattern
     const pattern_arg = vm.stack[vm.base + func_reg + 2];
     const pattern_obj = pattern_arg.asString() orelse {
-        const got = switch (pattern_arg) {
+        const got = switch (pattern_arg.kind()) {
             .nil => "nil",
             .boolean => "boolean",
             .integer, .number => "number",
-            .object => |obj| switch (obj.type) {
+            .object => switch ((pattern_arg).asObjectPtr().type) {
                 .string => "string",
                 .table => "table",
                 .closure, .native_closure, .c_closure => "function",
@@ -1721,9 +1725,9 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             const start: i64 = @intCast(init + pos + 1); // 1-based
             const end_pos: i64 = start + @as(i64, @intCast(pattern.len)) - 1;
 
-            vm.stack[vm.base + func_reg] = .{ .integer = start };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(start);
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+                vm.stack[vm.base + func_reg + 1] = TValue.fromInt(end_pos);
             }
         } else {
             vm.stack[vm.base + func_reg] = .nil;
@@ -1745,9 +1749,9 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             const start: i64 = @intCast(matcher.match_start + 1); // 1-based
             const end_pos: i64 = @intCast(matcher.match_end);
 
-            vm.stack[vm.base + func_reg] = .{ .integer = start };
+            vm.stack[vm.base + func_reg] = TValue.fromInt(start);
             if (nresults > 1) {
-                vm.stack[vm.base + func_reg + 1] = .{ .integer = end_pos };
+                vm.stack[vm.base + func_reg + 1] = TValue.fromInt(end_pos);
             }
 
             if (matcher.capture_count > 0 and nresults > 2) {
@@ -1756,7 +1760,7 @@ pub fn nativeStringFind(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                 while (i < matcher.capture_count and out < nresults) : (i += 1) {
                     const cap = matcher.captures[i];
                     if (cap.is_position) {
-                        vm.stack[vm.base + func_reg + out] = .{ .integer = @intCast(cap.start + 1) };
+                        vm.stack[vm.base + func_reg + out] = TValue.fromInt(@intCast(cap.start + 1));
                     } else {
                         const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                         vm.stack[vm.base + func_reg + out] = TValue.fromString(cap_str);
@@ -1843,7 +1847,7 @@ pub fn nativeStringMatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
                 while (i < actual_count) : (i += 1) {
                     const cap = matcher.captures[i];
                     if (cap.is_position) {
-                        vm.stack[vm.base + func_reg + i] = .{ .integer = @intCast(cap.start + 1) };
+                        vm.stack[vm.base + func_reg + i] = TValue.fromInt(@intCast(cap.start + 1));
                     } else {
                         const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                         vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
@@ -1944,8 +1948,8 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     const key_last_end = try vm.gc().allocString("last_end");
     try vm.gc().tableSet(state_table, TValue.fromString(key_s), str_arg);
     try vm.gc().tableSet(state_table, TValue.fromString(key_p), pat_arg);
-    try vm.gc().tableSet(state_table, TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(init_pos)) });
-    try vm.gc().tableSet(state_table, TValue.fromString(key_last_end), .{ .integer = -1 });
+    try vm.gc().tableSet(state_table, TValue.fromString(key_pos), TValue.fromInt(@as(i64, @intCast(init_pos))));
+    try vm.gc().tableSet(state_table, TValue.fromString(key_last_end), TValue.fromInt(-1));
 
     // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.string_gmatch_iterator));
@@ -2061,8 +2065,8 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try vm.gc().tableSet(state, TValue.fromString(key_pos), .{ .integer = @as(i64, @intCast(next_pos)) });
-            try vm.gc().tableSet(state, TValue.fromString(key_last_end), .{ .integer = @as(i64, @intCast(matcher.match_end)) });
+            try vm.gc().tableSet(state, TValue.fromString(key_pos), TValue.fromInt(@as(i64, @intCast(next_pos))));
+            try vm.gc().tableSet(state, TValue.fromString(key_last_end), TValue.fromInt(@as(i64, @intCast(matcher.match_end))));
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {
@@ -2070,7 +2074,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
                 while (i < matcher.capture_count and i < nresults) : (i += 1) {
                     const cap = matcher.captures[i];
                     if (cap.is_position) {
-                        vm.stack[vm.base + func_reg + i] = .{ .integer = @intCast(cap.start + 1) };
+                        vm.stack[vm.base + func_reg + i] = TValue.fromInt(@intCast(cap.start + 1));
                     } else {
                         const cap_str = try vm.gc().allocString(str[cap.start..cap.end]);
                         vm.stack[vm.base + func_reg + i] = TValue.fromString(cap_str);
@@ -2242,7 +2246,7 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
 
     // Return replacement count as second value
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .{ .integer = replacement_count };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromInt(replacement_count);
     }
 }
 
@@ -2597,8 +2601,8 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (zero_pad or show_sign or space_sign or alt_form or precision != null) return vm.raiseString("invalid conversion");
                 // Pointer-like formatting (Lua compatibility): non-objects => "(null)".
                 var buf: [48]u8 = undefined;
-                const ptr_str: []const u8 = if (arg == .object)
-                    std.fmt.bufPrint(&buf, "0x{x}", .{@intFromPtr(arg.object)}) catch "(null)"
+                const ptr_str: []const u8 = if (arg.isObject())
+                    std.fmt.bufPrint(&buf, "0x{x}", .{@intFromPtr(arg.asObjectPtr())}) catch "(null)"
                 else
                     "(null)";
                 try padAndAppend(allocator, &result, ptr_str, width, left_justify, ' ');
@@ -2609,10 +2613,11 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 }
                 // Lua %q: produce a loadable literal for strings/numbers/booleans/nil.
                 // TODO(lua54-strings): tighten numeric canonicalization to match PUC-Lua byte-for-byte.
-                switch (arg) {
+                switch (arg.kind()) {
                     .nil => try result.appendSlice(allocator, "nil"),
-                    .boolean => |b| try result.appendSlice(allocator, if (b) "true" else "false"),
-                    .integer => |ival| {
+                    .boolean => try result.appendSlice(allocator, if (arg.asBool()) "true" else "false"),
+                    .integer => {
+                        const ival = arg.asInt();
                         if (ival == std.math.minInt(i64)) {
                             // Preserve integer type on reload (direct literal may parse as float).
                             try result.appendSlice(allocator, "(-9223372036854775807-1)");
@@ -2622,8 +2627,9 @@ pub fn nativeStringFormat(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                             try result.appendSlice(allocator, lit);
                         }
                     },
-                    .number => |nval| try appendLuaQNumberLiteral(allocator, &result, nval),
-                    .object => |obj| {
+                    .number => try appendLuaQNumberLiteral(allocator, &result, arg.asFloat()),
+                    .object => {
+                        const obj = arg.asObjectPtr();
                         if (obj.type == .string) {
                             const str = object.getObject(StringObject, obj).asSlice();
                             try appendLuaQuotedString(allocator, &result, str);
@@ -2670,7 +2676,7 @@ pub fn nativeStringDump(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void
     // Check for strip option (second argument)
     const strip = if (nargs >= 2) blk: {
         const strip_arg = vm.stack[vm.base + func_reg + 2];
-        break :blk strip_arg.isBoolean() and strip_arg.boolean;
+        break :blk strip_arg.isBoolean() and strip_arg.asBool();
     } else false;
 
     // Get the proto from the closure
@@ -2939,7 +2945,7 @@ pub fn nativeStringPacksize(vm: anytype, func_reg: u32, nargs: u32, nresults: u3
         }
     }
 
-    vm.stack[vm.base + func_reg] = .{ .integer = @intCast(total_size) };
+    vm.stack[vm.base + func_reg] = TValue.fromInt(@intCast(total_size));
 }
 
 /// string.pack(fmt, v1, v2, ...) - Returns binary string containing values v1, v2, etc. packed according to format fmt
@@ -3217,7 +3223,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (data_pos >= data.len) break;
                 const byte: i8 = @bitCast(data[data_pos]);
                 data_pos += 1;
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = byte };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(byte);
                 result_idx += 1;
             },
             'B' => {
@@ -3225,7 +3231,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (data_pos >= data.len) break;
                 const byte = data[data_pos];
                 data_pos += 1;
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = byte };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(byte);
                 result_idx += 1;
             },
             'h' => {
@@ -3236,7 +3242,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
                 data_pos += 2;
                 const signed: i16 = @bitCast(@as(u16, @truncate(val)));
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = signed };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(signed);
                 result_idx += 1;
             },
             'H' => {
@@ -3246,7 +3252,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (2 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..2], 2, state.little_endian);
                 data_pos += 2;
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @intCast(val) };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(@intCast(val));
                 result_idx += 1;
             },
             'l', 'j' => {
@@ -3256,7 +3262,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (8 > data.len - data_pos) break;
                 const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(@bitCast(val));
                 result_idx += 1;
             },
             'L', 'J', 'T' => {
@@ -3267,7 +3273,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const val = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
                 // Note: Large unsigned values may overflow i64
-                vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(@bitCast(val));
                 result_idx += 1;
             },
             'i', 'I' => {
@@ -3303,9 +3309,9 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 if (c == 'i') {
                     // Sign extend for signed
                     const signed = signExtend(val, size);
-                    vm.stack[vm.base + func_reg + result_idx] = .{ .integer = signed };
+                    vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(signed);
                 } else {
-                    vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @bitCast(val) };
+                    vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(@bitCast(val));
                 }
                 result_idx += 1;
             },
@@ -3317,7 +3323,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const bits: u32 = @truncate(unpackInteger(data[data_pos..][0..4], 4, state.little_endian));
                 data_pos += 4;
                 const float: f32 = @bitCast(bits);
-                vm.stack[vm.base + func_reg + result_idx] = .{ .number = float };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromFloat(float);
                 result_idx += 1;
             },
             'd', 'n' => {
@@ -3328,7 +3334,7 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 const bits = unpackInteger(data[data_pos..][0..8], 8, state.little_endian);
                 data_pos += 8;
                 const double: f64 = @bitCast(bits);
-                vm.stack[vm.base + func_reg + result_idx] = .{ .number = double };
+                vm.stack[vm.base + func_reg + result_idx] = TValue.fromFloat(double);
                 result_idx += 1;
             },
             'c' => {
@@ -3407,6 +3413,6 @@ pub fn nativeStringUnpack(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Return final position (1-based) as last return value
     if (result_idx < nresults) {
-        vm.stack[vm.base + func_reg + result_idx] = .{ .integer = @intCast(data_pos + 1) };
+        vm.stack[vm.base + func_reg + result_idx] = TValue.fromInt(@intCast(data_pos + 1));
     }
 }

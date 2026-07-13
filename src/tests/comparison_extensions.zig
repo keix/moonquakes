@@ -15,7 +15,7 @@ test "EQK: equality with constant - skip on match" {
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 42 (should skip)
     const constants = [_]TValue{
-        .{ .integer = 42 }, // Index 0
+        TValue.fromInt(42), // Index 0
     };
 
     const instructions = [_]Instruction{
@@ -28,13 +28,13 @@ test "EQK: equality with constant - skip on match" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip LOADTRUE R[0], execute LOADFALSE R[0]
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "EQK: equality with constant - no skip on mismatch" {
@@ -44,7 +44,7 @@ test "EQK: equality with constant - no skip on mismatch" {
 
     // Test R[1] == K[0] where R[1] = 42 and K[0] = 100 (should not skip)
     const constants = [_]TValue{
-        .{ .integer = 100 }, // Index 0
+        TValue.fromInt(100), // Index 0
     };
 
     const instructions = [_]Instruction{
@@ -56,13 +56,13 @@ test "EQK: equality with constant - no skip on mismatch" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should execute LOADTRUE R[0]
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = true }));
+    try testing.expect(result.single.eql(TValue.fromBool(true)));
 }
 
 test "EQI: equality with immediate integer" {
@@ -81,13 +81,13 @@ test "EQI: equality with immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "LTI: less than immediate integer" {
@@ -106,13 +106,13 @@ test "LTI: less than immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "LEI: less than or equal immediate integer" {
@@ -131,13 +131,13 @@ test "LEI: less than or equal immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "GTI: greater than immediate integer" {
@@ -156,13 +156,13 @@ test "GTI: greater than immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "GEI: greater than or equal immediate integer" {
@@ -181,13 +181,13 @@ test "GEI: greater than or equal immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 42
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 42 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(42);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "Comparison extensions: negative immediate values" {
@@ -209,13 +209,13 @@ test "Comparison extensions: negative immediate values" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 5
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .integer = 5 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromInt(5);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }
 
 test "Comparison extensions: floating point values" {
@@ -234,11 +234,11 @@ test "Comparison extensions: floating point values" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &instructions, 0, false, 10);
 
     // Set R[1] = 3.14
-    ctx.vm.stack[ctx.vm.base + 1] = .{ .number = 3.14 };
+    ctx.vm.stack[ctx.vm.base + 1] = TValue.fromFloat(3.14);
 
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should skip, so R[0] should be false
     try testing.expect(result == .single);
-    try testing.expect(result.single.eql(TValue{ .boolean = false }));
+    try testing.expect(result.single.eql(TValue.fromBool(false)));
 }

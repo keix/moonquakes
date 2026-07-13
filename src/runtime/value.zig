@@ -39,6 +39,73 @@ pub const TValue = union(enum) {
     number: f64,
     object: *GCObject,
 
+    /// Value kind, decoupled from the union tag so code outside this file
+    /// never depends on TValue's physical representation (NaN-boxing
+    /// migration: stage 0).
+    pub const Kind = enum { nil, boolean, integer, number, object };
+
+    pub inline fn kind(self: *const TValue) Kind {
+        return switch (self.*) {
+            .nil => .nil,
+            .boolean => .boolean,
+            .integer => .integer,
+            .number => .number,
+            .object => .object,
+        };
+    }
+
+    // Factories. Use these (or the `.nil` decl literal) instead of union
+    // literal syntax outside this file.
+    pub inline fn fromInt(i: i64) TValue {
+        return .{ .integer = i };
+    }
+
+    pub inline fn fromFloat(n: f64) TValue {
+        return .{ .number = n };
+    }
+
+    pub inline fn fromBool(b: bool) TValue {
+        return .{ .boolean = b };
+    }
+
+    pub inline fn fromObject(obj: *GCObject) TValue {
+        return .{ .object = obj };
+    }
+
+    // In-place stores: construct directly in the destination slot. Zig's
+    // result location does not flow through function returns (even inline
+    // ones), so `slot.* = fromInt(x)` materializes a temporary and copies
+    // 16 bytes; these write the slot directly.
+    pub inline fn setInt(slot: *TValue, i: i64) void {
+        slot.* = .{ .integer = i };
+    }
+
+    pub inline fn setFloat(slot: *TValue, n: f64) void {
+        slot.* = .{ .number = n };
+    }
+
+    pub inline fn setBool(slot: *TValue, b: bool) void {
+        slot.* = .{ .boolean = b };
+    }
+
+    // Unchecked payload accessors: caller must have established the kind,
+    // exactly like the direct field accesses they replace.
+    pub inline fn asInt(self: *const TValue) i64 {
+        return self.integer;
+    }
+
+    pub inline fn asFloat(self: *const TValue) f64 {
+        return self.number;
+    }
+
+    pub inline fn asBool(self: *const TValue) bool {
+        return self.boolean;
+    }
+
+    pub inline fn asObjectPtr(self: *const TValue) *GCObject {
+        return self.object;
+    }
+
     pub fn isNil(self: TValue) bool {
         return self == .nil;
     }

@@ -30,7 +30,7 @@ fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
 }
 
 fn valueIsYoung(value: TValue) bool {
-    return value == .object and value.object.generation != .old;
+    return value.isObject() and value.asObjectPtr().generation != .old;
 }
 
 fn tableHasYoungRefs(table: *const TableObject) bool {

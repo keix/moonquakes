@@ -18,7 +18,7 @@ fn expectSingleResult(result: ReturnValue, expected: TValue) !void {
 
 test "ADDI: positive immediate with integer" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
+        TValue.fromInt(10),
     };
 
     const code = [_]Instruction{
@@ -34,12 +34,12 @@ test "ADDI: positive immediate with integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 15 });
+    try expectSingleResult(result, TValue.fromInt(15));
 }
 
 test "ADDI: negative immediate with integer" {
     const constants = [_]TValue{
-        .{ .integer = 10 },
+        TValue.fromInt(10),
     };
 
     // -3 as u8 = 253
@@ -58,12 +58,12 @@ test "ADDI: negative immediate with integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 7 });
+    try expectSingleResult(result, TValue.fromInt(7));
 }
 
 test "ADDI: with float number" {
     const constants = [_]TValue{
-        .{ .number = 10.5 },
+        TValue.fromFloat(10.5),
     };
 
     const code = [_]Instruction{
@@ -79,12 +79,12 @@ test "ADDI: with float number" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 13.5 });
+    try expectSingleResult(result, TValue.fromFloat(13.5));
 }
 
 test "ADDI: maximum positive immediate" {
     const constants = [_]TValue{
-        .{ .integer = 100 },
+        TValue.fromInt(100),
     };
 
     const code = [_]Instruction{
@@ -100,12 +100,12 @@ test "ADDI: maximum positive immediate" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 227 });
+    try expectSingleResult(result, TValue.fromInt(227));
 }
 
 test "ADDI: maximum negative immediate" {
     const constants = [_]TValue{
-        .{ .integer = 100 },
+        TValue.fromInt(100),
     };
 
     // -128 as u8 = 128
@@ -124,12 +124,12 @@ test "ADDI: maximum negative immediate" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 2);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = -28 });
+    try expectSingleResult(result, TValue.fromInt(-28));
 }
 
 test "ADDI: loop counter optimization" {
     const constants = [_]TValue{
-        .{ .integer = 0 },
+        TValue.fromInt(0),
     };
 
     const code = [_]Instruction{
@@ -147,5 +147,5 @@ test "ADDI: loop counter optimization" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 3 });
+    try expectSingleResult(result, TValue.fromInt(3));
 }

@@ -17,9 +17,9 @@ test "utf8.char and utf8.codepoint roundtrip codepoints" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("A€B")),
-        .{ .integer = 65 },
-        .{ .integer = 0x20AC },
-        .{ .integer = 66 },
+        TValue.fromInt(65),
+        TValue.fromInt(0x20AC),
+        TValue.fromInt(66),
     });
 }
 
@@ -33,7 +33,7 @@ test "utf8.len counts codepoints in multibyte strings" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 3 },
+        TValue.fromInt(3),
     });
 }
 
@@ -48,10 +48,10 @@ test "utf8.offset returns byte positions for characters" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 5 },
-        .{ .integer = 2 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(5),
+        TValue.fromInt(2),
     });
 }
 
@@ -71,12 +71,12 @@ test "utf8.codes iterates byte positions and codepoints" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 65 },
-        .{ .integer = 2 },
-        .{ .integer = 0x20AC },
-        .{ .integer = 5 },
-        .{ .integer = 66 },
+        TValue.fromInt(1),
+        TValue.fromInt(65),
+        TValue.fromInt(2),
+        TValue.fromInt(0x20AC),
+        TValue.fromInt(5),
+        TValue.fromInt(66),
     });
 }
 
@@ -91,6 +91,6 @@ test "utf8.charpattern is exposed" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("string")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }

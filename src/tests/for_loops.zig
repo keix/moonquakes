@@ -22,9 +22,9 @@ test "FORPREP minimal test" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 }, // init
-        .{ .integer = 5 }, // limit
-        .{ .integer = 1 }, // step
+        TValue.fromInt(5), // init
+        TValue.fromInt(5), // limit
+        TValue.fromInt(1), // step
     };
 
     const code = [_]Instruction{
@@ -38,7 +38,7 @@ test "FORPREP minimal test" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 4.0 }); // init - step = 5 - 1 = 4
+    try expectSingleResult(result, TValue.fromFloat(4.0)); // init - step = 5 - 1 = 4
 }
 
 test "for loop: simple integer loop 1 to 3" {
@@ -47,10 +47,10 @@ test "for loop: simple integer loop 1 to 3" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 1 }, // init (R0)
-        .{ .integer = 3 }, // limit (R1)
-        .{ .integer = 1 }, // step  (R2)
-        .{ .integer = 0 }, // accumulator (R4)
+        TValue.fromInt(1), // init (R0)
+        TValue.fromInt(3), // limit (R1)
+        TValue.fromInt(1), // step  (R2)
+        TValue.fromInt(0), // accumulator (R4)
     };
 
     const code = [_]Instruction{
@@ -79,15 +79,15 @@ test "for loop: simple integer loop 1 to 3" {
     trace.updateFinal(ctx.vm, 5);
 
     // Existing verification
-    try expectSingleResult(result, TValue{ .integer = 6 }); // 1+2+3 = 6
+    try expectSingleResult(result, TValue.fromInt(6)); // 1+2+3 = 6
 
     // Added: Verify loop variables and control flow
     // R0 (index) should be 3 after loop (last value before exit)
-    try trace.expectRegisterChanged(0, TValue{ .integer = 3 });
-    try trace.expectRegisterChanged(1, TValue{ .integer = 3 }); // limit unchanged
-    try trace.expectRegisterChanged(2, TValue{ .integer = 1 }); // step unchanged
-    try trace.expectRegisterChanged(3, TValue{ .integer = 3 }); // control variable (last value)
-    try trace.expectRegisterChanged(4, TValue{ .integer = 6 }); // accumulator
+    try trace.expectRegisterChanged(0, TValue.fromInt(3));
+    try trace.expectRegisterChanged(1, TValue.fromInt(3)); // limit unchanged
+    try trace.expectRegisterChanged(2, TValue.fromInt(1)); // step unchanged
+    try trace.expectRegisterChanged(3, TValue.fromInt(3)); // control variable (last value)
+    try trace.expectRegisterChanged(4, TValue.fromInt(6)); // accumulator
 }
 
 // Added: Critical edge case tests for potential bugs
@@ -98,10 +98,10 @@ test "for loop: negative step (countdown)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 }, // init (R0)
-        .{ .integer = 1 }, // limit (R1)
-        .{ .integer = -1 }, // step (R2) - negative!
-        .{ .integer = 0 }, // accumulator (R4)
+        TValue.fromInt(5), // init (R0)
+        TValue.fromInt(1), // limit (R1)
+        TValue.fromInt(-1), // step (R2) - negative!
+        TValue.fromInt(0), // accumulator (R4)
     };
 
     const code = [_]Instruction{
@@ -121,11 +121,11 @@ test "for loop: negative step (countdown)" {
     trace.updateFinal(ctx.vm, 5);
 
     // Should execute: 5, 4, 3, 2, 1 = 15
-    try expectSingleResult(result, TValue{ .integer = 15 });
+    try expectSingleResult(result, TValue.fromInt(15));
 
     // Verify final loop state
-    try trace.expectRegisterChanged(0, TValue{ .integer = 1 }); // last valid index
-    try trace.expectRegisterChanged(4, TValue{ .integer = 15 }); // sum
+    try trace.expectRegisterChanged(0, TValue.fromInt(1)); // last valid index
+    try trace.expectRegisterChanged(4, TValue.fromInt(15)); // sum
 }
 
 test "for loop: zero iterations (start > limit with positive step)" {
@@ -134,10 +134,10 @@ test "for loop: zero iterations (start > limit with positive step)" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 5 }, // init (R0) - starts above limit!
-        .{ .integer = 3 }, // limit (R1)
-        .{ .integer = 1 }, // step (R2) - positive
-        .{ .integer = 99 }, // accumulator (R4) - should remain unchanged
+        TValue.fromInt(5), // init (R0) - starts above limit!
+        TValue.fromInt(3), // limit (R1)
+        TValue.fromInt(1), // step (R2) - positive
+        TValue.fromInt(99), // accumulator (R4) - should remain unchanged
     };
 
     const code = [_]Instruction{
@@ -161,14 +161,14 @@ test "for loop: zero iterations (start > limit with positive step)" {
     trace.updateFinal(ctx.vm, 5);
 
     // Should not execute any iterations
-    try expectSingleResult(result, TValue{ .integer = 99 }); // unchanged
+    try expectSingleResult(result, TValue.fromInt(99)); // unchanged
 
     // R3 should remain nil (control variable never set)
     try trace.expectRegisterUnchanged(3);
     try test_utils.expectRegister(ctx.vm, 3, .nil);
 
     // R4 should remain 99 (accumulator unchanged)
-    try trace.expectRegisterChanged(4, TValue{ .integer = 99 });
+    try trace.expectRegisterChanged(4, TValue.fromInt(99));
 }
 
 test "for loop: float loop variables with integer path detection" {
@@ -177,10 +177,10 @@ test "for loop: float loop variables with integer path detection" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .number = 1.0 }, // init (R0) - float that could be integer
-        .{ .number = 3.0 }, // limit (R1) - float that could be integer
-        .{ .number = 1.0 }, // step (R2) - float that could be integer
-        .{ .integer = 0 }, // accumulator (R4)
+        TValue.fromFloat(1.0), // init (R0) - float that could be integer
+        TValue.fromFloat(3.0), // limit (R1) - float that could be integer
+        TValue.fromFloat(1.0), // step (R2) - float that could be integer
+        TValue.fromInt(0), // accumulator (R4)
     };
 
     const code = [_]Instruction{
@@ -211,7 +211,7 @@ test "for loop: float loop variables with integer path detection" {
     try testing.expectEqual(@as(usize, 4), result.multiple.len);
 
     // Print actual types for debugging
-    if (result.multiple[0] == .integer) {
+    if (result.multiple[0].isInteger()) {
         try final_loop.expectIntegerPath();
     } else {
         try final_loop.expectFloatPath();
@@ -224,9 +224,9 @@ test "for loop: step of zero should error" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 1 }, // init
-        .{ .integer = 3 }, // limit
-        .{ .integer = 0 }, // step - ZERO!
+        TValue.fromInt(1), // init
+        TValue.fromInt(3), // limit
+        TValue.fromInt(0), // step - ZERO!
     };
 
     const code = [_]Instruction{
@@ -253,10 +253,10 @@ test "for loop: overflow behavior" {
 
     const max = std.math.maxInt(i64);
     const constants = [_]TValue{
-        .{ .integer = max - 2 }, // init
-        .{ .integer = max }, // limit
-        .{ .integer = 1 }, // step
-        .{ .integer = 0 }, // accumulator
+        TValue.fromInt(max - 2), // init
+        TValue.fromInt(max), // limit
+        TValue.fromInt(1), // step
+        TValue.fromInt(0), // accumulator
     };
 
     const code = [_]Instruction{
@@ -274,7 +274,7 @@ test "for loop: overflow behavior" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     // Should execute 3 times: max-2, max-1, max
-    try expectSingleResult(result, TValue{ .integer = 3 });
+    try expectSingleResult(result, TValue.fromInt(3));
 }
 
 test "for loop: side effects on unused registers" {
@@ -283,9 +283,9 @@ test "for loop: side effects on unused registers" {
     defer ctx.deinit();
 
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 1 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(1),
     };
 
     const code = [_]Instruction{
@@ -303,12 +303,12 @@ test "for loop: side effects on unused registers" {
     const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 11);
 
     // Initialize extra registers with specific values
-    ctx.vm.stack[5] = TValue{ .integer = 555 };
-    ctx.vm.stack[6] = TValue{ .boolean = true };
-    ctx.vm.stack[7] = TValue{ .number = 3.14 };
+    ctx.vm.stack[5] = TValue.fromInt(555);
+    ctx.vm.stack[6] = TValue.fromBool(true);
+    ctx.vm.stack[7] = TValue.fromFloat(3.14);
     ctx.vm.stack[8] = .nil;
-    ctx.vm.stack[9] = TValue{ .integer = 999 };
-    ctx.vm.stack[10] = TValue{ .boolean = false };
+    ctx.vm.stack[9] = TValue.fromInt(999);
+    ctx.vm.stack[10] = TValue.fromBool(false);
 
     var trace = test_utils.ExecutionTrace.captureInitial(ctx.vm, 11);
     const result = try Mnemonics.execute(ctx.vm, proto);
@@ -319,10 +319,10 @@ test "for loop: side effects on unused registers" {
     try testing.expectEqual(@as(usize, 10), result.multiple.len);
 
     // Verify loop registers changed
-    try trace.expectRegisterChanged(0, TValue{ .integer = 2 }); // final index
-    try trace.expectRegisterChanged(1, TValue{ .integer = 2 }); // limit
-    try trace.expectRegisterChanged(2, TValue{ .integer = 1 }); // step
-    try trace.expectRegisterChanged(3, TValue{ .integer = 2 }); // control var
+    try trace.expectRegisterChanged(0, TValue.fromInt(2)); // final index
+    try trace.expectRegisterChanged(1, TValue.fromInt(2)); // limit
+    try trace.expectRegisterChanged(2, TValue.fromInt(1)); // step
+    try trace.expectRegisterChanged(3, TValue.fromInt(2)); // control var
     try trace.expectRegisterChanged(4, .nil); // body executed
 
     // Verify R5-R10 are corrupted by LOADNIL instruction, not by loop

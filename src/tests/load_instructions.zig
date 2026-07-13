@@ -37,7 +37,7 @@ test "LOADI: load signed immediate integer" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = 42 });
+    try expectSingleResult(result, TValue.fromInt(42));
 }
 
 test "LOADI: load negative signed immediate" {
@@ -53,7 +53,7 @@ test "LOADI: load negative signed immediate" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .integer = -100 });
+    try expectSingleResult(result, TValue.fromInt(-100));
 }
 
 test "LOADF: load signed immediate as float" {
@@ -69,7 +69,7 @@ test "LOADF: load signed immediate as float" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .number = 42.0 });
+    try expectSingleResult(result, TValue.fromFloat(42.0));
 }
 
 test "LOADFALSE: load false" {
@@ -85,7 +85,7 @@ test "LOADFALSE: load false" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "LOADTRUE: load true" {
@@ -101,7 +101,7 @@ test "LOADTRUE: load true" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = true });
+    try expectSingleResult(result, TValue.fromBool(true));
 }
 
 test "LFALSESKIP: load false and skip" {
@@ -118,12 +118,12 @@ test "LFALSESKIP: load false and skip" {
     const proto = try test_utils.createTestProto(ctx.vm, &[_]TValue{}, &code, 0, false, 1);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue{ .boolean = false });
+    try expectSingleResult(result, TValue.fromBool(false));
 }
 
 test "LOADNIL: single register" {
     const constants = [_]TValue{
-        .{ .integer = 42 }, // Some initial value
+        TValue.fromInt(42), // Some initial value
     };
 
     const code = [_]Instruction{
@@ -144,9 +144,9 @@ test "LOADNIL: single register" {
 
 test "LOADNIL: multiple registers" {
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
     };
 
     const code = [_]Instruction{
@@ -170,8 +170,8 @@ test "LOADNIL: multiple registers" {
 
 test "LOADNIL: range in middle of stack" {
     const constants = [_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 5 },
+        TValue.fromInt(1),
+        TValue.fromInt(5),
     };
 
     const code = [_]Instruction{
@@ -189,11 +189,11 @@ test "LOADNIL: range in middle of stack" {
     const result = try Mnemonics.execute(ctx.vm, proto);
 
     const expected = [_]TValue{
-        .{ .integer = 1 },
+        TValue.fromInt(1),
         .nil,
         .nil,
         .nil,
-        .{ .integer = 5 },
+        TValue.fromInt(5),
     };
     try expectMultipleResults(result, &expected);
 }

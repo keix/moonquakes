@@ -16,7 +16,7 @@ test "coroutine.running identifies the main thread" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("thread")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 
@@ -35,8 +35,8 @@ test "coroutine.create and coroutine.status report lifecycle" {
 
     try api.expectMultiple(result, &[_]TValue{
         TValue.fromString(try ctx.base.gc().allocString("suspended")),
-        .{ .boolean = true },
-        .{ .integer = 42 },
+        TValue.fromBool(true),
+        TValue.fromInt(42),
         TValue.fromString(try ctx.base.gc().allocString("dead")),
     });
 }
@@ -57,11 +57,11 @@ test "coroutine.resume returns yielded values and resume values" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
-        .{ .integer = 11 },
-        .{ .integer = 12 },
-        .{ .boolean = true },
-        .{ .integer = 50 },
+        TValue.fromBool(true),
+        TValue.fromInt(11),
+        TValue.fromInt(12),
+        TValue.fromBool(true),
+        TValue.fromInt(50),
         TValue.fromString(try ctx.base.gc().allocString("dead")),
     });
 }
@@ -80,7 +80,7 @@ test "coroutine.resume returns false plus error on failure" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 3), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "boom");
             try testing.expect(values[2].eql(TValue.fromString(try ctx.base.gc().allocString("dead"))));
@@ -107,9 +107,9 @@ test "coroutine.wrap returns values and propagates errors" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 4), values.len);
-            try testing.expect(values[0].eql(.{ .integer = 1 }));
-            try testing.expect(values[1].eql(.{ .integer = 2 }));
-            try testing.expect(values[2].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromInt(1)));
+            try testing.expect(values[1].eql(TValue.fromInt(2)));
+            try testing.expect(values[2].eql(TValue.fromBool(false)));
             const err_str = values[3].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "wrapped boom");
         },
@@ -127,7 +127,7 @@ test "coroutine.isyieldable reports main thread as not yieldable" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = false },
+        TValue.fromBool(false),
     });
 }
 
@@ -146,10 +146,10 @@ test "coroutine.close closes a suspended coroutine" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("pause")),
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("dead")),
     });
 }

@@ -26,7 +26,7 @@ test "SELF - prepare method call" {
     ctx.vm.stack[0] = TValue.fromTable(table);
 
     // Add a method to the table
-    try table.set(TValue.fromString(method_key), .{ .integer = 42 }); // placeholder value as "method"
+    try table.set(TValue.fromString(method_key), TValue.fromInt(42)); // placeholder value as "method"
 
     const constants = [_]TValue{
         TValue.fromString(method_key), // K[0] = "getValue"
@@ -44,7 +44,7 @@ test "SELF - prepare method call" {
     try testing.expect(result == .multiple);
 
     // R[1] should be the method (42 in our test)
-    try testing.expect(result.multiple[0].eql(.{ .integer = 42 }));
+    try testing.expect(result.multiple[0].eql(TValue.fromInt(42)));
     // R[2] should be the object (the table)
     try testing.expect(result.multiple[1].asTable() == table);
 }

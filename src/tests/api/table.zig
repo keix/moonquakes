@@ -16,8 +16,8 @@ test "table.pack and table.unpack preserve values and n field" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 3 },
-        .{ .integer = 10 },
+        TValue.fromInt(3),
+        TValue.fromInt(10),
         .nil,
         TValue.fromString(try ctx.base.gc().allocString("x")),
     });
@@ -54,10 +54,10 @@ test "table.insert and table.remove mutate list positions" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
-        .{ .integer = 2 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
+        TValue.fromInt(2),
     });
 }
 
@@ -75,9 +75,9 @@ test "table.move copies ranges into destination table" {
 
     try api.expectMultiple(result, &[_]TValue{
         .nil,
-        .{ .integer = 10 },
-        .{ .integer = 20 },
-        .{ .integer = 30 },
+        TValue.fromInt(10),
+        TValue.fromInt(20),
+        TValue.fromInt(30),
     });
 }
 
@@ -93,9 +93,9 @@ test "table.sort sorts values in ascending order" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .integer = 2 },
-        .{ .integer = 3 },
-        .{ .integer = 4 },
+        TValue.fromInt(1),
+        TValue.fromInt(2),
+        TValue.fromInt(3),
+        TValue.fromInt(4),
     });
 }

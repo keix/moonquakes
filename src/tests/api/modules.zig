@@ -61,8 +61,8 @@ test "modules.require returns builtin library table" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -83,11 +83,11 @@ test "modules.require uses package.preload and caches the result" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .boolean = true },
+        TValue.fromInt(1),
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("demo_mod")),
         TValue.fromString(try ctx.base.gc().allocString(":preload:")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
     });
 }
 
@@ -105,7 +105,7 @@ test "modules.require errors when package.searchers is not a table" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "package.searchers");
             try api.expectStringContains(err_str.asSlice(), "table");
@@ -127,7 +127,7 @@ test "modules.require reports module not found" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "module 'definitely_missing_module_name' not found");
             try api.expectStringContains(err_str.asSlice(), "package.preload");
@@ -174,7 +174,7 @@ test "modules.package searchpath reports searched paths on failure" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0] == .nil);
+            try testing.expect(values[0].isNil());
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "./foo/bar.lua");
             try api.expectStringContains(err_str.asSlice(), "./foo/bar/init.lua");
@@ -239,10 +239,10 @@ test "modules.require caches true when preload loader returns nil" {
     );
 
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 1 },
-        .{ .boolean = true },
-        .{ .boolean = true },
-        .{ .boolean = true },
+        TValue.fromInt(1),
+        TValue.fromBool(true),
+        TValue.fromBool(true),
+        TValue.fromBool(true),
     });
 }
 
@@ -268,9 +268,9 @@ test "modules.require loads Lua modules through package.path" {
 
     const result = try ctx.exec(source);
     try api.expectMultiple(result, &[_]TValue{
-        .{ .integer = 42 },
+        TValue.fromInt(42),
         TValue.fromString(try ctx.base.gc().allocString("loaded")),
-        .{ .boolean = true },
+        TValue.fromBool(true),
         TValue.fromString(try ctx.base.gc().allocString("./tmp_api_require_module.lua")),
     });
 }
@@ -289,7 +289,7 @@ test "modules.require rejects non-string package.path" {
     switch (result) {
         .multiple => |values| {
             try testing.expectEqual(@as(usize, 2), values.len);
-            try testing.expect(values[0].eql(.{ .boolean = false }));
+            try testing.expect(values[0].eql(TValue.fromBool(false)));
             const err_str = values[1].asString() orelse return error.TestUnexpectedResult;
             try api.expectStringContains(err_str.asSlice(), "package.path must be a string");
         },

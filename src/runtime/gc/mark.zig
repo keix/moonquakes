@@ -74,8 +74,8 @@ pub fn markGray(self: anytype, obj: *GCObject) void {
 
 /// Mark a TValue as gray if it contains a GC object
 pub fn markGrayValue(self: anytype, value: TValue) void {
-    if (value == .object) {
-        markGray(self, value.object);
+    if (value.isObject()) {
+        markGray(self, value.asObjectPtr());
     }
 }
 
@@ -290,8 +290,8 @@ pub fn barrierBack(self: anytype, parent: *GCObject, child: *GCObject) void {
 /// Backward barrier for TValue references
 /// Call when: parent[field] = value (where value may contain white object)
 pub fn barrierBackValue(self: anytype, parent: *GCObject, value: TValue) void {
-    if (value == .object) {
-        barrierBack(self, parent, value.object);
+    if (value.isObject()) {
+        barrierBack(self, parent, value.asObjectPtr());
     }
 }
 

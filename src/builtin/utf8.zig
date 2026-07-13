@@ -196,7 +196,7 @@ pub fn nativeUtf8Codes(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
             const key_s = try vm.gc().allocString("s");
             const key_lax = try vm.gc().allocString("lax");
             try vm.gc().tableSet(state, TValue.fromString(key_s), str_arg);
-            try vm.gc().tableSet(state, TValue.fromString(key_lax), .{ .boolean = true });
+            try vm.gc().tableSet(state, TValue.fromString(key_lax), TValue.fromBool(true));
             vm.stack[vm.base + func_reg + 1] = TValue.fromTable(state);
         } else {
             vm.stack[vm.base + func_reg + 1] = str_arg;
@@ -205,7 +205,7 @@ pub fn nativeUtf8Codes(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
 
     // Return 0 as initial byte position
     if (nresults > 2) {
-        vm.stack[vm.base + func_reg + 2] = .{ .integer = 0 };
+        vm.stack[vm.base + func_reg + 2] = TValue.fromInt(0);
     }
 }
 
@@ -277,9 +277,9 @@ pub fn nativeUtf8CodesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults:
         return vm.raiseString("invalid UTF-8 code");
     };
 
-    vm.stack[vm.base + func_reg] = .{ .integer = @as(i64, @intCast(next_pos + 1)) };
+    vm.stack[vm.base + func_reg] = TValue.fromInt(@as(i64, @intCast(next_pos + 1)));
     if (nresults > 1) {
-        vm.stack[vm.base + func_reg + 1] = .{ .integer = @intCast(decoded.codepoint) };
+        vm.stack[vm.base + func_reg + 1] = TValue.fromInt(@intCast(decoded.codepoint));
     }
 }
 
@@ -340,7 +340,7 @@ pub fn nativeUtf8Codepoint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             return vm.raiseString("invalid UTF-8 code");
         };
         if (written < result_cap and (vm.base + func_reg + written) < vm.stack.len) {
-            vm.stack[vm.base + func_reg + written] = .{ .integer = @intCast(decoded.codepoint) };
+            vm.stack[vm.base + func_reg + written] = TValue.fromInt(@intCast(decoded.codepoint));
             written += 1;
         }
         pos += decoded.len;
@@ -397,7 +397,7 @@ pub fn nativeUtf8Len(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     }
 
     if (i_abs > j_abs) {
-        vm.stack[vm.base + func_reg] = .{ .integer = 0 };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(0);
         return;
     }
 
@@ -406,7 +406,7 @@ pub fn nativeUtf8Len(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
 
     if (pos < len and isContinuationByte(str[pos])) {
         vm.stack[vm.base + func_reg] = .nil;
-        if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = .{ .integer = @as(i64, @intCast(pos + 1)) };
+        if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = TValue.fromInt(@as(i64, @intCast(pos + 1)));
         return;
     }
 
@@ -414,14 +414,14 @@ pub fn nativeUtf8Len(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     while (pos < len and @as(i64, @intCast(pos + 1)) <= end_byte_1based) {
         const decoded = decodeAt(str, pos, lax) catch {
             vm.stack[vm.base + func_reg] = .nil;
-            if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = .{ .integer = @as(i64, @intCast(pos + 1)) };
+            if (nresults >= 2) vm.stack[vm.base + func_reg + 1] = TValue.fromInt(@as(i64, @intCast(pos + 1)));
             return;
         };
         count += 1;
         pos += decoded.len;
     }
 
-    vm.stack[vm.base + func_reg] = .{ .integer = count };
+    vm.stack[vm.base + func_reg] = TValue.fromInt(count);
 }
 
 /// utf8.offset(s, n [, i]) - Returns byte position of n-th character
@@ -468,7 +468,7 @@ pub fn nativeUtf8Offset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         while (pos > 0 and pos < len and isContinuationByte(str[pos])) {
             pos -= 1;
         }
-        vm.stack[vm.base + func_reg] = .{ .integer = @as(i64, @intCast(pos + 1)) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@as(i64, @intCast(pos + 1)));
         return;
     }
 
@@ -489,7 +489,7 @@ pub fn nativeUtf8Offset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             }
             rem -= 1;
         }
-        vm.stack[vm.base + func_reg] = .{ .integer = @as(i64, @intCast(pos + 1)) };
+        vm.stack[vm.base + func_reg] = TValue.fromInt(@as(i64, @intCast(pos + 1)));
         return;
     }
 
@@ -505,7 +505,7 @@ pub fn nativeUtf8Offset(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
         }
         rem -= 1;
     }
-    vm.stack[vm.base + func_reg] = .{ .integer = @as(i64, @intCast(pos + 1)) };
+    vm.stack[vm.base + func_reg] = TValue.fromInt(@as(i64, @intCast(pos + 1)));
 }
 
 /// utf8.charpattern - Pattern that matches exactly one UTF-8 character
