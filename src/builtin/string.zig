@@ -293,42 +293,57 @@ const PatternMatcher = struct {
         is_open: bool,
     };
 
+    /// Backtracking undo record. A failed matchPattern attempt can only:
+    ///   - advance pat_pos/str_pos/match_end and the two scalar flags,
+    ///   - APPEND captures (undone by restoring capture_count),
+    ///   - CLOSE captures that were open at snapshot time (their is_open
+    ///     flag flips; start is immutable and end is rewritten on the next
+    ///     close), popping them from the capture stack whose vacated slots
+    ///     may then be overwritten by new opens.
+    /// Closed captures are never modified, so saving the scalars plus the
+    /// open-capture stack (typically 0-2 entries) is a complete undo —
+    /// unlike the previous whole-struct copy (~800 bytes per backtrack).
     const Snapshot = struct {
         pat_pos: usize,
         str_pos: usize,
         match_end: usize,
-        captures: [32]Capture,
         capture_count: u32,
-        capture_stack: [32]u8,
         capture_stack_top: u32,
         invalid_capture_index: ?u8,
         frontier_missing: bool,
+        open_stack: [32]u8,
     };
 
     fn snapshot(self: *const PatternMatcher) Snapshot {
-        return .{
+        var snap: Snapshot = .{
             .pat_pos = self.pat_pos,
             .str_pos = self.str_pos,
             .match_end = self.match_end,
-            .captures = self.captures,
             .capture_count = self.capture_count,
-            .capture_stack = self.capture_stack,
             .capture_stack_top = self.capture_stack_top,
             .invalid_capture_index = self.invalid_capture_index,
             .frontier_missing = self.frontier_missing,
+            .open_stack = undefined,
         };
+        const top = self.capture_stack_top;
+        @memcpy(snap.open_stack[0..top], self.capture_stack[0..top]);
+        return snap;
     }
 
     fn restore(self: *PatternMatcher, snap: Snapshot) void {
         self.pat_pos = snap.pat_pos;
         self.str_pos = snap.str_pos;
         self.match_end = snap.match_end;
-        self.captures = snap.captures;
         self.capture_count = snap.capture_count;
-        self.capture_stack = snap.capture_stack;
-        self.capture_stack_top = snap.capture_stack_top;
         self.invalid_capture_index = snap.invalid_capture_index;
         self.frontier_missing = snap.frontier_missing;
+        const top = snap.capture_stack_top;
+        @memcpy(self.capture_stack[0..top], snap.open_stack[0..top]);
+        self.capture_stack_top = top;
+        var i: u32 = 0;
+        while (i < top) : (i += 1) {
+            self.captures[snap.open_stack[i]].is_open = true;
+        }
     }
 
     fn init(pattern: []const u8, str: []const u8, start: usize) PatternMatcher {
@@ -766,11 +781,6 @@ fn getGsubReplacement(
     str: []const u8,
     matcher: *PatternMatcher,
 ) !?[]const u8 {
-    if (repl_arg.asString()) |repl_obj| {
-        const repl = repl_obj.asSlice();
-        return try expandGsubCaptures(vm, repl, str, matcher);
-    }
-
     if (repl_arg.asTable()) |repl_table| {
         const key_val = if (matcher.capture_count > 0 and matcher.captures[0].is_position)
             TValue.fromInt(@intCast(matcher.captures[0].start + 1))
@@ -890,12 +900,18 @@ fn lookupTableReplacement(vm: *VM, table: *object.TableObject, key_val: TValue, 
     return null;
 }
 
-fn expandGsubCaptures(
+/// Expand a string replacement's %N captures directly into the gsub
+/// output buffer. The previous version built the expansion in a temporary
+/// list and interned a GC string per match — three allocations per
+/// replacement on the hottest gsub path.
+fn appendExpandedCaptures(
     vm: anytype,
     repl: []const u8,
     str: []const u8,
     matcher: *PatternMatcher,
-) ![]const u8 {
+    result: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+) !void {
     var has_escapes = false;
     for (repl) |c| {
         if (c == '%') {
@@ -903,11 +919,10 @@ fn expandGsubCaptures(
             break;
         }
     }
-    if (!has_escapes) return repl;
-
-    const allocator = vm.gc().allocator;
-    var result = try std.ArrayList(u8).initCapacity(allocator, repl.len);
-    defer result.deinit(allocator);
+    if (!has_escapes) {
+        try result.appendSlice(allocator, repl);
+        return;
+    }
 
     var i: usize = 0;
     while (i < repl.len) {
@@ -925,9 +940,9 @@ fn expandGsubCaptures(
                 } else if (cap_idx <= matcher.capture_count) {
                     const cap = matcher.captures[cap_idx - 1];
                     if (cap.is_position) {
-                        const pos_buf = try std.fmt.allocPrint(allocator, "{d}", .{cap.start + 1});
-                        defer allocator.free(pos_buf);
-                        try result.appendSlice(allocator, pos_buf);
+                        var pos_buf: [24]u8 = undefined;
+                        const pos_str = std.fmt.bufPrint(&pos_buf, "{d}", .{cap.start + 1}) catch unreachable;
+                        try result.appendSlice(allocator, pos_str);
                     } else {
                         try result.appendSlice(allocator, str[cap.start..cap.end]);
                     }
@@ -946,8 +961,6 @@ fn expandGsubCaptures(
         }
     }
 
-    const result_obj = try vm.gc().allocString(result.items);
-    return result_obj.asSlice();
 }
 
 fn tryFormatSimpleSubst(vm: anytype, func_reg: u32, nargs: u32, nresults: u32, fmt: []const u8, allocator: std.mem.Allocator) !bool {
@@ -2177,15 +2190,12 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
             // Append text before match
             try result.appendSlice(allocator, str[pos..matcher.match_start]);
 
-            // Get replacement string based on repl type
-            const replacement = try getGsubReplacement(
-                vm,
-                repl_arg,
-                str,
-                &matcher,
-            );
-
-            if (replacement) |repl_str| {
+            // String replacements expand straight into the output buffer;
+            // table/function replacements go through the value path.
+            if (repl_arg.asString()) |repl_obj| {
+                try appendExpandedCaptures(vm, repl_obj.asSlice(), str, &matcher, &result, allocator);
+                any_substitution = true;
+            } else if (try getGsubReplacement(vm, repl_arg, str, &matcher)) |repl_str| {
                 try result.appendSlice(allocator, repl_str);
                 any_substitution = true;
             } else {
@@ -2204,6 +2214,12 @@ pub fn nativeStringGsub(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !
                     try result.append(allocator, str[pos]);
                 }
                 pos += 1;
+            }
+            // An anchored pattern matches at most once (PUC semantics);
+            // the miss branch below already stops, but the hit path kept
+            // rescanning every position.
+            if (pattern.len > 0 and pattern[0] == '^') {
+                break;
             }
         } else {
             if (matcher.interrupted) {
