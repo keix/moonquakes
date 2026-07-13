@@ -871,8 +871,15 @@ pub const ProtoBuilder = struct {
     }
 
     pub fn emitReturn(self: *ProtoBuilder, reg: u8, count: u8) !void {
-        // B = count + 1 (B=1 means 0 values, B=2 means 1 value, etc.)
-        const instr = Instruction.initABC(.RETURN, reg, count + 1, 0);
+        // Fixed-count returns use the specialized opcodes (as PUC does):
+        // their handlers share RETURN's full prepareReturn machinery, and
+        // the hot loop keeps them in the inner dispatch.
+        const instr = switch (count) {
+            0 => Instruction.initABC(.RETURN0, 0, 1, 0),
+            1 => Instruction.initABC(.RETURN1, reg, 2, 0),
+            // B = count + 1 (B=1 means 0 values, B=2 means 1 value, etc.)
+            else => Instruction.initABC(.RETURN, reg, count + 1, 0),
+        };
         try self.code.append(self.allocator, instr);
         try self.lineinfo.append(self.allocator, self.current_line);
     }
@@ -2171,7 +2178,7 @@ pub const Parser = struct {
             return_line = end_line;
         }
         builder.current_line = return_line;
-        try builder.emit(.RETURN, 0, 1, 0);
+        try builder.emit(.RETURN0, 0, 1, 0);
 
         const func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
         proto_ptr.* = func_proto_data;

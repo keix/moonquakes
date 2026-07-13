@@ -274,17 +274,18 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     else => unreachable,
                 };
                 TValue.setInt(&stack[base + inst.getA()], res);
-            } else if (vb.isNumber() and vc.isNumber()) {
+            } else {
+                // Float or int-float mixed; strings/metamethods exit to
+                // the full handler.
+                const fb = numberToFloat(vb) orelse return;
+                const fc = numberToFloat(vc) orelse return;
                 const res = switch (inst.getOpCode()) {
-                    .ADD => vb.asFloat() + vc.asFloat(),
-                    .SUB => vb.asFloat() - vc.asFloat(),
-                    .MUL => vb.asFloat() * vc.asFloat(),
+                    .ADD => fb + fc,
+                    .SUB => fb - fc,
+                    .MUL => fb * fc,
                     else => unreachable,
                 };
                 TValue.setFloat(&stack[base + inst.getA()], res);
-            } else {
-                // Mixed/coercion/metamethod: full handler re-executes it.
-                return;
             }
             pc += 1;
             inst = pc[0];
@@ -301,11 +302,35 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     else => unreachable,
                 };
                 TValue.setInt(&stack[base + inst.getA()], res);
-                pc += 1;
-                inst = pc[0];
-                continue :dispatch inst.getOpCode();
+            } else {
+                const fb = numberToFloat(vb) orelse return;
+                const fc = numberToFloat(vc) orelse return;
+                const res = switch (inst.getOpCode()) {
+                    .ADDK => fb + fc,
+                    .SUBK => fb - fc,
+                    .MULK => fb * fc,
+                    else => unreachable,
+                };
+                TValue.setFloat(&stack[base + inst.getA()], res);
             }
-            return;
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .DIV, .DIVK => {
+            // Lua '/' is always float arithmetic, including int/int;
+            // coercion/metamethods exit to the full handler.
+            const vb = &stack[base + inst.getB()];
+            const vc = if (inst.getOpCode() == .DIVK)
+                &k[inst.getC()]
+            else
+                &stack[base + inst.getC()];
+            const fb = numberToFloat(vb) orelse return;
+            const fc = numberToFloat(vc) orelse return;
+            TValue.setFloat(&stack[base + inst.getA()], fb / fc);
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
         },
         .LTI, .LEI, .GTI, .GEI => {
             const left = &stack[base + inst.getB()];
@@ -479,8 +504,19 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // finishReturnToCaller and popCallInfo for non-protected frames.
             if (cur.tbc_bitmap != 0 or cur.continuation != .none) return;
             if (cur.is_protected) return;
-            if (vm.open_upvalues != null) return;
+            // The open-upvalue list is sorted by descending stack address,
+            // so only a head at or above this frame's base needs closing;
+            // outer frames' open upvalues don't block the fast return.
+            if (vm.open_upvalues) |uv| {
+                const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&stack[0])) / @sizeOf(TValue);
+                if (uv_level >= base) return;
+            }
             const prev = cur.previous orelse return;
+            // A pending continuation on the CALLER means this frame was
+            // staged by a dispatch handler (e.g. a comparison metamethod)
+            // that must consume the result when the frame returns — the
+            // outer loop runs it; a fast pop here would skip it.
+            if (prev.continuation != .none) return;
 
             const is_return1 = inst.getOpCode() == .RETURN1;
             const ret_val = if (is_return1) stack[base + inst.getA()] else TValue.nil;
@@ -674,6 +710,15 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         else => return,
     }
+}
+
+/// Numeric coercion for float arithmetic: floats pass through, integers
+/// convert, everything else (strings, objects) returns null so the arm
+/// exits to the full handler.
+inline fn numberToFloat(v: *const TValue) ?f64 {
+    if (v.isNumber()) return v.asFloat();
+    if (v.isInteger()) return @floatFromInt(v.asInt());
+    return null;
 }
 
 /// Slow half of the field cache: chain hits (the class-method pattern),
