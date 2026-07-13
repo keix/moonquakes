@@ -119,6 +119,31 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        .FORPREP => {
+            // All-integer staging: store init-step and jump to the FORLOOP,
+            // mirroring opFORPREP's plain case. Zero step (error), float
+            // state, non-integer limits and overflowing init-step all exit
+            // to the full handler.
+            const a = inst.getA();
+            const v_init = &stack[base + a];
+            const v_limit = &stack[base + a + 1];
+            const v_step = &stack[base + a + 2];
+            if (!(v_init.isInteger() and v_limit.isInteger() and v_step.isInteger())) return;
+            const is = v_step.asInt();
+            if (is == 0) return;
+            const staged = @subWithOverflow(v_init.asInt(), is);
+            if (staged[1] != 0) return;
+            TValue.setInt(v_init, staged[0]);
+            const sbx = inst.getSBx();
+            pc += 1;
+            if (sbx >= 0) {
+                pc += @as(usize, @intCast(sbx));
+            } else {
+                pc -= @as(usize, @intCast(-sbx));
+            }
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
         .FORLOOP => {
             const a = inst.getA();
             const idx = &stack[base + a];
@@ -169,10 +194,13 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .CLOSE => {
-            // Emitted at every loop back-edge by the compiler. With no
-            // to-be-closed slots on this frame and no open upvalues at all,
-            // there is nothing to close.
-            if (cur.tbc_bitmap != 0 or vm.open_upvalues != null) return;
+            // Emitted at every loop back-edge by the compiler. To-be-closed
+            // slots need __close metamethod calls and exit; plain upvalue
+            // closing is infallible and stays in the loop.
+            if (cur.tbc_bitmap != 0) return;
+            if (vm.open_upvalues != null) {
+                vm.closeUpvalues(base + inst.getA());
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -328,6 +356,24 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const fb = numberToFloat(vb) orelse return;
             const fc = numberToFloat(vc) orelse return;
             TValue.setFloat(&stack[base + inst.getA()], fb / fc);
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .MOD, .MODK => {
+            // Integer floor modulo (Zig's @mod matches Lua's
+            // divisor-signed result). Zero divisor is the n%0 error path
+            // and minInt % -1 would overflow the division — both exit;
+            // float mod needs fmod sign correction and exits too.
+            const vb = &stack[base + inst.getB()];
+            const vc = if (inst.getOpCode() == .MODK)
+                &k[inst.getC()]
+            else
+                &stack[base + inst.getC()];
+            if (!vb.isInteger() or !vc.isInteger()) return;
+            const divisor = vc.asInt();
+            if (divisor == 0 or divisor == -1) return;
+            TValue.setInt(&stack[base + inst.getA()], @mod(vb.asInt(), divisor));
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -689,6 +735,36 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 vm.gc().barrierBackValue(&table.header, value);
             }
             pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SETLIST => {
+            // Constructor flush appending right at the array end of a table
+            // with no hash/deleted entries and no nil values — the same
+            // bulk store opSETLIST fast-paths. B == 0 takes the count from
+            // vm.top (multret tails), which the CALL/RETURN arms keep
+            // current. Anything else exits; OOM bails with pc still at the
+            // SETLIST so the outer handler re-executes it.
+            const a = inst.getA();
+            const table = stack[base + a].asTable() orelse return;
+            var next_pc = pc + 1;
+            const start: i64 = if (inst.getk()) blk: {
+                const ax = @as(i64, pc[1].getAx());
+                next_pc = pc + 2;
+                break :blk if (inst.getC() == 0) ax else (ax - 1) * 50 + 1;
+            } else (@as(i64, inst.getC()) - 1) * 50 + 1;
+            const b = inst.getB();
+            const n: u32 = if (b > 0) b else vm.top - (base + a + 1);
+            if (n > 0) {
+                if (start != @as(i64, @intCast(table.array.items.len)) + 1) return;
+                if (table.hash_part.count() != 0 or table.deleted_keys.count() != 0) return;
+                const values = vm.stack[base + a + 1 ..][0..n];
+                for (values) |v| {
+                    if (v.isNil()) return;
+                }
+                mutation.tableExtendArray(vm.gc(), table, values) catch return;
+            }
+            pc = next_pc;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
