@@ -76,6 +76,14 @@ pub const VM = struct {
         shape: u64 = 0,
         epoch: u64 = std.math.maxInt(u64),
         slot: *TValue = undefined,
+        // __index-chain entries: the receiver missed and the value was
+        // resolved in the metatable's __index table. mm_slot points at the
+        // metatable's __index slot (valid while mt_shape holds); it must
+        // still reference chain_table, whose shape guards `slot`.
+        mt_shape: u64 = 0,
+        mm_slot: ?*TValue = null,
+        chain_table: usize = 0,
+        chain_shape: u64 = 0,
     };
 
     // Core execution state

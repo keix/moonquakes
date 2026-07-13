@@ -518,32 +518,49 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         .GETFIELD => {
             // String-key table read. The diagnostic hint is recorded like
-            // the full handler does (before the lookup); a miss may need
-            // __index and exits.
+            // the full handler does (before the lookup); anything that
+            // cannot be resolved as a direct hit or a one-level
+            // __index-table hit exits to the full handler.
             const table = stack[base + inst.getB()].asTable() orelse return;
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
-            // Slot-pointer inline cache: valid while the table's structure
-            // (shape_count) and the GC epoch are unchanged. In-place value
-            // writes keep the cache hot; a nil slot means the key became
-            // absent (array hole), which falls back to the lookup.
             const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
             if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
                 entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
-                !entry.slot.isNil())
+                entry.chain_table == 0 and !entry.slot.isNil())
             {
                 stack[base + inst.getA()] = entry.slot.*;
+            } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
+                stack[base + inst.getA()] = value;
             } else {
-                const slot = table.getPtr(key_val) orelse return;
-                stack[base + inst.getA()] = slot.*;
-                entry.* = .{
-                    .pc = @intFromPtr(pc),
-                    .table = @intFromPtr(table),
-                    .shape = table.shape_count,
-                    .epoch = vm.ic_epoch,
-                    .slot = slot,
-                };
+                return;
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SELF => {
+            // Method lookup: R[A+1] := receiver, R[A] := receiver[K[C]].
+            // Shares the field cache, including the __index-chain form that
+            // resolves class methods through the metatable.
+            const receiver = stack[base + inst.getB()];
+            const table = receiver.asTable() orelse return;
+            const key_val = k[inst.getC()];
+            const key = key_val.asString() orelse return;
+            field_cache.rememberFieldAccess(vm, inst.getA(), key, false, true);
+            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
+                entry.chain_table == 0 and !entry.slot.isNil())
+            {
+                stack[base + inst.getA() + 1] = receiver;
+                stack[base + inst.getA()] = entry.slot.*;
+            } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
+                stack[base + inst.getA() + 1] = receiver;
+                stack[base + inst.getA()] = value;
+            } else {
+                return;
             }
             pc += 1;
             inst = pc[0];
@@ -623,4 +640,65 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         else => return,
     }
+}
+
+/// Slow half of the field cache: chain hits (the class-method pattern),
+/// misses, and cache fills. The direct-hit check lives inline in the
+/// GETFIELD/SELF arms. Returns null when the full handler must take over
+/// (deep chains, __index functions, true misses).
+fn readFieldSlow(vm: *VM, pc: [*]const Instruction, table: *object.TableObject, key_val: TValue) ?TValue {
+    const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+    if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+        entry.shape == table.shape_count and entry.epoch == vm.ic_epoch)
+    {
+        if (entry.chain_table != 0) {
+            if (table.metatable) |mt| {
+                // Chain entry: the metatable's __index slot must be intact
+                // and still reference the same target table, whose shape
+                // guards the cached value slot.
+                if (mt.shape_count == entry.mt_shape) {
+                    const mm = entry.mm_slot.?.*;
+                    if (mm.isObject() and @intFromPtr(mm.asObjectPtr()) == entry.chain_table) {
+                        const target: *object.TableObject = @ptrFromInt(entry.chain_table);
+                        if (target.shape_count == entry.chain_shape) {
+                            const v = entry.slot.*;
+                            if (!v.isNil()) return v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Miss: resolve directly, then through one __index table level.
+    if (table.getPtr(key_val)) |slot| {
+        const v = slot.*;
+        entry.* = .{
+            .pc = @intFromPtr(pc),
+            .table = @intFromPtr(table),
+            .shape = table.shape_count,
+            .epoch = vm.ic_epoch,
+            .slot = slot,
+        };
+        return v;
+    }
+    const mt = table.metatable orelse return null;
+    const mm_key = TValue.fromString(vm.gc().mm_keys.get(.index));
+    const mm_slot = mt.getPtr(mm_key) orelse return null;
+    const mm = mm_slot.*;
+    const target = mm.asTable() orelse return null;
+    const slot = target.getPtr(key_val) orelse return null;
+    const v = slot.*;
+    entry.* = .{
+        .pc = @intFromPtr(pc),
+        .table = @intFromPtr(table),
+        .shape = table.shape_count,
+        .epoch = vm.ic_epoch,
+        .slot = slot,
+        .mt_shape = mt.shape_count,
+        .mm_slot = mm_slot,
+        .chain_table = @intFromPtr(&target.header),
+        .chain_shape = target.shape_count,
+    };
+    return v;
 }
