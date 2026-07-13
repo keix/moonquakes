@@ -51,6 +51,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
     var base = vm.base;
     var k = cur.func.k;
 
+    // Every arm ends with the same `pc += 1; inst = pc[0]; continue` triplet
+    // (or a jump variant). It cannot be factored into a helper: Zig's
+    // labeled-switch `continue` is what turns each arm into a direct jump
+    // to the next opcode's arm, and it must appear literally in the arm.
     var inst = pc[0];
     dispatch: switch (inst.getOpCode()) {
         .MOVE => {
@@ -108,11 +112,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         .JMP => {
             const sj = inst.getsJ();
-            pc += 1;
-            if (sj >= 0) {
-                pc += @as(usize, @intCast(sj));
-            } else {
-                pc -= @as(usize, @intCast(-sj));
+            pc = jumpTarget(pc + 1, sj);
+            if (sj < 0) {
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
             }
@@ -134,13 +135,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const staged = @subWithOverflow(v_init.asInt(), is);
             if (staged[1] != 0) return;
             TValue.setInt(v_init, staged[0]);
-            const sbx = inst.getSBx();
-            pc += 1;
-            if (sbx >= 0) {
-                pc += @as(usize, @intCast(sbx));
-            } else {
-                pc -= @as(usize, @intCast(-sbx));
-            }
+            pc = jumpTarget(pc + 1, inst.getSBx());
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
@@ -182,11 +177,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 }
             }
             if (continues) {
-                if (sbx >= 0) {
-                    pc += @as(usize, @intCast(sbx));
-                } else {
-                    pc -= @as(usize, @intCast(-sbx));
-                }
+                pc = jumpTarget(pc, sbx);
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
             }
@@ -198,7 +189,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // slots need __close metamethod calls and exit; plain upvalue
             // closing is infallible and stays in the loop.
             if (cur.tbc_bitmap != 0) return;
-            if (vm.open_upvalues != null) {
+            if (openUpvaluesReach(vm, stack, base + inst.getA())) {
                 vm.closeUpvalues(base + inst.getA());
             }
             pc += 1;
@@ -227,21 +218,30 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .GETTABLE => {
-            // Only integer keys: string keys record a field-cache hint in
-            // the full handler (error diagnostics), nil/float keys have
-            // their own semantics there. Array hits are read inline; hash
-            // hits go through get(); misses may need __index and exit.
+            // Integer keys: array hits read inline, hash hits go through
+            // get(). String keys (register-valued, so the per-pc IC does
+            // not apply): direct hash hits via getPtr, with the same
+            // field-cache hint the full handler records for diagnostics.
+            // Misses may need __index and exit; nil/float keys have their
+            // own semantics in the full handler.
             const table = stack[base + inst.getB()].asTable() orelse return;
             const key = &stack[base + inst.getC()];
-            if (!key.isInteger()) return;
-            const i = key.asInt();
-            if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
-                const value = table.array.items[@intCast(i - 1)];
-                if (value.isNil()) return;
-                stack[base + inst.getA()] = value;
+            if (key.isInteger()) {
+                const i = key.asInt();
+                if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
+                    const value = table.array.items[@intCast(i - 1)];
+                    if (value.isNil()) return;
+                    stack[base + inst.getA()] = value;
+                } else {
+                    const value = table.get(key.*) orelse return;
+                    stack[base + inst.getA()] = value;
+                }
+            } else if (key.asString()) |key_str| {
+                field_cache.rememberFieldAccess(vm, inst.getA(), key_str, table == vm.globals(), false);
+                const slot = table.getPtr(key.*) orelse return;
+                stack[base + inst.getA()] = slot.*;
             } else {
-                const value = table.get(key.*) orelse return;
-                stack[base + inst.getA()] = value;
+                return;
             }
             pc += 1;
             inst = pc[0];
@@ -345,6 +345,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        // Convention: the hottest arithmetic (ADD/SUB/MUL and their K
+        // forms) gets separate arms so operand selection is branch-free;
+        // rarer DIV/MOD pairs share an arm and select the K operand with a
+        // well-predicted runtime branch. Both are deliberate.
         .DIV, .DIVK => {
             // Lua '/' is always float arithmetic, including int/int;
             // coercion/metamethods exit to the full handler.
@@ -521,12 +525,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             pc += 1;
             if (!first_var.isNil()) {
                 stack[base + a + 2] = first_var;
-                const sbx = inst.getSBx();
-                if (sbx >= 0) {
-                    pc += @as(usize, @intCast(sbx));
-                } else {
-                    pc -= @as(usize, @intCast(-sbx));
-                }
+                pc = jumpTarget(pc, inst.getSBx());
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
             }
@@ -555,15 +554,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // Mirror stageLuaCallFrameFromStack's non-vararg path: shift
             // the arguments one slot down over the function value.
             const new_base = base + a;
-            const nargs: u32 = b - 1;
-            const params_to_copy = @min(nargs, @as(u32, proto.numparams));
-            var i: u32 = 0;
-            while (i < params_to_copy) : (i += 1) {
-                stack[new_base + i] = stack[new_base + 1 + i];
-            }
-            while (i < proto.numparams) : (i += 1) {
-                stack[new_base + i] = .nil;
-            }
+            stageFixedArgs(stack, new_base, new_base + 1, b - 1, proto.numparams);
 
             const c = inst.getC();
             const nresults: i16 = if (c > 0) @as(i16, @intCast(c - 1)) else -1;
@@ -599,21 +590,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (proto.is_vararg) return;
             if (vm.slow_work_signal or interrupt.isPending()) return;
 
-            if (vm.open_upvalues) |uv| {
-                const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&stack[0])) / @sizeOf(TValue);
-                if (uv_level >= base) vm.closeUpvalues(base);
+            if (openUpvaluesReach(vm, stack, base)) {
+                vm.closeUpvalues(base);
             }
 
             // Shift the arguments down over the reused frame's base.
-            const nargs: u32 = b - 1;
-            const params_to_copy = @min(nargs, @as(u32, proto.numparams));
-            var i: u32 = 0;
-            while (i < params_to_copy) : (i += 1) {
-                stack[base + i] = stack[base + a + 1 + i];
-            }
-            while (i < proto.numparams) : (i += 1) {
-                stack[base + i] = .nil;
-            }
+            stageFixedArgs(stack, base, base + a + 1, b - 1, proto.numparams);
 
             cur.reset(proto, func_closure, base, cur.ret_base, cur.nresults, cur.previous, 0, 0);
             cur.was_tail_called = true;
@@ -629,13 +611,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // finishReturnToCaller and popCallInfo for non-protected frames.
             if (cur.tbc_bitmap != 0 or cur.continuation != .none) return;
             if (cur.is_protected) return;
-            // The open-upvalue list is sorted by descending stack address,
-            // so only a head at or above this frame's base needs closing;
-            // outer frames' open upvalues don't block the fast return.
-            if (vm.open_upvalues) |uv| {
-                const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&stack[0])) / @sizeOf(TValue);
-                if (uv_level >= base) return;
-            }
+            // Open upvalues inside this frame need real closing: exit.
+            // Outer frames' open upvalues don't block the fast return.
+            if (openUpvaluesReach(vm, stack, base)) return;
             const prev = cur.previous orelse return;
             // A pending continuation on the CALLER means this frame was
             // staged by a dispatch handler (e.g. a comparison metamethod)
@@ -688,11 +666,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
-            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
-            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
-                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
-                entry.chain_table == 0 and !entry.slot.isNil())
-            {
+            const entry = fieldIcEntry(vm, pc);
+            if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
                 stack[base + inst.getA()] = entry.slot.*;
             } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
                 stack[base + inst.getA()] = value;
@@ -712,11 +687,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, true);
-            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
-            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
-                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
-                entry.chain_table == 0 and !entry.slot.isNil())
-            {
+            const entry = fieldIcEntry(vm, pc);
+            if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
                 stack[base + inst.getA() + 1] = receiver;
                 stack[base + inst.getA()] = entry.slot.*;
             } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
@@ -738,11 +710,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, true, false);
-            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
-            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
-                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
-                !entry.slot.isNil())
-            {
+            const entry = fieldIcEntry(vm, pc);
+            if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
                 stack[base + inst.getA()] = entry.slot.*;
             } else {
                 const slot = table.getPtr(key_val) orelse return;
@@ -785,15 +754,29 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // TableObject.set's fast path. Object values take the backward
             // barrier (infallible); nil writes are removals and exit.
             const table = stack[base + inst.getA()].asTable() orelse return;
+            const value = stack[base + inst.getC()];
+            if (value.isNil()) return;
             const i: i64 = if (inst.getOpCode() == .SETI)
                 @as(i64, inst.getB())
             else blk: {
                 const key = &stack[base + inst.getB()];
-                if (!key.isInteger()) return;
-                break :blk key.asInt();
+                if (key.isInteger()) break :blk key.asInt();
+                if (key.asString() != null) {
+                    // String key on an existing slot: in-place update
+                    // through the write barrier, mirroring SETFIELD.
+                    // Absent keys (possible __newindex) exit.
+                    const slot = table.getPtr(key.*) orelse return;
+                    slot.* = value;
+                    table.mod_count +%= 1;
+                    if (value.isObject()) {
+                        vm.gc().barrierBackValue(&table.header, value);
+                    }
+                    pc += 1;
+                    inst = pc[0];
+                    continue :dispatch inst.getOpCode();
+                }
+                return;
             };
-            const value = stack[base + inst.getC()];
-            if (value.isNil()) return;
             const alen: i64 = @intCast(table.array.items.len);
             if (i >= 1 and i <= table.seq_len and i <= alen) {
                 const slot = &table.array.items[@intCast(i - 1)];
@@ -837,6 +820,8 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (n > 0) {
                 if (start != @as(i64, @intCast(table.array.items.len)) + 1) return;
                 if (table.hash_part.count() != 0 or table.deleted_keys.count() != 0) return;
+                // vm.stack, not the `stack` local: a pointer-to-slice can
+                // be indexed but not sliced.
                 const values = vm.stack[base + a + 1 ..][0..n];
                 for (values) |v| {
                     if (v.isNil()) return;
@@ -876,12 +861,62 @@ inline fn numberToFloat(v: *const TValue) ?f64 {
     return null;
 }
 
+/// Apply a signed instruction offset (JMP sJ, FORPREP/FORLOOP/TFORLOOP
+/// sBx) to a pc that has already been advanced past the instruction.
+inline fn jumpTarget(pc: [*]const Instruction, offset: i32) [*]const Instruction {
+    return if (offset >= 0)
+        pc + @as(usize, @intCast(offset))
+    else
+        pc - @as(usize, @intCast(-offset));
+}
+
+/// True when the open-upvalue list reaches into the frame starting at
+/// `level`. The list is sorted by descending stack address, so checking
+/// the head suffices; outer frames' open upvalues don't count.
+inline fn openUpvaluesReach(vm: *const VM, stack: anytype, level: u32) bool {
+    const uv = vm.open_upvalues orelse return false;
+    const uv_level = (@intFromPtr(uv.location) - @intFromPtr(&stack[0])) / @sizeOf(TValue);
+    return uv_level >= level;
+}
+
+/// Stage a fixed-arg Lua call: copy the supplied arguments to the callee
+/// frame base and nil-fill missing parameters (CALL shifts one slot down
+/// over the function value; TAILCALL shifts onto the reused base).
+inline fn stageFixedArgs(stack: anytype, dst: u32, src: u32, nargs: u32, numparams: u32) void {
+    const params_to_copy = @min(nargs, numparams);
+    var i: u32 = 0;
+    while (i < params_to_copy) : (i += 1) {
+        stack[dst + i] = stack[src + i];
+    }
+    while (i < numparams) : (i += 1) {
+        stack[dst + i] = .nil;
+    }
+}
+
+/// Direct-mapped field-IC slot for an instruction address. Instructions
+/// are 4 bytes, so the low bits index after the shift; the mask derives
+/// from the table length (a power of two).
+inline fn fieldIcEntry(vm: *VM, pc: [*]const Instruction) *VM.FieldICEntry {
+    return &vm.field_ic[(@intFromPtr(pc) >> 2) & (vm.field_ic.len - 1)];
+}
+
+/// Direct-hit validation shared by GETFIELD/SELF/GETTABUP: same site,
+/// same table, structure unchanged, IC generation current, not a chain
+/// entry, and a live slot. (GETTABUP sites never store chain entries, so
+/// the chain check is redundant-but-free there; sharing one predicate
+/// keeps the invariant in one place.)
+inline fn icDirectHit(entry: *const VM.FieldICEntry, pc: [*]const Instruction, table: *const object.TableObject, ic_epoch: u64) bool {
+    return entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+        entry.shape == table.shape_count and entry.epoch == ic_epoch and
+        entry.chain_table == 0 and !entry.slot.isNil();
+}
+
 /// Slow half of the field cache: chain hits (the class-method pattern),
 /// misses, and cache fills. The direct-hit check lives inline in the
 /// GETFIELD/SELF arms. Returns null when the full handler must take over
 /// (deep chains, __index functions, true misses).
 fn readFieldSlow(vm: *VM, pc: [*]const Instruction, table: *object.TableObject, key_val: TValue) ?TValue {
-    const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+    const entry = fieldIcEntry(vm, pc);
     if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
         entry.shape == table.shape_count and entry.epoch == vm.ic_epoch)
     {

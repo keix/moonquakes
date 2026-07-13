@@ -13,6 +13,7 @@ const call_debug = @import("call_debug.zig");
 const call = @import("call.zig");
 const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
+const CallInfo = @import("execution.zig").CallInfo;
 
 pub fn rootProvider(self: *VM) RootProvider {
     return RootProvider.init(VM, self, &vmRootProviderVTable);
@@ -38,6 +39,7 @@ fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
         gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
     }
     gc_ptr.markValue(vm.base_ci.error_handler);
+    markFrameVarargs(vm, gc_ptr, &vm.base_ci);
 
     for (vm.callstack[0..vm.callstack_size]) |frame| {
         if (frame.closure) |closure| {
@@ -46,6 +48,19 @@ fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
             gc_ptr.markProtoObject(@constCast(frame.func));
         }
         gc_ptr.markValue(frame.error_handler);
+        markFrameVarargs(vm, gc_ptr, &frame);
+    }
+}
+
+fn markFrameVarargs(vm: *const VM, gc_ptr: *GC, frame: *const CallInfo) void {
+    // A frame's varargs live at vararg_base, ABOVE base + maxstacksize —
+    // and above vm.top while a callee is executing. The stack sweep up to
+    // vm.top (computeStackExtent) never reaches them, so they must be
+    // marked per frame or they are collected while still readable via
+    // VARARG after the callee returns.
+    if (frame.vararg_count == 0) return;
+    for (vm.stack[frame.vararg_base..][0..frame.vararg_count]) |value| {
+        gc_ptr.markValue(value);
     }
 }
 

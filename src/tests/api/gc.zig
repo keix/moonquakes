@@ -111,3 +111,35 @@ test "gc collectgarbage rejects invalid options and non integer tuning args" {
         else => return error.TestUnexpectedResult,
     }
 }
+
+test "gc varargs stored above vm.top survive a collection inside a callee" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    // A vararg frame parks its extra arguments at vararg_base, above
+    // base + maxstacksize — and above vm.top while a callee runs. The
+    // stack root sweep stops at vm.top, so frame marking must cover the
+    // vararg slices explicitly or the churn below recycles them while
+    // they are still readable via `...` after the callee returns.
+    const result = try ctx.exec(
+        \\local function churn()
+        \\  for i = 1, 200 do local t = { i, i + 1, tostring(i) .. "pad" } end
+        \\  collectgarbage("collect")
+        \\  collectgarbage("collect")
+        \\  for i = 1, 200 do local t = { i * 2, "fill" .. tostring(i) } end
+        \\end
+        \\local function v(...)
+        \\  churn()
+        \\  local a, b, c = ...
+        \\  return a[1], b[1], c[1]
+        \\end
+        \\return v({11}, {22}, {33})
+    );
+
+    try api.expectMultiple(result, &[_]TValue{
+        TValue.fromInt(11),
+        TValue.fromInt(22),
+        TValue.fromInt(33),
+    });
+}
