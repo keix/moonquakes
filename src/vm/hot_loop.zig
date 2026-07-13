@@ -28,6 +28,8 @@ const CallInfo = @import("execution.zig").CallInfo;
 const interrupt = @import("../interrupt.zig");
 const mutation = @import("../runtime/gc/mutation.zig");
 const call_debug = @import("call_debug.zig");
+const field_cache = @import("field_cache.zig");
+const object = @import("../runtime/gc/object.zig");
 
 pub fn run(vm: *VM, ci: *CallInfo) void {
     // Safe builds validate the PC on every fetch (CallInfo.validatePC);
@@ -197,12 +199,20 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .GETTABLE => {
             // Only integer keys: string keys record a field-cache hint in
             // the full handler (error diagnostics), nil/float keys have
-            // their own semantics there. Misses may need __index and exit.
+            // their own semantics there. Array hits are read inline; hash
+            // hits go through get(); misses may need __index and exit.
             const table = stack[base + inst.getB()].asTable() orelse return;
             const key = &stack[base + inst.getC()];
             if (!key.isInteger()) return;
-            const value = table.get(key.*) orelse return;
-            stack[base + inst.getA()] = value;
+            const i = key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
+                const value = table.array.items[@intCast(i - 1)];
+                if (value.isNil()) return;
+                stack[base + inst.getA()] = value;
+            } else {
+                const value = table.get(key.*) orelse return;
+                stack[base + inst.getA()] = value;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -212,8 +222,15 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // stays here (opGETI records no field-cache hint, so semantics
             // match). Misses may need __index and exit.
             const table = stack[base + inst.getB()].asTable() orelse return;
-            const value = table.get(.{ .integer = @as(i64, inst.getC()) }) orelse return;
-            stack[base + inst.getA()] = value;
+            const i = @as(i64, inst.getC());
+            if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
+                const value = table.array.items[@intCast(i - 1)];
+                if (value.isNil()) return;
+                stack[base + inst.getA()] = value;
+            } else {
+                const value = table.get(.{ .integer = i }) orelse return;
+                stack[base + inst.getA()] = value;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -349,6 +366,63 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        .TFORCALL => {
+            // Specialized for the builtin ipairs iterator: the whole step
+            // (index increment, array read, result placement) runs inline
+            // instead of a native call frame per element. ipairs honors
+            // __index, so a raw miss on a table with a metatable exits.
+            const a = inst.getA();
+            const func_val = &stack[base + a];
+            if (!func_val.isObject() or func_val.object.type != .native_closure) return;
+            const nc = object.getObject(object.NativeClosureObject, func_val.object);
+            if (nc.func.id != .ipairs_iterator) return;
+            const table = stack[base + a + 1].asTable() orelse return;
+            const control = &stack[base + a + 2];
+            if (!control.isInteger()) return;
+            const next_index = control.integer +% 1;
+
+            var value: TValue = .nil;
+            if (next_index >= 1 and next_index <= @as(i64, @intCast(table.array.items.len))) {
+                value = table.array.items[@intCast(next_index - 1)];
+            } else if (table.get(.{ .integer = next_index })) |v| {
+                value = v;
+            }
+            if (value.isNil() and table.metatable != null) return;
+
+            const c = inst.getC();
+            const nresults: u32 = if (c > 0) c else 1;
+            const res = base + a + 4;
+            if (value.isNil()) {
+                var j: u32 = 0;
+                while (j < nresults) : (j += 1) stack[res + j] = .nil;
+            } else {
+                stack[res] = .{ .integer = next_index };
+                if (nresults > 1) stack[res + 1] = value;
+                var j: u32 = 2;
+                while (j < nresults) : (j += 1) stack[res + j] = .nil;
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .TFORLOOP => {
+            const a = inst.getA();
+            const first_var = stack[base + a + 4];
+            pc += 1;
+            if (!first_var.isNil()) {
+                stack[base + a + 2] = first_var;
+                const sbx = inst.getSBx();
+                if (sbx >= 0) {
+                    pc += @as(usize, @intCast(sbx));
+                } else {
+                    pc -= @as(usize, @intCast(-sbx));
+                }
+                // Loop back-edge: safepoint.
+                if (vm.slow_work_signal or interrupt.isPending()) return;
+            }
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
         .CALL => {
             // Fast path: fixed-arg call of a non-vararg Lua closure. Vararg
             // callees, top-defined argument counts (B == 0), native/pcall
@@ -439,6 +513,111 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             base = prev.base;
             k = prev.func.k;
             pc = prev.pc;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETFIELD => {
+            // String-key table read. The diagnostic hint is recorded like
+            // the full handler does (before the lookup); a miss may need
+            // __index and exits.
+            const table = stack[base + inst.getB()].asTable() orelse return;
+            const key_val = k[inst.getC()];
+            const key = key_val.asString() orelse return;
+            field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
+            // Slot-pointer inline cache: valid while the table's structure
+            // (shape_count) and the GC epoch are unchanged. In-place value
+            // writes keep the cache hot; a nil slot means the key became
+            // absent (array hole), which falls back to the lookup.
+            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
+                !entry.slot.isNil())
+            {
+                stack[base + inst.getA()] = entry.slot.*;
+            } else {
+                const slot = table.getPtr(key_val) orelse return;
+                stack[base + inst.getA()] = slot.*;
+                entry.* = .{
+                    .pc = @intFromPtr(pc),
+                    .table = @intFromPtr(table),
+                    .shape = table.shape_count,
+                    .epoch = vm.ic_epoch,
+                    .slot = slot,
+                };
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .GETTABUP => {
+            // Global (or _ENV field) read through an upvalue table.
+            const closure = cur.closure orelse return;
+            const b = inst.getB();
+            if (b >= closure.upvalues.len) return;
+            const table = closure.upvalues[b].get().asTable() orelse return;
+            const key_val = k[inst.getC()];
+            const key = key_val.asString() orelse return;
+            field_cache.rememberFieldAccess(vm, inst.getA(), key, true, false);
+            const entry = &vm.field_ic[(@intFromPtr(pc) >> 2) & 63];
+            if (entry.pc == @intFromPtr(pc) and entry.table == @intFromPtr(table) and
+                entry.shape == table.shape_count and entry.epoch == vm.ic_epoch and
+                !entry.slot.isNil())
+            {
+                stack[base + inst.getA()] = entry.slot.*;
+            } else {
+                const slot = table.getPtr(key_val) orelse return;
+                stack[base + inst.getA()] = slot.*;
+                entry.* = .{
+                    .pc = @intFromPtr(pc),
+                    .table = @intFromPtr(table),
+                    .shape = table.shape_count,
+                    .epoch = vm.ic_epoch,
+                    .slot = slot,
+                };
+            }
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SETFIELD => {
+            // String-key write to an existing slot: in-place update through
+            // the write barrier. Absent keys (possible __newindex) and nil
+            // stores (removal bookkeeping) exit to the full handler.
+            const table = stack[base + inst.getA()].asTable() orelse return;
+            const key_val = k[inst.getB()];
+            if (key_val.asString() == null) return;
+            const value = stack[base + inst.getC()];
+            if (value.isNil()) return;
+            const slot = table.getPtr(key_val) orelse return;
+            slot.* = value;
+            table.mod_count +%= 1;
+            vm.gc().barrierBackValue(&table.header, value);
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SETTABLE, .SETI => {
+            // Array-part write with no side channel: integer key within the
+            // sequence border, non-nil slot (an absent key would need
+            // __newindex), and a non-collectable value (an object value
+            // would need the GC write barrier). Everything else exits.
+            const table = stack[base + inst.getA()].asTable() orelse return;
+            const i: i64 = if (inst.getOpCode() == .SETI)
+                @as(i64, inst.getB())
+            else blk: {
+                const key = &stack[base + inst.getB()];
+                if (!key.isInteger()) return;
+                break :blk key.integer;
+            };
+            const value = stack[base + inst.getC()];
+            if (value == .object or value.isNil()) return;
+            if (i < 1 or i > table.seq_len) return;
+            if (i > @as(i64, @intCast(table.array.items.len))) return;
+            const slot = &table.array.items[@intCast(i - 1)];
+            if (slot.isNil()) return;
+            slot.* = value;
+            table.mod_count +%= 1;
+            pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },

@@ -164,6 +164,23 @@ pub fn nativeTableInsert(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
 
         if (pos < 1 or pos > len + 1) return vm.raiseString("position out of bounds");
 
+        // Fast path: no metatable to honor (__index/__newindex/__len) and
+        // the whole affected range lives in the array part — the shift is a
+        // single memmove instead of per-element get/set round-trips.
+        if (table.metatable == null and len <= @as(i64, @intCast(table.array.items.len))) {
+            try table.array.insert(table.allocator, @intCast(pos - 1), value);
+            vm.gc().barrierBackValue(&table.header, value);
+            table.mod_count +%= 1;
+            table.shape_count +%= 1;
+            if (pos <= table.seq_len) {
+                table.seq_len += 1;
+            } else if (pos == table.seq_len + 1 and !value.isNil()) {
+                table.seq_len = pos;
+                while (table.rawHas(table.seq_len + 1)) table.seq_len += 1;
+            }
+            return;
+        }
+
         // Shift elements from len down to pos
         var i: i64 = len;
         while (i >= pos) : (i -= 1) {
@@ -227,6 +244,20 @@ pub fn nativeTableRemove(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) 
     if (pos > len) {
         if (nresults > 0) {
             vm.stack[vm.base + func_reg] = .nil;
+        }
+        return;
+    }
+
+    // Fast path: mirror of the insert fast path — one memmove.
+    if (table.metatable == null and len <= @as(i64, @intCast(table.array.items.len))) {
+        const removed_value = table.array.orderedRemove(@intCast(pos - 1));
+        table.mod_count +%= 1;
+        table.shape_count +%= 1;
+        if (pos <= table.seq_len and table.seq_len > 0) {
+            table.seq_len -= 1;
+        }
+        if (nresults > 0) {
+            vm.stack[vm.base + func_reg] = removed_value;
         }
         return;
     }

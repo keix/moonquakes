@@ -279,11 +279,20 @@ pub const TableObject = struct {
     };
 
     header: GCObject,
+    /// Array part: values for integer keys 1..array.items.len. A nil slot
+    /// is a hole and means "absent" (raw reads report it as missing so
+    /// __index still fires). Keys grow into the array only through
+    /// appends at len+1; sparse integer keys live in hash_part.
+    array: std.ArrayListUnmanaged(TValue),
     hash_part: HashMap,
     deleted_keys: DeletedKeySet,
     iter_keys: std.ArrayListUnmanaged(TValue),
     iter_index: KeyIndexMap,
     mod_count: u64 = 0,
+    /// Bumped only on structural changes that can move or retire value
+    /// slots (hash insert/remove, array growth/shift) — NOT on in-place
+    /// value overwrites. Slot-pointer inline caches key on this.
+    shape_count: u64 = 0,
     iter_cache_mod_count: u64 = std.math.maxInt(u64),
     allocator: std.mem.Allocator,
     seq_len: i64 = 0,
@@ -304,9 +313,63 @@ pub const TableObject = struct {
 
     /// Get a value by TValue key
     pub fn get(self: *const TableObject, key: TValue) ?TValue {
+        // Integer keys are already canonical; check the array part before
+        // paying for canonicalization or hashing.
+        if (key == .integer) {
+            const i = key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const v = self.array.items[@intCast(i - 1)];
+                if (v.isNil()) return null;
+                return v;
+            }
+            if (self.hash_part.get(key)) |v| return v;
+            return null;
+        }
         const canonical_key = canonicalizeLookupKey(key);
+        if (canonical_key == .integer) {
+            const i = canonical_key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const v = self.array.items[@intCast(i - 1)];
+                if (v.isNil()) return null;
+                return v;
+            }
+        }
         if (self.hash_part.get(canonical_key)) |v| return v;
         return null;
+    }
+
+    /// Pointer to the slot currently holding a non-nil value for the key,
+    /// or null when the key is absent. Valid until the next structural
+    /// mutation (insert/remove/rehash); callers must write through it
+    /// immediately.
+    pub fn getPtr(self: *TableObject, key: TValue) ?*TValue {
+        if (key == .integer) {
+            const i = key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const slot = &self.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return null;
+                return slot;
+            }
+            return self.hash_part.getPtr(key);
+        }
+        const canonical_key = canonicalizeLookupKey(key);
+        if (canonical_key == .integer) {
+            const i = canonical_key.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                const slot = &self.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return null;
+                return slot;
+            }
+        }
+        return self.hash_part.getPtr(canonical_key);
+    }
+
+    /// True when the key currently holds a non-nil value (either part).
+    pub fn rawHas(self: *const TableObject, i: i64) bool {
+        if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+            return !self.array.items[@intCast(i - 1)].isNil();
+        }
+        return self.hash_part.get(.{ .integer = i }) != null;
     }
 
     pub fn rawLen(self: *const TableObject) i64 {
@@ -314,7 +377,12 @@ pub const TableObject = struct {
     }
 
     fn isPureArray(self: *const TableObject) bool {
-        return self.seq_len > 0 and @as(usize, @intCast(self.seq_len)) == self.hash_part.count();
+        if (self.seq_len <= 0) return false;
+        const n: usize = @intCast(self.seq_len);
+        // All sequence keys in the array part and nothing in the hash part,
+        // or the legacy all-in-hash shape.
+        if (self.hash_part.count() == 0 and n <= self.array.items.len) return true;
+        return n == self.hash_part.count() and self.array.items.len == 0;
     }
 
     fn keyLessThan(a: TValue, b: TValue) bool {
@@ -336,10 +404,22 @@ pub const TableObject = struct {
     }
 
     fn selectNext(self: *const TableObject, after: ?TValue) ?KeyValuePair {
-        var iter = self.hash_part.iterator();
         var best_key: ?TValue = null;
         var best_val: TValue = .nil;
 
+        for (self.array.items, 1..) |value, ui| {
+            if (value.isNil()) continue;
+            const key = TValue{ .integer = @intCast(ui) };
+            if (after) |pivot| {
+                if (!keyLessThan(pivot, key)) continue;
+            }
+            if (best_key == null or keyLessThan(key, best_key.?)) {
+                best_key = key;
+                best_val = value;
+            }
+        }
+
+        var iter = self.hash_part.iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
             const value = entry.value_ptr.*;
@@ -360,6 +440,11 @@ pub const TableObject = struct {
     fn rebuildIterCache(self: *TableObject) !void {
         self.iter_keys.clearRetainingCapacity();
         self.iter_index.clearRetainingCapacity();
+
+        for (self.array.items, 1..) |value, i| {
+            if (value.isNil()) continue;
+            try self.iter_keys.append(self.allocator, .{ .integer = @intCast(i) });
+        }
 
         var iter = self.hash_part.iterator();
         while (iter.next()) |entry| {
@@ -394,6 +479,12 @@ pub const TableObject = struct {
     }
 
     fn hasExactKey(self: *const TableObject, target: TValue) bool {
+        if (target == .integer) {
+            const i = target.integer;
+            if (i >= 1 and i <= @as(i64, @intCast(self.array.items.len))) {
+                return !self.array.items[@intCast(i - 1)].isNil();
+            }
+        }
         var iter = self.hash_part.iterator();
         while (iter.next()) |entry| {
             if (keyExactEq(entry.key_ptr.*, target)) return true;
@@ -448,7 +539,7 @@ pub const TableObject = struct {
 
         if (prev == null) {
             for (self.iter_keys.items) |key| {
-                if (self.hash_part.get(key)) |value| {
+                if (self.get(key)) |value| {
                     if (!value.isNil()) return .{ .key = key, .value = value };
                 }
             }
@@ -460,7 +551,7 @@ pub const TableObject = struct {
             var i: usize = @as(usize, @intCast(pos)) + 1;
             while (i < self.iter_keys.items.len) : (i += 1) {
                 const key = self.iter_keys.items[i];
-                if (self.hash_part.get(key)) |value| {
+                if (self.get(key)) |value| {
                     if (!value.isNil()) return .{ .key = key, .value = value };
                 }
             }
@@ -490,35 +581,85 @@ pub const TableObject = struct {
             else => null,
         };
 
+        // Array part: in-range writes go straight to the slot; a write one
+        // past the end appends and absorbs any contiguous keys that were
+        // waiting in the hash part.
+        if (seq_key) |i| {
+            const alen: i64 = @intCast(self.array.items.len);
+            if (i <= alen) {
+                const had_value = !self.array.items[@intCast(i - 1)].isNil();
+                self.array.items[@intCast(i - 1)] = value;
+                self.mod_count +%= 1;
+                if (value.isNil()) {
+                    if (had_value) {
+                        // Keep next()'s deleted-key recovery working for
+                        // array holes, mirroring the hash removal path.
+                        try self.deleted_keys.put(canonical_key, {});
+                        self.pruneDeletedKeys();
+                    }
+                    if (i == self.seq_len) {
+                        while (self.seq_len > 0) {
+                            if (self.rawHas(self.seq_len)) break;
+                            self.seq_len -= 1;
+                        }
+                    }
+                } else {
+                    _ = self.deleted_keys.remove(canonical_key);
+                    if (i == self.seq_len + 1) {
+                        var cursor = self.seq_len + 1;
+                        while (self.rawHas(cursor + 1)) cursor += 1;
+                        self.seq_len = cursor;
+                    }
+                }
+                return;
+            }
+            if (i == alen + 1 and !value.isNil()) {
+                try self.array.append(self.allocator, value);
+                _ = self.deleted_keys.remove(canonical_key);
+                var next: i64 = i + 1;
+                while (self.hash_part.get(.{ .integer = next })) |hv| : (next += 1) {
+                    try self.array.append(self.allocator, hv);
+                    _ = self.hash_part.remove(.{ .integer = next });
+                }
+                self.mod_count +%= 1;
+                self.shape_count +%= 1;
+                if (i == self.seq_len + 1) {
+                    var cursor = self.seq_len + 1;
+                    while (self.rawHas(cursor + 1)) cursor += 1;
+                    self.seq_len = cursor;
+                }
+                return;
+            }
+        }
+
         // Setting to nil removes the entry
         if (value.isNil()) {
             if (self.hash_part.contains(canonical_key)) {
                 _ = self.hash_part.remove(canonical_key);
                 try self.deleted_keys.put(canonical_key, {});
                 self.mod_count +%= 1;
+                self.shape_count +%= 1;
                 self.pruneDeletedKeys();
                 if (seq_key) |k| {
                     if (k == self.seq_len) {
                         while (self.seq_len > 0) {
-                            const prev_key = TValue{ .integer = self.seq_len };
-                            if (self.hash_part.get(prev_key) != null) break;
+                            if (self.rawHas(self.seq_len)) break;
                             self.seq_len -= 1;
                         }
                     }
                 }
             }
         } else {
-            try self.hash_part.put(canonical_key, value);
+            const gop = try self.hash_part.getOrPut(canonical_key);
+            if (!gop.found_existing) self.shape_count +%= 1;
+            gop.value_ptr.* = value;
             _ = self.deleted_keys.remove(canonical_key);
             self.mod_count +%= 1;
             if (seq_key) |k| {
                 if (k == self.seq_len + 1) {
                     var cursor = self.seq_len + 1;
-                    while (true) : (cursor += 1) {
-                        const next_key = TValue{ .integer = cursor };
-                        if (self.hash_part.get(next_key) == null) break;
-                    }
-                    self.seq_len = cursor - 1;
+                    while (self.rawHas(cursor + 1)) cursor += 1;
+                    self.seq_len = cursor;
                 }
             }
         }
@@ -526,6 +667,7 @@ pub const TableObject = struct {
 
     /// Clean up internal data structures (called by GC during sweep)
     pub fn deinit(self: *TableObject) void {
+        self.array.deinit(self.allocator);
         self.iter_index.deinit();
         self.iter_keys.deinit(self.allocator);
         self.deleted_keys.deinit();

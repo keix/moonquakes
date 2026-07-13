@@ -38,6 +38,17 @@ pub fn propagateEphemerons(self: anytype) bool {
         // Only process tables with weak keys (ephemerons)
         if (!table.hasWeakKeys()) continue;
 
+        // Array-part keys are integers, so they are always "marked"; their
+        // values propagate unless values are weak too.
+        if (!table.hasWeakValues()) {
+            for (table.array.items) |value| {
+                if (value == .object and self.isWhite(value.object)) {
+                    self.markGray(value.object);
+                    changed = true;
+                }
+            }
+        }
+
         var iter = table.hash_part.iterator();
         while (iter.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -117,7 +128,23 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
         }
     }
 
+    // Weak values in the array part: dead values become holes.
+    if (table.hasWeakValues()) {
+        for (table.array.items) |*slot| {
+            const val = slot.*;
+            if (val == .object and val.object.type != .string and self.isWhite(val.object)) {
+                if (!self.isAliveInCurrentCycle(val.object)) {
+                    slot.* = .nil;
+                    removed_positive_integer_key = true;
+                }
+            }
+        }
+    }
+
     // Remove dead entries
+    if (to_remove.items.len > 0) {
+        table.shape_count +%= 1;
+    }
     for (to_remove.items) |key| {
         _ = table.hash_part.remove(key);
     }
@@ -126,6 +153,7 @@ fn cleanWeakTableEntries(self: anytype, table: *TableObject) void {
     // storage. Release it here so collectgarbage("count") reflects reclaimed
     // memory after dead entries are cleared.
     if (table.hash_part.count() == 0) {
+        table.shape_count +%= 1;
         table.hash_part.deinit();
         table.hash_part = TableObject.HashMap.init(table.allocator);
         table.deleted_keys.deinit();

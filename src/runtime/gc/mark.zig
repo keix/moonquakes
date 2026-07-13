@@ -144,7 +144,11 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
                 }
                 // weak_keys (ephemerons): defer to propagateEphemerons
             } else {
-                // Strong table: mark all keys and values
+                // Strong table: mark all keys and values. Array-part keys
+                // are integers; only the values need marking.
+                for (table.array.items) |value| {
+                    markGrayValue(self, value);
+                }
                 var iter = table.hash_part.iterator();
                 while (iter.next()) |entry| {
                     markGrayValue(self, entry.key_ptr.*);
