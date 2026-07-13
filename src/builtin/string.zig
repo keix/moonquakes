@@ -771,6 +771,13 @@ fn getGmatchStateMap(vm: *VM) !*object.TableObject {
         if (existing.asTable()) |tbl| return tbl;
     }
     const tbl = try vm.gc().allocTable();
+    // Weak keys: entries must die with their iterator closures. A strong
+    // map leaked one iterator + state table per string.gmatch call.
+    const mt = try vm.gc().allocTable();
+    const mode_key = try vm.gc().allocString("__mode");
+    const mode_val = try vm.gc().allocString("k");
+    try vm.gc().tableSet(mt, TValue.fromString(mode_key), TValue.fromString(mode_val));
+    vm.gc().tableSetMetatable(tbl, mt);
     try vm.gc().tableSet(globals, key_val, TValue.fromTable(tbl));
     return tbl;
 }
@@ -1953,16 +1960,15 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         }
     }
 
-    // Create state table with string, pattern, and position
+    // Create the iterator state as an integer-keyed table so every
+    // per-iteration read/write is an array-part access instead of four
+    // interned-string hash lookups: [1]=subject, [2]=pattern, [3]=pos,
+    // [4]=last match end.
     const state_table = try vm.gc().allocTable();
-    const key_s = try vm.gc().allocString("s");
-    const key_p = try vm.gc().allocString("p");
-    const key_pos = try vm.gc().allocString("pos");
-    const key_last_end = try vm.gc().allocString("last_end");
-    try vm.gc().tableSet(state_table, TValue.fromString(key_s), str_arg);
-    try vm.gc().tableSet(state_table, TValue.fromString(key_p), pat_arg);
-    try vm.gc().tableSet(state_table, TValue.fromString(key_pos), TValue.fromInt(@as(i64, @intCast(init_pos))));
-    try vm.gc().tableSet(state_table, TValue.fromString(key_last_end), TValue.fromInt(-1));
+    try vm.gc().tableSet(state_table, TValue.fromInt(1), str_arg);
+    try vm.gc().tableSet(state_table, TValue.fromInt(2), pat_arg);
+    try vm.gc().tableSet(state_table, TValue.fromInt(3), TValue.fromInt(@as(i64, @intCast(init_pos))));
+    try vm.gc().tableSet(state_table, TValue.fromInt(4), TValue.fromInt(-1));
 
     // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.string_gmatch_iterator));
@@ -1994,9 +2000,20 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     }
     if (state_table == null) {
         if (vm.stack[vm.base + func_reg].asNativeClosure()) |iter_nc| {
-            if (getGmatchStateMap(vm) catch null) |state_map| {
+            // One-entry cache: a generic-for drives the same iterator for
+            // the whole loop, so the registry lookup (three hash probes)
+            // only runs on the first step and after each GC sweep (the
+            // epoch guards freed closures, like the field IC).
+            if (vm.gmatch_cache_closure == @intFromPtr(iter_nc) and
+                vm.gmatch_cache_epoch == vm.ic_epoch)
+            {
+                state_table = vm.gmatch_cache_state;
+            } else if (getGmatchStateMap(vm) catch null) |state_map| {
                 if (state_map.get(TValue.fromNativeClosure(iter_nc))) |st| {
                     state_table = st.asTable();
+                    vm.gmatch_cache_closure = @intFromPtr(iter_nc);
+                    vm.gmatch_cache_state = state_table;
+                    vm.gmatch_cache_epoch = vm.ic_epoch;
                 }
             }
         }
@@ -2007,8 +2024,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     };
 
     // Get string from state table
-    const key_s = try vm.gc().allocString("s");
-    const str_val = state.get(TValue.fromString(key_s)) orelse {
+    const str_val = state.get(TValue.fromInt(1)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -2019,8 +2035,7 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     const str = str_obj.asSlice();
 
     // Get pattern from state table
-    const key_p = try vm.gc().allocString("p");
-    const pat_val = state.get(TValue.fromString(key_p)) orelse {
+    const pat_val = state.get(TValue.fromInt(2)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -2028,12 +2043,12 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
+    // The pattern was validated when string.gmatch created this state;
+    // re-validating on every iteration was pure overhead.
     const pattern = pat_obj.asSlice();
-    try validatePatternOrRaise(vm, pattern);
 
     // Get current position from state table
-    const key_pos = try vm.gc().allocString("pos");
-    const pos_val = state.get(TValue.fromString(key_pos)) orelse {
+    const pos_val = state.get(TValue.fromInt(3)) orelse {
         vm.stack[vm.base + func_reg] = .nil;
         return;
     };
@@ -2048,9 +2063,8 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
     }
     const start_pos: usize = @intCast(pos_i64);
 
-    const key_last_end = try vm.gc().allocString("last_end");
     const last_end_i64: i64 = blk: {
-        const v = state.get(TValue.fromString(key_last_end)) orelse break :blk -1;
+        const v = state.get(TValue.fromInt(4)) orelse break :blk -1;
         break :blk v.toInteger() orelse -1;
     };
 
@@ -2078,8 +2092,8 @@ pub fn nativeStringGmatchIterator(vm: anytype, func_reg: u32, nargs: u32, nresul
             }
 
             // Update position in state table for next iteration
-            try vm.gc().tableSet(state, TValue.fromString(key_pos), TValue.fromInt(@as(i64, @intCast(next_pos))));
-            try vm.gc().tableSet(state, TValue.fromString(key_last_end), TValue.fromInt(@as(i64, @intCast(matcher.match_end))));
+            try vm.gc().tableSet(state, TValue.fromInt(3), TValue.fromInt(@as(i64, @intCast(next_pos))));
+            try vm.gc().tableSet(state, TValue.fromInt(4), TValue.fromInt(@as(i64, @intCast(matcher.match_end))));
 
             // Return captures or whole match
             if (matcher.capture_count > 0) {

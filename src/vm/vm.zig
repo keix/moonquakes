@@ -107,6 +107,12 @@ pub const VM = struct {
     // (bumped by the GC after every sweep, guarding freed slots) match.
     field_ic: [64]FieldICEntry = [_]FieldICEntry{.{}} ** 64,
     ic_epoch: u64 = 0,
+
+    // One-entry cache for the gmatch iterator's private-state recovery
+    // (closure identity -> state table), epoch-guarded like field_ic.
+    gmatch_cache_closure: usize = 0,
+    gmatch_cache_state: ?*object.TableObject = null,
+    gmatch_cache_epoch: u64 = std.math.maxInt(u64),
     call_debug: CallDebugState = .{},
 
     // Shared runtime identity
