@@ -658,6 +658,46 @@ pub const ProtoBuilder = struct {
         self.updateMaxStack(dst + 1);
     }
 
+    /// Copy `src` into `dst`, retargeting the instruction that produced
+    /// `src` instead of emitting a MOVE when that is safe: the producer
+    /// must be the last emitted instruction, emitted within the current
+    /// expression (at or after `code_start`), writing a temp register
+    /// (locals keep their homes), and of an opcode whose A operand is a
+    /// pure output. Because only the final instruction changes and reads
+    /// happen before its write, this is aliasing-safe even for
+    /// self-referencing assignments like x = x + f(x).
+    pub fn retargetOrMove(self: *ProtoBuilder, dst: u8, src: u8, code_start: usize) !void {
+        if (dst == src) return;
+        if (src >= self.locals_top and self.code.items.len > code_start) {
+            const last_idx = self.code.items.len - 1;
+            const last = self.code.items[last_idx];
+            // The producer must be the SOLE writer of src within the
+            // expression: comparison materialization (LFALSESKIP+LOADTRUE)
+            // and and/or merges write the register on multiple paths, and
+            // retargeting only the final write would strand the others.
+            var sole_writer = true;
+            var wi = code_start;
+            while (wi < last_idx) : (wi += 1) {
+                if (self.code.items[wi].getA() == src) {
+                    sole_writer = false;
+                    break;
+                }
+            }
+            if (sole_writer and last.getA() == src) {
+                const retargetable = switch (last.getOpCode()) {
+                    .MOVE, .LOADK, .LOADKX, .LOADI, .LOADF, .LOADTRUE, .LOADFALSE, .GETUPVAL, .GETTABUP, .GETTABLE, .GETI, .GETFIELD, .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR, .ADDK, .SUBK, .MULK, .DIVK, .MODK, .POWK, .IDIVK, .BANDK, .BORK, .BXORK, .ADDI, .SHRI, .SHLI, .UNM, .NOT, .LEN, .BNOT, .CONCAT, .CLOSURE => true,
+                    else => false,
+                };
+                if (retargetable) {
+                    self.code.items[last_idx].a = dst;
+                    self.updateMaxStack(dst + 1);
+                    return;
+                }
+            }
+        }
+        try self.emitMOVE(dst, src);
+    }
+
     /// Emit GETUPVAL instruction: R[A] := UpValue[B]
     pub fn emitGETUPVAL(self: *ProtoBuilder, dst: u8, upval_idx: u8) !void {
         const instr = Instruction.initABC(.GETUPVAL, dst, upval_idx, 0);
@@ -2828,7 +2868,7 @@ pub const Parser = struct {
                 switch (loc) {
                     .local => |local_reg| {
                         self.proto.current_line = store_line;
-                        try self.proto.emitMOVE(local_reg, value_reg);
+                        try self.proto.retargetOrMove(local_reg, value_reg, expr_start);
                     },
                     .upvalue => |idx| {
                         self.proto.current_line = store_line;
@@ -5230,7 +5270,7 @@ pub const Parser = struct {
             // Move first expression to first variable register
             if (expr_reg != first_reg) {
                 self.proto.current_line = first_expr_line;
-                try self.proto.emitMOVE(first_reg, expr_reg);
+                try self.proto.retargetOrMove(first_reg, expr_reg, last_expr_code_start);
             }
             expr_count += 1;
             if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
@@ -5253,7 +5293,7 @@ pub const Parser = struct {
                     const target_reg = first_reg + expr_count;
                     if (expr_reg != target_reg) {
                         self.proto.current_line = expr_line;
-                        try self.proto.emitMOVE(target_reg, expr_reg);
+                        try self.proto.retargetOrMove(target_reg, expr_reg, last_expr_code_start);
                     }
                 }
                 // If more values than variables, discard extras
@@ -5622,7 +5662,7 @@ pub const Parser = struct {
                 // Restore next_reg to max of saved and current
                 self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
                 if (arg_reg != target_reg) {
-                    try self.proto.emitMOVE(target_reg, arg_reg);
+                    try self.proto.retargetOrMove(target_reg, arg_reg, code_len_before);
                 }
                 arg_count = 1;
                 last_was_call = self.isDirectTrailingCallResult(code_len_before, target_reg);
@@ -5667,7 +5707,7 @@ pub const Parser = struct {
                 // Restore next_reg to max of saved and current (in case parseExpr allocated more)
                 self.proto.next_reg = @max(self.proto.next_reg, saved_next_reg);
                 if (next_arg != target_reg) {
-                    try self.proto.emitMOVE(target_reg, next_arg);
+                    try self.proto.retargetOrMove(target_reg, next_arg, code_len_before2);
                 }
                 last_was_call = arg_is_call;
             }
