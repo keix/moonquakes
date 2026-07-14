@@ -539,6 +539,26 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // are also safepoints (recursion has no back-edges).
             const func_val = &stack[base + inst.getA()];
             if (!func_val.isObject()) return;
+            // Pure-math native leaves run inline (like TFORCALL's ipairs
+            // specialization): one numeric argument, one float result, no
+            // frame, no error path. String coercion and each native's own
+            // bad-argument behavior stay in the full handler.
+            if (func_val.asObjectPtr().type == .native_closure) {
+                if (inst.getB() != 2 or inst.getC() != 2) return;
+                const nc = object.getObject(object.NativeClosureObject, func_val.asObjectPtr());
+                const arg = &stack[base + inst.getA() + 1];
+                const x = numberToFloat(arg) orelse return;
+                const r = switch (nc.func.id) {
+                    .math_sqrt => @sqrt(x),
+                    .math_sin => @sin(x),
+                    .math_cos => @cos(x),
+                    else => return,
+                };
+                TValue.setFloat(&stack[base + inst.getA()], r);
+                pc += 1;
+                inst = pc[0];
+                continue :dispatch inst.getOpCode();
+            }
             const func_closure = func_val.asClosure() orelse return;
             const proto = func_closure.proto;
             if (proto.is_vararg) return;
