@@ -364,6 +364,47 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        .BAND, .BOR, .BXOR, .BANDK, .BORK, .BXORK => {
+            // Integer-only; floats with integral values, strings and
+            // metamethods take the full handler's coercion path.
+            const vb = &stack[base + inst.getB()];
+            const vc = switch (inst.getOpCode()) {
+                .BANDK, .BORK, .BXORK => &k[inst.getC()],
+                else => &stack[base + inst.getC()],
+            };
+            if (!vb.isInteger() or !vc.isInteger()) return;
+            const ib: u64 = @bitCast(vb.asInt());
+            const ic: u64 = @bitCast(vc.asInt());
+            const res: u64 = switch (inst.getOpCode()) {
+                .BAND, .BANDK => ib & ic,
+                .BOR, .BORK => ib | ic,
+                .BXOR, .BXORK => ib ^ ic,
+                else => unreachable,
+            };
+            TValue.setInt(&stack[base + inst.getA()], @bitCast(res));
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SHL, .SHR => {
+            // Plain in-range shifts only; negative and >= 64 counts have
+            // Lua-specific semantics (direction flip, saturate to zero)
+            // handled by the full path, as do coercion and metamethods.
+            const vb = &stack[base + inst.getB()];
+            const vc = &stack[base + inst.getC()];
+            if (!vb.isInteger() or !vc.isInteger()) return;
+            const shift = vc.asInt();
+            if (shift < 0 or shift >= 64) return;
+            const u: u64 = @bitCast(vb.asInt());
+            const res: u64 = if (inst.getOpCode() == .SHL)
+                u << @intCast(shift)
+            else
+                u >> @intCast(shift);
+            TValue.setInt(&stack[base + inst.getA()], @bitCast(res));
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
         .MOD, .MODK => {
             // Integer floor modulo (Zig's @mod matches Lua's
             // divisor-signed result). Zero divisor is the n%0 error path
