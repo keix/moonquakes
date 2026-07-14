@@ -2687,6 +2687,43 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     if (all_primitive) {
+        // Small results assemble in one pass on the stack: no temporary
+        // heap allocation and each number formats once. Overflow falls
+        // back to the two-pass heap path below.
+        var sbuf: [2048]u8 = undefined;
+        var soff: usize = 0;
+        var fits = true;
+        for (b..c + 1) |i| {
+            const val = &vm.stack[vm.base + i];
+            if (val.asString()) |str| {
+                const s = str.asSlice();
+                if (soff + s.len > sbuf.len) {
+                    fits = false;
+                    break;
+                }
+                @memcpy(sbuf[soff..][0..s.len], s);
+                soff += s.len;
+            } else if (val.isInteger()) {
+                const s = std.fmt.bufPrint(sbuf[soff..], "{d}", .{val.asInt()}) catch {
+                    fits = false;
+                    break;
+                };
+                soff += s.len;
+            } else if (val.isNumber()) {
+                if (sbuf.len - soff < 40) {
+                    fits = false;
+                    break;
+                }
+                const s = formatConcatNumber(sbuf[soff..], val.asFloat());
+                soff += s.len;
+            }
+        }
+        if (fits) {
+            const result_str = try vm.gc().allocString(sbuf[0..soff]);
+            vm.stack[vm.base + a] = TValue.fromString(result_str);
+            return .Continue;
+        }
+
         var total_len: usize = 0;
         for (b..c + 1) |i| {
             const val = &vm.stack[vm.base + i];
