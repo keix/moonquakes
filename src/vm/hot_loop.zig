@@ -849,15 +849,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 if (slot.isNil()) return;
                 slot.* = value;
                 table.mod_count +%= 1;
-            } else if (i == alen + 1 and table.metatable == null and
-                table.hash_part.count() == 0 and table.deleted_keys.count() == 0)
-            {
+            } else if (i == alen + 1 and table.metatable == null) {
                 // On OOM the table is untouched; the defer leaves pc at
-                // this SETI so the outer handler re-executes it.
-                table.array.append(table.allocator, value) catch return;
-                table.mod_count +%= 1;
-                table.shape_count +%= 1;
-                if (i == table.seq_len + 1) table.seq_len = i;
+                // this SETI so the outer handler re-executes it. The
+                // append invariant lives in TableObject.tryAppendFresh.
+                const appended = table.tryAppendFresh(i, value) catch return;
+                if (!appended) return;
             } else return;
             if (value.isObject()) {
                 vm.gc().barrierBackValue(&table.header, value);

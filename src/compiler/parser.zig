@@ -839,6 +839,9 @@ pub const ProtoBuilder = struct {
         } else {
             // SELF puts obj in R[A+1] and method in R[A]
             // Emulate with: MOVE R[A+1], R[B]; LOADK temp, K[C]; GETTABLE R[A], R[B], temp
+            // NOTE: name_resolver's GETTABLE classifier pattern-matches
+            // this exact shape (the MOVE dst+1,obj) to report call errors
+            // as "method 'x'" — keep them in sync if this changes.
             try self.emitMOVE(dst + 1, obj);
             const temp = self.allocTemp();
             try self.emitLoadK(temp, method_const);

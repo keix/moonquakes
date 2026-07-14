@@ -589,6 +589,23 @@ pub const TableObject = struct {
         self.shape_count +%= 1;
     }
 
+    /// Fresh-append fast path: store non-nil `value` at 1-based index
+    /// `i` when that is exactly one past the array end and the hash and
+    /// deleted-key parts are empty — no absorb, no deleted-key
+    /// bookkeeping, and nothing beyond the array to probe for the
+    /// sequence border. Returns false when those conditions don't hold.
+    /// Single home for the invariant shared by set()'s append branch and
+    /// the hot loop's SETI/SETTABLE arm.
+    pub inline fn tryAppendFresh(self: *TableObject, i: i64, value: TValue) !bool {
+        if (i != @as(i64, @intCast(self.array.items.len)) + 1) return false;
+        if (self.hash_part.count() != 0 or self.deleted_keys.count() != 0) return false;
+        try self.array.append(self.allocator, value);
+        self.mod_count +%= 1;
+        self.shape_count +%= 1;
+        if (self.seq_len + 1 == i) self.seq_len = i;
+        return true;
+    }
+
     /// Set a value by TValue key
     /// Note: nil and NaN keys are not allowed (Lua 5.4 semantics)
     pub fn set(self: *TableObject, key: TValue, value: TValue) !void {
@@ -635,17 +652,7 @@ pub const TableObject = struct {
                 return;
             }
             if (i == alen + 1 and !value.isNil()) {
-                // Fresh-append fast path (constructor fills): empty hash
-                // and deleted-key parts mean no absorb, no deleted-key
-                // bookkeeping and nothing beyond the array to probe for
-                // the sequence walk.
-                if (self.hash_part.count() == 0 and self.deleted_keys.count() == 0) {
-                    try self.array.append(self.allocator, value);
-                    self.mod_count +%= 1;
-                    self.shape_count +%= 1;
-                    if (i == self.seq_len + 1) self.seq_len = i;
-                    return;
-                }
+                if (try self.tryAppendFresh(i, value)) return;
                 try self.array.append(self.allocator, value);
                 _ = self.deleted_keys.remove(canonical_key);
                 var next: i64 = i + 1;
