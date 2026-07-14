@@ -3533,17 +3533,27 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             else
                 nc.func.id.desiredResultsForCall(c);
             const top_defined = c == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
-            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-            for (0..native_call_arg_count) |i| {
-                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            // The arg snapshot feeds only the return hook (the native may
+            // overwrite the arg slots with results before the hook fires),
+            // so skip the 1KB buffer init entirely when nothing listens.
+            const wants_return_hook = hook_state.hasReturnListener(vm);
+            var native_call_args: [64]TValue = undefined;
+            var native_call_arg_count: usize = 0;
+            if (wants_return_hook) {
+                native_call_args = [_]TValue{.nil} ** 64;
+                native_call_arg_count = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                for (0..native_call_arg_count) |i| {
+                    native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                }
             }
             vm.top = vm.base + a + 1 + nargs;
-            try hook_state.onCallTransfer(vm, null, .{ .stack = .{
-                .start = 1,
-                .src_base = vm.base + a + 1,
-                .count = nargs,
-            } }, executeSyncMM);
+            if (hook_state.hasCallListener(vm)) {
+                try hook_state.onCallTransfer(vm, null, .{ .stack = .{
+                    .start = 1,
+                    .src_base = vm.base + a + 1,
+                    .count = nargs,
+                } }, executeSyncMM);
+            }
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, nresults, top_defined);
             const result_end = native_result.result_end;
             if (result_end < frame_max) {
@@ -3552,7 +3562,12 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
             vm.top = if (c == 0) result_end else frame_max;
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            // Re-check at return time: the native itself may have installed
+            // a hook (debug.sethook). Its own return event then fires with
+            // an empty arg snapshot, but delivery timing matches.
+            if (hook_state.hasReturnListener(vm)) {
+                try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            }
             return .LoopContinue;
         }
     }
@@ -3799,13 +3814,21 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
             const native_nresults = nc.func.id.desiredResultsForCall(c_for_native);
             const top_defined = c_for_native == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
-            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-            for (0..native_call_arg_count) |i| {
-                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            // Same hook-off gating as opCALL's native path: the snapshot
+            // only feeds the return hook.
+            var native_call_args: [64]TValue = undefined;
+            var native_call_arg_count: usize = 0;
+            if (hook_state.hasReturnListener(vm)) {
+                native_call_args = [_]TValue{.nil} ** 64;
+                native_call_arg_count = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                for (0..native_call_arg_count) |i| {
+                    native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                }
             }
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, native_nresults, top_defined);
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            if (hook_state.hasReturnListener(vm)) {
+                try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            }
 
             if (current_ci.previous != null) {
                 const actual_nresults: u32 = if (nresults < 0) blk: {
