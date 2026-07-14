@@ -62,7 +62,7 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
     const lineinfo = try gc.allocator.dupe(u32, raw.lineinfo);
 
     // Allocate via GC - ProtoObject is now GC-managed
-    return gc.allocProto(
+    const proto_obj = try gc.allocProto(
         k,
         code,
         nested_protos,
@@ -76,6 +76,9 @@ pub fn materialize(raw: *const RawProto, gc: *GC, allocator: std.mem.Allocator) 
         source,
         lineinfo,
     );
+    proto_obj.linedefined = raw.linedefined;
+    proto_obj.lastlinedefined = raw.lastlinedefined;
+    return proto_obj;
 }
 
 fn materializeConstants(raw: *const RawProto, gc: *GC) MaterializeError![]const TValue {

@@ -126,6 +126,24 @@ pub fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
                             }
                         }
                     }
+                    // A temp holding _ENV (loaded via GETUPVAL) also means
+                    // this is a global access, not a field read.
+                    var j = i;
+                    var jbudget: u8 = 8;
+                    while (j > 0 and jbudget > 0) {
+                        j -= 1;
+                        jbudget -= 1;
+                        const w = ci.func.code[j];
+                        if (w.getA() != table_reg) continue;
+                        if (w.getOpCode() == .GETUPVAL and w.getB() < ci.func.upvalues.len) {
+                            if (ci.func.upvalues[w.getB()].name) |uv_name| {
+                                if (std.mem.eql(u8, uv_name, "_ENV")) {
+                                    return .{ .kind = .global_name, .name = key.asSlice() };
+                                }
+                            }
+                        }
+                        break;
+                    }
                     return .{ .kind = .field_name, .name = key.asSlice() };
                 }
                 continue;
@@ -144,7 +162,75 @@ pub fn callNameContext(ci: *const CallInfo, call_reg: u8) ?CallNameContext {
                 const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
                 return .{ .kind = .upvalue_name, .name = uv_name };
             },
-            else => continue,
+            .GETTABLE => {
+                // Large constant keys compile as LOADK key + GETTABLE;
+                // recover the key string and classify like GETFIELD.
+                const key_reg = inst.getC();
+                var kj = i;
+                var kb: u8 = 8;
+                var key_str: ?[]const u8 = null;
+                while (kj > 0 and kb > 0) {
+                    kj -= 1;
+                    kb -= 1;
+                    const w = ci.func.code[kj];
+                    if (w.getA() != key_reg) continue;
+                    if (w.getOpCode() == .LOADK and w.getBx() < ci.func.k.len) {
+                        if (ci.func.k[w.getBx()].asString()) |ks| key_str = ks.asSlice();
+                    } else if (w.getOpCode() == .LOADKX and kj + 1 < ci.func.code.len) {
+                        const ax = ci.func.code[kj + 1].getAx();
+                        if (ax < ci.func.k.len) {
+                            if (ci.func.k[ax].asString()) |ks| key_str = ks.asSlice();
+                        }
+                    }
+                    break;
+                }
+                const key = key_str orelse break;
+                const table_reg = inst.getB();
+                if (table_reg < ci.func.local_reg_names.len) {
+                    if (ci.func.local_reg_names[table_reg]) |local_name| {
+                        if (std.mem.eql(u8, local_name, "_ENV")) {
+                            return .{ .kind = .global_name, .name = key };
+                        }
+                    }
+                }
+                var tj = i;
+                var tb: u8 = 8;
+                while (tj > 0 and tb > 0) {
+                    tj -= 1;
+                    tb -= 1;
+                    const w = ci.func.code[tj];
+                    if (w.getA() != table_reg) continue;
+                    if (w.getOpCode() == .GETUPVAL and w.getB() < ci.func.upvalues.len) {
+                        if (ci.func.upvalues[w.getB()].name) |uv_name| {
+                            if (std.mem.eql(u8, uv_name, "_ENV")) {
+                                return .{ .kind = .global_name, .name = key };
+                            }
+                        }
+                    }
+                    break;
+                }
+                // Large-key method calls emulate SELF as
+                // "MOVE dst+1,obj; LOADK k; GETTABLE dst,obj,k".
+                var mj = i;
+                var mb: u8 = 4;
+                while (mj > 0 and mb > 0) {
+                    mj -= 1;
+                    mb -= 1;
+                    const w = ci.func.code[mj];
+                    if (w.getOpCode() == .MOVE and w.getA() == inst.getA() + 1 and w.getB() == table_reg) {
+                        return .{ .kind = .method_name, .name = key };
+                    }
+                }
+                return .{ .kind = .field_name, .name = key };
+            },
+            // Instructions whose A operand is a source (stores, returns,
+            // tests): they do not produce the register, keep walking.
+            .SETTABLE, .SETI, .SETFIELD, .SETTABUP, .SETLIST, .SETUPVAL, .RETURN, .RETURN0, .RETURN1, .TFORCALL, .TEST, .EQ, .LT, .LE, .EQK, .EQI, .LTI, .LEI, .GTI, .GEI, .JMP, .CLOSE, .TBC => continue,
+            // Anything else that writes the register produced its value
+            // in an unclassifiable way (constant loads, arithmetic, call
+            // results); walking past it would fabricate provenance from
+            // an older, unrelated write.
+            else => break,
         }
     }
     if (target_reg < ci.func.local_reg_names.len) {
@@ -263,6 +349,24 @@ pub fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext
                             }
                         }
                     }
+                    // A temp holding _ENV (loaded via GETUPVAL) also means
+                    // this is a global access, not a field read.
+                    var j = i;
+                    var jbudget: u8 = 8;
+                    while (j > 0 and jbudget > 0) {
+                        j -= 1;
+                        jbudget -= 1;
+                        const w = ci.func.code[j];
+                        if (w.getA() != table_reg) continue;
+                        if (w.getOpCode() == .GETUPVAL and w.getB() < ci.func.upvalues.len) {
+                            if (ci.func.upvalues[w.getB()].name) |uv_name| {
+                                if (std.mem.eql(u8, uv_name, "_ENV")) {
+                                    return .{ .kind = .global_name, .name = key.asSlice() };
+                                }
+                            }
+                        }
+                        break;
+                    }
                     return .{ .kind = .field_name, .name = key.asSlice() };
                 }
                 continue;
@@ -281,7 +385,75 @@ pub fn resolveRegisterNameContext(ci: *const CallInfo, reg: u8) ?CallNameContext
                 const uv_name = ci.func.upvalues[uv_idx].name orelse return null;
                 return .{ .kind = .upvalue_name, .name = uv_name };
             },
-            else => continue,
+            .GETTABLE => {
+                // Large constant keys compile as LOADK key + GETTABLE;
+                // recover the key string and classify like GETFIELD.
+                const key_reg = inst.getC();
+                var kj = i;
+                var kb: u8 = 8;
+                var key_str: ?[]const u8 = null;
+                while (kj > 0 and kb > 0) {
+                    kj -= 1;
+                    kb -= 1;
+                    const w = ci.func.code[kj];
+                    if (w.getA() != key_reg) continue;
+                    if (w.getOpCode() == .LOADK and w.getBx() < ci.func.k.len) {
+                        if (ci.func.k[w.getBx()].asString()) |ks| key_str = ks.asSlice();
+                    } else if (w.getOpCode() == .LOADKX and kj + 1 < ci.func.code.len) {
+                        const ax = ci.func.code[kj + 1].getAx();
+                        if (ax < ci.func.k.len) {
+                            if (ci.func.k[ax].asString()) |ks| key_str = ks.asSlice();
+                        }
+                    }
+                    break;
+                }
+                const key = key_str orelse break;
+                const table_reg = inst.getB();
+                if (table_reg < ci.func.local_reg_names.len) {
+                    if (ci.func.local_reg_names[table_reg]) |local_name| {
+                        if (std.mem.eql(u8, local_name, "_ENV")) {
+                            return .{ .kind = .global_name, .name = key };
+                        }
+                    }
+                }
+                var tj = i;
+                var tb: u8 = 8;
+                while (tj > 0 and tb > 0) {
+                    tj -= 1;
+                    tb -= 1;
+                    const w = ci.func.code[tj];
+                    if (w.getA() != table_reg) continue;
+                    if (w.getOpCode() == .GETUPVAL and w.getB() < ci.func.upvalues.len) {
+                        if (ci.func.upvalues[w.getB()].name) |uv_name| {
+                            if (std.mem.eql(u8, uv_name, "_ENV")) {
+                                return .{ .kind = .global_name, .name = key };
+                            }
+                        }
+                    }
+                    break;
+                }
+                // Large-key method calls emulate SELF as
+                // "MOVE dst+1,obj; LOADK k; GETTABLE dst,obj,k".
+                var mj = i;
+                var mb: u8 = 4;
+                while (mj > 0 and mb > 0) {
+                    mj -= 1;
+                    mb -= 1;
+                    const w = ci.func.code[mj];
+                    if (w.getOpCode() == .MOVE and w.getA() == inst.getA() + 1 and w.getB() == table_reg) {
+                        return .{ .kind = .method_name, .name = key };
+                    }
+                }
+                return .{ .kind = .field_name, .name = key };
+            },
+            // Instructions whose A operand is a source (stores, returns,
+            // tests): they do not produce the register, keep walking.
+            .SETTABLE, .SETI, .SETFIELD, .SETTABUP, .SETLIST, .SETUPVAL, .RETURN, .RETURN0, .RETURN1, .TFORCALL, .TEST, .EQ, .LT, .LE, .EQK, .EQI, .LTI, .LEI, .GTI, .GEI, .JMP, .CLOSE, .TBC => continue,
+            // Anything else that writes the register produced its value
+            // in an unclassifiable way (constant loads, arithmetic, call
+            // results); walking past it would fabricate provenance from
+            // an older, unrelated write.
+            else => break,
         }
     }
 

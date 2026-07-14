@@ -153,9 +153,35 @@ pub fn formatIndexOnNonTableError(vm: *VM, inst: Instruction, msg_buf: *[128]u8)
         }
     }
     if (field_cache.takeLastFieldHint(vm)) |hint| {
-        const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
-        const kind = if (hint.is_global) "global" else "field";
-        return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
+        // A hint is only trustworthy when it describes the register the
+        // failing instruction actually indexed; otherwise it is a stale
+        // record from an unrelated access (possibly another frame).
+        const inst_reg: ?u8 = switch (inst.getOpCode()) {
+            .GETTABLE, .GETFIELD, .GETI, .SELF => inst.getB(),
+            .SETTABLE, .SETFIELD, .SETI => inst.getA(),
+            else => null,
+        };
+        if (inst_reg == null or inst_reg.? == hint.reg) {
+            const ty = if (vm.base + hint.reg < vm.stack.len) callableValueTypeName(vm.stack[vm.base + hint.reg]) else "non-table";
+            const kind = if (hint.is_global) "global" else "field";
+            return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value ({s} '{s}')", .{ ty, kind, hint.key.asSlice() }) catch "attempt to index a non-table value";
+        }
+    }
+    // No name context anywhere (e.g. the register IS the local, with no
+    // loading instruction to classify), but the register still names the
+    // type — PUC always reports it.
+    if (vm.ci != null) {
+        const reg_opt2: ?u8 = switch (inst.getOpCode()) {
+            .GETTABLE, .GETFIELD, .GETI, .SELF => inst.getB(),
+            .SETTABLE, .SETFIELD, .SETI => inst.getA(),
+            else => null,
+        };
+        if (reg_opt2) |bad_reg| {
+            if (vm.base + bad_reg < vm.stack.len) {
+                const ty = callableValueTypeName(vm.stack[vm.base + bad_reg]);
+                return std.fmt.bufPrint(msg_buf, "attempt to index a {s} value", .{ty}) catch "attempt to index a non-table value";
+            }
+        }
     }
     return "attempt to index a non-table value";
 }
@@ -288,6 +314,26 @@ pub fn formatArithmeticError(vm: *VM, inst: Instruction, msg_buf: *[128]u8, toIn
     }
 
     if (vm.field_cache.last_field_key) |key| {
+        // Only trust the hint when it describes one of this instruction's
+        // operand registers; otherwise it is a stale record from an
+        // unrelated access and the typed fallback below is more accurate.
+        if (vm.field_cache.last_field_reg) |hreg| {
+            const relevant = switch (inst.getOpCode()) {
+                .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => hreg == inst.getB() or hreg == inst.getC(),
+                .MMBIN => hreg == inst.getA() or hreg == inst.getB(),
+                .UNM, .BNOT, .LEN => hreg == inst.getB(),
+                .ADDK, .SUBK, .MULK, .DIVK, .MODK, .POWK, .IDIVK, .BANDK, .BORK, .BXORK => hreg == inst.getB(),
+                else => true,
+            };
+            if (!relevant) {
+                field_cache.clearLastFieldHint(vm);
+                if (firstArithmeticBadOperand(vm, inst)) |bad| {
+                    const ty = namedValueTypeName(vm, bad);
+                    return std.fmt.bufPrint(msg_buf, "attempt to perform arithmetic on a non-numeric value ({s} value)", .{ty}) catch "attempt to perform arithmetic on a non-numeric value";
+                }
+                return "attempt to perform arithmetic on a non-numeric value";
+            }
+        }
         var suppress_field_hint = false;
         switch (inst.getOpCode()) {
             .ADD, .SUB, .MUL, .DIV, .MOD, .POW, .IDIV, .BAND, .BOR, .BXOR, .SHL, .SHR => {

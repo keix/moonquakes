@@ -1430,86 +1430,14 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             const short_src_key = try vm.gc().allocString("short_src");
             const short_src = try allocShortSource(vm, src);
             try tableSet(vm, result_table, TValue.fromString(short_src_key), TValue.fromString(short_src));
-            var lastlinedefined: i64 = if (proto.lineinfo.len > 0)
-                @intCast(proto.lineinfo[proto.lineinfo.len - 1])
-            else
-                0;
-            const first_line: i64 = if (proto.lineinfo.len > 0) @intCast(proto.lineinfo[0]) else 0;
-            var linedefined: i64 = if (first_line > 0) first_line - 1 else 0;
-            if (proto.is_vararg and first_line > 0 and first_line == lastlinedefined) {
-                linedefined = first_line;
-            }
-            if (func_name) |fname| {
-                if (src.len > 1 and src[0] == '@') {
-                    const path = src[1..];
-                    if (std.fs.cwd().openFile(path, .{})) |file| {
-                        defer file.close();
-                        if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
-                            defer vm.gc().allocator.free(content);
-                            var lines = std.mem.splitScalar(u8, content, '\n');
-                            var line_no: i64 = 1;
-                            var found_decl_line: ?i64 = null;
-                            var fn_pat_buf: [160]u8 = undefined;
-                            var lfn_pat_buf: [176]u8 = undefined;
-                            const fn_pat = std.fmt.bufPrint(&fn_pat_buf, "function {s}", .{fname}) catch "";
-                            const lfn_pat = std.fmt.bufPrint(&lfn_pat_buf, "local function {s}", .{fname}) catch "";
-                            while (lines.next()) |ln| : (line_no += 1) {
-                                const t = std.mem.trimLeft(u8, ln, " \t");
-                                if ((fn_pat.len > 0 and std.mem.startsWith(u8, t, fn_pat)) or
-                                    (lfn_pat.len > 0 and std.mem.startsWith(u8, t, lfn_pat)))
-                                {
-                                    linedefined = line_no;
-                                    found_decl_line = line_no;
-                                    break;
-                                }
-                            }
-                            if (found_decl_line) |decl| {
-                                if (findFunctionEndLine(content, decl)) |end_line| {
-                                    lastlinedefined = end_line;
-                                }
-                            }
-                        } else |_| {}
-                    } else |_| {}
-                }
-            }
-            if (func_name == null) {
-                if (src.len > 1 and src[0] == '@') {
-                    const path = src[1..];
-                    if (std.fs.cwd().openFile(path, .{})) |file| {
-                        defer file.close();
-                        if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
-                            defer vm.gc().allocator.free(content);
-                            if (findAnonymousFunctionDeclLine(content, first_line)) |decl| {
-                                linedefined = decl;
-                            }
-                        } else |_| {}
-                    } else |_| {}
-                } else if (findAnonymousFunctionDeclLine(src, first_line)) |decl| {
-                    linedefined = decl;
-                } else {
-                    // Stripped chunks have no source/line data, but Lua still
-                    // reports a positive line interval for functions.
-                    if (std.mem.eql(u8, src, "?") or std.mem.eql(u8, src, "=?")) {
-                        linedefined = 1;
-                        lastlinedefined = 1;
-                    } else {
-                        // Main chunk loaded from string source.
-                        linedefined = 0;
-                        lastlinedefined = 0;
-                    }
-                }
-            }
-            if (src.len > 1 and src[0] == '@' and linedefined > 0) {
-                const path = src[1..];
-                if (std.fs.cwd().openFile(path, .{})) |file| {
-                    defer file.close();
-                    if (file.readToEndAlloc(vm.gc().allocator, 256 * 1024)) |content| {
-                        defer vm.gc().allocator.free(content);
-                        if (findFunctionEndLine(content, linedefined)) |end_line| {
-                            lastlinedefined = end_line;
-                        }
-                    } else |_| {}
-                } else |_| {}
+            // Exact values recorded at parse time (0 = main chunk, matching
+            // PUC). Serialized chunks that predate the fields report the
+            // stripped-chunk interval.
+            var linedefined: i64 = @intCast(proto.linedefined);
+            var lastlinedefined: i64 = @intCast(proto.lastlinedefined);
+            if (linedefined == 0 and !proto.is_main_chunk) {
+                linedefined = 1;
+                lastlinedefined = 1;
             }
             const linedefined_key = try vm.gc().allocString("linedefined");
             try tableSet(vm, result_table, TValue.fromString(linedefined_key), TValue.fromInt(linedefined));

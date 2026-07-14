@@ -2170,17 +2170,16 @@ pub const Parser = struct {
         const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
-        var return_line: u32 = @intCast(self.current.line);
-        if (builder.lineinfo.items.len > 0) {
-            const last_line = builder.lineinfo.items[builder.lineinfo.items.len - 1];
-            if (last_line > 0) return_line = last_line;
-        } else {
-            return_line = end_line;
-        }
-        builder.current_line = return_line;
+        // The implicit return belongs to the function's `end` line, as in
+        // PUC (activelines and line hooks observe it there). Deriving it
+        // from the last body instruction made the attribution flip with
+        // unrelated codegen changes.
+        builder.current_line = end_line;
         try builder.emit(.RETURN0, 0, 1, 0);
 
-        const func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
+        var func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
+        func_proto_data.linedefined = fn_line;
+        func_proto_data.lastlinedefined = end_line;
         proto_ptr.* = func_proto_data;
         return end_line;
     }
@@ -2504,8 +2503,20 @@ pub const Parser = struct {
         const ret_code_before = self.proto.code.items.len;
 
         // Parse first return value
-        const first_reg = try self.parseExpr();
+        var first_reg = try self.parseExpr();
         var count: u8 = 1;
+
+        // Multi-value returns need a contiguous block. A first value that
+        // is not a fresh top temp (e.g. a direct local register) cannot
+        // anchor it — the following slots would be other locals — so
+        // rebase onto a fresh temp before staging the rest.
+        if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
+            if (!(first_reg >= self.proto.locals_top and first_reg + 1 == self.proto.next_reg)) {
+                const rebased = self.proto.allocTemp();
+                try self.proto.emitMOVE(rebased, first_reg);
+                first_reg = rebased;
+            }
+        }
 
         // Check for tail call optimization: return f(...)
         // If the return is a single function call, convert CALL to TAILCALL.
@@ -2561,12 +2572,17 @@ pub const Parser = struct {
             const expr_code_before = self.proto.code.items.len;
             const expr_reg = try self.parseExpr();
 
-            // Values must be in consecutive registers
+            // Values must be in consecutive registers; reserve each slot so
+            // the next expression's temps cannot allocate over it.
             const expected_reg = first_reg + count;
             if (expr_reg != expected_reg) {
                 try self.proto.emitMOVE(expected_reg, expr_reg);
             }
             count += 1;
+            if (self.proto.next_reg < first_reg + count) {
+                self.proto.next_reg = first_reg + count;
+            }
+            self.proto.updateMaxStack(first_reg + count);
 
             // Check if this is the last expression and it's a function call
             // If so, we need to expand its return values
@@ -3133,6 +3149,7 @@ pub const Parser = struct {
         // Parenthesized expression: (expr)
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) {
             self.advance(); // consume '('
+            const paren_code_start = self.proto.code.items.len;
             const result = try self.parseExpr();
             if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ")"))) {
                 return error.ExpectedRightParen;
@@ -3142,10 +3159,13 @@ pub const Parser = struct {
             // If the inner expression was a function call:
             // 1. Patch CALL to return exactly 1 result (C=2)
             // 2. Emit barrier MOVEs to prevent parseMultipleAssignment from expanding the CALL
-            if (self.proto.code.items.len > 0) {
+            // The CALL must have been emitted by THIS expression and produce
+            // the returned register: a direct local emits nothing, and
+            // patching an earlier statement's call would change its arity.
+            if (self.proto.code.items.len > paren_code_start) {
                 const last_idx = self.proto.code.items.len - 1;
                 const last_inst = self.proto.code.items[last_idx];
-                if (last_inst.getOpCode() == .CALL) {
+                if (last_inst.getOpCode() == .CALL and last_inst.getA() == result) {
                     const a = last_inst.getA();
                     const b = last_inst.getB();
                     // Patch CALL to return exactly 1 result (C=2)
@@ -3269,6 +3289,21 @@ pub const Parser = struct {
             const var_name = self.current.lexeme;
             var base_reg: u8 = undefined;
             if (try self.proto.resolveVariable(var_name)) |loc| {
+                if (loc == .local) {
+                    // Direct register reference: expression consumers treat
+                    // operand registers as read-only (binary ops write to a
+                    // fresh destination, staging paths copy-if-needed), so
+                    // a bare local needs no temp copy. Suffix chains mutate
+                    // their base register in place and keep the copy.
+                    const has_suffix = next.kind == .Symbol and
+                        (std.mem.eql(u8, next.lexeme, ".") or
+                            std.mem.eql(u8, next.lexeme, "[") or
+                            std.mem.eql(u8, next.lexeme, ":"));
+                    if (!has_suffix) {
+                        self.advance();
+                        return loc.local;
+                    }
+                }
                 base_reg = self.proto.allocTemp();
                 switch (loc) {
                     .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
@@ -3830,22 +3865,11 @@ pub const Parser = struct {
         var left = try self.parseMul();
 
         // Accumulator register that folds long additive chains to avoid
-        // unbounded temporary growth (e.g. a1 + a2 + ... + a200).
-        // Its allocation is deferred only while a constant fold is still
-        // possible (left is a just-loaded numeric literal); otherwise it is
-        // allocated up front so non-folded chains keep their exact register
-        // layout.
+        // unbounded temporary growth (e.g. a1 + a2 + ... + a200). The
+        // first emitted arith writes it directly from (left, right), so no
+        // MOVE prologue is needed; while a constant fold is still possible
+        // (left is a just-loaded numeric literal) emission stays deferred.
         var acc: ?u8 = null;
-        if (self.current.kind == .Symbol and
-            (std.mem.eql(u8, self.current.lexeme, "+") or
-                std.mem.eql(u8, self.current.lexeme, "-")) and
-            self.proto.trailingNumericLoad(0, left) == null)
-        {
-            acc = self.proto.allocTemp();
-            if (acc.? != left) {
-                try self.proto.emitMOVE(acc.?, left);
-            }
-        }
 
         while (self.current.kind == .Symbol and
             (std.mem.eql(u8, self.current.lexeme, "+") or
@@ -3862,24 +3886,27 @@ pub const Parser = struct {
                     left = folded;
                     continue;
                 }
-                acc = self.proto.allocTemp();
-                if (acc.? != left) {
-                    try self.proto.emitMOVE(acc.?, left);
-                }
             }
             // Constant RHS: use the K-operand opcode and drop the LOADK, so
             // `x + 1` costs one dispatch instead of two.
             if (self.proto.trailingNumericConstIndex(right)) |k_idx| {
                 self.proto.popLastInstruction();
+                const src = acc orelse left;
+                if (acc == null) acc = self.proto.allocTemp();
                 if (std.mem.eql(u8, op, "+")) {
-                    try self.proto.emit(.ADDK, acc.?, acc.?, k_idx);
+                    try self.proto.emit(.ADDK, acc.?, src, k_idx);
                 } else {
-                    try self.proto.emit(.SUBK, acc.?, acc.?, k_idx);
+                    try self.proto.emit(.SUBK, acc.?, src, k_idx);
                 }
-            } else if (std.mem.eql(u8, op, "+")) {
-                try self.proto.emitAdd(acc.?, acc.?, right);
+                self.proto.updateMaxStack(acc.? + 1);
             } else {
-                try self.proto.emitSub(acc.?, acc.?, right);
+                const src = acc orelse left;
+                if (acc == null) acc = self.proto.allocTemp();
+                if (std.mem.eql(u8, op, "+")) {
+                    try self.proto.emitAdd(acc.?, src, right);
+                } else {
+                    try self.proto.emitSub(acc.?, src, right);
+                }
             }
 
             // Release temporaries created for the RHS; keep only accumulator.
@@ -4353,8 +4380,22 @@ pub const Parser = struct {
     fn parseNumericFor(self: *Parser, loop_var_name: []const u8, break_count: usize) ParseError!void {
         self.advance(); // consume '='
 
+        // The loop owns base..base+3 (staged control, limit, step, user
+        // var) and FORPREP/FORLOOP write all four. Header values that did
+        // not land in a fresh top temp (e.g. a direct local register) are
+        // copied into their slot, and next_reg is forced past each slot so
+        // no later temp allocation can collide with it (the same reserve
+        // discipline parseGenericFor uses).
+
         // Parse initial value
-        const init_reg = try self.parseExpr();
+        const init_expr = try self.parseExpr();
+        var base_reg: u8 = undefined;
+        if (init_expr >= self.proto.locals_top and init_expr + 1 == self.proto.next_reg) {
+            base_reg = init_expr;
+        } else {
+            base_reg = self.proto.allocTemp();
+            try self.proto.emitMOVE(base_reg, init_expr);
+        }
 
         // Expect ','
         if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ","))) {
@@ -4364,18 +4405,26 @@ pub const Parser = struct {
 
         // Parse limit value
         const limit_reg = try self.parseExpr();
+        if (limit_reg != base_reg + 1) {
+            try self.proto.emitMOVE(base_reg + 1, limit_reg);
+        }
+        if (self.proto.next_reg < base_reg + 2) self.proto.next_reg = base_reg + 2;
+        self.proto.updateMaxStack(base_reg + 2);
 
         // Check for optional step (for now, default to 1)
-        var step_reg: u8 = 0;
         if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, ",")) {
             self.advance(); // consume ','
-            step_reg = try self.parseExpr();
+            const step_reg = try self.parseExpr();
+            if (step_reg != base_reg + 2) {
+                try self.proto.emitMOVE(base_reg + 2, step_reg);
+            }
         } else {
-            // Default step = 1
-            step_reg = self.proto.allocTemp();
+            // Default step = 1, written straight into its slot.
             const const_idx = try self.proto.addConstNumber("1");
-            try self.proto.emitLoadK(step_reg, const_idx);
+            try self.proto.emitLoadK(base_reg + 2, const_idx);
         }
+        if (self.proto.next_reg < base_reg + 3) self.proto.next_reg = base_reg + 3;
+        self.proto.updateMaxStack(base_reg + 3);
 
         // Expect 'do'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "do"))) {
@@ -4383,16 +4432,6 @@ pub const Parser = struct {
         }
         const do_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'do'
-
-        // Set up for loop registers: base, base+1=limit, base+2=step
-        const base_reg = init_reg;
-        // Move limit and step to correct positions if needed
-        if (limit_reg != base_reg + 1) {
-            try self.proto.emitMOVE(base_reg + 1, limit_reg);
-        }
-        if (step_reg != base_reg + 2) {
-            try self.proto.emitMOVE(base_reg + 2, step_reg);
-        }
 
         // FORPREP: decrement counter by step, then jump to FORLOOP
         self.proto.current_line = do_line;
