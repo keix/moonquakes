@@ -196,6 +196,9 @@ pub const NativeFnId = enum(u8) {
             .xpcall,
             .coroutine_yield,
             .coroutine_resume,
+            // close returns (true) or (false, err): the transfer writer
+            // sets vm.top for whichever shape applies.
+            .coroutine_close,
             => .{ .call_multret = .top_defined },
 
             .string_gsub,
