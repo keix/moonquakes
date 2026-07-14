@@ -143,3 +143,30 @@ test "gc varargs stored above vm.top survive a collection inside a callee" {
         TValue.fromInt(33),
     });
 }
+
+test "metamethod frames stage above the caller's registers after a native tail call" {
+    var ctx = api.ApiContext{};
+    try ctx.init();
+    defer ctx.deinit();
+
+    // `new` tail-calls a native (setmetatable), which used to leave vm.top
+    // at ret_base + 1 — deep inside the caller's register file. The next
+    // metamethod dispatch staged its frame at the unclamped vm.top and
+    // overwrote the caller's locals (here: acc), so __add received a
+    // foreign table. The staging clamp and the tail-call top policy keep
+    // the frame above base + maxstacksize.
+    const result = try ctx.exec(
+        \\local Vec = {}
+        \\Vec.__add = function(a, b) return setmetatable({ a[1] + b[1] }, Vec) end
+        \\Vec.__mul = function(a, s) return setmetatable({ a[1] * s }, Vec) end
+        \\local function new(x) return setmetatable({ x }, Vec) end
+        \\local acc = new(0.0)
+        \\local v = new(1.5)
+        \\for i = 1, 100 do
+        \\  acc = acc + v * 0.5
+        \\end
+        \\return acc[1]
+    );
+
+    try api.expectMultiple(result, &[_]TValue{TValue.fromFloat(75.0)});
+}

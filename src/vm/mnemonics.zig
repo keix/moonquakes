@@ -977,6 +977,8 @@ fn executeSyncMMAnnotated(
 
     // Push call info for metamethod
     const new_ci = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
+    // The hot loop must hand this frame's return back to this executor.
+    new_ci.sync_boundary = true;
     if (annotation.debug_name) |name| {
         new_ci.debug_name = name;
         new_ci.debug_namewhat = annotation.debug_namewhat orelse "metamethod";
@@ -985,7 +987,14 @@ fn executeSyncMMAnnotated(
 
     // Execute until we return to saved depth
     while (vm.callstack_size > saved_depth) {
-        const ci = &vm.callstack[vm.callstack_size - 1];
+        var ci = &vm.callstack[vm.callstack_size - 1];
+        // Same hot-loop integration as runUntilReturnCommon: the
+        // sync_boundary flag keeps the fast return from escaping this
+        // loop; frames may switch inside, so re-derive before fetching.
+        if (!vm.hooks.active and ci.continuation == .none) {
+            hot_loop.run(vm, ci);
+            ci = &vm.callstack[vm.callstack_size - 1];
+        }
         const inst = ci.fetch() catch {
             vm.base = ci.ret_base;
             vm.top = ci.ret_base + 1;
@@ -1121,7 +1130,12 @@ fn scheduleMetamethodClosureCall(
     plan: MetamethodCallPlan,
     mm_name: []const u8,
 ) !ExecuteResult {
-    const prepared = try call.stageLuaCallFrameFromArgs(vm, closure, args, vm.top);
+    // Never stage below the current frame's register file: vm.top can sag
+    // (e.g. right after a tail call into a native returned few results),
+    // and an unclamped base would plant the metamethod frame on top of
+    // live caller registers. Same clamp as executeSyncMM.
+    const safe_base = @max(vm.top, vm.base + vm.ci.?.func.maxstacksize);
+    const prepared = try call.stageLuaCallFrameFromArgs(vm, closure, args, safe_base);
     const ci = try call.activateLuaCallFrame(vm, closure, prepared, plan.ret_abs, plan.nresults);
     markMetamethodFrame(ci, mm_name);
     return .LoopContinue;
@@ -2682,6 +2696,43 @@ fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
     }
 
     if (all_primitive) {
+        // Small results assemble in one pass on the stack: no temporary
+        // heap allocation and each number formats once. Overflow falls
+        // back to the two-pass heap path below.
+        var sbuf: [2048]u8 = undefined;
+        var soff: usize = 0;
+        var fits = true;
+        for (b..c + 1) |i| {
+            const val = &vm.stack[vm.base + i];
+            if (val.asString()) |str| {
+                const s = str.asSlice();
+                if (soff + s.len > sbuf.len) {
+                    fits = false;
+                    break;
+                }
+                @memcpy(sbuf[soff..][0..s.len], s);
+                soff += s.len;
+            } else if (val.isInteger()) {
+                const s = std.fmt.bufPrint(sbuf[soff..], "{d}", .{val.asInt()}) catch {
+                    fits = false;
+                    break;
+                };
+                soff += s.len;
+            } else if (val.isNumber()) {
+                if (sbuf.len - soff < 40) {
+                    fits = false;
+                    break;
+                }
+                const s = formatConcatNumber(sbuf[soff..], val.asFloat());
+                soff += s.len;
+            }
+        }
+        if (fits) {
+            const result_str = try vm.gc().allocString(sbuf[0..soff]);
+            vm.stack[vm.base + a] = TValue.fromString(result_str);
+            return .Continue;
+        }
+
         var total_len: usize = 0;
         for (b..c + 1) |i| {
             const val = &vm.stack[vm.base + i];
@@ -3533,17 +3584,27 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             else
                 nc.func.id.desiredResultsForCall(c);
             const top_defined = c == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
-            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-            for (0..native_call_arg_count) |i| {
-                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            // The arg snapshot feeds only the return hook (the native may
+            // overwrite the arg slots with results before the hook fires),
+            // so skip the 1KB buffer init entirely when nothing listens.
+            const wants_return_hook = hook_state.hasReturnListener(vm);
+            var native_call_args: [64]TValue = undefined;
+            var native_call_arg_count: usize = 0;
+            if (wants_return_hook) {
+                native_call_args = [_]TValue{.nil} ** 64;
+                native_call_arg_count = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                for (0..native_call_arg_count) |i| {
+                    native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                }
             }
             vm.top = vm.base + a + 1 + nargs;
-            try hook_state.onCallTransfer(vm, null, .{ .stack = .{
-                .start = 1,
-                .src_base = vm.base + a + 1,
-                .count = nargs,
-            } }, executeSyncMM);
+            if (hook_state.hasCallListener(vm)) {
+                try hook_state.onCallTransfer(vm, null, .{ .stack = .{
+                    .start = 1,
+                    .src_base = vm.base + a + 1,
+                    .count = nargs,
+                } }, executeSyncMM);
+            }
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, nresults, top_defined);
             const result_end = native_result.result_end;
             if (result_end < frame_max) {
@@ -3552,7 +3613,12 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
             }
             vm.top = if (c == 0) result_end else frame_max;
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            // Re-check at return time: the native itself may have installed
+            // a hook (debug.sethook). Its own return event then fires with
+            // an empty arg snapshot, but delivery timing matches.
+            if (hook_state.hasReturnListener(vm)) {
+                try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            }
             return .LoopContinue;
         }
     }
@@ -3671,8 +3737,10 @@ fn reuseTailClosureFrame(vm: *VM, current_ci: *CallInfo, a: u8, nargs: u32, clos
         }
     }
 
+    const sync_boundary = current_ci.sync_boundary;
     current_ci.reset(func_proto, closure, new_base, ret_base, nresults, current_ci.previous, vararg_base, vararg_count);
     current_ci.was_tail_called = true;
+    current_ci.sync_boundary = sync_boundary;
     vm.base = new_base;
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
     try hook_state.onTailCallTransfer(vm, null, .{ .stack = .{
@@ -3799,13 +3867,21 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             const c_for_native: u8 = if (nresults < 0) 0 else @intCast(nresults + 1);
             const native_nresults = nc.func.id.desiredResultsForCall(c_for_native);
             const top_defined = c_for_native == 0 and nc.func.id.resultAbi().call_multret == .top_defined;
-            var native_call_args: [64]TValue = [_]TValue{.nil} ** 64;
-            const native_call_arg_count: usize = @min(@as(usize, @intCast(nargs)), native_call_args.len);
-            for (0..native_call_arg_count) |i| {
-                native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+            // Same hook-off gating as opCALL's native path: the snapshot
+            // only feeds the return hook.
+            var native_call_args: [64]TValue = undefined;
+            var native_call_arg_count: usize = 0;
+            if (hook_state.hasReturnListener(vm)) {
+                native_call_args = [_]TValue{.nil} ** 64;
+                native_call_arg_count = @min(@as(usize, @intCast(nargs)), native_call_args.len);
+                for (0..native_call_arg_count) |i| {
+                    native_call_args[i] = vm.stack[vm.base + a + 1 + @as(u32, @intCast(i))];
+                }
             }
             const native_result = try call.invokeNativeOnStack(vm, nc, a, nargs, native_nresults, top_defined);
-            try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            if (hook_state.hasReturnListener(vm)) {
+                try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
+            }
 
             if (current_ci.previous != null) {
                 const actual_nresults: u32 = if (nresults < 0) blk: {
@@ -3821,7 +3897,14 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
 
                 popCallInfo(vm);
-                vm.top = ret_base + actual_nresults;
+                // Mirror finishReturnToCaller's top policy: fixed-result
+                // returns restore the caller's frame top so vm.top never
+                // sags below live registers; only multret leaves the
+                // result-defined top.
+                vm.top = if (nresults < 0)
+                    ret_base + actual_nresults
+                else
+                    vm.base + vm.ci.?.func.maxstacksize;
                 return .LoopContinue;
             }
 
@@ -3847,7 +3930,14 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
 
                 popCallInfo(vm);
-                vm.top = ret_base + actual_nresults;
+                // Mirror finishReturnToCaller's top policy: fixed-result
+                // returns restore the caller's frame top so vm.top never
+                // sags below live registers; only multret leaves the
+                // result-defined top.
+                vm.top = if (nresults < 0)
+                    ret_base + actual_nresults
+                else
+                    vm.base + vm.ci.?.func.maxstacksize;
                 return .LoopContinue;
             }
 

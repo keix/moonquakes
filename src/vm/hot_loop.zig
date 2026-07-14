@@ -364,6 +364,47 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
+        .BAND, .BOR, .BXOR, .BANDK, .BORK, .BXORK => {
+            // Integer-only; floats with integral values, strings and
+            // metamethods take the full handler's coercion path.
+            const vb = &stack[base + inst.getB()];
+            const vc = switch (inst.getOpCode()) {
+                .BANDK, .BORK, .BXORK => &k[inst.getC()],
+                else => &stack[base + inst.getC()],
+            };
+            if (!vb.isInteger() or !vc.isInteger()) return;
+            const ib: u64 = @bitCast(vb.asInt());
+            const ic: u64 = @bitCast(vc.asInt());
+            const res: u64 = switch (inst.getOpCode()) {
+                .BAND, .BANDK => ib & ic,
+                .BOR, .BORK => ib | ic,
+                .BXOR, .BXORK => ib ^ ic,
+                else => unreachable,
+            };
+            TValue.setInt(&stack[base + inst.getA()], @bitCast(res));
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
+        .SHL, .SHR => {
+            // Plain in-range shifts only; negative and >= 64 counts have
+            // Lua-specific semantics (direction flip, saturate to zero)
+            // handled by the full path, as do coercion and metamethods.
+            const vb = &stack[base + inst.getB()];
+            const vc = &stack[base + inst.getC()];
+            if (!vb.isInteger() or !vc.isInteger()) return;
+            const shift = vc.asInt();
+            if (shift < 0 or shift >= 64) return;
+            const u: u64 = @bitCast(vb.asInt());
+            const res: u64 = if (inst.getOpCode() == .SHL)
+                u << @intCast(shift)
+            else
+                u >> @intCast(shift);
+            TValue.setInt(&stack[base + inst.getA()], @bitCast(res));
+            pc += 1;
+            inst = pc[0];
+            continue :dispatch inst.getOpCode();
+        },
         .MOD, .MODK => {
             // Integer floor modulo (Zig's @mod matches Lua's
             // divisor-signed result). Zero divisor is the n%0 error path
@@ -539,6 +580,26 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // are also safepoints (recursion has no back-edges).
             const func_val = &stack[base + inst.getA()];
             if (!func_val.isObject()) return;
+            // Pure-math native leaves run inline (like TFORCALL's ipairs
+            // specialization): one numeric argument, one float result, no
+            // frame, no error path. String coercion and each native's own
+            // bad-argument behavior stay in the full handler.
+            if (func_val.asObjectPtr().type == .native_closure) {
+                if (inst.getB() != 2 or inst.getC() != 2) return;
+                const nc = object.getObject(object.NativeClosureObject, func_val.asObjectPtr());
+                const arg = &stack[base + inst.getA() + 1];
+                const x = numberToFloat(arg) orelse return;
+                const r = switch (nc.func.id) {
+                    .math_sqrt => @sqrt(x),
+                    .math_sin => @sin(x),
+                    .math_cos => @cos(x),
+                    else => return,
+                };
+                TValue.setFloat(&stack[base + inst.getA()], r);
+                pc += 1;
+                inst = pc[0];
+                continue :dispatch inst.getOpCode();
+            }
             const func_closure = func_val.asClosure() orelse return;
             const proto = func_closure.proto;
             if (proto.is_vararg) return;
@@ -597,8 +658,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // Shift the arguments down over the reused frame's base.
             stageFixedArgs(stack, base, base + a + 1, b - 1, proto.numparams);
 
+            const sync_boundary = cur.sync_boundary;
             cur.reset(proto, func_closure, base, cur.ret_base, cur.nresults, cur.previous, 0, 0);
             cur.was_tail_called = true;
+            cur.sync_boundary = sync_boundary;
             vm.top = base + proto.maxstacksize;
 
             k = proto.k;
@@ -611,6 +674,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // finishReturnToCaller and popCallInfo for non-protected frames.
             if (cur.tbc_bitmap != 0 or cur.continuation != .none) return;
             if (cur.is_protected) return;
+            // A reentrant executor (runUntilReturn / executeSyncMM) owns
+            // this frame's return; hand control back to its loop.
+            if (cur.sync_boundary) return;
             // Open upvalues inside this frame need real closing: exit.
             // Outer frames' open upvalues don't block the fast return.
             if (openUpvaluesReach(vm, stack, base)) return;

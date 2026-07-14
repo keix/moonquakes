@@ -72,6 +72,11 @@ pub const CallInfo = struct {
     nresults: i16, // expected number of results (-1 = multiple)
     previous: ?*CallInfo, // previous frame in the call stack
     was_tail_called: bool = false,
+    // Root frame of a reentrant executor run (runUntilReturn /
+    // executeSyncMM): its return must hand control back to that
+    // executor's loop, so the hot loop's fast return bails out here.
+    // Must survive tail-call frame reuse.
+    sync_boundary: bool = false,
     debug_name: ?[]const u8 = null,
     debug_namewhat: ?[]const u8 = null,
 

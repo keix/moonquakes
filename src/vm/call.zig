@@ -22,6 +22,7 @@ const execution = @import("execution.zig");
 const CallInfo = execution.CallInfo;
 const error_state = @import("error_state.zig");
 const mnemonics = @import("mnemonics.zig");
+const hot_loop = @import("hot_loop.zig");
 const frame = @import("frame.zig");
 const VM = @import("vm.zig").VM;
 
@@ -758,7 +759,10 @@ fn runUntilReturnCommon(
     nresults: i16,
 ) anyerror!ReentrantCallResult {
     const saved_depth = vm.callstack_size;
-    _ = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, nresults, vararg_base, vararg_count);
+    const root_ci = try mnemonics.pushCallInfoVararg(vm, proto, closure, call_base, result_slot, nresults, vararg_base, vararg_count);
+    // The hot loop must hand this frame's return back to this loop
+    // instead of fast-popping past it.
+    root_ci.sync_boundary = true;
 
     while (vm.callstack_size > saved_depth) {
         if (error_state.hasPendingUnwindAtCurrentFrame(vm)) {
@@ -772,7 +776,16 @@ fn runUntilReturnCommon(
             }
         }
 
-        const ci = &vm.callstack[vm.callstack_size - 1];
+        var ci = &vm.callstack[vm.callstack_size - 1];
+        // Run fast-path opcodes in the hot loop, exactly like the main
+        // executor. The sync_boundary flag keeps its RETURN/TAILCALL
+        // arms from popping past this run's root frame, so the depth
+        // condition above stays authoritative. Frames may switch inside;
+        // re-derive before the fetch.
+        if (!vm.hooks.active and ci.continuation == .none) {
+            hot_loop.run(vm, ci);
+            ci = &vm.callstack[vm.callstack_size - 1];
+        }
         const inst = ci.fetch() catch {
             if (restorePreviousFrame(vm, saved_depth)) break;
             continue;

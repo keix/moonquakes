@@ -51,11 +51,11 @@ fn clearTransfer(vm: *VM) void {
     for (&vm.hooks.transfer_values) |*slot| slot.* = .nil;
 }
 
-fn hasCallListener(vm: *const VM) bool {
+pub fn hasCallListener(vm: *const VM) bool {
     return !vm.hooks.in_hook and (vm.hooks.mask & 0x01) != 0 and vm.hooks.func != null;
 }
 
-fn hasReturnListener(vm: *const VM) bool {
+pub fn hasReturnListener(vm: *const VM) bool {
     return !vm.hooks.in_hook and (vm.hooks.mask & 0x02) != 0 and vm.hooks.func != null;
 }
 
