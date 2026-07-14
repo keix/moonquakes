@@ -88,6 +88,10 @@ fn writeProto(
         try writeProto(result, allocator, nested, strip, proto.source);
     }
 
+    // Definition lines survive stripping, as in PUC.
+    try writeU32(result, allocator, proto.linedefined);
+    try writeU32(result, allocator, proto.lastlinedefined);
+
     // Write debug info (unless stripped)
     if (strip) {
         try writeU32(result, allocator, 0); // source_len
@@ -264,6 +268,9 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
         p.* = try readProto(reader, gc, allocator);
     }
 
+    const linedefined = reader.readU32() orelse return error.InvalidBytecode;
+    const lastlinedefined = reader.readU32() orelse return error.InvalidBytecode;
+
     // Read debug info
     const source_len = reader.readU32() orelse return error.InvalidBytecode;
     const source = if (source_len > 0) blk: {
@@ -329,6 +336,8 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
 
     // Allocate ProtoObject through GC
     const proto_obj = try gc.allocProto(k, code, protos, numparams, is_vararg, is_main_chunk, maxstacksize, nups, upvalues, local_reg_names, source, lineinfo);
+    proto_obj.linedefined = linedefined;
+    proto_obj.lastlinedefined = lastlinedefined;
     // Ownership of upvalue names has moved into the ProtoObject/GC graph.
     // Do not let serializer-side error cleanup free them again.
     upvalue_name_bufs.clearRetainingCapacity();

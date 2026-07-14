@@ -2180,7 +2180,9 @@ pub const Parser = struct {
         builder.current_line = return_line;
         try builder.emit(.RETURN0, 0, 1, 0);
 
-        const func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
+        var func_proto_data = try builder.toRawProto(self.proto.output_allocator, param_count);
+        func_proto_data.linedefined = fn_line;
+        func_proto_data.lastlinedefined = end_line;
         proto_ptr.* = func_proto_data;
         return end_line;
     }

@@ -20,6 +20,14 @@ pub const TracebackState = struct {
     snapshot_def_lines: [256]u32 = [_]u32{0} ** 256,
     snapshot_count: u16 = 0,
     snapshot_has_error_frame: bool = false,
+    // True when the frame is the thread's root (called from C, e.g. a
+    // coroutine entry): such frames have no caller context, so name
+    // inference is skipped and they render anonymously, as in PUC.
+    snapshot_is_root: [256]bool = [_]bool{false} ** 256,
+    // Metamethod frames carry their event name (static string) so the
+    // traceback can render "in metamethod 'x'" like PUC.
+    snapshot_debug_names: [256]?[]const u8 = [_]?[]const u8{null} ** 256,
+    snapshot_debug_namewhats: [256]?[]const u8 = [_]?[]const u8{null} ** 256,
 };
 
 const snapshot_cap = 256;
@@ -69,9 +77,17 @@ fn appendSnapshotFrame(vm: *VM, ci: *const CallInfo, count: *usize) void {
     const line = frameLine(ci) orelse return;
     vm.traceback.snapshot_lines[count.*] = line;
     vm.traceback.snapshot_names[count.*] = .nil;
+    vm.traceback.snapshot_is_root[count.*] = false;
+    vm.traceback.snapshot_debug_names[count.*] = ci.debug_name;
+    vm.traceback.snapshot_debug_namewhats[count.*] = ci.debug_namewhat;
     vm.traceback.snapshot_closures[count.*] = ci.closure;
     vm.traceback.snapshot_sources[count.*] = ci.func.source;
-    vm.traceback.snapshot_def_lines[count.*] = if (ci.func.lineinfo.len > 0) ci.func.lineinfo[0] else line;
+    vm.traceback.snapshot_def_lines[count.*] = if (ci.func.linedefined > 0)
+        ci.func.linedefined
+    else if (ci.func.lineinfo.len > 0)
+        ci.func.lineinfo[0]
+    else
+        line;
     if (ci.closure) |cl| {
         if (inferGlobalName(vm, cl)) |name| {
             vm.traceback.snapshot_names[count.*] = name;
@@ -98,6 +114,9 @@ pub fn captureSnapshot(vm: *VM, stop_before: ?*CallInfo) void {
             appendSnapshotFrame(vm, ci, &count);
         }
     }
+    // The deepest captured frame is the thread's entry frame — called
+    // from C, so it has no caller context for naming.
+    if (count > 0) vm.traceback.snapshot_is_root[count - 1] = true;
     vm.traceback.snapshot_count = @intCast(count);
     vm.traceback.snapshot_has_error_frame = error_state.takeErrorBuiltinFlag(vm);
 }
@@ -116,18 +135,26 @@ pub fn formatSnapshotFrame(
     infer_declared: anytype,
     infer_enclosing: anytype,
 ) []const u8 {
-    var snapshot_name: ?[]const u8 = null;
-    if (target_vm.traceback.snapshot_names[index].asString()) |name| {
-        snapshot_name = name.asSlice();
+    // A frame staged as a metamethod knows its event name exactly.
+    if (target_vm.traceback.snapshot_debug_names[index]) |dn| {
+        const what = target_vm.traceback.snapshot_debug_namewhats[index] orelse "function";
+        return std.fmt.bufPrint(out_buf, "[string]:{d}: in {s} '{s}'", .{ target_vm.traceback.snapshot_lines[index], what, dn }) catch "[Lua function]";
     }
-    if (snapshot_name == null) {
+    var snapshot_name: ?[]const u8 = null;
+    const is_root = target_vm.traceback.snapshot_is_root[index];
+    if (!is_root) {
+        if (target_vm.traceback.snapshot_names[index].asString()) |name| {
+            snapshot_name = name.asSlice();
+        }
+    }
+    if (snapshot_name == null and !is_root) {
         if (target_vm.traceback.snapshot_closures[index]) |cl| {
             if (infer_global(target_vm, cl)) |name| {
                 snapshot_name = name;
             }
         }
     }
-    if (snapshot_name == null) {
+    if (snapshot_name == null and !is_root) {
         var decl_buf: [128]u8 = undefined;
         if (infer_declared(
             host_vm,

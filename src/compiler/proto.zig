@@ -79,4 +79,8 @@ pub const RawProto = struct {
     // Debug/error info
     source: []const u8 = "",
     lineinfo: []const u32 = &.{},
+    // Exact definition lines recorded at parse time (0 for the main
+    // chunk, matching PUC); never derived from lineinfo or source text.
+    linedefined: u32 = 0,
+    lastlinedefined: u32 = 0,
 };

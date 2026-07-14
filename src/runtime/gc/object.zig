@@ -829,6 +829,9 @@ pub const ProtoObject = struct {
     source: []const u8 = "",
     /// Line number for each instruction
     lineinfo: []const u32 = &.{},
+    /// Exact definition lines recorded at parse time (0 = main chunk).
+    linedefined: u32 = 0,
+    lastlinedefined: u32 = 0,
 };
 
 /// Userdata Object - GC-managed arbitrary data block
