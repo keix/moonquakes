@@ -742,6 +742,10 @@ fn inferDeclaredNameForClosure(vm: *VM, closure: *ClosureObject, storage: []u8) 
     return null;
 }
 
+// TODO(boundary): this family of helpers re-reads source files from disk
+// inside error/traceback formatting. Replace guessing with recording, as
+// already done for getinfo's definition lines and metamethod frame names
+// (see docs/moonquakes-todo.md).
 fn inferDeclaredNameFromSourceLine(vm: *VM, source_raw: []const u8, def_line: u32, storage: []u8) ?[]const u8 {
     if (source_raw.len <= 1 or source_raw[0] != '@' or def_line == 0) return null;
     const path = source_raw[1..];
