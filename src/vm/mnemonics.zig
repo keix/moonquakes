@@ -977,6 +977,8 @@ fn executeSyncMMAnnotated(
 
     // Push call info for metamethod
     const new_ci = try pushCallInfoVararg(vm, proto, closure, call_base, result_slot, 1, vararg_base, vararg_count);
+    // The hot loop must hand this frame's return back to this executor.
+    new_ci.sync_boundary = true;
     if (annotation.debug_name) |name| {
         new_ci.debug_name = name;
         new_ci.debug_namewhat = annotation.debug_namewhat orelse "metamethod";
@@ -985,7 +987,14 @@ fn executeSyncMMAnnotated(
 
     // Execute until we return to saved depth
     while (vm.callstack_size > saved_depth) {
-        const ci = &vm.callstack[vm.callstack_size - 1];
+        var ci = &vm.callstack[vm.callstack_size - 1];
+        // Same hot-loop integration as runUntilReturnCommon: the
+        // sync_boundary flag keeps the fast return from escaping this
+        // loop; frames may switch inside, so re-derive before fetching.
+        if (!vm.hooks.active and ci.continuation == .none) {
+            hot_loop.run(vm, ci);
+            ci = &vm.callstack[vm.callstack_size - 1];
+        }
         const inst = ci.fetch() catch {
             vm.base = ci.ret_base;
             vm.top = ci.ret_base + 1;
@@ -3728,8 +3737,10 @@ fn reuseTailClosureFrame(vm: *VM, current_ci: *CallInfo, a: u8, nargs: u32, clos
         }
     }
 
+    const sync_boundary = current_ci.sync_boundary;
     current_ci.reset(func_proto, closure, new_base, ret_base, nresults, current_ci.previous, vararg_base, vararg_count);
     current_ci.was_tail_called = true;
+    current_ci.sync_boundary = sync_boundary;
     vm.base = new_base;
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else new_base + func_proto.maxstacksize;
     try hook_state.onTailCallTransfer(vm, null, .{ .stack = .{

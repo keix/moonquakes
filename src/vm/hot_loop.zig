@@ -658,8 +658,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // Shift the arguments down over the reused frame's base.
             stageFixedArgs(stack, base, base + a + 1, b - 1, proto.numparams);
 
+            const sync_boundary = cur.sync_boundary;
             cur.reset(proto, func_closure, base, cur.ret_base, cur.nresults, cur.previous, 0, 0);
             cur.was_tail_called = true;
+            cur.sync_boundary = sync_boundary;
             vm.top = base + proto.maxstacksize;
 
             k = proto.k;
@@ -672,6 +674,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // finishReturnToCaller and popCallInfo for non-protected frames.
             if (cur.tbc_bitmap != 0 or cur.continuation != .none) return;
             if (cur.is_protected) return;
+            // A reentrant executor (runUntilReturn / executeSyncMM) owns
+            // this frame's return; hand control back to its loop.
+            if (cur.sync_boundary) return;
             // Open upvalues inside this frame need real closing: exit.
             // Outer frames' open upvalues don't block the fast return.
             if (openUpvaluesReach(vm, stack, base)) return;
