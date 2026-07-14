@@ -1121,7 +1121,12 @@ fn scheduleMetamethodClosureCall(
     plan: MetamethodCallPlan,
     mm_name: []const u8,
 ) !ExecuteResult {
-    const prepared = try call.stageLuaCallFrameFromArgs(vm, closure, args, vm.top);
+    // Never stage below the current frame's register file: vm.top can sag
+    // (e.g. right after a tail call into a native returned few results),
+    // and an unclamped base would plant the metamethod frame on top of
+    // live caller registers. Same clamp as executeSyncMM.
+    const safe_base = @max(vm.top, vm.base + vm.ci.?.func.maxstacksize);
+    const prepared = try call.stageLuaCallFrameFromArgs(vm, closure, args, safe_base);
     const ci = try call.activateLuaCallFrame(vm, closure, prepared, plan.ret_abs, plan.nresults);
     markMetamethodFrame(ci, mm_name);
     return .LoopContinue;
@@ -3844,7 +3849,14 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
 
                 popCallInfo(vm);
-                vm.top = ret_base + actual_nresults;
+                // Mirror finishReturnToCaller's top policy: fixed-result
+                // returns restore the caller's frame top so vm.top never
+                // sags below live registers; only multret leaves the
+                // result-defined top.
+                vm.top = if (nresults < 0)
+                    ret_base + actual_nresults
+                else
+                    vm.base + vm.ci.?.func.maxstacksize;
                 return .LoopContinue;
             }
 
@@ -3870,7 +3882,14 @@ fn opTAILCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
                 }
 
                 popCallInfo(vm);
-                vm.top = ret_base + actual_nresults;
+                // Mirror finishReturnToCaller's top policy: fixed-result
+                // returns restore the caller's frame top so vm.top never
+                // sags below live registers; only multret leaves the
+                // result-defined top.
+                vm.top = if (nresults < 0)
+                    ret_base + actual_nresults
+                else
+                    vm.base + vm.ci.?.func.maxstacksize;
                 return .LoopContinue;
             }
 
