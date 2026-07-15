@@ -745,6 +745,10 @@ pub fn nativeCoroutineClose(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !
     }
 
     // Closing a suspended coroutine must run pending to-be-closed variables.
+    // TODO(boundary): this manipulates another VM's frame state directly
+    // from the builtin layer; promote to a VM-level unwind API (see
+    // docs/moonquakes-todo.md). The dead-coroutine traceback bugs of
+    // 2026-07 lived in this seam.
     if (thread.status == .suspended) {
         while (co_vm.ci) |unwind_ci| {
             mnemonics.closeTBCVariables(co_vm, unwind_ci, 0, .nil) catch |cerr| switch (cerr) {

@@ -1575,84 +1575,25 @@ inline fn runCountHookIfNeeded(vm: *VM) !void {
     }
 }
 
-inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
+inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo) !void {
     if ((vm.hooks.mask & 0x04) == 0 or vm.hooks.in_hook or ci.closure == null) return;
 
     if (currentInstructionIndex(ci)) |idx| {
         if (idx < ci.func.lineinfo.len) {
-            var line_u32 = ci.func.lineinfo[idx];
-            if (idx > 0) {
-                const op = ci.func.code[idx].getOpCode();
-                var suppress_call_line_adjust = false;
-                if (op == .CALL) {
-                    const call_reg = inst.getA();
-                    if (vm.stack[vm.base + call_reg].asNativeClosure()) |nc| {
-                        // Preserve the clear-hook source line before native
-                        // debug.sethook() disables further line callbacks,
-                        // but only chunk frames expect a line event on the
-                        // clear call itself.
-                        suppress_call_line_adjust =
-                            (nc.func.isBuiltin(.debug_sethook) and
-                                inst.getB() == 1 and
-                                ci.func.numparams == 0 and
-                                ci.func.is_vararg);
-                    } else if (ci.previous == null) {
-                        if (vm.stack[vm.base + call_reg].asClosure()) |callee| {
-                            // For stripped closures, keep caller line stable around CALL.
-                            suppress_call_line_adjust = callee.proto.lineinfo.len == 0;
-                        }
-                    }
-                }
-                if (op == .CALL and
-                    !suppress_call_line_adjust and
-                    line_u32 > ci.func.lineinfo[idx - 1])
-                {
-                    line_u32 = ci.func.lineinfo[idx - 1];
-                }
-            }
-            const line: i64 = @intCast(line_u32);
+            const line: i64 = @intCast(ci.func.lineinfo[idx]);
             const idx_i32: i32 = @intCast(idx);
-            var first_line: i64 = -1;
-            var multi_line = false;
-            var li: usize = 0;
-            while (li < ci.func.lineinfo.len) : (li += 1) {
-                const ln: i64 = @intCast(ci.func.lineinfo[li]);
-                if (ln <= 0) continue;
-                if (first_line < 0) {
-                    first_line = ln;
-                } else if (ln != first_line) {
-                    multi_line = true;
-                    break;
-                }
-            }
-            var has_for_loop = false;
-            if (!multi_line) {
-                var oi: usize = 0;
-                while (oi < ci.func.code.len) : (oi += 1) {
-                    const lop = ci.func.code[oi].getOpCode();
-                    if (lop == .FORLOOP or lop == .TFORLOOP) {
-                        has_for_loop = true;
-                        break;
-                    }
-                }
-            }
-            const should_dispatch = if (ci.hook_last_pc < 0) blk: {
-                if (!multi_line) {
-                    if (has_for_loop) break :blk false;
-                }
-                break :blk line != ci.hook_last_line;
-            } else if (idx_i32 <= ci.hook_last_pc) blk: {
-                if (line != ci.hook_last_line) break :blk true;
-                // Lua reports same-line backward jumps for single-line chunks
-                // (e.g. one-line numeric for), but not for multi-line chunks.
-                break :blk !multi_line;
-            } else blk: {
-                if (has_for_loop and ci.hook_last_line < 0) break :blk false;
+            // PUC's luaG_traceexec rule: fire when execution jumps backward
+            // (idx not strictly increasing — a loop back-edge, even on the
+            // same line) or when the reported line differs from the line of
+            // the previous step.
+            const should_dispatch = blk: {
+                if (ci.hook_last_pc < 0) break :blk true;
+                if (idx_i32 <= ci.hook_last_pc) break :blk true;
                 break :blk line != ci.hook_last_line;
             };
             ci.hook_last_pc = idx_i32;
+            ci.hook_last_line = line;
             if (should_dispatch) {
-                ci.hook_last_line = line;
                 try hook_state.onLine(vm, line, executeSyncMM);
             }
         } else {
@@ -1674,13 +1615,13 @@ inline fn runLineHookIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
     }
 }
 
-inline fn runHooksIfNeeded(vm: *VM, ci: *CallInfo, inst: Instruction) !void {
+inline fn runHooksIfNeeded(vm: *VM, ci: *CallInfo) !void {
     // Fast path: skip all hook processing when no hooks are registered.
     // `active` is derived from mask/count (see hook.syncActive) so the
     // per-instruction guard is a single load.
     if (!vm.hooks.active) return;
     try runCountHookIfNeeded(vm);
-    try runLineHookIfNeeded(vm, ci, inst);
+    try runLineHookIfNeeded(vm, ci);
 }
 
 /// Execute a single instruction.
@@ -1690,7 +1631,7 @@ pub inline fn do(vm: *VM, inst: Instruction) !ExecuteResult {
         return vm.raiseString("interrupted!");
     }
     const ci = vm.ci.?;
-    try runHooksIfNeeded(vm, ci, inst);
+    try runHooksIfNeeded(vm, ci);
 
     switch (inst.getOpCode()) {
         .MOVE => return opMOVE(vm, inst),
@@ -3283,54 +3224,42 @@ inline fn opTESTSET(vm: *VM, ci: *CallInfo, inst: Instruction) ExecuteResult {
 //   - advances integer or float loop state
 //   - jumps back by sBx when the loop continues
 inline fn opFORLOOP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
-    // Inline integer fast path; the float fallback stays out of line so the
-    // dispatch loop only carries the common case.
+    // Count-based integer loops (as in PUC 5.4): the control slot holds
+    // the remaining trip count computed by FORPREP; the control registers
+    // are not user-addressable, so no per-iteration type or overflow
+    // checks are needed. The float fallback stays out of line.
     const a = inst.getA();
     const sbx = inst.getSBx();
-    const idx = &vm.stack[vm.base + a];
-    const limit = &vm.stack[vm.base + a + 1];
-    const step = &vm.stack[vm.base + a + 2];
+    const ctrl = &vm.stack[vm.base + a];
 
-    if (idx.isInteger() and limit.isInteger() and step.isInteger()) {
-        const i = idx.asInt();
-        const l = limit.asInt();
-        const s = step.asInt();
-
-        if (s > 0) {
-            if (i < l) {
-                const add_result = @addWithOverflow(i, s);
-                if (add_result[1] == 0 and add_result[0] <= l) {
-                    const new_i = add_result[0];
-                    idx.* = TValue.fromInt(new_i);
-                    vm.stack[vm.base + a + 3] = TValue.fromInt(new_i);
-                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-                }
-            }
-        } else if (s < 0) {
-            if (i > l) {
-                const add_result = @addWithOverflow(i, s);
-                if (add_result[1] == 0 and add_result[0] >= l) {
-                    const new_i = add_result[0];
-                    idx.* = TValue.fromInt(new_i);
-                    vm.stack[vm.base + a + 3] = TValue.fromInt(new_i);
-                    if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
-                }
-            }
+    if (ctrl.isInteger()) {
+        const count: u64 = @bitCast(ctrl.asInt());
+        if (count > 0) {
+            TValue.setInt(ctrl, @bitCast(count - 1));
+            // Advance the pristine index (kept in the old limit slot) and
+            // overwrite the user variable from it, so body writes to the
+            // user variable never affect iteration (as in PUC).
+            const idx_slot = &vm.stack[vm.base + a + 1];
+            const idx = idx_slot.asInt() +% vm.stack[vm.base + a + 2].asInt();
+            TValue.setInt(idx_slot, idx);
+            TValue.setInt(&vm.stack[vm.base + a + 3], idx);
+            if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
         }
         return .Continue;
     }
-    return opFORLOOPFloat(vm, ci, a, sbx, idx, limit, step);
+    return opFORLOOPFloat(vm, ci, a, sbx);
 }
 
-fn opFORLOOPFloat(vm: *VM, ci: *CallInfo, a: u8, sbx: i17, idx: *TValue, limit: *TValue, step: *TValue) !ExecuteResult {
-    const i = idx.toNumber() orelse return error.InvalidForLoopInit;
-    const l = limit.toNumber() orelse return error.InvalidForLoopLimit;
-    const s = step.toNumber() orelse return error.InvalidForLoopStep;
+fn opFORLOOPFloat(vm: *VM, ci: *CallInfo, a: u8, sbx: i17) !ExecuteResult {
+    // FORPREP normalized all four slots to floats.
+    const idx_slot = &vm.stack[vm.base + a];
+    const l = vm.stack[vm.base + a + 1].asFloat();
+    const s = vm.stack[vm.base + a + 2].asFloat();
 
-    const new_i = i + s;
+    const new_i = idx_slot.asFloat() + s;
     const cont = if (s > 0) (new_i <= l) else (new_i >= l);
     if (cont) {
-        idx.* = TValue.fromFloat(new_i);
+        TValue.setFloat(idx_slot, new_i);
         vm.stack[vm.base + a + 3] = TValue.fromFloat(new_i);
         if (sbx >= 0) ci.pc += @as(usize, @intCast(sbx)) else ci.pc -= @as(usize, @intCast(-sbx));
     }
@@ -3396,28 +3325,52 @@ fn opFORPREP(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
         }
         vm.stack[vm.base + a + 1] = TValue.fromInt(il);
 
-        const sub_result = @subWithOverflow(ii, is);
-        if (sub_result[1] == 0) {
-            vm.stack[vm.base + a] = TValue.fromInt(sub_result[0]);
-        } else {
-            const should_run = if (is > 0) (ii <= il) else (ii >= il);
-            if (!should_run) {
-                try ci.jumpRel(sbx);
-                return .Continue;
-            }
-            vm.stack[vm.base + a] = TValue.fromInt(ii);
-            vm.stack[vm.base + a + 3] = TValue.fromInt(ii);
+        // Zero-trip loops jump past FORLOOP; otherwise fall into the body.
+        const runs = if (is > 0) ii <= il else ii >= il;
+        if (!runs) {
+            try ci.jumpRel(sbx);
             return .Continue;
         }
+        // Count-based iteration (as in PUC 5.4): the control slot holds
+        // the remaining trip count and FORLOOP only decrements it — no
+        // per-iteration type or overflow checks. Unsigned arithmetic
+        // covers the full i64 range, including a minInt step.
+        const ui: u64 = @bitCast(ii);
+        const ul: u64 = @bitCast(il);
+        var count: u64 = if (is > 0) ul -% ui else ui -% ul;
+        if (is > 0) {
+            const us: u64 = @intCast(is);
+            if (us != 1) count /= us;
+        } else {
+            const us: u64 = @as(u64, @bitCast(-(is + 1))) +% 1;
+            if (us != 1) count /= us;
+        }
+        vm.stack[vm.base + a] = TValue.fromInt(@bitCast(count));
+        // The limit is consumed into the count; its slot now carries the
+        // pristine index, so body writes to the user variable never leak
+        // into iteration (matching PUC).
+        vm.stack[vm.base + a + 1] = TValue.fromInt(ii);
+        vm.stack[vm.base + a + 3] = TValue.fromInt(ii);
+        return .Continue;
     } else {
+        // Float loop: normalize all four slots to floats once; FORLOOP
+        // then runs add-and-compare with no coercions. A NaN limit
+        // compares false and skips the loop, as in PUC.
         const i = v_init.toNumber() orelse return error.InvalidForLoopInit;
         const s = v_step.toNumber() orelse return error.InvalidForLoopStep;
         if (s == 0) return error.InvalidForLoopStep;
-        vm.stack[vm.base + a] = TValue.fromFloat(i - s);
+        const lf = v_limit.toNumber() orelse return error.InvalidForLoopLimit;
+        const runs = if (s > 0) i <= lf else lf <= i;
+        if (!runs) {
+            try ci.jumpRel(sbx);
+            return .Continue;
+        }
+        vm.stack[vm.base + a] = TValue.fromFloat(i);
+        vm.stack[vm.base + a + 1] = TValue.fromFloat(lf);
+        vm.stack[vm.base + a + 2] = TValue.fromFloat(s);
+        vm.stack[vm.base + a + 3] = TValue.fromFloat(i);
+        return .Continue;
     }
-
-    try ci.jumpRel(sbx);
-    return .Continue;
 }
 
 // Stack:

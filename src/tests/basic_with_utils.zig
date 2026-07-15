@@ -155,7 +155,7 @@ test "FORPREP/FORLOOP with state tracking" {
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1 (step)
 
         // For loop
-        Instruction.initAsBx(.FORPREP, 0, 1), // prepare loop, jump to FORLOOP
+        Instruction.initAsBx(.FORPREP, 0, 2), // prepare loop; zero-trip skips past FORLOOP
         Instruction.initABC(.LOADNIL, 4, 0, 0), // loop body (just a placeholder)
         Instruction.initAsBx(.FORLOOP, 0, -2), // loop back
         Instruction.initABC(.RETURN, 0, 5, 0), // return R0..R3
@@ -188,8 +188,8 @@ test "FORPREP/FORLOOP with state tracking" {
     // Verify final loop state
     try testing.expect(result == .multiple);
     try testing.expectEqual(@as(usize, 4), result.multiple.len);
-    try testing.expect(result.multiple[0].eql(TValue.fromInt(3))); // init after loop (last valid value)
-    try testing.expect(result.multiple[1].eql(TValue.fromInt(3))); // limit
+    try testing.expect(result.multiple[0].eql(TValue.fromInt(0))); // trip count exhausted
+    try testing.expect(result.multiple[1].eql(TValue.fromInt(3))); // pristine index (== last value)
     try testing.expect(result.multiple[2].eql(TValue.fromInt(1))); // step
     try testing.expect(result.multiple[3].eql(TValue.fromInt(3))); // control (last value)
 }

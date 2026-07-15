@@ -121,63 +121,62 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             continue :dispatch inst.getOpCode();
         },
         .FORPREP => {
-            // All-integer staging: store init-step and jump to the FORLOOP,
-            // mirroring opFORPREP's plain case. Zero step (error), float
-            // state, non-integer limits and overflowing init-step all exit
-            // to the full handler.
+            // All-integer count staging, mirroring opFORPREP: the control
+            // slot receives the trip count and execution falls into the
+            // body; zero-trip loops jump past FORLOOP. Zero step (error),
+            // float state and float limits exit to the full handler.
             const a = inst.getA();
             const v_init = &stack[base + a];
             const v_limit = &stack[base + a + 1];
             const v_step = &stack[base + a + 2];
             if (!(v_init.isInteger() and v_limit.isInteger() and v_step.isInteger())) return;
+            const ii = v_init.asInt();
+            const il = v_limit.asInt();
             const is = v_step.asInt();
             if (is == 0) return;
-            const staged = @subWithOverflow(v_init.asInt(), is);
-            if (staged[1] != 0) return;
-            TValue.setInt(v_init, staged[0]);
-            pc = jumpTarget(pc + 1, inst.getSBx());
+            const runs = if (is > 0) ii <= il else ii >= il;
+            if (!runs) {
+                pc = jumpTarget(pc + 1, inst.getSBx());
+                inst = pc[0];
+                continue :dispatch inst.getOpCode();
+            }
+            const ui: u64 = @bitCast(ii);
+            const ul: u64 = @bitCast(il);
+            var count: u64 = if (is > 0) ul -% ui else ui -% ul;
+            if (is > 0) {
+                const us: u64 = @intCast(is);
+                if (us != 1) count /= us;
+            } else {
+                const us: u64 = @as(u64, @bitCast(-(is + 1))) +% 1;
+                if (us != 1) count /= us;
+            }
+            TValue.setInt(v_init, @bitCast(count));
+            // Limit slot becomes the pristine index (see opFORPREP).
+            TValue.setInt(v_limit, ii);
+            TValue.setInt(&stack[base + a + 3], ii);
+            pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
         .FORLOOP => {
+            // Count-based: decrement the staged trip count and advance the
+            // user variable, mirroring opFORLOOP. Float loops (non-integer
+            // control slot) and a user variable clobbered to a non-integer
+            // exit to the full handler with pc still at the FORLOOP.
             const a = inst.getA();
-            const idx = &stack[base + a];
-            const limit = &stack[base + a + 1];
-            const step = &stack[base + a + 2];
-            if (!(idx.isInteger() and limit.isInteger() and step.isInteger())) {
-                // Float loop state: leave pc at the FORLOOP itself so the
-                // outer loop re-executes it through the full handler.
-                return;
-            }
-            const i = idx.asInt();
-            const l = limit.asInt();
-            const s = step.asInt();
-            const sbx = inst.getSBx();
+            const ctrl = &stack[base + a];
+            if (!ctrl.isInteger()) return;
+            const count: u64 = @bitCast(ctrl.asInt());
             pc += 1;
-            var continues = false;
-            if (s > 0) {
-                if (i < l) {
-                    const add_result = @addWithOverflow(i, s);
-                    if (add_result[1] == 0 and add_result[0] <= l) {
-                        const new_i = add_result[0];
-                        TValue.setInt(idx, new_i);
-                        TValue.setInt(&stack[base + a + 3], new_i);
-                        continues = true;
-                    }
-                }
-            } else if (s < 0) {
-                if (i > l) {
-                    const add_result = @addWithOverflow(i, s);
-                    if (add_result[1] == 0 and add_result[0] >= l) {
-                        const new_i = add_result[0];
-                        TValue.setInt(idx, new_i);
-                        TValue.setInt(&stack[base + a + 3], new_i);
-                        continues = true;
-                    }
-                }
-            }
-            if (continues) {
-                pc = jumpTarget(pc, sbx);
+            if (count > 0) {
+                TValue.setInt(ctrl, @bitCast(count - 1));
+                // Advance the pristine index (old limit slot) and refresh
+                // the user variable from it (see opFORLOOP).
+                const idx_slot = &stack[base + a + 1];
+                const idx = idx_slot.asInt() +% stack[base + a + 2].asInt();
+                TValue.setInt(idx_slot, idx);
+                TValue.setInt(&stack[base + a + 3], idx);
+                pc = jumpTarget(pc, inst.getSBx());
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
             }
@@ -849,15 +848,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 if (slot.isNil()) return;
                 slot.* = value;
                 table.mod_count +%= 1;
-            } else if (i == alen + 1 and table.metatable == null and
-                table.hash_part.count() == 0 and table.deleted_keys.count() == 0)
-            {
+            } else if (i == alen + 1 and table.metatable == null) {
                 // On OOM the table is untouched; the defer leaves pc at
-                // this SETI so the outer handler re-executes it.
-                table.array.append(table.allocator, value) catch return;
-                table.mod_count +%= 1;
-                table.shape_count +%= 1;
-                if (i == table.seq_len + 1) table.seq_len = i;
+                // this SETI so the outer handler re-executes it. The
+                // append invariant lives in TableObject.tryAppendFresh.
+                const appended = table.tryAppendFresh(i, value) catch return;
+                if (!appended) return;
             } else return;
             if (value.isObject()) {
                 vm.gc().barrierBackValue(&table.header, value);
