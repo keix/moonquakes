@@ -925,11 +925,12 @@ inline fn numberToFloat(v: *const TValue) ?f64 {
 
 /// Apply a signed instruction offset (JMP sJ, FORPREP/FORLOOP/TFORLOOP
 /// sBx) to a pc that has already been advanced past the instruction.
+/// Wrapping pointer arithmetic on the sign-extended offset: one add, no
+/// branch and no cmov — the branchy form compiled to a neg/test/cmovns
+/// chain on the jump-fetch critical path.
 inline fn jumpTarget(pc: [*]const Instruction, offset: i32) [*]const Instruction {
-    return if (offset >= 0)
-        pc + @as(usize, @intCast(offset))
-    else
-        pc - @as(usize, @intCast(-offset));
+    const delta = @as(isize, offset) *% @sizeOf(Instruction);
+    return @ptrFromInt(@intFromPtr(pc) +% @as(usize, @bitCast(delta)));
 }
 
 /// True when the open-upvalue list reaches into the frame starting at
