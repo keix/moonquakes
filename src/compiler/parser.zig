@@ -1886,7 +1886,7 @@ pub const Parser = struct {
             patched.new_c,
         );
         if (producer.strip_trailing_move) {
-            _ = self.proto.code.pop();
+            self.proto.popLastInstruction();
         }
 
         return .{
@@ -2333,7 +2333,7 @@ pub const Parser = struct {
     fn popRecoveredAssignmentTarget(self: *Parser, recovery: AssignmentTargetRecovery) void {
         var pops = recovery.pop_count;
         while (pops > 0) : (pops -= 1) {
-            _ = self.proto.code.pop();
+            self.proto.popLastInstruction();
         }
     }
 
@@ -2575,7 +2575,7 @@ pub const Parser = struct {
                     const b = call_inst.getB();
                     self.proto.code.items[producer.index] = Instruction.initABC(.TAILCALL, a, b, 0);
                     if (producer.strip_trailing_move) {
-                        self.proto.code.items.len -= 1;
+                        self.proto.popLastInstruction();
                     }
                     if (producer.index < self.proto.lineinfo.items.len) {
                         self.proto.lineinfo.items[producer.index] = return_line;
@@ -5605,6 +5605,13 @@ pub const Parser = struct {
     /// Parse call arguments into contiguous registers starting at `first_arg_reg`.
     /// Returns the argument count, or `VARARG_SENTINEL` when the last argument expands.
     fn parseCallArgsInto(self: *Parser, first_arg_reg: u8) ParseError!u8 {
+        // PUC's luaK_fixline: the CALL instruction is attributed to the
+        // line where the argument list begins, not the line the lexer has
+        // reached after the last argument (which may have advanced past a
+        // newline). The caller emits CALL right after we return, so restore
+        // current_line for it here.
+        const call_line: u32 = @intCast(self.current.line);
+        defer self.proto.current_line = call_line;
         var arg_count: u8 = 0;
         var last_was_call = false;
         var last_was_vararg = false;
