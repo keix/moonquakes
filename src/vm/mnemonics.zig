@@ -1567,10 +1567,10 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 
 inline fn runCountHookIfNeeded(vm: *VM) !void {
     if (vm.hooks.count == 0 or vm.hooks.in_hook) return;
-    if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count * 2;
+    if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count;
     vm.hooks.countdown -|= 1;
     if (vm.hooks.countdown == 0) {
-        vm.hooks.countdown = vm.hooks.count * 2;
+        vm.hooks.countdown = vm.hooks.count;
         try hook_state.onCount(vm, executeSyncMM);
     }
 }
