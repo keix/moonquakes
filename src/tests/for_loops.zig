@@ -31,14 +31,16 @@ test "FORPREP minimal test" {
         Instruction.initABx(.LOADK, 0, 0), // R0 = 5 (init)
         Instruction.initABx(.LOADK, 1, 1), // R1 = 5 (limit)
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1 (step)
-        Instruction.initAsBx(.FORPREP, 0, 0), // FORPREP A=0, sBx=0 (jump to next = RETURN)
-        Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (should be 5-1=4)
+        Instruction.initAsBx(.FORPREP, 0, 0), // FORPREP A=0 (loop runs: falls through)
+        Instruction.initABC(.RETURN, 0, 2, 0), // return R0 (trip count after prep)
     };
 
-    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 3);
+    const proto = try test_utils.createTestProto(ctx.vm, &constants, &code, 0, false, 4);
     const result = try Mnemonics.execute(ctx.vm, proto);
 
-    try expectSingleResult(result, TValue.fromFloat(4.0)); // init - step = 5 - 1 = 4
+    // Count-based FORPREP: R[A] holds the REMAINING iterations after the
+    // first (5..5 step 1 runs once, so the staged count is 0).
+    try expectSingleResult(result, TValue.fromInt(0));
 }
 
 test "for loop: simple integer loop 1 to 3" {
@@ -60,7 +62,7 @@ test "for loop: simple integer loop 1 to 3" {
         Instruction.initABx(.LOADK, 4, 3), // R4 = 0
         // ---- FOR structure ----
         // index 4: FORPREP jumps directly to index 6 (FORLOOP)
-        Instruction.initAsBx(.FORPREP, 0, 1), // (PC += 1 -> FORLOOP)
+        Instruction.initAsBx(.FORPREP, 0, 2), // (PC += 1 -> FORLOOP)
         // index 5: loop body
         Instruction.initABC(.ADD, 4, 4, 3), // R4 += R3 (control variable)
         // index 6:
@@ -82,9 +84,9 @@ test "for loop: simple integer loop 1 to 3" {
     try expectSingleResult(result, TValue.fromInt(6)); // 1+2+3 = 6
 
     // Added: Verify loop variables and control flow
-    // R0 (index) should be 3 after loop (last value before exit)
-    try trace.expectRegisterChanged(0, TValue.fromInt(3));
-    try trace.expectRegisterChanged(1, TValue.fromInt(3)); // limit unchanged
+    // R0 holds the trip count, exhausted to 0; R1 the pristine index.
+    try trace.expectRegisterChanged(0, TValue.fromInt(0));
+    try trace.expectRegisterChanged(1, TValue.fromInt(3)); // pristine index (== last value)
     try trace.expectRegisterChanged(2, TValue.fromInt(1)); // step unchanged
     try trace.expectRegisterChanged(3, TValue.fromInt(3)); // control variable (last value)
     try trace.expectRegisterChanged(4, TValue.fromInt(6)); // accumulator
@@ -109,7 +111,7 @@ test "for loop: negative step (countdown)" {
         Instruction.initABx(.LOADK, 1, 1), // R1 = 1
         Instruction.initABx(.LOADK, 2, 2), // R2 = -1
         Instruction.initABx(.LOADK, 4, 3), // R4 = 0
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.ADD, 4, 4, 3), // R4 += R3
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 4, 2, 0),
@@ -124,7 +126,7 @@ test "for loop: negative step (countdown)" {
     try expectSingleResult(result, TValue.fromInt(15));
 
     // Verify final loop state
-    try trace.expectRegisterChanged(0, TValue.fromInt(1)); // last valid index
+    try trace.expectRegisterChanged(0, TValue.fromInt(0)); // trip count exhausted
     try trace.expectRegisterChanged(4, TValue.fromInt(15)); // sum
 }
 
@@ -145,7 +147,7 @@ test "for loop: zero iterations (start > limit with positive step)" {
         Instruction.initABx(.LOADK, 1, 1), // R1 = 3
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1
         Instruction.initABx(.LOADK, 4, 3), // R4 = 99
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.ADD, 4, 4, 3), // R4 += R3 (should never execute)
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 4, 2, 0),
@@ -188,7 +190,7 @@ test "for loop: float loop variables with integer path detection" {
         Instruction.initABx(.LOADK, 1, 1), // R1 = 3.0
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1.0
         Instruction.initABx(.LOADK, 4, 3), // R4 = 0
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.ADD, 4, 4, 3), // R4 += R3
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 0, 5, 0), // return all registers
@@ -233,7 +235,7 @@ test "for loop: step of zero should error" {
         Instruction.initABx(.LOADK, 0, 0),
         Instruction.initABx(.LOADK, 1, 1),
         Instruction.initABx(.LOADK, 2, 2),
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.LOADNIL, 3, 0, 0), // body (should not execute)
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 0, 1, 0),
@@ -264,7 +266,7 @@ test "for loop: overflow behavior" {
         Instruction.initABx(.LOADK, 1, 1), // R1 = max
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1
         Instruction.initABx(.LOADK, 4, 3), // R4 = 0
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.ADDI, 4, 4, 1), // R4 += 1 (count iterations)
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 4, 2, 0),
@@ -294,7 +296,7 @@ test "for loop: side effects on unused registers" {
         Instruction.initABx(.LOADK, 2, 2), // R2 = 1
         // Set up registers beyond loop to check for corruption
         Instruction.initABC(.LOADNIL, 5, 5, 0), // R5..R10 = nil
-        Instruction.initAsBx(.FORPREP, 0, 1),
+        Instruction.initAsBx(.FORPREP, 0, 2),
         Instruction.initABC(.LOADNIL, 4, 0, 0), // R4 = nil (dummy body)
         Instruction.initAsBx(.FORLOOP, 0, -2),
         Instruction.initABC(.RETURN, 0, 11, 0), // return R0..R10
@@ -319,8 +321,8 @@ test "for loop: side effects on unused registers" {
     try testing.expectEqual(@as(usize, 10), result.multiple.len);
 
     // Verify loop registers changed
-    try trace.expectRegisterChanged(0, TValue.fromInt(2)); // final index
-    try trace.expectRegisterChanged(1, TValue.fromInt(2)); // limit
+    try trace.expectRegisterChanged(0, TValue.fromInt(0)); // trip count exhausted
+    try trace.expectRegisterChanged(1, TValue.fromInt(2)); // pristine index
     try trace.expectRegisterChanged(2, TValue.fromInt(1)); // step
     try trace.expectRegisterChanged(3, TValue.fromInt(2)); // control var
     try trace.expectRegisterChanged(4, .nil); // body executed

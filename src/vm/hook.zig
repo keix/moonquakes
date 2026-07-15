@@ -97,7 +97,10 @@ pub fn onLine(vm: *VM, line: i64, invoke: anytype) !void {
     if ((vm.hooks.mask & 0x04) == 0) return;
     const hook = vm.hooks.func orelse return;
     if (line <= 0) return;
-    if (vm.hooks.skip_next_line) return;
+    if (vm.hooks.skip_next_line) {
+        vm.hooks.skip_next_line = false;
+        return;
+    }
 
     const event_name = try vm.gc().allocString("line");
     const saved_top = vm.top;

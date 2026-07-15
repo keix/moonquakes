@@ -4525,8 +4525,10 @@ pub const Parser = struct {
         self.proto.current_line = do_line;
         const forloop_addr = try self.proto.emitPatchableFORLOOP(base_reg);
 
-        // Patch FORPREP to jump to FORLOOP if initial condition fails
-        self.proto.patchFORInstr(forprep_addr, forloop_addr);
+        // Patch FORPREP's skip target to just past FORLOOP: zero-trip
+        // loops exit there, and a running loop falls straight into the
+        // body with the trip count staged in the control slot.
+        self.proto.patchFORInstr(forprep_addr, forloop_addr + 1);
 
         // Patch FORLOOP to jump back to loop start
         self.proto.patchFORInstr(forloop_addr, loop_start);
@@ -4798,13 +4800,20 @@ pub const Parser = struct {
         self.advance(); // consume 'end'
 
         // Close loop-scope locals/upvalues at end of each iteration before
-        // jumping back to reevaluate the condition.
-        self.proto.current_line = do_line;
+        // jumping back to reevaluate the condition. The back edge is
+        // attributed to the last body line (as in PUC): using the
+        // condition line would fire two line events per iteration.
+        var back_line = do_line;
+        if (self.proto.lineinfo.items.len > 0) {
+            const ln = self.proto.lineinfo.items[self.proto.lineinfo.items.len - 1];
+            if (ln > 0) back_line = ln;
+        }
+        self.proto.current_line = back_line;
         try self.proto.emitCloseIfNeeded(break_close_reg);
 
         // Jump back to loop start
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
-        self.proto.current_line = do_line;
+        self.proto.current_line = back_line;
         try self.proto.emitJMP(@intCast(back_offset));
 
         // Patch exit jump and all break jumps to after the loop
