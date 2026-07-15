@@ -1565,7 +1565,7 @@ pub fn nativeIoLinesIterator(vm: anytype, func_reg: u32, nargs: u32, nresults: u
         var out_idx: u32 = 0;
         var written_count: u32 = 0;
         while (out_idx < fmt_count) : (out_idx += 1) {
-            const fmt_val = fmts_table.get(TValue.fromInt(@as(i64, @intCast(out_idx)) + 1)) orelse .nil;
+            const fmt_val = fmts_table.get(TValue.fromInt(@as(i64, @intCast(out_idx)) + 1)) orelse TValue.nil;
 
             if (fmt_val.toInteger()) |count_i| {
                 if (count_i < 0) {
@@ -2875,7 +2875,7 @@ pub fn nativeFileRead(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(end)));
     } else if (std.mem.eql(u8, format, "n")) {
         const res = readLuaNumberFromContent(content, pos);
-        if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse .nil;
+        if (nresults > 0) vm.stack[vm.base + func_reg] = res.value orelse TValue.nil;
         try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(@intCast(res.new_pos)));
     } else {
         return vm.raiseString("invalid format");

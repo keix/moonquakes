@@ -410,7 +410,7 @@ pub fn nativePrint(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void 
     vm.top = saved_top;
 
     if (nresults > 0) {
-        vm.stack[vm.base + func_reg] = TValue{ .nil = {} };
+        vm.stack[vm.base + func_reg] = .nil;
     }
 }
 
@@ -886,7 +886,7 @@ pub fn nativeRawget(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
     // Direct table access without metamethods
     // Supports any TValue as key (Lua 5.4 semantics)
-    vm.stack[vm.base + func_reg] = table.get(key_arg) orelse .nil;
+    vm.stack[vm.base + func_reg] = table.get(key_arg) orelse TValue.nil;
 }
 
 /// rawset(table, index, value) - Sets the real value of table[index] without metamethods

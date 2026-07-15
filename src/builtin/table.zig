@@ -54,7 +54,7 @@ fn getAt(vm: anytype, table_val: TValue, table: *TableObject, key: TValue) !TVal
     if (table.get(key)) |v| return v;
     if (metamethod.getMetamethod(table_val, .index, &vm.gc().mm_keys, &vm.gc().shared_mt)) |index_mm| {
         if (index_mm.asTable()) |index_table| {
-            return index_table.get(key) orelse .nil;
+            return index_table.get(key) orelse TValue.nil;
         }
         return callValueManaged(vm, index_mm, &[_]TValue{ table_val, key });
     }

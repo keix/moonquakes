@@ -50,12 +50,12 @@ pub const OwnedReturnValue = union(enum) {
 
 /// Convert TValue to OwnedValue (copies strings)
 pub fn toOwnedValue(allocator: std.mem.Allocator, val: TValue) !OwnedValue {
-    return switch (val) {
+    return switch (val.kind()) {
         .nil => .nil,
-        .boolean => |b| .{ .boolean = b },
-        .integer => |i| .{ .integer = i },
-        .number => |n| .{ .number = n },
-        .object => |obj| switch (obj.type) {
+        .boolean => .{ .boolean = val.asBool() },
+        .integer => .{ .integer = val.asInt() },
+        .number => .{ .number = val.asFloat() },
+        .object => switch (val.asObjectPtr().type) {
             .string => .{ .string = try allocator.dupe(u8, val.asString().?.asSlice()) },
             .table => .nil, // TODO: serialize table
             .closure, .native_closure, .c_closure => .nil, // TODO: represent closure

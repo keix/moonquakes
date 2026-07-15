@@ -148,7 +148,7 @@ pub fn nativeError(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
     const error_value = if (nargs > 0)
         vm.stack[vm.base + func_reg + 1]
     else
-        .nil;
+        TValue.nil;
 
     const level_i: i64 = if (nargs >= 2) blk: {
         const level_arg = vm.stack[vm.base + func_reg + 2];

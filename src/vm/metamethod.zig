@@ -130,7 +130,7 @@ pub const SharedMetatables = struct {
             return self.function;
         }
         if (value.isObject()) {
-            const obj = value.object;
+            const obj = value.asObjectPtr();
             if (obj.type == .native_closure or obj.type == .c_closure) {
                 return self.function;
             }
@@ -162,7 +162,7 @@ pub const SharedMetatables = struct {
             return true;
         }
         if (value.isObject()) {
-            const obj = value.object;
+            const obj = value.asObjectPtr();
             if (obj.type == .native_closure or obj.type == .c_closure) {
                 self.function = mt;
                 return true;

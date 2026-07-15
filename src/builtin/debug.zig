@@ -897,7 +897,7 @@ fn shouldSkipUnnamedDuplicateSlot(target_vm: *VM, ci: *const CallInfo, reg: u32)
 
     const cur = target_vm.stack[ci.base + reg];
     const prev = target_vm.stack[ci.base + reg - 1];
-    return std.meta.eql(cur, prev);
+    return TValue.rawIdentical(cur, prev);
 }
 
 fn mapLocalOrdinalToRegister(target_vm: *VM, ci: *const CallInfo, local_idx: u32, restrict_outer_temporaries: bool) ?u32 {
@@ -1651,7 +1651,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             if (ulevel >= 2 and reg >= ci.func.numparams and ci.vararg_count > 0) {
                 var vi: u32 = 0;
                 while (vi < ci.vararg_count) : (vi += 1) {
-                    if (std.meta.eql(value, target_vm.stack[ci.vararg_base + vi])) {
+                    if (TValue.rawIdentical(value, target_vm.stack[ci.vararg_base + vi])) {
                         visible_value = TValue.nil;
                         break;
                     }

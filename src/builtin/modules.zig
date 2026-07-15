@@ -386,7 +386,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                         if (!result.isNil()) {
                             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), result);
                         }
-                        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
+                        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse TValue.nil;
                         if (require_result.isNil()) {
                             require_result = TValue.fromBool(true);
                             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);
@@ -448,7 +448,7 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
         if (!result.isNil()) {
             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), result);
         }
-        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse .nil;
+        var require_result = loaded_table.?.get(TValue.fromString(mod_key)) orelse TValue.nil;
         if (require_result.isNil()) {
             require_result = TValue.fromBool(true);
             try tableSet(vm, loaded_table.?, TValue.fromString(mod_key), require_result);

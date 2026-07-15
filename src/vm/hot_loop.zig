@@ -58,7 +58,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
     var inst = pc[0];
     dispatch: switch (inst.getOpCode()) {
         .MOVE => {
-            stack[base + inst.getA()] = stack[base + inst.getB()];
+            TValue.copy(&stack[base + inst.getA()], &stack[base + inst.getB()]);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -198,10 +198,11 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .GETUPVAL => {
             const closure = cur.closure orelse return;
             const b = inst.getB();
-            stack[base + inst.getA()] = if (b < closure.upvalues.len)
-                closure.upvalues[b].get()
-            else
-                .nil;
+            if (b < closure.upvalues.len) {
+                TValue.copy(&stack[base + inst.getA()], closure.upvalues[b].location);
+            } else {
+                stack[base + inst.getA()] = .nil;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -561,10 +562,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         .TFORLOOP => {
             const a = inst.getA();
-            const first_var = stack[base + a + 4];
+            const first_var = &stack[base + a + 4];
             pc += 1;
             if (!first_var.isNil()) {
-                stack[base + a + 2] = first_var;
+                TValue.copy(&stack[base + a + 2], first_var);
                 pc = jumpTarget(pc, inst.getSBx());
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
@@ -687,7 +688,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (prev.continuation != .none) return;
 
             const is_return1 = inst.getOpCode() == .RETURN1;
-            const ret_val = if (is_return1) stack[base + inst.getA()] else TValue.nil;
+            const ret_src = base + inst.getA();
             const nresults = cur.nresults;
             const dst = cur.ret_base;
 
@@ -697,7 +698,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
 
             if (nresults < 0) {
                 if (is_return1) {
-                    stack[dst] = ret_val;
+                    TValue.copy(&stack[dst], &stack[ret_src]);
                     vm.top = dst + 1;
                 } else {
                     vm.top = dst;
@@ -706,7 +707,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 const n: u32 = @intCast(nresults);
                 var j: u32 = 0;
                 if (is_return1 and n >= 1) {
-                    stack[dst] = ret_val;
+                    TValue.copy(&stack[dst], &stack[ret_src]);
                     j = 1;
                 }
                 while (j < n) : (j += 1) {
@@ -949,7 +950,7 @@ inline fn stageFixedArgs(stack: anytype, dst: u32, src: u32, nargs: u32, numpara
     const params_to_copy = @min(nargs, numparams);
     var i: u32 = 0;
     while (i < params_to_copy) : (i += 1) {
-        stack[dst + i] = stack[src + i];
+        TValue.copy(&stack[dst + i], &stack[src + i]);
     }
     while (i < numparams) : (i += 1) {
         stack[dst + i] = .nil;
