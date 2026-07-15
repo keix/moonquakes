@@ -1997,7 +1997,6 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         target_vm.hooks.count = 0;
         target_vm.hooks.countdown = 0;
         target_vm.hooks.name_override = null;
-        target_vm.hooks.in_hook = false;
         target_vm.hooks.skip_next_line = false;
         target_vm.hooks.transfer_start = 1;
         target_vm.hooks.transfer_count = 0;
@@ -2016,7 +2015,6 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         target_vm.hooks.count = 0;
         target_vm.hooks.countdown = 0;
         target_vm.hooks.name_override = null;
-        target_vm.hooks.in_hook = false;
         target_vm.hooks.skip_next_line = false;
         target_vm.hooks.transfer_start = 1;
         target_vm.hooks.transfer_count = 0;
@@ -2061,7 +2059,6 @@ pub fn nativeDebugSethook(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     target_vm.hooks.count = count;
     target_vm.hooks.countdown = if (count == 0) 0 else count * 2;
     target_vm.hooks.name_override = null;
-    target_vm.hooks.in_hook = false;
     target_vm.hooks.skip_next_line = false;
     target_vm.hooks.transfer_start = 1;
     target_vm.hooks.transfer_count = 0;
