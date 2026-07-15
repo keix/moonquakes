@@ -4314,14 +4314,17 @@ pub const Parser = struct {
 
         // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = then_line;
-        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+        const fused = self.proto.tryFuseCompareJump(condition_reg);
+        if (!fused) {
             try self.proto.emitTEST(condition_reg, false);
         }
         const false_jmp = try self.proto.emitPatchableJMP();
 
         // Drop temporary condition value before branch bodies so GC does not
         // keep weakly-referenced objects alive through dead temp registers.
-        if (condition_reg >= self.proto.locals_top) {
+        // A fused comparison never materialized its boolean, so the temp
+        // holds no new reference and needs no clearing.
+        if (!fused and condition_reg >= self.proto.locals_top) {
             try self.proto.emitLOADNIL(condition_reg, 1);
         }
 
@@ -4850,13 +4853,16 @@ pub const Parser = struct {
 
         // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = do_line;
-        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+        const fused = self.proto.tryFuseCompareJump(condition_reg);
+        if (!fused) {
             try self.proto.emitTEST(condition_reg, false);
         }
         const exit_jmp = try self.proto.emitPatchableJMP();
 
-        // Condition temporaries are dead after TEST/JMP dispatch.
-        if (condition_reg >= self.proto.locals_top) {
+        // Condition temporaries are dead after TEST/JMP dispatch. A fused
+        // comparison never materialized its boolean, so the temp holds no
+        // new reference and needs no clearing.
+        if (!fused and condition_reg >= self.proto.locals_top) {
             try self.proto.emitLOADNIL(condition_reg, 1);
         }
 
