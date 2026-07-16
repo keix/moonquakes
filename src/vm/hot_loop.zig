@@ -911,7 +911,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
-        else => return,
+        // Explicit exit arms instead of `else`: an exhaustive switch over
+        // the u7 opcode enum lets LLVM emit a full jump table with no
+        // per-dispatch range check (`cmp; jae`) in front of the indirect
+        // jump — the check cost every executed instruction two decode ops
+        // and a branch.
+        .LOADKX, .SETTABUP, .ADDI, .POWK, .IDIVK, .SHRI, .SHLI, .POW, .IDIV, .MMBIN, .MMBINI, .MMBINK, .BNOT, .LEN, .CONCAT, .TBC, .EQK, .EQI, .TESTSET, .RETURN, .TFORPREP, .CLOSURE, .VARARG, .VARARGPREP, .EXTRAARG, .PCALL => return,
     }
 }
 
