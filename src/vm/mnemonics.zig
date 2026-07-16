@@ -3552,6 +3552,8 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             }
             vm.top = vm.base + a + 1 + nargs;
             if (hook_state.hasCallListener(vm)) {
+                vm.hooks.event_callee = nc;
+                defer vm.hooks.event_callee = null;
                 try hook_state.onCallTransfer(vm, null, .{ .stack = .{
                     .start = 1,
                     .src_base = vm.base + a + 1,
@@ -3570,6 +3572,8 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             // a hook (debug.sethook). Its own return event then fires with
             // an empty arg snapshot, but delivery timing matches.
             if (hook_state.hasReturnListener(vm)) {
+                vm.hooks.event_callee = nc;
+                defer vm.hooks.event_callee = null;
                 try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
             }
             return .LoopContinue;

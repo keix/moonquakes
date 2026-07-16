@@ -6,6 +6,7 @@
 const std = @import("std");
 const TValue = @import("../runtime/value.zig").TValue;
 const ClosureObject = @import("../runtime/gc/object.zig").ClosureObject;
+const NativeClosureObject = @import("../runtime/gc/object.zig").NativeClosureObject;
 const error_state = @import("error_state.zig");
 const VM = @import("vm.zig").VM;
 
@@ -26,6 +27,11 @@ pub const HookState = struct {
     name_override: ?[]const u8 = null,
     skip_next_line: bool = false,
     last_line: i64 = -1,
+    // Native callee of the call/return event currently being hooked.
+    // Natives run frameless, so without this the hook's getinfo(2) would
+    // resolve to the CALLER; debug.getinfo splices a virtual C frame in
+    // at level 2 while it is set (PUC pushes a real C frame in precall).
+    event_callee: ?*NativeClosureObject = null,
 };
 
 pub const HookTransfer = union(enum) {
