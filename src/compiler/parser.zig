@@ -3403,20 +3403,24 @@ pub const Parser = struct {
                     // Direct register reference: expression consumers treat
                     // operand registers as read-only (binary ops write to a
                     // fresh destination, staging paths copy-if-needed), so
-                    // a bare local needs no temp copy. Suffix chains mutate
-                    // their base register in place and keep the copy.
-                    const has_suffix = next.kind == .Symbol and
-                        (std.mem.eql(u8, next.lexeme, ".") or
-                            std.mem.eql(u8, next.lexeme, "[") or
-                            std.mem.eql(u8, next.lexeme, ":"));
+                    // a bare local needs no temp copy. Suffix chains read
+                    // the local in place too: their first access writes a
+                    // fresh temp and only later links mutate it (borrowed
+                    // base, see parseSuffixChainOwned).
+                    self.advance();
+                    const has_suffix = self.current.kind == .Symbol and
+                        (std.mem.eql(u8, self.current.lexeme, ".") or
+                            std.mem.eql(u8, self.current.lexeme, "[") or
+                            (std.mem.eql(u8, self.current.lexeme, ":") and
+                                !(self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":"))));
                     if (!has_suffix) {
-                        self.advance();
                         return loc.local;
                     }
+                    return try self.parseSuffixChainOwned(loc.local, false);
                 }
                 base_reg = self.proto.allocTemp();
                 switch (loc) {
-                    .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
+                    .local => unreachable,
                     .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
                 }
                 self.advance();
@@ -3440,12 +3444,27 @@ pub const Parser = struct {
 
     /// Parse suffixes for a prefix expression: calls, field/index access, and method calls.
     fn parseSuffixChain(self: *Parser, base_reg: u8) ParseError!u8 {
+        return self.parseSuffixChainOwned(base_reg, true);
+    }
+
+    /// `owned == false`: base_reg is a live local that must not be
+    /// clobbered — the first access reads it in place into a fresh temp
+    /// (the MOVE it replaces cost every `local[k]` chain an instruction);
+    /// from then on the chain owns the temp and mutates it as before.
+    fn parseSuffixChainOwned(self: *Parser, base_reg: u8, base_owned: bool) ParseError!u8 {
         var reg = base_reg;
+        var owned = base_owned;
 
         while (true) {
             if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
                 self.isNoParensArg())
             {
+                if (!owned) {
+                    const t = self.proto.allocTemp();
+                    try self.proto.emitMOVE(t, reg);
+                    reg = t;
+                    owned = true;
+                }
                 const arg_count = try self.parseCallArgs(reg);
                 try self.proto.emitCallVararg(reg, arg_count, 1);
                 continue;
@@ -3476,7 +3495,14 @@ pub const Parser = struct {
 
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
-                try self.proto.emitGETFIELD(reg, reg, key_const);
+                if (owned) {
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                } else {
+                    const dst = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst, reg, key_const);
+                    reg = dst;
+                    owned = true;
+                }
 
                 if (has_call_suffix) {
                     const arg_count = try self.parseCallArgs(reg);
@@ -3514,7 +3540,14 @@ pub const Parser = struct {
 
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
-                try self.proto.emitGETTABLE(reg, reg, key_reg);
+                if (owned) {
+                    try self.proto.emitGETTABLE(reg, reg, key_reg);
+                } else {
+                    const dst = self.proto.allocTemp();
+                    try self.proto.emitGETTABLE(dst, reg, key_reg);
+                    reg = dst;
+                    owned = true;
+                }
 
                 // Check for function call: t["key"]() or t[k]()
                 if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
@@ -3530,7 +3563,9 @@ pub const Parser = struct {
                 self.advance(); // consume ':'
                 // Keep method-call base in the same register so trailing MULTRET
                 // argument expansion does not include stale prefix values.
-                const func_reg = try self.prepareMethodCall(reg, reg);
+                // A borrowed local base stays untouched: SELF reads it and
+                // writes the fresh func/self pair.
+                const func_reg = try self.prepareMethodCall(reg, if (owned) reg else null);
 
                 // Parse extra arguments starting at func_reg + 2
                 const extra_args = try self.parseMethodArgs(func_reg);
@@ -3539,6 +3574,7 @@ pub const Parser = struct {
                 const total_args: u8 = if (extra_args == ProtoBuilder.VARARG_SENTINEL) ProtoBuilder.VARARG_SENTINEL else extra_args + 1;
                 try self.proto.emitCallVararg(func_reg, total_args, 1);
                 reg = func_reg;
+                owned = true;
             }
         }
 
