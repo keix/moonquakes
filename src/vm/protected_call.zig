@@ -121,5 +121,5 @@ pub fn reuseCurrentFrame(vm: *VM, current_ci: *CallInfo, ret_base: u32, total_re
     current_ci.reset(&bootstrap_proto, null, new_base, ret_base, pcall_nresults, current_ci.previous, 0, 0);
     current_ci.was_tail_called = true;
     current_ci.is_protected = true;
-    current_ci.error_handler = handler orelse .nil;
+    current_ci.error_handler = handler orelse TValue.nil;
 }

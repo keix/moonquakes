@@ -159,6 +159,12 @@ const ScopeMark = struct {
     locals_top: u8, // register watermark for this scope
 };
 
+/// One block on the close-tracking stack (see ProtoBuilder.close_scopes)
+const CloseScope = struct {
+    base: u8, // first register a local of this block can occupy
+    captured: bool, // a local at or above base escaped or is to-be-closed
+};
+
 /// Pending goto that needs to be patched when the label is defined
 const PendingGoto = struct {
     name: []const u8, // label name
@@ -203,12 +209,17 @@ pub const ProtoBuilder = struct {
     upvalues: std.ArrayList(Upvaldesc), // Upvalue descriptors for this function
     parent: ?*ProtoBuilder, // For function scope hierarchy
     local_decl_seq: u32 = 0,
-    // True once this function's locals can need closing: a nested function
-    // captured one of them (open upvalues can exist over this frame) or a
-    // to-be-closed slot was declared. While false, every CLOSE this
-    // function would emit is a guaranteed runtime no-op and is skipped
+    // Block-granular capture tracking (PUC's BlockCnt.upval): one entry
+    // per block that can emit CLOSE, flagged when a local at or above its
+    // base register is captured by a nested closure or declared
+    // to-be-closed. Capture-free blocks skip the CLOSE dispatch entirely
     // (see emitCloseIfNeeded).
-    needs_close: bool = false,
+    close_scopes: std.ArrayList(CloseScope) = .{},
+    // Monotone: a local of this function was ever captured or declared
+    // to-be-closed. Gates the CLOSE a goto-targeted label must emit for
+    // jumps that leave closeable blocks (PUC's createlabel), since the
+    // crossed blocks' close scopes are already popped by label time.
+    ever_captured: bool = false,
     // Constant deduplication maps (string content -> const_refs index)
     string_constants: std.StringHashMap(u32),
     // Label tracking for goto support
@@ -243,10 +254,17 @@ pub const ProtoBuilder = struct {
             .pending_gotos = .{},
         };
 
+        // Root close scope: tracks captures of parameters and function
+        // top-level locals (backward gotos crossing them emit CLOSE).
+        try builder.close_scopes.append(allocator, .{ .base = 0, .captured = false });
+
         // All functions have _ENV as upvalue[0].
         if (parent) |p| {
             // Nested function: bind _ENV to the nearest visible _ENV in parent scope.
             if (p.findVariable("_ENV")) |env_reg| {
+                // A local _ENV escapes into this closure like any other
+                // captured local: its declaring block must emit CLOSE.
+                p.markCaptured(env_reg);
                 try builder.upvalues.append(allocator, .{ .instack = true, .idx = env_reg, .name = "_ENV" });
             } else {
                 var env_upidx: u8 = 0;
@@ -292,6 +310,7 @@ pub const ProtoBuilder = struct {
         self.functions.deinit(self.allocator);
         self.variables.deinit(self.allocator);
         self.scope_starts.deinit(self.allocator);
+        self.close_scopes.deinit(self.allocator);
         self.upvalues.deinit(self.allocator);
         self.string_constants.deinit();
         self.labels.deinit();
@@ -359,17 +378,64 @@ pub const ProtoBuilder = struct {
         try self.lineinfo.append(self.allocator, self.current_line);
     }
 
-    /// Emit CLOSE only when this function's frame can actually have
+    /// Emit CLOSE only when the enclosing block can actually have
     /// something to close (a captured local or a to-be-closed slot, see
-    /// needs_close). Block ends and loop back-edges otherwise emit CLOSE
+    /// close_scopes). Block ends and loop back-edges otherwise emit CLOSE
     /// unconditionally, costing one dispatched no-op per iteration.
     /// Soundness: an open upvalue at a bytecode position requires a
-    /// CLOSURE instruction executed before it, and every backward jump's
-    /// CLOSE is emitted after its body was parsed — so any capture inside
-    /// the body has already set the flag by the time the CLOSE is emitted.
+    /// CLOSURE instruction executed before it, and every block-end or
+    /// back-edge CLOSE is emitted after its block was parsed — so any
+    /// capture inside the block has already flagged it by the time the
+    /// CLOSE is emitted. The walk covers blocks whose locals can sit at
+    /// or above `reg`: everything down to and including the block that
+    /// declared `reg` (outer blocks hold only lower registers). The
+    /// declaring block's flag may refer to a lower captured register when
+    /// `reg` is not a block base (backward goto), costing at most a
+    /// spurious CLOSE there.
     pub fn emitCloseIfNeeded(self: *ProtoBuilder, reg: u8) !void {
-        if (!self.needs_close) return;
+        var i = self.close_scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const scope = self.close_scopes.items[i];
+            if (scope.captured) {
+                try self.emit(.CLOSE, reg, 0, 0);
+                return;
+            }
+            if (scope.base <= reg) break;
+        }
+    }
+
+    /// Unconditional CLOSE, for paths that leave a scope before its parse
+    /// finishes (break) or must finalize to-be-closed state (generic-for
+    /// exit). These run once per loop lifetime, not per iteration.
+    pub fn emitClose(self: *ProtoBuilder, reg: u8) !void {
         try self.emit(.CLOSE, reg, 0, 0);
+    }
+
+    pub fn pushCloseScope(self: *ProtoBuilder, base: u8) !void {
+        try self.close_scopes.append(self.allocator, .{ .base = base, .captured = false });
+    }
+
+    pub fn popCloseScope(self: *ProtoBuilder) void {
+        _ = self.close_scopes.pop();
+    }
+
+    /// Record that the local in `reg` escapes (closure capture or
+    /// to-be-closed declaration): flag the block that declared it — the
+    /// innermost one whose base does not exceed the register. Function
+    /// top-level locals land on the root scope every function pushes at
+    /// creation; backward gotos crossing them still need their CLOSE.
+    pub fn markCaptured(self: *ProtoBuilder, reg: u8) void {
+        self.ever_captured = true;
+        var i = self.close_scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            const scope = &self.close_scopes.items[i];
+            if (scope.base <= reg) {
+                scope.captured = true;
+                return;
+            }
+        }
     }
 
     pub fn emitWithK(self: *ProtoBuilder, op: opcodes.OpCode, a: u8, b: u8, c: u8, k: bool) !void {
@@ -1504,9 +1570,8 @@ pub const ProtoBuilder = struct {
         switch (parent_loc) {
             .local => |reg| {
                 // Parent has it as a local - capture from parent's stack.
-                // The parent frame can now hold open upvalues, so its CLOSE
-                // instructions become meaningful.
-                parent.needs_close = true;
+                // The declaring block's CLOSE instructions become meaningful.
+                parent.markCaptured(reg);
                 try self.upvalues.append(self.allocator, .{ .instack = true, .idx = reg, .name = name });
             },
             .upvalue => |idx| {
@@ -1704,6 +1769,7 @@ pub const Parser = struct {
 
     fn enterScope(self: *Parser) !void {
         try self.proto.enterScope();
+        try self.proto.pushCloseScope(self.proto.locals_top);
         try self.scope_label_marks.append(self.proto.allocator, self.active_label_names.items.len);
         try self.tbc_scope_marks.append(self.proto.allocator, self.active_tbc_count);
         self.next_scope_id += 1;
@@ -1724,6 +1790,7 @@ pub const Parser = struct {
         }
         self.active_label_names.shrinkRetainingCapacity(mark);
         _ = self.scope_ids.pop();
+        self.proto.popCloseScope();
         self.proto.leaveScope();
     }
 
@@ -3336,20 +3403,24 @@ pub const Parser = struct {
                     // Direct register reference: expression consumers treat
                     // operand registers as read-only (binary ops write to a
                     // fresh destination, staging paths copy-if-needed), so
-                    // a bare local needs no temp copy. Suffix chains mutate
-                    // their base register in place and keep the copy.
-                    const has_suffix = next.kind == .Symbol and
-                        (std.mem.eql(u8, next.lexeme, ".") or
-                            std.mem.eql(u8, next.lexeme, "[") or
-                            std.mem.eql(u8, next.lexeme, ":"));
+                    // a bare local needs no temp copy. Suffix chains read
+                    // the local in place too: their first access writes a
+                    // fresh temp and only later links mutate it (borrowed
+                    // base, see parseSuffixChainOwned).
+                    self.advance();
+                    const has_suffix = self.current.kind == .Symbol and
+                        (std.mem.eql(u8, self.current.lexeme, ".") or
+                            std.mem.eql(u8, self.current.lexeme, "[") or
+                            (std.mem.eql(u8, self.current.lexeme, ":") and
+                                !(self.peek().kind == .Symbol and std.mem.eql(u8, self.peek().lexeme, ":"))));
                     if (!has_suffix) {
-                        self.advance();
                         return loc.local;
                     }
+                    return try self.parseSuffixChainOwned(loc.local, false);
                 }
                 base_reg = self.proto.allocTemp();
                 switch (loc) {
-                    .local => |var_reg| try self.proto.emitMOVE(base_reg, var_reg),
+                    .local => unreachable,
                     .upvalue => |idx| try self.proto.emitGETUPVAL(base_reg, idx),
                 }
                 self.advance();
@@ -3373,12 +3444,27 @@ pub const Parser = struct {
 
     /// Parse suffixes for a prefix expression: calls, field/index access, and method calls.
     fn parseSuffixChain(self: *Parser, base_reg: u8) ParseError!u8 {
+        return self.parseSuffixChainOwned(base_reg, true);
+    }
+
+    /// `owned == false`: base_reg is a live local that must not be
+    /// clobbered — the first access reads it in place into a fresh temp
+    /// (the MOVE it replaces cost every `local[k]` chain an instruction);
+    /// from then on the chain owns the temp and mutates it as before.
+    fn parseSuffixChainOwned(self: *Parser, base_reg: u8, base_owned: bool) ParseError!u8 {
         var reg = base_reg;
+        var owned = base_owned;
 
         while (true) {
             if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
                 self.isNoParensArg())
             {
+                if (!owned) {
+                    const t = self.proto.allocTemp();
+                    try self.proto.emitMOVE(t, reg);
+                    reg = t;
+                    owned = true;
+                }
                 const arg_count = try self.parseCallArgs(reg);
                 try self.proto.emitCallVararg(reg, arg_count, 1);
                 continue;
@@ -3409,7 +3495,14 @@ pub const Parser = struct {
 
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
-                try self.proto.emitGETFIELD(reg, reg, key_const);
+                if (owned) {
+                    try self.proto.emitGETFIELD(reg, reg, key_const);
+                } else {
+                    const dst = self.proto.allocTemp();
+                    try self.proto.emitGETFIELD(dst, reg, key_const);
+                    reg = dst;
+                    owned = true;
+                }
 
                 if (has_call_suffix) {
                     const arg_count = try self.parseCallArgs(reg);
@@ -3447,7 +3540,14 @@ pub const Parser = struct {
 
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
-                try self.proto.emitGETTABLE(reg, reg, key_reg);
+                if (owned) {
+                    try self.proto.emitGETTABLE(reg, reg, key_reg);
+                } else {
+                    const dst = self.proto.allocTemp();
+                    try self.proto.emitGETTABLE(dst, reg, key_reg);
+                    reg = dst;
+                    owned = true;
+                }
 
                 // Check for function call: t["key"]() or t[k]()
                 if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or
@@ -3463,7 +3563,9 @@ pub const Parser = struct {
                 self.advance(); // consume ':'
                 // Keep method-call base in the same register so trailing MULTRET
                 // argument expansion does not include stale prefix values.
-                const func_reg = try self.prepareMethodCall(reg, reg);
+                // A borrowed local base stays untouched: SELF reads it and
+                // writes the fresh func/self pair.
+                const func_reg = try self.prepareMethodCall(reg, if (owned) reg else null);
 
                 // Parse extra arguments starting at func_reg + 2
                 const extra_args = try self.parseMethodArgs(func_reg);
@@ -3472,6 +3574,7 @@ pub const Parser = struct {
                 const total_args: u8 = if (extra_args == ProtoBuilder.VARARG_SENTINEL) ProtoBuilder.VARARG_SENTINEL else extra_args + 1;
                 try self.proto.emitCallVararg(func_reg, total_args, 1);
                 reg = func_reg;
+                owned = true;
             }
         }
 
@@ -4165,10 +4268,13 @@ pub const Parser = struct {
         while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "and")) {
             self.advance(); // consume 'and'
 
-            const dst = self.proto.allocTemp();
-            if (left != dst) {
-                try self.proto.emitMOVE(dst, left);
-            }
+            // A temp left is dead after the TEST, so it can accumulate the
+            // result in place; only a named local needs a fresh register.
+            const dst = if (left >= self.proto.locals_top) left else blk: {
+                const d = self.proto.allocTemp();
+                try self.proto.emitMOVE(d, left);
+                break :blk d;
+            };
             // If dst is falsy, jump to end and keep dst.
             // TEST A k skips next when toBoolean(A) != k.
             // With k=false: truthy skips JMP, falsy executes JMP.
@@ -4198,10 +4304,13 @@ pub const Parser = struct {
         while (self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "or")) {
             self.advance(); // consume 'or'
 
-            const dst = self.proto.allocTemp();
-            if (left != dst) {
-                try self.proto.emitMOVE(dst, left);
-            }
+            // A temp left is dead after the TEST, so it can accumulate the
+            // result in place; only a named local needs a fresh register.
+            const dst = if (left >= self.proto.locals_top) left else blk: {
+                const d = self.proto.allocTemp();
+                try self.proto.emitMOVE(d, left);
+                break :blk d;
+            };
             // If dst is truthy, jump to end and keep dst.
             // With k=true: truthy executes JMP, falsy skips JMP.
             try self.proto.emitTEST(dst, true);
@@ -4241,14 +4350,17 @@ pub const Parser = struct {
 
         // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = then_line;
-        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+        const fused = self.proto.tryFuseCompareJump(condition_reg);
+        if (!fused) {
             try self.proto.emitTEST(condition_reg, false);
         }
         const false_jmp = try self.proto.emitPatchableJMP();
 
         // Drop temporary condition value before branch bodies so GC does not
         // keep weakly-referenced objects alive through dead temp registers.
-        if (condition_reg >= self.proto.locals_top) {
+        // A fused comparison never materialized its boolean, so the temp
+        // holds no new reference and needs no clearing.
+        if (!fused and condition_reg >= self.proto.locals_top) {
             try self.proto.emitLOADNIL(condition_reg, 1);
         }
 
@@ -4494,6 +4606,8 @@ pub const Parser = struct {
         try self.proto.addVariable(loop_var_name, base_reg + 3);
         try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
         defer _ = self.loop_close_regs.pop();
+        try self.proto.pushCloseScope(base_reg + 3);
+        defer self.proto.popCloseScope();
 
         // Mark for loop body - each iteration resets to this point
         const loop_body_mark = self.proto.markTemps();
@@ -4660,13 +4774,18 @@ pub const Parser = struct {
 
         // Mark to-be-closed state before loop dispatch.
         // Must run before TFORPREP, otherwise empty iterators skip TBC.
+        // The TBC slot makes the enclosing block closeable: a goto jumping
+        // out of the loop closes it via emitCloseIfNeeded.
+        self.proto.markCaptured(base_reg + 3);
         self.proto.current_line = do_line;
-        self.proto.needs_close = true;
         try self.proto.emit(.TBC, base_reg + 3, 0, 0);
         self.active_tbc_count += 1;
         defer self.active_tbc_count -= 1;
         try self.loop_close_regs.append(self.proto.allocator, base_reg + 3);
         defer _ = self.loop_close_regs.pop();
+        // Loop variables start at base_reg + 4 (past iter/state/control/tbc).
+        try self.proto.pushCloseScope(base_reg + 4);
+        defer self.proto.popCloseScope();
 
         // TFORPREP: jump to TFORCALL
         self.proto.current_line = do_line;
@@ -4710,9 +4829,11 @@ pub const Parser = struct {
         const end_line: u32 = @intCast(self.current.line);
         self.advance(); // consume 'end'
 
-        // Close upvalues and TBC state before TFORCALL (end of iteration)
+        // Close captured loop variables before TFORCALL (end of iteration).
+        // The to-be-closed slot at base_reg + 3 must survive iterations, so
+        // this close starts at the loop variables.
         self.proto.current_line = do_line;
-        try self.proto.emitCloseIfNeeded(base_reg + 3);
+        try self.proto.emitCloseIfNeeded(base_reg + 4);
 
         // TFORCALL: call iterator and store results
         const tforcall_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4729,9 +4850,11 @@ pub const Parser = struct {
         // Patch TFORLOOP to jump back to loop start
         self.proto.patchFORInstr(tforloop_addr, loop_start);
 
-        // Close upvalues and TBC state when loop exits (after TFORLOOP falls through)
+        // Close upvalues and TBC state when loop exits (after TFORLOOP
+        // falls through). Unconditional, as in PUC: the to-be-closed slot
+        // must be finalized regardless of captures.
         self.proto.current_line = end_line;
-        try self.proto.emitCloseIfNeeded(base_reg + 3);
+        try self.proto.emitClose(base_reg + 3);
 
         // Patch all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4766,13 +4889,16 @@ pub const Parser = struct {
 
         // TEST condition, skip if false (or branch on a fused comparison)
         self.proto.current_line = do_line;
-        if (!self.proto.tryFuseCompareJump(condition_reg)) {
+        const fused = self.proto.tryFuseCompareJump(condition_reg);
+        if (!fused) {
             try self.proto.emitTEST(condition_reg, false);
         }
         const exit_jmp = try self.proto.emitPatchableJMP();
 
-        // Condition temporaries are dead after TEST/JMP dispatch.
-        if (condition_reg >= self.proto.locals_top) {
+        // Condition temporaries are dead after TEST/JMP dispatch. A fused
+        // comparison never materialized its boolean, so the temp holds no
+        // new reference and needs no clearing.
+        if (!fused and condition_reg >= self.proto.locals_top) {
             try self.proto.emitLOADNIL(condition_reg, 1);
         }
 
@@ -4789,10 +4915,6 @@ pub const Parser = struct {
         // Parse loop body
         try self.parseStatements();
 
-        // Release loop body scope and temporaries
-        self.leaveScope();
-        self.proto.resetTemps(body_mark);
-
         // Expect 'end'
         if (!(self.current.kind == .Keyword and std.mem.eql(u8, self.current.lexeme, "end"))) {
             return error.ExpectedEnd;
@@ -4803,6 +4925,8 @@ pub const Parser = struct {
         // jumping back to reevaluate the condition. The back edge is
         // attributed to the last body line (as in PUC): using the
         // condition line would fire two line events per iteration.
+        // The body's close scope must still be active here, so the scope
+        // is left only after the back edge is emitted.
         var back_line = do_line;
         if (self.proto.lineinfo.items.len > 0) {
             const ln = self.proto.lineinfo.items[self.proto.lineinfo.items.len - 1];
@@ -4815,6 +4939,10 @@ pub const Parser = struct {
         const back_offset = @as(i32, @intCast(loop_start)) - @as(i32, @intCast(self.proto.code.items.len)) - 1;
         self.proto.current_line = back_line;
         try self.proto.emitJMP(@intCast(back_offset));
+
+        // Release loop body scope and temporaries
+        self.leaveScope();
+        self.proto.resetTemps(body_mark);
 
         // Patch exit jump and all break jumps to after the loop
         const end_addr = @as(u32, @intCast(self.proto.code.items.len));
@@ -4915,9 +5043,12 @@ pub const Parser = struct {
 
         // Close only variables that belong to the current loop scope.
         // Using CLOSE 0 would also close unrelated outer upvalues.
+        // Unconditional: the loop body is still being parsed, so its
+        // capture flag is not final here, and a break runs once per loop
+        // exit — the dispatch is not worth a stale-flag soundness hole.
         const close_reg = self.loop_close_regs.items[self.loop_close_regs.items.len - 1];
         self.proto.current_line = break_line;
-        try self.proto.emitCloseIfNeeded(close_reg);
+        try self.proto.emitClose(close_reg);
 
         // Emit JMP to be patched later at end of loop
         self.proto.current_line = break_line;
@@ -5008,6 +5139,27 @@ pub const Parser = struct {
         };
         try self.proto.labels.put(label_name, label);
         try self.active_label_names.append(self.proto.allocator, label_name);
+
+        // A goto arriving from a deeper block may leave the scope of
+        // captured or to-be-closed slots whose blocks never see the jump
+        // (their close scopes are gone by label time), so the label itself
+        // must close everything above its own level — PUC's createlabel.
+        // Falling through is safe: nothing closeable lives at or above
+        // locals_top here. Gated on ever_captured to keep goto-as-continue
+        // code free of no-op CLOSE dispatch.
+        var needs_close = false;
+        for (self.proto.pending_gotos.items) |pending| {
+            if (!std.mem.eql(u8, pending.name, label_name)) continue;
+            if (!self.isScopeAncestor(label.scope_id, pending.scope_id)) continue;
+            if (pending.scope_id != label.scope_id) {
+                needs_close = true;
+                break;
+            }
+        }
+        if (needs_close and self.proto.ever_captured) {
+            self.proto.current_line = @intCast(label_line);
+            try self.proto.emitClose(self.proto.locals_top);
+        }
 
         // Patch any pending gotos to this label
         var i: usize = 0;
@@ -5358,7 +5510,7 @@ pub const Parser = struct {
         i = 0;
         while (i < var_count) : (i += 1) {
             if (var_is_close[i]) {
-                self.proto.needs_close = true;
+                self.proto.markCaptured(first_reg + i);
                 try self.proto.emit(.TBC, first_reg + i, 0, 0);
                 self.active_tbc_count += 1;
             }

@@ -214,7 +214,7 @@ test "parser: return (no expression)" {
 
     // Bare return is valid - returns no values
     const result = try parseAndExecute(&ctx, allocator, "return");
-    try testing.expectEqual(ReturnValue.none, result);
+    try testing.expect(result == .none);
 }
 
 test "parser: return \"hello\" (string literal)" {

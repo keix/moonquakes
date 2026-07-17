@@ -897,7 +897,7 @@ fn shouldSkipUnnamedDuplicateSlot(target_vm: *VM, ci: *const CallInfo, reg: u32)
 
     const cur = target_vm.stack[ci.base + reg];
     const prev = target_vm.stack[ci.base + reg - 1];
-    return std.meta.eql(cur, prev);
+    return TValue.rawIdentical(cur, prev);
 }
 
 fn mapLocalOrdinalToRegister(target_vm: *VM, ci: *const CallInfo, local_idx: u32, restrict_outer_temporaries: bool) ?u32 {
@@ -1234,7 +1234,25 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             return;
         }
 
-        const frame_info = target_vm.debugGetFrameInfoAtLevel(level) orelse {
+        // During a native call/return hook the callee has no CallInfo
+        // (natives run frameless), so the frame walk would resolve level 2
+        // to the CALLER. Splice a virtual C frame in at level 2 and shift
+        // deeper levels by one — the view PUC gets from its real C frame.
+        var effective_level = level;
+        var virtual_native: ?*NativeClosureObject = null;
+        if (vm.hooks.in_hook and vm == target_vm) {
+            if (vm.hooks.event_callee) |nc| {
+                if (level == 2) {
+                    virtual_native = nc;
+                } else if (level > 2) {
+                    effective_level = level - 1;
+                }
+            }
+        }
+        if (virtual_native) |nc| {
+            target_native = nc;
+        } else {
+        const frame_info = target_vm.debugGetFrameInfoAtLevel(effective_level) orelse {
             vm.stack[vm.base + func_reg] = TValue.nil;
             return;
         };
@@ -1244,6 +1262,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         is_main_chunk = frame_info.is_main;
         if (frame_info.debug_name) |n| func_name = n;
         if (frame_info.debug_namewhat) |nw| func_namewhat = nw;
+        }
         if (func_name != null and func_namewhat != null and target_closure != null and level_arg != null and !(vm.hooks.in_hook and vm.hooks.name_override != null)) {
             if (!isConsistentLevelName(vm, level_arg.?, target_closure.?, func_name.?, func_namewhat.?)) {
                 func_name = null;
@@ -1496,17 +1515,21 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             try tableSet(vm, result_table, TValue.fromString(act_key), TValue.fromTable(act_tbl));
         }
     } else if (target_native) |nc| {
-        if (want_name and func_name == null) {
-            var it = vm.globals().hash_part.iterator();
-            while (it.next()) |entry| {
-                const key = entry.key_ptr.*;
-                const value = entry.value_ptr.*;
-                const value_nc = value.asNativeClosure() orelse continue;
-                if (value_nc != nc) continue;
-                const key_str = key.asString() orelse continue;
-                func_name = key_str.asSlice();
-                break;
+        if (want_name) {
+            if (func_name == null) {
+                var it = vm.globals().hash_part.iterator();
+                while (it.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    const value = entry.value_ptr.*;
+                    const value_nc = value.asNativeClosure() orelse continue;
+                    if (value_nc != nc) continue;
+                    const key_str = key.asString() orelse continue;
+                    func_name = key_str.asSlice();
+                    break;
+                }
             }
+            // func_name may also arrive pre-set (hook name_override for
+            // the virtual C frame a native call/return hook observes).
             if (func_name) |name| {
                 const name_key = try vm.gc().allocString("name");
                 try tableSet(vm, result_table, TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
@@ -1651,7 +1674,7 @@ pub fn nativeDebugGetlocal(vm: anytype, func_reg: u32, nargs: u32, nresults: u32
             if (ulevel >= 2 and reg >= ci.func.numparams and ci.vararg_count > 0) {
                 var vi: u32 = 0;
                 while (vi < ci.vararg_count) : (vi += 1) {
-                    if (std.meta.eql(value, target_vm.stack[ci.vararg_base + vi])) {
+                    if (TValue.rawIdentical(value, target_vm.stack[ci.vararg_base + vi])) {
                         visible_value = TValue.nil;
                         break;
                     }

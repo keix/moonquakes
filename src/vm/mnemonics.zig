@@ -1567,10 +1567,10 @@ pub fn execute(vm: *VM, proto: *const ProtoObject) !ReturnValue {
 
 inline fn runCountHookIfNeeded(vm: *VM) !void {
     if (vm.hooks.count == 0 or vm.hooks.in_hook) return;
-    if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count * 2;
+    if (vm.hooks.countdown == 0) vm.hooks.countdown = vm.hooks.count;
     vm.hooks.countdown -|= 1;
     if (vm.hooks.countdown == 0) {
-        vm.hooks.countdown = vm.hooks.count * 2;
+        vm.hooks.countdown = vm.hooks.count;
         try hook_state.onCount(vm, executeSyncMM);
     }
 }
@@ -3552,6 +3552,8 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             }
             vm.top = vm.base + a + 1 + nargs;
             if (hook_state.hasCallListener(vm)) {
+                vm.hooks.event_callee = nc;
+                defer vm.hooks.event_callee = null;
                 try hook_state.onCallTransfer(vm, null, .{ .stack = .{
                     .start = 1,
                     .src_base = vm.base + a + 1,
@@ -3570,6 +3572,8 @@ fn opCALL(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
             // a hook (debug.sethook). Its own return event then fires with
             // an empty arg snapshot, but delivery timing matches.
             if (hook_state.hasReturnListener(vm)) {
+                vm.hooks.event_callee = nc;
+                defer vm.hooks.event_callee = null;
                 try emitNativeReturnHook(vm, nc.func.id, native_call_args[0..native_call_arg_count], native_result);
             }
             return .LoopContinue;

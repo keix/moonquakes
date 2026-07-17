@@ -338,7 +338,7 @@ test "weak value table does not retain white value" {
     gc.collect();
 
     try std.testing.expect(before > gc.getStats().object_count);
-    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+    try std.testing.expect(weak_table.get(TValue.fromString(key)) == null);
 }
 
 test "finalizer queue keeps unreachable object alive until drained" {
@@ -459,7 +459,7 @@ test "generational minor clears weak value entries for unreachable young values"
     try std.testing.expectEqual(object.ObjectGeneration.young, value.header.generation);
 
     try std.testing.expect(gc.stepSized(0));
-    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+    try std.testing.expect(weak_table.get(TValue.fromString(key)) == null);
 }
 
 test "generational minor keeps weak value entry for unreachable old value" {
@@ -497,7 +497,7 @@ test "generational minor keeps weak value entry for unreachable old value" {
     try std.testing.expect(result.?.asTable() == old_value);
 
     gc.collect();
-    try std.testing.expectEqual(@as(?TValue, null), weak_table.get(TValue.fromString(key)));
+    try std.testing.expect(weak_table.get(TValue.fromString(key)) == null);
 }
 
 test "generational minor keeps ephemeron value when young key is still rooted" {
@@ -593,7 +593,7 @@ test "generational minor enqueues finalizer for unreachable young object" {
 
     const queued = gc.finalizer_queue.items[0];
     try std.testing.expect(queued.obj == &obj.header);
-    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), queued.func);
+    try std.testing.expect(TValue.rawIdentical(TValue.fromNativeClosure(gc_fn), queued.func));
 }
 
 test "queued finalizer survives subsequent minor cycle" {
@@ -629,7 +629,7 @@ test "queued finalizer survives subsequent minor cycle" {
     try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
     try std.testing.expect(gc.finalizer_queue.items[0].obj == &obj.header);
-    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
+    try std.testing.expect(TValue.rawIdentical(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func));
 }
 
 test "queued finalizer keeps young __gc function alive across minor cycle" {
@@ -662,12 +662,12 @@ test "queued finalizer keeps young __gc function alive across minor cycle" {
     try std.testing.expect(gc.stepSized(0));
     const queued_count = gc.getStats().object_count;
     try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
-    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
+    try std.testing.expect(TValue.rawIdentical(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func));
 
     try std.testing.expect(gc.stepSized(0));
     try std.testing.expectEqual(queued_count, gc.getStats().object_count);
     try std.testing.expectEqual(@as(usize, 1), gc.finalizer_queue.items.len);
-    try std.testing.expectEqual(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func);
+    try std.testing.expect(TValue.rawIdentical(TValue.fromNativeClosure(gc_fn), gc.finalizer_queue.items[0].func));
 }
 
 test "generational minor does not enqueue finalizer for unreachable old object" {

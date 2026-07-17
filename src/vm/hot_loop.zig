@@ -58,7 +58,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
     var inst = pc[0];
     dispatch: switch (inst.getOpCode()) {
         .MOVE => {
-            stack[base + inst.getA()] = stack[base + inst.getB()];
+            TValue.copy(&stack[base + inst.getA()], &stack[base + inst.getB()]);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -198,10 +198,11 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         .GETUPVAL => {
             const closure = cur.closure orelse return;
             const b = inst.getB();
-            stack[base + inst.getA()] = if (b < closure.upvalues.len)
-                closure.upvalues[b].get()
-            else
-                .nil;
+            if (b < closure.upvalues.len) {
+                TValue.copy(&stack[base + inst.getA()], closure.upvalues[b].location);
+            } else {
+                stack[base + inst.getA()] = .nil;
+            }
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -228,9 +229,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (key.isInteger()) {
                 const i = key.asInt();
                 if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
-                    const value = table.array.items[@intCast(i - 1)];
-                    if (value.isNil()) return;
-                    stack[base + inst.getA()] = value;
+                    const slot = &table.array.items[@intCast(i - 1)];
+                    if (slot.isNil()) return;
+                    TValue.copy(&stack[base + inst.getA()], slot);
                 } else {
                     const value = table.get(key.*) orelse return;
                     stack[base + inst.getA()] = value;
@@ -238,7 +239,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             } else if (key.asString()) |key_str| {
                 field_cache.rememberFieldAccess(vm, inst.getA(), key_str, table == vm.globals(), false);
                 const slot = table.getPtr(key.*) orelse return;
-                stack[base + inst.getA()] = slot.*;
+                TValue.copy(&stack[base + inst.getA()], slot);
             } else {
                 return;
             }
@@ -253,9 +254,9 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const table = stack[base + inst.getB()].asTable() orelse return;
             const i = @as(i64, inst.getC());
             if (i >= 1 and i <= @as(i64, @intCast(table.array.items.len))) {
-                const value = table.array.items[@intCast(i - 1)];
-                if (value.isNil()) return;
-                stack[base + inst.getA()] = value;
+                const slot = &table.array.items[@intCast(i - 1)];
+                if (slot.isNil()) return;
+                TValue.copy(&stack[base + inst.getA()], slot);
             } else {
                 const value = table.get(TValue.fromInt(i)) orelse return;
                 stack[base + inst.getA()] = value;
@@ -561,10 +562,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
         },
         .TFORLOOP => {
             const a = inst.getA();
-            const first_var = stack[base + a + 4];
+            const first_var = &stack[base + a + 4];
             pc += 1;
             if (!first_var.isNil()) {
-                stack[base + a + 2] = first_var;
+                TValue.copy(&stack[base + a + 2], first_var);
                 pc = jumpTarget(pc, inst.getSBx());
                 // Loop back-edge: safepoint.
                 if (vm.slow_work_signal or interrupt.isPending()) return;
@@ -687,7 +688,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (prev.continuation != .none) return;
 
             const is_return1 = inst.getOpCode() == .RETURN1;
-            const ret_val = if (is_return1) stack[base + inst.getA()] else TValue.nil;
+            const ret_src = base + inst.getA();
             const nresults = cur.nresults;
             const dst = cur.ret_base;
 
@@ -697,7 +698,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
 
             if (nresults < 0) {
                 if (is_return1) {
-                    stack[dst] = ret_val;
+                    TValue.copy(&stack[dst], &stack[ret_src]);
                     vm.top = dst + 1;
                 } else {
                     vm.top = dst;
@@ -706,7 +707,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                 const n: u32 = @intCast(nresults);
                 var j: u32 = 0;
                 if (is_return1 and n >= 1) {
-                    stack[dst] = ret_val;
+                    TValue.copy(&stack[dst], &stack[ret_src]);
                     j = 1;
                 }
                 while (j < n) : (j += 1) {
@@ -733,7 +734,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, false);
             const entry = fieldIcEntry(vm, pc);
             if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
-                stack[base + inst.getA()] = entry.slot.*;
+                TValue.copy(&stack[base + inst.getA()], entry.slot);
             } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
                 stack[base + inst.getA()] = value;
             } else {
@@ -747,17 +748,17 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // Method lookup: R[A+1] := receiver, R[A] := receiver[K[C]].
             // Shares the field cache, including the __index-chain form that
             // resolves class methods through the metatable.
-            const receiver = stack[base + inst.getB()];
+            const receiver = &stack[base + inst.getB()];
             const table = receiver.asTable() orelse return;
             const key_val = k[inst.getC()];
             const key = key_val.asString() orelse return;
             field_cache.rememberFieldAccess(vm, inst.getA(), key, false, true);
             const entry = fieldIcEntry(vm, pc);
             if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
-                stack[base + inst.getA() + 1] = receiver;
-                stack[base + inst.getA()] = entry.slot.*;
+                TValue.copy(&stack[base + inst.getA() + 1], receiver);
+                TValue.copy(&stack[base + inst.getA()], entry.slot);
             } else if (readFieldSlow(vm, pc, table, key_val)) |value| {
-                stack[base + inst.getA() + 1] = receiver;
+                TValue.copy(&stack[base + inst.getA() + 1], receiver);
                 stack[base + inst.getA()] = value;
             } else {
                 return;
@@ -777,10 +778,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             field_cache.rememberFieldAccess(vm, inst.getA(), key, true, false);
             const entry = fieldIcEntry(vm, pc);
             if (icDirectHit(entry, pc, table, vm.ic_epoch)) {
-                stack[base + inst.getA()] = entry.slot.*;
+                TValue.copy(&stack[base + inst.getA()], entry.slot);
             } else {
                 const slot = table.getPtr(key_val) orelse return;
-                stack[base + inst.getA()] = slot.*;
+                TValue.copy(&stack[base + inst.getA()], slot);
                 entry.* = .{
                     .pc = @intFromPtr(pc),
                     .table = @intFromPtr(table),
@@ -800,12 +801,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             const table = stack[base + inst.getA()].asTable() orelse return;
             const key_val = k[inst.getB()];
             if (key_val.asString() == null) return;
-            const value = stack[base + inst.getC()];
+            const value = &stack[base + inst.getC()];
             if (value.isNil()) return;
             const slot = table.getPtr(key_val) orelse return;
-            slot.* = value;
+            TValue.copy(slot, value);
             table.mod_count +%= 1;
-            vm.gc().barrierBackValue(&table.header, value);
+            vm.gc().barrierBackValue(&table.header, value.*);
             pc += 1;
             inst = pc[0];
             continue :dispatch inst.getOpCode();
@@ -819,7 +820,7 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // TableObject.set's fast path. Object values take the backward
             // barrier (infallible); nil writes are removals and exit.
             const table = stack[base + inst.getA()].asTable() orelse return;
-            const value = stack[base + inst.getC()];
+            const value = &stack[base + inst.getC()];
             if (value.isNil()) return;
             const i: i64 = if (inst.getOpCode() == .SETI)
                 @as(i64, inst.getB())
@@ -831,10 +832,10 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
                     // through the write barrier, mirroring SETFIELD.
                     // Absent keys (possible __newindex) exit.
                     const slot = table.getPtr(key.*) orelse return;
-                    slot.* = value;
+                    TValue.copy(slot, value);
                     table.mod_count +%= 1;
                     if (value.isObject()) {
-                        vm.gc().barrierBackValue(&table.header, value);
+                        vm.gc().barrierBackValue(&table.header, value.*);
                     }
                     pc += 1;
                     inst = pc[0];
@@ -846,17 +847,17 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             if (i >= 1 and i <= table.seq_len and i <= alen) {
                 const slot = &table.array.items[@intCast(i - 1)];
                 if (slot.isNil()) return;
-                slot.* = value;
+                TValue.copy(slot, value);
                 table.mod_count +%= 1;
             } else if (i == alen + 1 and table.metatable == null) {
                 // On OOM the table is untouched; the defer leaves pc at
                 // this SETI so the outer handler re-executes it. The
                 // append invariant lives in TableObject.tryAppendFresh.
-                const appended = table.tryAppendFresh(i, value) catch return;
+                const appended = table.tryAppendFresh(i, value.*) catch return;
                 if (!appended) return;
             } else return;
             if (value.isObject()) {
-                vm.gc().barrierBackValue(&table.header, value);
+                vm.gc().barrierBackValue(&table.header, value.*);
             }
             pc += 1;
             inst = pc[0];
@@ -910,7 +911,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             inst = pc[0];
             continue :dispatch inst.getOpCode();
         },
-        else => return,
+        // Explicit exit arms instead of `else`: an exhaustive switch over
+        // the u7 opcode enum lets LLVM emit a full jump table with no
+        // per-dispatch range check (`cmp; jae`) in front of the indirect
+        // jump — the check cost every executed instruction two decode ops
+        // and a branch.
+        .LOADKX, .SETTABUP, .ADDI, .POWK, .IDIVK, .SHRI, .SHLI, .POW, .IDIV, .MMBIN, .MMBINI, .MMBINK, .BNOT, .LEN, .CONCAT, .TBC, .EQK, .EQI, .TESTSET, .RETURN, .TFORPREP, .CLOSURE, .VARARG, .VARARGPREP, .EXTRAARG, .PCALL => return,
     }
 }
 
@@ -925,11 +931,12 @@ inline fn numberToFloat(v: *const TValue) ?f64 {
 
 /// Apply a signed instruction offset (JMP sJ, FORPREP/FORLOOP/TFORLOOP
 /// sBx) to a pc that has already been advanced past the instruction.
+/// Wrapping pointer arithmetic on the sign-extended offset: one add, no
+/// branch and no cmov — the branchy form compiled to a neg/test/cmovns
+/// chain on the jump-fetch critical path.
 inline fn jumpTarget(pc: [*]const Instruction, offset: i32) [*]const Instruction {
-    return if (offset >= 0)
-        pc + @as(usize, @intCast(offset))
-    else
-        pc - @as(usize, @intCast(-offset));
+    const delta = @as(isize, offset) *% @sizeOf(Instruction);
+    return @ptrFromInt(@intFromPtr(pc) +% @as(usize, @bitCast(delta)));
 }
 
 /// True when the open-upvalue list reaches into the frame starting at
@@ -948,7 +955,7 @@ inline fn stageFixedArgs(stack: anytype, dst: u32, src: u32, nargs: u32, numpara
     const params_to_copy = @min(nargs, numparams);
     var i: u32 = 0;
     while (i < params_to_copy) : (i += 1) {
-        stack[dst + i] = stack[src + i];
+        TValue.copy(&stack[dst + i], &stack[src + i]);
     }
     while (i < numparams) : (i += 1) {
         stack[dst + i] = .nil;
