@@ -1956,7 +1956,9 @@ fn opGETI(vm: *VM, inst: Instruction) !ExecuteResult {
             }
         }
     } else {
-        return error.InvalidTableOperation;
+        if (try dispatchSharedIndexMMValue(vm, table_val, TValue.fromInt(@intCast(c)), a)) |result| {
+            return result;
+        }
     }
     return .Continue;
 }
@@ -2081,7 +2083,11 @@ fn opSETI(vm: *VM, inst: Instruction) !ExecuteResult {
             return result;
         }
     } else {
-        return error.InvalidTableOperation;
+        // Mirrors opSETTABLE's non-table branch.
+        const key = TValue.fromInt(@intCast(b));
+        if (try dispatchSharedIndexMMValue(vm, table_val, key, a)) |result| {
+            return result;
+        }
     }
     return .Continue;
 }
