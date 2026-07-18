@@ -608,6 +608,14 @@ pub const ProtoBuilder = struct {
         try self.lineinfo.append(self.allocator, self.current_line);
     }
 
+    /// Emit GETI instruction: R[A] := R[B][C] (C is integer immediate)
+    pub fn emitGETI(self: *ProtoBuilder, dst: u8, table: u8, imm: u8) !void {
+        const instr = Instruction.initABC(.GETI, dst, table, imm);
+        try self.code.append(self.allocator, instr);
+        try self.lineinfo.append(self.allocator, self.current_line);
+        self.updateMaxStack(dst + 1);
+    }
+
     /// For large constant indices (>255), loads upvalue to temp and uses LOADK + GETTABLE
     pub fn emitGETTABUP(self: *ProtoBuilder, dst: u8, upval: u8, key_const: u32) !void {
         if (key_const <= 255) {
@@ -1119,6 +1127,23 @@ pub const ProtoBuilder = struct {
                 null,
             else => null,
         };
+    }
+
+    /// A bracket key just loaded as an integer constant that fits the
+    /// 8-bit immediate of GETI/SETI. Pops the load (reclaiming the temp
+    /// when it was the top of the stack) and returns the immediate.
+    /// A LOADK at a jump join is never trailing here: and/or arms end
+    /// in a MOVE into the shared destination.
+    fn popTrailingIndexImm(self: *ProtoBuilder, key_reg: u8) ?u8 {
+        const v = self.trailingNumericLoad(0, key_reg) orelse return null;
+        if (v != .integer) return null;
+        const i = v.integer;
+        if (i < 0 or i > 255) return null;
+        self.popLastInstruction();
+        if (self.next_reg == key_reg + 1) {
+            self.next_reg = @max(self.locals_top, key_reg);
+        }
+        return @intCast(i);
     }
 
     fn addConstNumeric(self: *ProtoBuilder, value: NumConst) !u32 {
@@ -2077,6 +2102,11 @@ pub const Parser = struct {
             try self.proto.emitGETTABLE(next_reg, pending.table_reg, kr);
             pending.table_reg = next_reg;
             pending.key_reg = null;
+        } else if (pending.key_imm) |imm| {
+            const next_reg = self.proto.allocTemp();
+            try self.proto.emitGETI(next_reg, pending.table_reg, imm);
+            pending.table_reg = next_reg;
+            pending.key_imm = null;
         }
     }
 
@@ -2085,6 +2115,8 @@ pub const Parser = struct {
             try self.proto.emitGETFIELD(dst, pending.table_reg, kc);
         } else if (pending.key_reg) |kr| {
             try self.proto.emitGETTABLE(dst, pending.table_reg, kr);
+        } else if (pending.key_imm) |imm| {
+            try self.proto.emitGETI(dst, pending.table_reg, imm);
         } else {
             return error.ExpectedEquals;
         }
@@ -2097,6 +2129,9 @@ pub const Parser = struct {
         }
         if (pending.key_reg) |kr| {
             return .{ .index = .{ .table_reg = pending.table_reg, .key_reg = kr } };
+        }
+        if (pending.key_imm) |imm| {
+            return .{ .index_imm = .{ .table_reg = pending.table_reg, .imm = imm } };
         }
         return error.ExpectedEquals;
     }
@@ -2336,10 +2371,16 @@ pub const Parser = struct {
             }
             self.advance(); // consume ']'
 
+            const key_imm = self.proto.popTrailingIndexImm(key_reg);
+
             if (self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "=")) {
                 self.advance(); // consume '='
                 const value_reg = try self.parseExpr();
-                try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                if (key_imm) |imm| {
+                    try self.proto.emitSETI(table_reg, imm, value_reg);
+                } else {
+                    try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                }
                 return .finished;
             }
 
@@ -2387,6 +2428,10 @@ pub const Parser = struct {
             .GETTABLE => blk: {
                 if (op_inst.a != probe_reg) return error.UnsupportedStatement;
                 break :blk .{ .index = .{ .table_reg = op_inst.b, .key_reg = op_inst.c } };
+            },
+            .GETI => blk: {
+                if (op_inst.a != probe_reg) return error.UnsupportedStatement;
+                break :blk .{ .index_imm = .{ .table_reg = op_inst.b, .imm = op_inst.c } };
             },
             else => return error.UnsupportedStatement,
         };
@@ -2556,6 +2601,7 @@ pub const Parser = struct {
         switch (target) {
             .field => |f| try self.proto.emitSETFIELD(f.table_reg, f.field_const, value_reg),
             .index => |idx| try self.proto.emitSETTABLE(idx.table_reg, idx.key_reg, value_reg),
+            .index_imm => |idx| try self.proto.emitSETI(idx.table_reg, idx.imm, value_reg),
             .variable => unreachable,
         }
     }
@@ -2793,12 +2839,18 @@ pub const Parser = struct {
                     // '['
                     self.advance(); // consume '['
 
-                    pending.key_reg = try self.parseExpr();
+                    const key_reg = try self.parseExpr();
 
                     if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
                         return error.ExpectedCloseBracket;
                     }
                     self.advance(); // consume ']'
+
+                    if (self.proto.popTrailingIndexImm(key_reg)) |imm| {
+                        pending.key_imm = imm;
+                    } else {
+                        pending.key_reg = key_reg;
+                    }
                 }
             }
 
@@ -2849,6 +2901,9 @@ pub const Parser = struct {
                 } else if (pending.key_reg) |kr| {
                     self.proto.current_line = store_line;
                     try self.proto.emitSETTABLE(pending.table_reg, kr, value_reg);
+                } else if (pending.key_imm) |imm| {
+                    self.proto.current_line = store_line;
+                    try self.proto.emitSETI(pending.table_reg, imm, value_reg);
                 }
             } else if ((self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "(")) or self.isNoParensArg()) {
                 // Function call: t[key]() or t.field[key]() etc.
@@ -2981,6 +3036,9 @@ pub const Parser = struct {
         field: struct { table_reg: u8, field_const: u32 },
         /// Index access: table[key] (table_reg, key_reg)
         index: struct { table_reg: u8, key_reg: u8 },
+        /// Index access with a constant integer key that fits SETI's
+        /// 8-bit immediate: table[imm]
+        index_imm: struct { table_reg: u8, imm: u8 },
     };
 
     const AssignmentTargetRecovery = struct {
@@ -2992,6 +3050,8 @@ pub const Parser = struct {
         table_reg: u8,
         key_const: ?u32 = null,
         key_reg: ?u8 = null,
+        /// Constant integer bracket key folded into GETI/SETI's immediate.
+        key_imm: ?u8 = null,
     };
 
     const FieldStatementDispatch = union(enum) {
@@ -3078,6 +3138,13 @@ pub const Parser = struct {
                         try self.proto.emitMOVE(key_snap, idx.key_reg);
                     }
                     targets[ti] = .{ .index = .{ .table_reg = tbl_snap, .key_reg = key_snap } };
+                },
+                .index_imm => |idx| {
+                    const tbl_snap = self.proto.allocTemp();
+                    if (tbl_snap != idx.table_reg) {
+                        try self.proto.emitMOVE(tbl_snap, idx.table_reg);
+                    }
+                    targets[ti] = .{ .index_imm = .{ .table_reg = tbl_snap, .imm = idx.imm } };
                 },
                 else => {},
             }
@@ -3174,6 +3241,9 @@ pub const Parser = struct {
                 .index => |idx| {
                     try self.proto.emitSETTABLE(idx.table_reg, idx.key_reg, value_reg);
                 },
+                .index_imm => |idx| {
+                    try self.proto.emitSETI(idx.table_reg, idx.imm, value_reg);
+                },
             }
         }
     }
@@ -3210,12 +3280,18 @@ pub const Parser = struct {
                     try self.materializePendingAccess(&pending);
 
                     self.advance(); // consume '['
-                    pending.key_reg = try self.parseExpr();
+                    const key_reg = try self.parseExpr();
 
                     if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "]"))) {
                         return error.ExpectedCloseBracket;
                     }
                     self.advance(); // consume ']'
+
+                    if (self.proto.popTrailingIndexImm(key_reg)) |imm| {
+                        pending.key_imm = imm;
+                    } else {
+                        pending.key_reg = key_reg;
+                    }
                 } else {
                     break;
                 }
@@ -3540,11 +3616,20 @@ pub const Parser = struct {
 
                 // Overwrite the current temporary register so chained call results stay
                 // contiguous when this expression is used as a trailing call argument.
+                const key_imm = self.proto.popTrailingIndexImm(key_reg);
                 if (owned) {
-                    try self.proto.emitGETTABLE(reg, reg, key_reg);
+                    if (key_imm) |imm| {
+                        try self.proto.emitGETI(reg, reg, imm);
+                    } else {
+                        try self.proto.emitGETTABLE(reg, reg, key_reg);
+                    }
                 } else {
                     const dst = self.proto.allocTemp();
-                    try self.proto.emitGETTABLE(dst, reg, key_reg);
+                    if (key_imm) |imm| {
+                        try self.proto.emitGETI(dst, reg, imm);
+                    } else {
+                        try self.proto.emitGETTABLE(dst, reg, key_reg);
+                    }
                     reg = dst;
                     owned = true;
                 }
@@ -3745,6 +3830,8 @@ pub const Parser = struct {
                 }
                 self.advance(); // consume ']'
 
+                const key_imm = self.proto.popTrailingIndexImm(key_reg);
+
                 // Expect '='
                 if (!(self.current.kind == .Symbol and std.mem.eql(u8, self.current.lexeme, "="))) {
                     return error.ExpectedEquals;
@@ -3754,8 +3841,12 @@ pub const Parser = struct {
                 // Parse value expression
                 const value_reg = try self.parseExpr();
 
-                // Emit SETTABLE: table[key] = value
-                try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                // Emit SETI/SETTABLE: table[key] = value
+                if (key_imm) |imm| {
+                    try self.proto.emitSETI(table_reg, imm, value_reg);
+                } else {
+                    try self.proto.emitSETTABLE(table_reg, key_reg, value_reg);
+                }
 
                 // Free temp registers
                 self.proto.next_reg = base_reg;
