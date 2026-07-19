@@ -143,6 +143,24 @@ fn scanChildren(self: anytype, obj: *GCObject) void {
                     }
                 }
                 // weak_keys (ephemerons): defer to propagateEphemerons
+
+                // Strings are Lua *values*, never weak: cleanWeakTableEntries
+                // skips them, so unmarked string values would be swept while
+                // still referenced by the table. Keep them alive here.
+                if (table.hasWeakValues()) {
+                    for (table.array.items) |value| {
+                        if (value.isObject() and value.asObjectPtr().type == .string) {
+                            markGray(self, value.asObjectPtr());
+                        }
+                    }
+                    var val_iter = table.hash_part.iterator();
+                    while (val_iter.next()) |entry| {
+                        const v = entry.value_ptr.*;
+                        if (v.isObject() and v.asObjectPtr().type == .string) {
+                            markGray(self, v.asObjectPtr());
+                        }
+                    }
+                }
             } else {
                 // Strong table: mark all keys and values. Array-part keys
                 // are integers; only the values need marking.
