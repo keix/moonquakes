@@ -86,6 +86,12 @@ pub const Runtime = struct {
         try gc.addRootProvider(self.rootProvider());
 
         // Initialize builtin environment (_G, _ENV, print, etc.)
+        // Inhibit GC for the whole sequence: builtin setup allocates objects
+        // (closures, key strings) that only become reachable from globals at
+        // the end of each registration, so a collect in between would sweep
+        // them and leave dangling pointers in the tables.
+        gc.inhibitGC();
+        defer gc.allowGC();
         try builtin_dispatch.initGlobalEnvironment(globals, gc);
 
         return self;

@@ -258,6 +258,12 @@ pub fn runPreloadModule(vm: *VM, module_spec: []const u8) !void {
 /// Inject `arg` table into VM globals
 /// Called by launcher before execution, not by Moonquakes facade
 pub fn injectArg(globals: *TableObject, gc: *GC, options: RunOptions) !void {
+    // The arg table only becomes reachable from globals at the end; a collect
+    // during the string allocations below would sweep it (and earlier
+    // entries), leaving dangling pointers.
+    gc.inhibitGC();
+    defer gc.allowGC();
+
     const arg_table = try gc.allocTable();
 
     // arg[-n]..arg[-1] = CLI tokens before script
@@ -333,11 +339,10 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
         try executeInitChunk(vm, allocator, chunk, "=(command line)");
     }
 
-    // Phase 4: Materialize constants (returns GC-managed ProtoObject)
-    const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
-    // No defer needed - ProtoObject is GC-managed
-
-    // Phase 5: Execute
+    // Collect main-chunk arguments BEFORE materializing: the proto returned
+    // by materialize is unrooted until executeMainChunk installs it in the
+    // main frame, so no allocation (like the "arg" key below) may happen in
+    // between or a collect would sweep it.
     var main_args = std.ArrayList(TValue){};
     defer main_args.deinit(allocator);
     const arg_key = try vm.gc().allocString("arg");
@@ -354,6 +359,11 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8, options: RunOptions
         }
     }
 
+    // Phase 4: Materialize constants (returns GC-managed ProtoObject)
+    const proto = try pipeline.materialize(&raw_proto, vm.gc(), allocator);
+    // No defer needed - ProtoObject is GC-managed
+
+    // Phase 5: Execute
     const result = Mnemonics.executeMainChunk(vm, proto, main_args.items) catch |err| {
         if (err == error.LuaException) {
             printUnhandledLuaError(vm, options.exec_name);
