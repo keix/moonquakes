@@ -1335,6 +1335,7 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
     }
 
     vm.base_ci = CallInfo.initRoot(proto, main_closure, 0, 0, -1, vararg_base, vararg_count);
+    vm.base_ci_valid = true;
     vm.ci = &vm.base_ci;
     vm.base = 0;
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else proto.maxstacksize;

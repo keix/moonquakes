@@ -92,6 +92,11 @@ pub const VM = struct {
     base: u32,
     ci: ?*CallInfo,
     base_ci: CallInfo,
+    /// base_ci stays uninitialized until setupMainFrame/initRoot runs, but
+    /// reentrant executors (CLI -l requires, callValue from natives) push
+    /// callstack frames before that. GC frame walks must skip base_ci until
+    /// this is set or they dereference a garbage func pointer.
+    base_ci_valid: bool = false,
     // Keep this below 256 as callstack_size is u8.
     callstack: [200]CallInfo,
     callstack_size: u8,

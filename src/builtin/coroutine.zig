@@ -246,6 +246,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
         0,
         0,
     );
+    co_vm.base_ci_valid = true;
     co_vm.ci = &co_vm.base_ci;
 }
 

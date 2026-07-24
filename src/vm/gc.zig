@@ -33,13 +33,18 @@ fn computeStackExtent(vm: *const VM) u32 {
 fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
     if (vm.ci == null) return;
 
-    if (vm.base_ci.closure) |closure| {
-        gc_ptr.mark(&closure.header);
-    } else {
-        gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
+    // Reentrant executors (CLI -l requires, callValue from natives) push
+    // callstack frames before setupMainFrame ever runs; base_ci is still
+    // uninitialized then and its func pointer is garbage.
+    if (vm.base_ci_valid) {
+        if (vm.base_ci.closure) |closure| {
+            gc_ptr.mark(&closure.header);
+        } else {
+            gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
+        }
+        gc_ptr.markValue(vm.base_ci.error_handler);
+        markFrameVarargs(vm, gc_ptr, &vm.base_ci);
     }
-    gc_ptr.markValue(vm.base_ci.error_handler);
-    markFrameVarargs(vm, gc_ptr, &vm.base_ci);
 
     for (vm.callstack[0..vm.callstack_size]) |frame| {
         if (frame.closure) |closure| {
