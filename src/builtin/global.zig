@@ -722,6 +722,10 @@ pub fn nativeIpairs(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
 
     // Get or create cached singleton iterator (ipairs{} == ipairs{} must be true)
     const cache_key = try vm.gc().allocString("_ipairs_iter");
+    // Root the key: the allocations below can run a GC cycle, and a Zig
+    // local is not a root — the key would be swept before tableSet stores it.
+    if (!vm.pushTempRoot(TValue.fromString(cache_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const globals = vm.globals();
     const iter_val = if (globals.get(TValue.fromString(cache_key))) |cached| blk: {
         if (cached.asNativeClosure()) |nc| {

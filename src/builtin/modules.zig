@@ -370,10 +370,21 @@ pub fn nativeRequire(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !void {
                 if (preload.get(TValue.fromString(mod_key))) |loader| {
                     if (!loader.isNil()) {
                         const preload_loader_data = try vm.gc().allocString(":preload:");
+                        // Rooted across the loader call: it is reused for the
+                        // second return value after arbitrary Lua execution.
+                        if (!vm.pushTempRoot(TValue.fromString(preload_loader_data))) return error.OutOfMemory;
+                        defer vm.popTempRoots(1);
                         const result = try call.callValue(vm, loader, &[_]TValue{
                             TValue.fromString(mod_key),
                             TValue.fromString(preload_loader_data),
                         });
+                        // Root the loader result: the allocations below can
+                        // run a GC cycle and a Zig local is not a root — the
+                        // module table would be swept and pool-reused.
+                        if (result.isObject()) {
+                            if (!vm.pushTempRoot(result)) return error.OutOfMemory;
+                        }
+                        defer if (result.isObject()) vm.popTempRoots(1);
 
                         if (result.asTable()) |res_table| {
                             const xuxu_key = try vm.gc().allocString("xuxu");

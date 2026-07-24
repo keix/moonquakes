@@ -344,18 +344,23 @@ fn readProto(reader: *ByteReader, gc: anytype, allocator: std.mem.Allocator) !*P
 
     // Fix up nested protos that omitted source (same as this proto).
     if (proto_obj.source.len > 0) {
-        try propagateSourceToChildren(proto_obj, allocator);
+        try propagateSourceToChildren(proto_obj, gc, allocator);
     }
     return proto_obj;
 }
 
-fn propagateSourceToChildren(proto_obj: *ProtoObject, allocator: std.mem.Allocator) !void {
+fn propagateSourceToChildren(proto_obj: *ProtoObject, gc: anytype, allocator: std.mem.Allocator) !void {
     for (proto_obj.protos) |child| {
         if (child.source.len == 0 and child.lineinfo.len > 0 and proto_obj.source.len > 0) {
             child.source = try allocator.dupe(u8, proto_obj.source);
+            // The child was accounted with source.len == 0 at allocProto
+            // time, but the sweep subtracts the CURRENT source.len when the
+            // proto dies. Without this the books go negative over many
+            // undumps and bytes_allocated eventually wraps.
+            gc.trackAllocation(child.source.len);
         }
         if (child.source.len > 0) {
-            try propagateSourceToChildren(child, allocator);
+            try propagateSourceToChildren(child, gc, allocator);
         }
     }
 }

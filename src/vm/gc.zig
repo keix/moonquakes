@@ -25,21 +25,33 @@ pub const vmRootProviderVTable = RootProvider.VTable{
 
 fn computeStackExtent(vm: *const VM) u32 {
     // IMPORTANT: Only mark up to vm.top, not base + maxstacksize.
-    // Slots beyond top may contain stale pointers from previous function calls
-    // that have already returned. Those objects may have been freed.
+    // Slots beyond top may contain stale leftovers from expired scopes and
+    // popped frames; marking them would keep semantically dead values alive
+    // (visible through weak tables — gc.lua's weak tests fail if the whole
+    // frame window is marked). Frame setup and returns keep vm.top at the
+    // frame ceiling during Lua execution, and calls keep live caller
+    // registers below the staging area, so [0, top) covers every live slot
+    // at allocation points. clearDeadStackSlice below prevents the stale
+    // slots from ever surviving a sweep and being re-exposed by a later
+    // top raise.
     return vm.top;
 }
 
 fn markCallFrames(vm: *const VM, gc_ptr: *GC) void {
     if (vm.ci == null) return;
 
-    if (vm.base_ci.closure) |closure| {
-        gc_ptr.mark(&closure.header);
-    } else {
-        gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
+    // Reentrant executors (CLI -l requires, callValue from natives) push
+    // callstack frames before setupMainFrame ever runs; base_ci is still
+    // uninitialized then and its func pointer is garbage.
+    if (vm.base_ci_valid) {
+        if (vm.base_ci.closure) |closure| {
+            gc_ptr.mark(&closure.header);
+        } else {
+            gc_ptr.markProtoObject(@constCast(vm.base_ci.func));
+        }
+        gc_ptr.markValue(vm.base_ci.error_handler);
+        markFrameVarargs(vm, gc_ptr, &vm.base_ci);
     }
-    gc_ptr.markValue(vm.base_ci.error_handler);
-    markFrameVarargs(vm, gc_ptr, &vm.base_ci);
 
     for (vm.callstack[0..vm.callstack_size]) |frame| {
         if (frame.closure) |closure| {
@@ -100,6 +112,58 @@ fn markTracebackSnapshot(vm: *const VM, gc_ptr: *GC) void {
     }
 }
 
+/// PUC's "clear dead stack slice": slots above vm.top hold leftovers from
+/// popped frames and expired temporaries. This cycle's sweep may free
+/// their referents, and a later top raise (a call, or syncTopForAlloc)
+/// would re-expose them to markStack as dangling pointers. Nil everything
+/// above the extent — except live vararg regions, which intentionally sit
+/// above the frame windows while a callee executes.
+///
+/// Clearing down to vm.top is safe because every GC entry point keeps the
+/// invariant "no live register above vm.top": in-VM allocating opcodes
+/// raise top over the frame window first (mnemonics.syncTopForAlloc), and
+/// native-call triggers run with top just past the staged args, above all
+/// live caller registers.
+fn clearDeadStackSlice(vm: *VM, stack_extent: u32) void {
+    // Collect live vararg intervals above the extent (sorted by start).
+    var starts: [vm.callstack.len + 1]u32 = undefined;
+    var ends: [vm.callstack.len + 1]u32 = undefined;
+    var n: usize = 0;
+    var fi: usize = 0;
+    // Like markCallFrames: with no active frame (e.g. a coroutine VM before
+    // its first resume) base_ci is uninitialized and there are no varargs.
+    const frame_count: usize = if (vm.ci == null) 0 else vm.callstack_size + 1;
+    while (fi < frame_count) : (fi += 1) {
+        // Same guard as markCallFrames: base_ci may be uninitialized while
+        // reentrant frames run before the main chunk is staged.
+        if (fi == 0 and !vm.base_ci_valid) continue;
+        const frame: *const CallInfo = if (fi == 0) &vm.base_ci else &vm.callstack[fi - 1];
+        if (frame.vararg_count == 0) continue;
+        const s = frame.vararg_base;
+        const e = frame.vararg_base + frame.vararg_count;
+        if (e <= stack_extent) continue;
+        // Insertion sort by start; frame vararg regions never overlap.
+        var j = n;
+        while (j > 0 and starts[j - 1] > s) : (j -= 1) {
+            starts[j] = starts[j - 1];
+            ends[j] = ends[j - 1];
+        }
+        starts[j] = s;
+        ends[j] = e;
+        n += 1;
+    }
+
+    var pos = stack_extent;
+    for (starts[0..n], ends[0..n]) |s, e| {
+        const gap_end = @min(@max(s, pos), @as(u32, @intCast(vm.stack.len)));
+        @memset(vm.stack[pos..gap_end], TValue.nil);
+        pos = @max(pos, e);
+    }
+    if (pos < vm.stack.len) {
+        @memset(vm.stack[pos..], TValue.nil);
+    }
+}
+
 /// VM marks thread-local state only.
 /// Runtime marks globals/registry.
 fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
@@ -107,6 +171,7 @@ fn vmMarkRoots(ctx: *anyopaque, gc_ptr: *GC) void {
     const stack_extent = computeStackExtent(vm);
 
     gc_ptr.markStack(vm.stack[0..stack_extent]);
+    clearDeadStackSlice(vm, stack_extent);
     markCallFrames(vm, gc_ptr);
     markUpvalues(vm, gc_ptr);
     gc_ptr.markValue(error_state.getRaisedValue(vm));

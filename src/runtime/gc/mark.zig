@@ -376,6 +376,16 @@ pub fn markCycleRoots(self: anytype) void {
 
 /// Complete the mark phase and prepare sweep.
 pub fn finishMarkPhase(self: anytype) void {
+    // Atomic re-mark: stepped cycles (stepSized) pause the mark phase and
+    // let the mutator run. Container stores are covered by barrierBack, but
+    // plain stack/register writes are not — a white object moved from a
+    // container into only a register during the pause would be missed and
+    // swept while still referenced. Re-marking the roots here (PUC's atomic
+    // phase does the same for thread stacks) closes that hole; for
+    // non-stepped cycles it is a cheap no-op since everything reachable is
+    // already marked.
+    markCycleRoots(self);
+
     // Drain any remaining gray work before atomic cleanup.
     propagateAll(self);
 

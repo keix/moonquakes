@@ -770,11 +770,21 @@ fn getGmatchStateMap(vm: *VM) !*object.TableObject {
     if (globals.get(key_val)) |existing| {
         if (existing.asTable()) |tbl| return tbl;
     }
+    // Every allocation below can run a GC cycle; Zig locals are not roots,
+    // so each earlier object must be temp-rooted until reachable.
+    if (!vm.pushTempRoot(key_val)) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const tbl = try vm.gc().allocTable();
+    if (!vm.pushTempRoot(TValue.fromTable(tbl))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     // Weak keys: entries must die with their iterator closures. A strong
     // map leaked one iterator + state table per string.gmatch call.
     const mt = try vm.gc().allocTable();
+    if (!vm.pushTempRoot(TValue.fromTable(mt))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const mode_key = try vm.gc().allocString("__mode");
+    if (!vm.pushTempRoot(TValue.fromString(mode_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const mode_val = try vm.gc().allocString("k");
     try vm.gc().tableSet(mt, TValue.fromString(mode_key), TValue.fromString(mode_val));
     vm.gc().tableSetMetatable(tbl, mt);
@@ -1965,6 +1975,10 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
     // interned-string hash lookups: [1]=subject, [2]=pattern, [3]=pos,
     // [4]=last match end.
     const state_table = try vm.gc().allocTable();
+    // Root across the closure/state-map allocations below: a Zig local is
+    // not a GC root and either allocation can run a collection cycle.
+    if (!vm.pushTempRoot(TValue.fromTable(state_table))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     try vm.gc().tableSet(state_table, TValue.fromInt(1), str_arg);
     try vm.gc().tableSet(state_table, TValue.fromInt(2), pat_arg);
     try vm.gc().tableSet(state_table, TValue.fromInt(3), TValue.fromInt(@as(i64, @intCast(init_pos))));
@@ -1972,9 +1986,10 @@ pub fn nativeStringGmatch(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Create iterator function and store private state by iterator identity.
     const iter_nc = try vm.gc().allocNativeClosure(NativeFn.init(.string_gmatch_iterator));
+    // Root: getGmatchStateMap may allocate the map on first use.
+    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
     const state_map = try getGmatchStateMap(vm);
     try vm.gc().tableSet(state_map, TValue.fromNativeClosure(iter_nc), TValue.fromTable(state_table));
-    vm.stack[vm.base + func_reg] = TValue.fromNativeClosure(iter_nc);
 
     // Generic-for still accepts (f, s, var, toclose), but gmatch keeps state privately.
     if (nresults > 1) {

@@ -145,6 +145,24 @@ fn formatConcatNumber(buf: []u8, n: f64) []const u8 {
     return rendered;
 }
 
+/// PUC's checkGC discipline, adapted: before an in-VM allocation, raise
+/// vm.top to the current frame's register ceiling so the GC's stack mark
+/// ([0, vm.top)) covers every live register. After a native call returns,
+/// vm.top can sit at the results' end with live locals above it; an
+/// allocation in that window sweeps objects whose only reference is such a
+/// register (flaky corruption). Unlike PUC's precise `top = ra + 1` this
+/// raises to the whole frame (this parser stores into locals in place, so
+/// registers above the dest are not guaranteed dead); the over-retention
+/// only affects in-VM emergency collects — explicit collectgarbage() runs
+/// through a native frame with a precise low top, which is what the weak
+/// table semantics tests observe. Raise-only: never lowers a top that
+/// already covers staged multret values.
+inline fn syncTopForAlloc(vm: *VM) void {
+    if (vm.ci) |ci| {
+        vm.top = @max(vm.top, ci.base + ci.func.maxstacksize);
+    }
+}
+
 // Shared frame/error cleanup helpers used by the main loop and caller adapters.
 // Return/tailcall paths need identical TBC cleanup semantics: propagate errors,
 // but remember when __close yielded so the return instruction can re-execute.
@@ -340,12 +358,20 @@ pub fn unwindErrorFramesIgnoringCloseErrors(vm: *VM, saved_depth: u8, err_obj: T
 }
 
 pub fn unwindErrorFramesToProtectedTarget(vm: *VM, target_ci: ?*CallInfo, err_obj: TValue) error{Yield}!void {
+    // A __close in a deeper frame may replace the propagating error (its
+    // raise updates lua_error_value). Each remaining frame must see the
+    // CURRENT error, not the one captured when unwinding began — otherwise a
+    // shallower closeTBCVariables re-commits the stale value and the newest
+    // error is lost (PUC: the propagated status/errobj travels with the
+    // unwind, luaF_close updates it per close).
+    var current_err = err_obj;
     while (vm.ci != null and vm.ci != target_ci) {
         const unwind_ci = vm.ci.?;
-        popErrorFrame(vm, unwind_ci, err_obj) catch {
+        popErrorFrame(vm, unwind_ci, current_err) catch {
             error_state.setPendingUnwind(vm, unwind_ci);
             return error.Yield;
         };
+        if (!err_obj.isNil()) current_err = vm.errors.lua_error_value;
     }
 }
 
@@ -1335,6 +1361,7 @@ fn setupMainFrame(vm: *VM, proto: *const ProtoObject, main_closure: *ClosureObje
     }
 
     vm.base_ci = CallInfo.initRoot(proto, main_closure, 0, 0, -1, vararg_base, vararg_count);
+    vm.base_ci_valid = true;
     vm.ci = &vm.base_ci;
     vm.base = 0;
     vm.top = if (vararg_count > 0) vararg_base + vararg_count else proto.maxstacksize;
@@ -2127,6 +2154,7 @@ fn opSETFIELD(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - allocates a fresh table object
 fn opNEWTABLE(vm: *VM, inst: Instruction) !ExecuteResult {
     const a = inst.getA();
+    syncTopForAlloc(vm);
     const table = try vm.gc().allocTable();
     // C carries the parser's positional-item count (as in PUC's NEWTABLE):
     // size the array part exactly instead of growing it per append.
@@ -2630,6 +2658,7 @@ fn opLEN(vm: *VM, inst: Instruction) !ExecuteResult {
 //   - string/number fast path
 //   - may defer via __concat metamethod continuation
 fn opCONCAT(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    syncTopForAlloc(vm);
     const a = inst.getA();
     const b = inst.getB();
     const c = inst.getC();
@@ -4101,6 +4130,7 @@ fn opSETLIST(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
 //   - captures open or enclosing upvalues
 //   - allocates a fresh closure object
 fn opCLOSURE(vm: *VM, ci: *CallInfo, inst: Instruction) !ExecuteResult {
+    syncTopForAlloc(vm);
     const a = inst.getA();
     const bx = inst.getBx();
 
@@ -4647,6 +4677,7 @@ fn appendConcatValue(out: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
 }
 
 fn concatTwoSync(vm: *VM, left: TValue, right: TValue) !TValue {
+    syncTopForAlloc(vm);
     if (canConcatPrimitive(left) and canConcatPrimitive(right)) {
         var out: std.ArrayList(u8) = .{};
         defer out.deinit(vm.gc().allocator);
@@ -4961,6 +4992,7 @@ fn dispatchLeMM(vm: *VM, left: TValue, right: TValue) !?bool {
 fn getBitwiseMM(vm: *VM, val: TValue, comptime event: BitwiseMetaEvent) !?TValue {
     const table = val.asTable() orelse return null;
     const mt = table.metatable orelse return null;
+    syncTopForAlloc(vm);
     const key = try vm.gc().allocString(event.toKey());
     return mt.get(TValue.fromString(key));
 }

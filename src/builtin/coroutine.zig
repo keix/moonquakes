@@ -246,6 +246,7 @@ fn setupFirstResume(co_vm: *VM, caller_stack: []TValue, arg_base: u32, num_args:
         0,
         0,
     );
+    co_vm.base_ci_valid = true;
     co_vm.ci = &co_vm.base_ci;
 }
 
@@ -510,8 +511,12 @@ pub fn nativeCoroutineWrap(vm: *VM, func_reg: u32, nargs: u32, nresults: u32) !v
     _ = vm.pushTempRoot(TValue.fromTable(metatable));
     defer vm.popTempRoots(1);
 
-    const call_key = try vm.gc().allocString("__call");
+    // Allocate the closure first: the key must be the last GC allocation
+    // before the store, or the closure allocation sweeps the unrooted key.
     const call_fn = try vm.gc().allocNativeClosure(NativeFn.init(.coroutine_wrap_call));
+    _ = vm.pushTempRoot(TValue.fromNativeClosure(call_fn));
+    defer vm.popTempRoots(1);
+    const call_key = try vm.gc().allocString("__call");
     try vm.gc().tableSet(metatable, TValue.fromString(call_key), TValue.fromNativeClosure(call_fn));
 
     // Set metatable

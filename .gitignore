@@ -3,3 +3,4 @@ zig-out/
 build/
 testes/
 .zig-cache/
+docs/
