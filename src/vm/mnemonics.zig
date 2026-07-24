@@ -358,12 +358,20 @@ pub fn unwindErrorFramesIgnoringCloseErrors(vm: *VM, saved_depth: u8, err_obj: T
 }
 
 pub fn unwindErrorFramesToProtectedTarget(vm: *VM, target_ci: ?*CallInfo, err_obj: TValue) error{Yield}!void {
+    // A __close in a deeper frame may replace the propagating error (its
+    // raise updates lua_error_value). Each remaining frame must see the
+    // CURRENT error, not the one captured when unwinding began — otherwise a
+    // shallower closeTBCVariables re-commits the stale value and the newest
+    // error is lost (PUC: the propagated status/errobj travels with the
+    // unwind, luaF_close updates it per close).
+    var current_err = err_obj;
     while (vm.ci != null and vm.ci != target_ci) {
         const unwind_ci = vm.ci.?;
-        popErrorFrame(vm, unwind_ci, err_obj) catch {
+        popErrorFrame(vm, unwind_ci, current_err) catch {
             error_state.setPendingUnwind(vm, unwind_ci);
             return error.Yield;
         };
+        if (!err_obj.isNil()) current_err = vm.errors.lua_error_value;
     }
 }
 
