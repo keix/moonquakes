@@ -900,6 +900,12 @@ pub fn run(vm: *VM, ci: *CallInfo) void {
             // sync at frame switches, so roots are consistent mid-loop. On
             // OOM the defer leaves pc at this NEWTABLE and the outer
             // handler re-executes it, raising through the normal path.
+            // PUC checkGC discipline (see mnemonics.syncTopForAlloc): raise
+            // vm.top over the frame's registers so the GC's stack mark
+            // covers live locals that sit above a post-native-call top.
+            if (vm.ci) |cur_ci| {
+                vm.top = @max(vm.top, cur_ci.base + cur_ci.func.maxstacksize);
+            }
             const table = vm.gc().allocTable() catch return;
             const array_hint = inst.getC();
             if (array_hint > 0) {
