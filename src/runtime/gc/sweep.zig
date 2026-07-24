@@ -25,6 +25,25 @@ const Instruction = @import("../../compiler/opcodes.zig").Instruction;
 const TValue = @import("../value.zig").TValue;
 const mark_mod = @import("mark.zig");
 
+// DIAGNOSTIC: quarantine swept objects instead of freeing them. The
+// object (and its internal buffers) leaks with its type byte poisoned, so a
+// dangling reference that later reaches the mark machinery trips checkValid
+// in mark.zig and names the root that still held it. Pair with GC_STRESS_TEST.
+const GC_QUARANTINE = false;
+
+fn quarantineObject(self: anytype, obj: *GCObject) void {
+    // Keep the intern table consistent so lookups cannot resurrect the
+    // poisoned string (same guard as freeObject).
+    if (obj.type == .string) {
+        const str_obj: *StringObject = @fieldParentPtr("header", obj);
+        if (str_obj.interned) {
+            self.strings.remove(str_obj);
+        }
+    }
+    @as(*u8, @ptrCast(&obj.type)).* = 0xEE;
+    obj.next = null;
+}
+
 fn collectsInCurrentCycle(self: anytype, obj: *const GCObject) bool {
     return self.current_cycle_kind == .major or obj.generation != .old;
 }
@@ -109,7 +128,7 @@ pub fn sweep(self: anytype) void {
                 self.objects = next;
             }
 
-            freeObject(self, obj);
+            if (GC_QUARANTINE) quarantineObject(self, obj) else freeObject(self, obj);
             current = next;
         }
     }
@@ -142,7 +161,7 @@ pub fn sweepStep(self: anytype, budget: usize) bool {
             self.objects = next;
         }
 
-        freeObject(self, obj);
+        if (GC_QUARANTINE) quarantineObject(self, obj) else freeObject(self, obj);
         self.sweep_cursor = next;
     }
 
