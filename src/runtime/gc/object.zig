@@ -877,7 +877,9 @@ pub const UserdataObject = struct {
     /// Get pointer to the raw data block (stored after user values)
     pub fn data(self: *UserdataObject) [*]u8 {
         const base = @intFromPtr(self);
-        const offset = @sizeOf(UserdataObject) + self.nuvalue * @sizeOf(TValue);
+        // nuvalue is u8: widen before the multiply or nuvalue >= 16
+        // overflows (silent pointer corruption in release builds).
+        const offset = @sizeOf(UserdataObject) + @as(usize, self.nuvalue) * @sizeOf(TValue);
         return @ptrFromInt(base + offset);
     }
 

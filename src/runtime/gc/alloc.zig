@@ -186,7 +186,8 @@ pub fn allocClosure(self: anytype, proto: *ProtoObject) !*ClosureObject {
             slot.* = try self.allocClosedUpvalue(.nil);
         }
         obj.upvalues = upvals;
-        self.bytes_allocated += proto.nups * @sizeOf(*UpvalueObject);
+        // nups is u8: widen before the multiply or nups >= 32 overflows.
+        self.bytes_allocated += @as(usize, proto.nups) * @sizeOf(*UpvalueObject);
     } else {
         obj.upvalues = &.{};
     }
