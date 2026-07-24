@@ -215,28 +215,29 @@ fn createStdioFileObjectInit(gc: *GC, stdio_type: []const u8) !*FileObject {
 }
 
 /// Create a stdio handle (stdin, stdout, or stderr)
+/// Store a freshly allocated string value under an interned key. The value
+/// is allocated first and temp-rooted across the key allocation: the second
+/// allocString can run a GC cycle and a Zig local is not a root.
+fn setStringField(vm: anytype, table: *TableObject, key: []const u8, value: []const u8) !void {
+    const value_str = try vm.gc().allocString(value);
+    if (!vm.pushTempRoot(TValue.fromString(value_str))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
+    const key_str = try vm.gc().allocString(key);
+    try tableSet(vm.gc(), table, TValue.fromString(key_str), TValue.fromString(value_str));
+}
+
 fn createStdioHandle(vm: anytype, temp_slot: u32, stdio_type: []const u8) !*TableObject {
     const file_table = try vm.gc().allocTable();
     vm.stack[vm.base + temp_slot] = TValue.fromTable(file_table);
 
-    const stdio_key = try vm.gc().allocString(FILE_STDIO_KEY);
-    const stdio_str = try vm.gc().allocString(stdio_type);
-    try tableSet(vm.gc(), file_table, TValue.fromString(stdio_key), TValue.fromString(stdio_str));
-
-    const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-    const empty_str = try vm.gc().allocString("");
-    try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(empty_str));
+    try setStringField(vm, file_table, FILE_STDIO_KEY, stdio_type);
+    try setStringField(vm, file_table, FILE_OUTPUT_KEY, "");
 
     const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
     try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
-    const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
-    const mode_str = try vm.gc().allocString(if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
-    try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
-
-    const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-    const bufmode_str = try vm.gc().allocString("full");
-    try tableSet(vm.gc(), file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
+    try setStringField(vm, file_table, FILE_MODE_KEY, if (std.mem.eql(u8, stdio_type, "stdin")) "r" else "w");
+    try setStringField(vm, file_table, FILE_BUFMODE_KEY, "full");
 
     const pos_key = try vm.gc().allocString(FILE_POS_KEY);
     try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
@@ -1234,24 +1235,42 @@ pub fn nativeIoInput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         const file_table = try vm.gc().allocTable();
         vm.stack[vm.base + func_reg] = TValue.fromTable(file_table);
 
-        const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
-        const content_str = try vm.gc().allocString(content);
-        try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(content_str));
+        // Value first, temp-rooted across the key allocation: the second
+        // allocString can run a GC cycle and a Zig local is not a root.
+        {
+            const content_str = try vm.gc().allocString(content);
+            if (!vm.pushTempRoot(TValue.fromString(content_str))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
+            const output_key = try vm.gc().allocString(FILE_OUTPUT_KEY);
+            try tableSet(vm.gc(), file_table, TValue.fromString(output_key), TValue.fromString(content_str));
+        }
 
-        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
-        const filename_copy = try vm.gc().allocString(filename);
-        try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_copy));
+        {
+            const filename_copy = try vm.gc().allocString(filename);
+            if (!vm.pushTempRoot(TValue.fromString(filename_copy))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
+            const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+            try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_copy));
+        }
 
         const closed_key = try vm.gc().allocString(FILE_CLOSED_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(closed_key), TValue.fromBool(false));
 
-        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
-        const mode_str = try vm.gc().allocString("r");
-        try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
+        {
+            const mode_str = try vm.gc().allocString("r");
+            if (!vm.pushTempRoot(TValue.fromString(mode_str))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
+            const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+            try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
+        }
 
-        const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
-        const bufmode_str = try vm.gc().allocString("full");
-        try tableSet(vm.gc(), file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
+        {
+            const bufmode_str = try vm.gc().allocString("full");
+            if (!vm.pushTempRoot(TValue.fromString(bufmode_str))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
+            const bufmode_key = try vm.gc().allocString(FILE_BUFMODE_KEY);
+            try tableSet(vm.gc(), file_table, TValue.fromString(bufmode_key), TValue.fromString(bufmode_str));
+        }
 
         const pos_key = try vm.gc().allocString(FILE_POS_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(pos_key), TValue.fromInt(0));
@@ -1297,8 +1316,16 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     // Reserve stack slots for GC safety
     vm.reserveSlots(func_reg, 5);
     const state_table = try vm.gc().allocTable();
+    // Root for the whole function: every alloc below can run a GC cycle
+    // and a Zig local is not a root.
+    if (!vm.pushTempRoot(TValue.fromTable(state_table))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const content_key = try vm.gc().allocString("_content");
+    if (!vm.pushTempRoot(TValue.fromString(content_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const pos_key = try vm.gc().allocString("_pos");
+    if (!vm.pushTempRoot(TValue.fromString(pos_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
 
     // io.lines() / io.lines(nil, ...) -> iterate current default input
     const use_default_input = nargs == 0 or vm.stack[vm.base + func_reg + 1].isNil();
@@ -1368,6 +1395,9 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
         defer vm.gc().allocator.free(content);
 
         const content_str = try vm.gc().allocString(content);
+        // Rooted: reused below across further allocations (file_table etc.).
+        if (!vm.pushTempRoot(TValue.fromString(content_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
         try tableSet(vm.gc(), state_table, TValue.fromString(content_key), TValue.fromString(content_str));
         try tableSet(vm.gc(), state_table, TValue.fromString(pos_key), TValue.fromInt(0));
 
@@ -1393,10 +1423,14 @@ pub fn nativeIoLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !voi
     }
 
     if (fmt_count > 0) {
-        const fmts_key = try vm.gc().allocString("_fmts");
-        const fmt_count_key = try vm.gc().allocString("_fmt_count");
+        // Table first and rooted; each key allocated immediately before its
+        // store so nothing unrooted crosses another GC allocation.
         const fmts_table = try vm.gc().allocTable();
+        if (!vm.pushTempRoot(TValue.fromTable(fmts_table))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const fmts_key = try vm.gc().allocString("_fmts");
         try tableSet(vm.gc(), state_table, TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
+        const fmt_count_key = try vm.gc().allocString("_fmt_count");
         try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), TValue.fromInt(@intCast(fmt_count)));
 
         var i: u32 = 0;
@@ -1840,14 +1874,20 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(impl_key), TValue.fromFile(file_obj));
 
-        // Store filename for error messages
-        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+        // Store filename for error messages. Value first, rooted across the
+        // key allocation: the second allocString can run a GC cycle and a
+        // Zig local is not a root.
         const filename_str = try vm.gc().allocString(filename);
+        if (!vm.pushTempRoot(TValue.fromString(filename_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_str));
 
-        // Store mode
-        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+        // Store mode (same rooting discipline)
         const mode_str = try vm.gc().allocString(mode);
+        if (!vm.pushTempRoot(TValue.fromString(mode_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
 
         // Store closed flag (synced with FileObject)
@@ -1882,6 +1922,9 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
 
         // Create FileObject to manage the OS handle
         const file_obj = try vm.gc().allocFile(os_file);
+        // GC root: allocTable/allocString below may trigger collection, and
+        // an unreachable FileObject is finalized — closing the fd.
+        vm.stack[vm.base + func_reg + 1] = TValue.fromFile(file_obj);
 
         // Create file handle table (legacy shell)
         const file_table = try vm.gc().allocTable();
@@ -1891,14 +1934,20 @@ pub fn nativeIoOpen(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !void
         const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(impl_key), TValue.fromFile(file_obj));
 
-        // Store filename for error messages
-        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+        // Store filename for error messages. Value first, rooted across the
+        // key allocation: the second allocString can run a GC cycle and a
+        // Zig local is not a root.
         const filename_str = try vm.gc().allocString(filename);
+        if (!vm.pushTempRoot(TValue.fromString(filename_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_str));
 
-        // Store mode
-        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+        // Store mode (same rooting discipline)
         const mode_str = try vm.gc().allocString(mode);
+        if (!vm.pushTempRoot(TValue.fromString(mode_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
 
         // Store closed flag (synced with FileObject)
@@ -1980,6 +2029,9 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
             return vm.raiseString("cannot open file");
         };
         const file_obj = try vm.gc().allocFile(os_file);
+        // GC root immediately: the table allocation below can run a cycle,
+        // and an unreachable FileObject is finalized — closing the fd.
+        vm.stack[vm.base + func_reg + 2] = TValue.fromFile(file_obj);
 
         // Create file handle table (legacy shell + FileObject delegation)
         const file_table = try vm.gc().allocTable();
@@ -1988,14 +2040,19 @@ pub fn nativeIoOutput(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !vo
         const impl_key = try vm.gc().allocString(FILE_IMPL_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(impl_key), TValue.fromFile(file_obj));
 
-        // Store filename for diagnostics
-        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
+        // Store filename for diagnostics. Value first, rooted across the
+        // key allocation (the second allocString can run a GC cycle).
         const filename_str_alloc = try vm.gc().allocString(filename);
+        if (!vm.pushTempRoot(TValue.fromString(filename_str_alloc))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const filename_key = try vm.gc().allocString(FILE_FILENAME_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(filename_key), TValue.fromString(filename_str_alloc));
 
-        // Store mode
-        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
+        // Store mode (same rooting discipline)
         const mode_str = try vm.gc().allocString("w");
+        if (!vm.pushTempRoot(TValue.fromString(mode_str))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const mode_key = try vm.gc().allocString(FILE_MODE_KEY);
         try tableSet(vm.gc(), file_table, TValue.fromString(mode_key), TValue.fromString(mode_str));
 
         // Store closed flag (synced with FileObject)
@@ -2702,10 +2759,14 @@ pub fn nativeFileLines(vm: anytype, func_reg: u32, nargs: u32, nresults: u32) !v
     const fmt_count: u32 = if (nargs > 1) nargs - 1 else 0;
     const fmt_start: u32 = func_reg + 2;
     if (fmt_count > 0) {
-        const fmts_key = try vm.gc().allocString("_fmts");
-        const fmt_count_key = try vm.gc().allocString("_fmt_count");
+        // Table first and rooted; each key allocated immediately before its
+        // store so nothing unrooted crosses another GC allocation.
         const fmts_table = try vm.gc().allocTable();
+        if (!vm.pushTempRoot(TValue.fromTable(fmts_table))) return error.OutOfMemory;
+        defer vm.popTempRoots(1);
+        const fmts_key = try vm.gc().allocString("_fmts");
         try tableSet(vm.gc(), state_table, TValue.fromString(fmts_key), TValue.fromTable(fmts_table));
+        const fmt_count_key = try vm.gc().allocString("_fmt_count");
         try tableSet(vm.gc(), state_table, TValue.fromString(fmt_count_key), TValue.fromInt(@intCast(fmt_count)));
 
         var i: u32 = 0;

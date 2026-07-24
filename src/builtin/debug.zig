@@ -24,6 +24,19 @@ fn tableSet(vm: *VM, table: *TableObject, key: TValue, value: TValue) !void {
     try vm.gc().tableSet(table, key, value);
 }
 
+/// Store `value` under a freshly interned string key. The value is rooted
+/// across the key allocation: a Zig local is not a GC root, so a fresh
+/// object value would otherwise be swept if the key allocation runs a GC
+/// cycle. Call sites must not allocate between producing `value` and this
+/// call.
+fn setField(vm: *VM, table: *TableObject, comptime key: []const u8, value: TValue) !void {
+    const rooted = value.isObject();
+    if (rooted and !vm.pushTempRoot(value)) return error.OutOfMemory;
+    defer if (rooted) vm.popTempRoots(1);
+    const key_obj = try vm.gc().allocString(key);
+    try tableSet(vm, table, TValue.fromString(key_obj), value);
+}
+
 fn setTableMetatable(vm: *VM, table: *TableObject, new_mt: ?*TableObject) void {
     vm.gc().tableSetMetatable(table, new_mt);
 }
@@ -878,9 +891,20 @@ fn ensureHookRegistry(vm: *VM) !void {
     const hook_key = try vm.gc().allocString("_HOOKKEY");
     if (registry.get(TValue.fromString(hook_key)) != null) return;
 
+    // Each allocation below can run a GC cycle; Zig locals are not roots,
+    // so everything already allocated must be temp-rooted until it is
+    // reachable from the registry.
+    if (!vm.pushTempRoot(TValue.fromString(hook_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const hook_table = try vm.gc().allocTable();
+    if (!vm.pushTempRoot(TValue.fromTable(hook_table))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const hook_mt = try vm.gc().allocTable();
+    if (!vm.pushTempRoot(TValue.fromTable(hook_mt))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const mode_key = try vm.gc().allocString("__mode");
+    if (!vm.pushTempRoot(TValue.fromString(mode_key))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
     const mode_val = try vm.gc().allocString("k");
     try tableSet(vm, hook_mt, TValue.fromString(mode_key), TValue.fromString(mode_val));
     setTableMetatable(vm, hook_table, hook_mt);
@@ -1226,9 +1250,10 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
         // Level 0 is getinfo itself - which is native, so we return C info
         if (level == 0) {
             const result_table = try vm.gc().allocTable();
+            if (!vm.pushTempRoot(TValue.fromTable(result_table))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
             if (want_source) {
-                const what_key = try vm.gc().allocString("what");
-                try tableSet(vm, result_table, TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("C")));
+                try setField(vm, result_table, "what", TValue.fromString(try vm.gc().allocString("C")));
             }
             vm.stack[vm.base + func_reg] = TValue.fromTable(result_table);
             return;
@@ -1420,39 +1445,37 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
 
     // Create result table
     const result_table = try vm.gc().allocTable();
+    // Root the result table: field population below allocates keys/values
+    // and any of those allocations can run a GC cycle.
+    if (!vm.pushTempRoot(TValue.fromTable(result_table))) return error.OutOfMemory;
+    defer vm.popTempRoots(1);
 
     if (target_closure) |closure| {
         const proto = closure.proto;
 
         if (want_name) {
             if (func_name) |name| {
-                const name_key = try vm.gc().allocString("name");
-                try tableSet(vm, result_table, TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
-                const namewhat_key = try vm.gc().allocString("namewhat");
+                try setField(vm, result_table, "name", TValue.fromString(try vm.gc().allocString(name)));
                 const nw = func_namewhat orelse "global";
-                try tableSet(vm, result_table, TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
+                try setField(vm, result_table, "namewhat", TValue.fromString(try vm.gc().allocString(nw)));
             } else {
-                const namewhat_key = try vm.gc().allocString("namewhat");
                 const nw = func_namewhat orelse "";
-                try tableSet(vm, result_table, TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
+                try setField(vm, result_table, "namewhat", TValue.fromString(try vm.gc().allocString(nw)));
             }
         }
 
         if (want_source) {
-            const what_key = try vm.gc().allocString("what");
             const what_val = if (force_c_what) "C" else if (is_main_chunk) "main" else "Lua";
-            try tableSet(vm, result_table, TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString(what_val)));
+            try setField(vm, result_table, "what", TValue.fromString(try vm.gc().allocString(what_val)));
             const src = if (proto.source.len > 0)
                 (if (std.mem.eql(u8, proto.source, "?")) "=?" else proto.source)
             else if (proto.lineinfo.len == 0)
                 "=?"
             else
                 "";
-            const source_key = try vm.gc().allocString("source");
-            try tableSet(vm, result_table, TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString(src)));
-            const short_src_key = try vm.gc().allocString("short_src");
+            try setField(vm, result_table, "source", TValue.fromString(try vm.gc().allocString(src)));
             const short_src = try allocShortSource(vm, src);
-            try tableSet(vm, result_table, TValue.fromString(short_src_key), TValue.fromString(short_src));
+            try setField(vm, result_table, "short_src", TValue.fromString(short_src));
             // Exact values recorded at parse time (0 = main chunk, matching
             // PUC). Serialized chunks that predate the fields report the
             // stripped-chunk interval.
@@ -1462,47 +1485,42 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                 linedefined = 1;
                 lastlinedefined = 1;
             }
-            const linedefined_key = try vm.gc().allocString("linedefined");
-            try tableSet(vm, result_table, TValue.fromString(linedefined_key), TValue.fromInt(linedefined));
-            const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
-            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), TValue.fromInt(lastlinedefined));
+            try setField(vm, result_table, "linedefined", TValue.fromInt(linedefined));
+            try setField(vm, result_table, "lastlinedefined", TValue.fromInt(lastlinedefined));
         }
 
         if (want_line) {
-            const currentline_key = try vm.gc().allocString("currentline");
-            try tableSet(vm, result_table, TValue.fromString(currentline_key), TValue.fromInt(current_line));
+            try setField(vm, result_table, "currentline", TValue.fromInt(current_line));
         }
 
         if (want_tailcall) {
-            const istailcall_key = try vm.gc().allocString("istailcall");
-            try tableSet(vm, result_table, TValue.fromString(istailcall_key), TValue.fromBool(is_tailcall));
+            try setField(vm, result_table, "istailcall", TValue.fromBool(is_tailcall));
         }
 
         if (want_upvalue) {
-            const nups_key = try vm.gc().allocString("nups");
             var reps: [256]usize = undefined;
             const visible_nups = collectVisibleUpvalueReps(closure, &reps);
-            try tableSet(vm, result_table, TValue.fromString(nups_key), TValue.fromInt(@intCast(visible_nups)));
-            const nparams_key = try vm.gc().allocString("nparams");
-            try tableSet(vm, result_table, TValue.fromString(nparams_key), TValue.fromInt(@intCast(proto.numparams)));
-            const isvararg_key = try vm.gc().allocString("isvararg");
-            try tableSet(vm, result_table, TValue.fromString(isvararg_key), TValue.fromBool(proto.is_vararg));
+            try setField(vm, result_table, "nups", TValue.fromInt(@intCast(visible_nups)));
+            try setField(vm, result_table, "nparams", TValue.fromInt(@intCast(proto.numparams)));
+            try setField(vm, result_table, "isvararg", TValue.fromBool(proto.is_vararg));
         }
 
         if (want_func) {
-            const func_key = try vm.gc().allocString("func");
-            try tableSet(vm, result_table, TValue.fromString(func_key), TValue.fromClosure(closure));
+            try setField(vm, result_table, "func", TValue.fromClosure(closure));
         }
 
         if (want_transfer) {
-            const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_start)));
-            const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_count)));
+            try setField(vm, result_table, "ftransfer", TValue.fromInt(@intCast(vm.hooks.transfer_start)));
+            try setField(vm, result_table, "ntransfer", TValue.fromInt(@intCast(vm.hooks.transfer_count)));
         }
 
         if (want_activelines) {
             const act_tbl = try vm.gc().allocTable();
+            // Rooted while integer keys are inserted (hash growth is raw
+            // allocation, but tableSet on result_table is not reached until
+            // after; the table itself must survive any step in between).
+            if (!vm.pushTempRoot(TValue.fromTable(act_tbl))) return error.OutOfMemory;
+            defer vm.popTempRoots(1);
             if (proto.lineinfo.len > 0) {
                 for (proto.lineinfo, 0..) |ln, pc| {
                     if (ln > 0) {
@@ -1511,8 +1529,7 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
                     }
                 }
             }
-            const act_key = try vm.gc().allocString("activelines");
-            try tableSet(vm, result_table, TValue.fromString(act_key), TValue.fromTable(act_tbl));
+            try setField(vm, result_table, "activelines", TValue.fromTable(act_tbl));
         }
     } else if (target_native) |nc| {
         if (want_name) {
@@ -1531,60 +1548,45 @@ pub fn nativeDebugGetinfo(vm: anytype, func_reg: u32, nargs: u32, nresults: u32)
             // func_name may also arrive pre-set (hook name_override for
             // the virtual C frame a native call/return hook observes).
             if (func_name) |name| {
-                const name_key = try vm.gc().allocString("name");
-                try tableSet(vm, result_table, TValue.fromString(name_key), TValue.fromString(try vm.gc().allocString(name)));
-                const namewhat_key = try vm.gc().allocString("namewhat");
+                try setField(vm, result_table, "name", TValue.fromString(try vm.gc().allocString(name)));
                 const nw = func_namewhat orelse "global";
-                try tableSet(vm, result_table, TValue.fromString(namewhat_key), TValue.fromString(try vm.gc().allocString(nw)));
+                try setField(vm, result_table, "namewhat", TValue.fromString(try vm.gc().allocString(nw)));
             }
         }
 
         if (want_source) {
-            const what_key = try vm.gc().allocString("what");
-            try tableSet(vm, result_table, TValue.fromString(what_key), TValue.fromString(try vm.gc().allocString("C")));
-            const source_key = try vm.gc().allocString("source");
-            try tableSet(vm, result_table, TValue.fromString(source_key), TValue.fromString(try vm.gc().allocString("[C]")));
-            const short_src_key = try vm.gc().allocString("short_src");
-            try tableSet(vm, result_table, TValue.fromString(short_src_key), TValue.fromString(try vm.gc().allocString("[C]")));
-            const linedefined_key = try vm.gc().allocString("linedefined");
-            try tableSet(vm, result_table, TValue.fromString(linedefined_key), TValue.fromInt(-1));
-            const lastlinedefined_key = try vm.gc().allocString("lastlinedefined");
-            try tableSet(vm, result_table, TValue.fromString(lastlinedefined_key), TValue.fromInt(-1));
+            try setField(vm, result_table, "what", TValue.fromString(try vm.gc().allocString("C")));
+            try setField(vm, result_table, "source", TValue.fromString(try vm.gc().allocString("[C]")));
+            try setField(vm, result_table, "short_src", TValue.fromString(try vm.gc().allocString("[C]")));
+            try setField(vm, result_table, "linedefined", TValue.fromInt(-1));
+            try setField(vm, result_table, "lastlinedefined", TValue.fromInt(-1));
         }
 
         if (want_line) {
-            const currentline_key = try vm.gc().allocString("currentline");
-            try tableSet(vm, result_table, TValue.fromString(currentline_key), TValue.fromInt(-1));
+            try setField(vm, result_table, "currentline", TValue.fromInt(-1));
         }
 
         if (want_tailcall) {
-            const istailcall_key = try vm.gc().allocString("istailcall");
-            try tableSet(vm, result_table, TValue.fromString(istailcall_key), TValue.fromBool(false));
+            try setField(vm, result_table, "istailcall", TValue.fromBool(false));
         }
 
         if (want_upvalue) {
-            const nups_key = try vm.gc().allocString("nups");
             const nups_val: i64 = switch (nc.func.id) {
                 .string_gmatch_iterator => 1,
                 else => 0,
             };
-            try tableSet(vm, result_table, TValue.fromString(nups_key), TValue.fromInt(nups_val));
-            const nparams_key = try vm.gc().allocString("nparams");
-            try tableSet(vm, result_table, TValue.fromString(nparams_key), TValue.fromInt(0));
-            const isvararg_key = try vm.gc().allocString("isvararg");
-            try tableSet(vm, result_table, TValue.fromString(isvararg_key), TValue.fromBool(true));
+            try setField(vm, result_table, "nups", TValue.fromInt(nups_val));
+            try setField(vm, result_table, "nparams", TValue.fromInt(0));
+            try setField(vm, result_table, "isvararg", TValue.fromBool(true));
         }
 
         if (want_func) {
-            const func_key = try vm.gc().allocString("func");
-            try tableSet(vm, result_table, TValue.fromString(func_key), TValue.fromNativeClosure(nc));
+            try setField(vm, result_table, "func", TValue.fromNativeClosure(nc));
         }
 
         if (want_transfer) {
-            const ftransfer_key = try vm.gc().allocString("ftransfer");
-            try tableSet(vm, result_table, TValue.fromString(ftransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_start)));
-            const ntransfer_key = try vm.gc().allocString("ntransfer");
-            try tableSet(vm, result_table, TValue.fromString(ntransfer_key), TValue.fromInt(@intCast(vm.hooks.transfer_count)));
+            try setField(vm, result_table, "ftransfer", TValue.fromInt(@intCast(vm.hooks.transfer_start)));
+            try setField(vm, result_table, "ntransfer", TValue.fromInt(@intCast(vm.hooks.transfer_count)));
         }
     }
 
